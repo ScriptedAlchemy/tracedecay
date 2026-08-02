@@ -160,6 +160,10 @@ impl CodeIndexActivationV1 {
         self.identity.as_ref()
     }
 
+    pub(super) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
     pub(super) fn install_retirement(&self, callback: Box<dyn FnOnce() + Send + 'static>) {
         self.retirement.install(callback);
     }

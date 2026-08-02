@@ -7,9 +7,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    io::Write,
+    io::{BufReader, Write},
     num::NonZeroU64,
-    ops::Deref,
     path::{Path, PathBuf},
     sync::{
         Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak,
@@ -21,17 +20,16 @@ use std::{
 use thiserror::Error;
 use tracedecay_application::{DirectorySyncPolicy, now_micros};
 use tracedecay_domain::{
-    ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
-    ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId,
-    canonical_sha256,
+    ChunkerRevision, CodeGenerationId, ContentDigest, FileOccurrenceId, ManifestDigest,
+    PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
+    ProjectionOutcomeV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerDispositionV1, SanitizerRevision, SensitivityLevelV1,
+    SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
 use tracedecay_runtime_core::resident_memory::{
     DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryReservationV1,
+    ResidentMemoryKeyV1, ResidentMemoryReclaimerRegistrationV1, ResidentMemoryReservationV1,
 };
 
 use crate::{
@@ -55,15 +53,7 @@ use crate::{
     privacy::{
         CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
     },
-    query::retrieval::{
-        exact::{CentralExactAdmissionAuthorityV1, ExactLane},
-        graph::{CodeGraphEvidenceAdapterV1, GraphLane, production_code_index_freshness},
-        lexical::{
-            CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1,
-            CodeLexicalProjectionMetadataV1, LexicalLane,
-        },
-        ports::RetrievalPortError,
-    },
+    query::retrieval::graph::{CodeGraphEvidenceAdapterV1, GraphLane},
     retention::code_index_generations::{
         DurablePublicationPointerV1, acquire_code_generation_store_lock,
     },
@@ -165,51 +155,6 @@ impl SharedCodeIndexBytePoolV1 {
 /// every unpinned query and must not be evictable by cursor traffic over
 /// superseded generations.
 const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
-
-/// Whether one generation resolution may enter the single-flight sealed-decode.
-///
-/// Decoding a sealed generation is O(store). A query that already has a
-/// complete generation it can serve must never queue behind that decode:
-/// awaiting a *new* generation may not preempt serving an *old* one. Such a
-/// query resolves with [`Self::AlreadyDecoded`] and abstains rather than
-/// parking; only a query with nothing servable resolves with
-/// [`Self::AwaitDecode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum GenerationDecodeAdmissionV1 {
-    /// Join (or start) the single-flight decode of the active generation.
-    AwaitDecode,
-    /// Serve the active generation only if it is already decoded; never claim a
-    /// decode lease and never park on the barrier.
-    AlreadyDecoded,
-}
-
-/// Which sealed generation one decode lease covers.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum DecodeSubjectV1 {
-    /// The generation named by the durable active-publication pointer.
-    Active,
-    /// One immutable non-active generation, addressed by identity.
-    Generation(CodeGenerationId),
-}
-
-/// One canonical decoded generation and the exact process-memory charge that
-/// authorizes retaining it.
-///
-/// Serving handles clone this outer `Arc`, never the inner generation alone.
-/// Eviction therefore removes the cache's owner without releasing the charge
-/// while an in-flight query still holds the generation.
-struct ResidentPublishedGenerationV1 {
-    generation: Arc<CodeIndexPublishedGenerationV1>,
-    _reservation: ResidentMemoryReservationV1,
-}
-
-impl Deref for ResidentPublishedGenerationV1 {
-    type Target = CodeIndexPublishedGenerationV1;
-
-    fn deref(&self) -> &Self::Target {
-        self.generation.as_ref()
-    }
-}
 
 /// Decoded-generation cache state.
 ///
@@ -340,6 +285,11 @@ impl DecodedGenerationCacheV1 {
         }
         Ok(())
     }
+
+    fn reclaim_inactive(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.decoded.clear();
+    }
 }
 
 /// RAII claim on the single in-flight decode for one subject.
@@ -402,6 +352,8 @@ struct DaemonCodeIndexPublicationStoreV1 {
     project_id: ProjectId,
     worktree_id: WorktreeId,
     active_encoded_bytes: Arc<AtomicU64>,
+    sealed_read_attempts: Arc<AtomicU64>,
+    _reclaimer: Arc<ResidentMemoryReclaimerRegistrationV1>,
     active_path: PathBuf,
     generations_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
@@ -433,12 +385,26 @@ impl DaemonCodeIndexPublicationStoreV1 {
     ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let generations_root = store_root.join("code-generations-v1");
         std::fs::create_dir_all(&generations_root)?;
+        let cache = Arc::new(DecodedGenerationCacheV1::default());
+        let weak_cache = Arc::downgrade(&cache);
+        let reclaimer = resident_memory
+            .register_reclaimer(
+                100,
+                Arc::new(move |_| {
+                    if let Some(cache) = weak_cache.upgrade() {
+                        cache.reclaim_inactive();
+                    }
+                }),
+            )
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         Ok(Self {
-            cache: Arc::new(DecodedGenerationCacheV1::default()),
+            cache,
             resident_memory,
             project_id,
             worktree_id,
             active_encoded_bytes: Arc::new(AtomicU64::new(0)),
+            sealed_read_attempts: Arc::new(AtomicU64::new(0)),
+            _reclaimer: Arc::new(reclaimer),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
             expected_sanitizer_revision,
@@ -451,19 +417,32 @@ impl DaemonCodeIndexPublicationStoreV1 {
 
     fn reserve_authenticated_generation(
         &self,
-        bytes: &[u8],
-    ) -> Result<(CodeGenerationId, ResidentMemoryReservationV1), CodeIndexPublicationStoreErrorV1>
-    {
-        let estimate = CodeIndexPublishedGenerationV1::sealed_resident_memory_estimate(bytes)
-            .map_err(Self::unavailable)?;
-        let requested_bytes = NonZeroU64::new(estimate.reservation_bytes())
-            .ok_or_else(|| Self::unavailable("canonical generation resident estimate is zero"))?;
-        let component = ResidentMemoryComponentIdV1::new("code_index.canonical_generation.v1")
-            .map_err(Self::unavailable)?;
+        generation_id: CodeGenerationId,
+        sealed_bytes: u64,
+    ) -> Result<ResidentMemoryReservationV1, CodeIndexPublicationStoreErrorV1> {
+        let upper_bound =
+            CodeIndexPublishedGenerationV1::sealed_resident_memory_upper_bound(sealed_bytes)
+                .map_err(Self::unavailable)?;
+        self.reserve_generation_component(
+            generation_id,
+            "code_index.canonical_generation.v1",
+            upper_bound,
+        )
+    }
+
+    fn reserve_generation_component(
+        &self,
+        generation_id: CodeGenerationId,
+        component: &'static str,
+        requested_bytes: u64,
+    ) -> Result<ResidentMemoryReservationV1, CodeIndexPublicationStoreErrorV1> {
+        let requested_bytes = NonZeroU64::new(requested_bytes)
+            .ok_or_else(|| Self::unavailable("generation resident estimate is zero"))?;
+        let component = ResidentMemoryComponentIdV1::new(component).map_err(Self::unavailable)?;
         let key = ResidentMemoryKeyV1 {
             project_id: self.project_id.clone(),
             worktree_id: self.worktree_id.clone(),
-            generation_id: estimate.generation_id().clone(),
+            generation_id,
             component,
         };
         let reservation =
@@ -476,46 +455,80 @@ impl DaemonCodeIndexPublicationStoreV1 {
                         limit_bytes: failure.limit_bytes,
                     },
                 )?;
-        Ok((estimate.generation_id().clone(), reservation))
+        Ok(reservation)
     }
 
     fn finish_resident_generation(
         &self,
         generation: CodeIndexPublishedGenerationV1,
-        expected_generation_id: &CodeGenerationId,
-        bytes: &[u8],
-        mut reservation: ResidentMemoryReservationV1,
+        sealed_bytes: u64,
+        reservation: ResidentMemoryReservationV1,
     ) -> Result<Arc<ResidentPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        if generation.manifest().generation_id != *expected_generation_id {
-            return Err(Self::unavailable(
-                "sealed generation resident probe identity does not match decoded identity",
-            ));
-        }
-        let sealed_bytes = u64::try_from(bytes.len())
-            .map_err(|_| Self::unavailable("sealed generation byte length exceeds u64"))?;
-        let measured_bytes = generation
-            .structural_resident_memory_bytes(sealed_bytes)
-            .map_err(Self::unavailable)?;
-        reservation.shrink_to(measured_bytes).map_err(|error| {
-            Self::unavailable(format!(
-                "canonical generation resident estimate undercharged decoded allocation: {error}"
-            ))
-        })?;
         Ok(Arc::new(ResidentPublishedGenerationV1 {
             generation: Arc::new(generation),
+            resident_memory: Arc::clone(&self.resident_memory),
+            project_id: self.project_id.clone(),
+            worktree_id: self.worktree_id.clone(),
+            sealed_bytes,
             _reservation: reservation,
         }))
     }
 
+    #[cfg(test)]
     fn decode_authenticated_generation(
         &self,
         bytes: &[u8],
     ) -> Result<Arc<ResidentPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        let (expected_generation_id, reservation) = self.reserve_authenticated_generation(bytes)?;
+        let estimate = CodeIndexPublishedGenerationV1::sealed_resident_memory_estimate(bytes)
+            .map_err(Self::unavailable)?;
+        let sealed_bytes = u64::try_from(bytes.len())
+            .map_err(|_| Self::unavailable("sealed generation byte length exceeds u64"))?;
+        let reservation =
+            self.reserve_authenticated_generation(estimate.generation_id().clone(), sealed_bytes)?;
         self.cache.note_decode();
         let generation =
             CodeIndexPublishedGenerationV1::decode_sealed(bytes).map_err(Self::unavailable)?;
-        self.finish_resident_generation(generation, &expected_generation_id, bytes, reservation)
+        if generation.manifest().generation_id != *estimate.generation_id() {
+            return Err(Self::unavailable(
+                "sealed generation resident probe identity does not match decoded identity",
+            ));
+        }
+        self.finish_resident_generation(generation, sealed_bytes, reservation)
+    }
+
+    fn decode_generation_file(
+        &self,
+        path: &Path,
+        expected_generation_id: &CodeGenerationId,
+        expected_state_digest: &str,
+    ) -> Result<Arc<ResidentPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        let metadata = path.symlink_metadata().map_err(Self::unavailable)?;
+        if !metadata.file_type().is_file() {
+            return Err(Self::unavailable(
+                "sealed code-generation path is not a regular file",
+            ));
+        }
+        let sealed_bytes = metadata.len();
+        let reservation =
+            self.reserve_authenticated_generation(expected_generation_id.clone(), sealed_bytes)?;
+        self.sealed_read_attempts.fetch_add(1, Ordering::Relaxed);
+        let file = std::fs::File::open(path).map_err(Self::unavailable)?;
+        let mut reader = BufReader::with_capacity(64 * 1024, DigestingReaderV1::new(file));
+        self.cache.note_decode();
+        let generation = CodeIndexPublishedGenerationV1::decode_sealed_reader(&mut reader)
+            .map_err(Self::unavailable)?;
+        let digesting = reader.into_inner();
+        if digesting.bytes_read != sealed_bytes {
+            return Err(Self::unavailable(
+                "sealed code-generation changed while it was decoded",
+            ));
+        }
+        if digesting.state_digest() != expected_state_digest {
+            return Err(Self::unavailable(
+                "sealed code-generation bytes do not match their authenticated digest",
+            ));
+        }
+        self.finish_resident_generation(generation, sealed_bytes, reservation)
     }
 
     fn sync_directory(path: &Path) -> Result<(), CodeIndexPublicationStoreErrorV1> {
@@ -638,18 +651,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
             {
                 continue;
             }
-            let bytes = std::fs::read(&path).map_err(Self::unavailable)?;
-            if Self::state_digest(&bytes) != format!("sha256:{encoded_digest}") {
-                return Err(Self::unavailable(
-                    "immutable code-generation filename does not match its sealed bytes",
-                ));
-            }
-            if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&bytes)
-                .map_err(Self::unavailable)?
-            {
-                continue;
-            }
-            let generation = self.decode_authenticated_generation(&bytes)?;
+            let generation = self.decode_generation_file(
+                &path,
+                generation_id,
+                &format!("sha256:{encoded_digest}"),
+            )?;
             if generation.manifest().generation_id != *generation_id {
                 continue;
             }
@@ -765,19 +771,14 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 ))
             })?;
         Self::validate_generation_file(&pointer.generation_file)?;
-        let generation_bytes = std::fs::read(self.generations_root.join(&pointer.generation_file))
-            .map_err(Self::unavailable)?;
-        if Self::state_digest(&generation_bytes) != pointer.state_digest {
-            return Err(Self::unavailable(
-                "sealed code-generation bytes do not match the active pointer digest",
-            ));
-        }
-        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&generation_bytes)
-            .map_err(Self::unavailable)?
-        {
-            return Ok(None);
-        }
-        let generation = self.decode_authenticated_generation(&generation_bytes)?;
+        let expected_generation_id =
+            CodeGenerationId::new(pointer.generation_id.clone()).map_err(Self::unavailable)?;
+        let generation_path = self.generations_root.join(&pointer.generation_file);
+        let generation = self.decode_generation_file(
+            &generation_path,
+            &expected_generation_id,
+            &pointer.state_digest,
+        )?;
         if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
             return Ok(None);
         }
@@ -790,7 +791,10 @@ impl DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation pointer does not match the sealed generation",
             ));
         }
-        let encoded_bytes = u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX);
+        let encoded_bytes = generation_path
+            .symlink_metadata()
+            .map_err(Self::unavailable)?
+            .len();
         self.active_encoded_bytes
             .store(encoded_bytes, Ordering::Release);
         Ok(Some(generation))
@@ -804,6 +808,11 @@ impl DaemonCodeIndexPublicationStoreV1 {
     #[cfg(test)]
     fn sealed_decode_count(&self) -> u64 {
         self.cache.decode_count()
+    }
+
+    #[cfg(test)]
+    fn sealed_read_attempt_count(&self) -> u64 {
+        self.sealed_read_attempts.load(Ordering::Relaxed)
     }
 }
 
@@ -823,16 +832,35 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
-        let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
         let generation_id = generation.manifest().generation_id.clone();
-        let (resident_generation_id, reservation) =
-            self.reserve_authenticated_generation(&generation_bytes)?;
-        let generation = self.finish_resident_generation(
-            generation,
-            &resident_generation_id,
-            &generation_bytes,
-            reservation,
+        // Admit the encode and retained canonical value before serialization
+        // allocates its sealed buffer. Opaque allocator overhead is deliberately
+        // overcharged and never shrunk.
+        let structural_bytes = generation
+            .structural_resident_memory_bytes(0)
+            .map_err(Self::unavailable)?;
+        let pre_encode_upper_bound = structural_bytes
+            .checked_mul(4)
+            .and_then(|bytes| bytes.checked_add(8 * 1024 * 1024))
+            .ok_or_else(|| Self::unavailable("publication resident upper bound exceeds u64"))?;
+        let encode_probe_reservation = self.reserve_generation_component(
+            generation_id.clone(),
+            "code_index.canonical_encode_probe.v1",
+            pre_encode_upper_bound,
         )?;
+        let encoded_len = generation.encoded_sealed_len().map_err(Self::unavailable)?;
+        let reservation =
+            self.reserve_authenticated_generation(generation_id.clone(), encoded_len)?;
+        let generation_bytes = generation.encode_sealed().map_err(Self::unavailable)?;
+        let sealed_bytes = u64::try_from(generation_bytes.len())
+            .map_err(|_| Self::unavailable("sealed generation byte length exceeds u64"))?;
+        if sealed_bytes != encoded_len {
+            return Err(Self::unavailable(
+                "sealed generation count and encoded length disagree",
+            ));
+        }
+        let generation = self.finish_resident_generation(generation, sealed_bytes, reservation)?;
+        drop(encode_probe_reservation);
         let store_root = self
             .active_path
             .parent()
@@ -1006,26 +1034,6 @@ impl PendingHintsV1 {
     }
 }
 
-/// One candidate path's capture result, produced independently per file so
-/// the read/sanitize/digest sweep can run at machine width.
-struct CapturedCandidateV1 {
-    file: SanitizedCodeFileV1,
-    captured: CodeIndexCapturedFileV1,
-    receipt_id: SanitizationReceiptId,
-    retained: Arc<[u8]>,
-}
-
-struct CapturedSnapshotV1 {
-    snapshot: SanitizedCodeSnapshotV1,
-    captured_files: Vec<CodeIndexCapturedFileV1>,
-    changed_paths: BTreeSet<String>,
-    /// Strong references to this snapshot's interned bytes. The shared byte
-    /// pool holds only weak entries; the scheduler retains its current
-    /// snapshot's bytes so identical content in sibling worktrees can reuse
-    /// them (physical sharing without identity aliasing).
-    retained_bytes: Vec<Arc<[u8]>>,
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct CodeIndexPublishEvidenceV1 {
     pub generation_id: CodeGenerationId,
@@ -1051,26 +1059,19 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
     Noop(CodeIndexNoopEvidenceV1),
 }
 
-/// The lazily built serving caches shared by every handle bound to one sealed
-/// generation: the exact/lexical/graph lane owners and the record lookup index.
-/// Both are rebuilt only when a new generation is loaded.
-type GenerationServingCachesV1 = (
-    CodeGenerationId,
-    Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
-    Arc<OnceLock<queries::GenerationRecordIndexV1>>,
-    Arc<Mutex<()>>,
-);
-
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<ResidentPublishedGenerationV1>,
     query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
-    record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+    exact_lexical: Arc<OnceLock<Arc<ResidentReadyV1<ExactLexicalOwnersV1>>>>,
+    graph: Arc<OnceLock<Arc<ResidentReadyV1<GraphLane<CodeGraphEvidenceAdapterV1>>>>>,
+    record_index: Arc<OnceLock<Arc<ResidentReadyV1<queries::GenerationRecordIndexV1>>>>,
     /// Single-flight gate for the O(store) lane-owner build. Without it every
     /// query that raced the activation warm rebuilt the full lexical/exact
     /// projection inline — N concurrent cold queries did N store-sized builds,
     /// each blowing its own dispatch deadline while the warm was still running.
     query_owners_build_gate: Arc<Mutex<()>>,
+    warm_control: Arc<ServingWarmControlV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1080,66 +1081,9 @@ pub(super) struct SemanticEvaluationCodeSnapshotV1 {
     pub snapshot_digest: ManifestDigest,
 }
 
-/// Production exact/lexical/graph owners bound to one immutable published
-/// generation. Lanes remain independently disableable by omitting a field from
-/// composition; this bundle only proves the daemon can mint all three from the
-/// same sealed generation evidence.
-#[derive(Clone)]
-pub(super) struct ProductionCodeIndexQueryOwnersV1 {
-    pub exact: ExactLane<
-        CentralExactAdmissionAuthorityV1,
-        CodeExactProjectionAdapterV1<CentralExactAdmissionAuthorityV1>,
-    >,
-    pub lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
-    pub graph: GraphLane<CodeGraphEvidenceAdapterV1>,
-}
-
 impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn generation(&self) -> &CodeIndexPublishedGenerationV1 {
         self.generation.generation.as_ref()
-    }
-
-    /// Point-lookup indices over this sealed generation's record vectors.
-    ///
-    /// Built at most once per generation and shared by every clone of this
-    /// handle (and therefore by every concurrent query), the same way
-    /// [`Self::production_query_owners`] shares its lane owners. Serving a
-    /// query never rebuilds the indices; only loading a new generation does.
-    pub(in crate::daemon) fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
-        self.record_index
-            .get_or_init(|| queries::GenerationRecordIndexV1::build(self.generation.as_ref()))
-    }
-
-    /// Build every per-generation serving derivation now, off the request path.
-    ///
-    /// A sealed generation is immutable, so its exact-admission sweep, record
-    /// lookup indices, lane owners, and test-attribution join are pure functions
-    /// of it. Each is memoized behind a `OnceLock` that would otherwise be
-    /// initialized by whichever request arrives first — charging one query an
-    /// O(store) canonical sweep over every chunk. Warming them where the
-    /// generation is activated makes the FIRST query O(result), like every later
-    /// one.
-    ///
-    /// Failures are deliberately discarded: this is a pre-warm, not a gate. Only
-    /// success is memoized, so every serving path still runs — and still fails
-    /// closed on — the exact same checks.
-    pub(in crate::daemon) fn warm_serving_caches(&self) {
-        let _ = self.generation.admitted_chunks();
-        let _ = self.generation.test_attribution_authority();
-        let _ = self.record_index();
-        let _ = self.production_query_owners();
-    }
-
-    /// Whether the record lookup indices are already built for this generation.
-    #[cfg(test)]
-    fn record_index_is_warm(&self) -> bool {
-        self.record_index.get().is_some()
-    }
-
-    /// Whether the exact/lexical/graph lane owners are already built.
-    #[cfg(test)]
-    fn query_owners_are_warm(&self) -> bool {
-        self.query_owners.get().is_some()
     }
 
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
@@ -1201,86 +1145,6 @@ impl LatestCompleteCodeIndexV1 {
     pub fn graph_abstentions(&self) -> &[crate::code_index::chunks::CodeIndexEdgeAbstentionV1] {
         self.generation.edge_abstentions()
     }
-
-    /// Connect Plan 15 exact/lexical/graph production owners to the latest
-    /// complete published generation.
-    pub fn production_query_owners(
-        &self,
-    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
-        if let Some(owners) = self.query_owners.get() {
-            return Ok(Arc::clone(owners));
-        }
-        // Cold memo: exactly one caller builds; everyone else waits here and
-        // reads the memo the winner installed. The build is O(store), so
-        // duplicating it per racing query was the outage, not the wait.
-        let _build = self
-            .query_owners_build_gate
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(owners) = self.query_owners.get() {
-            return Ok(Arc::clone(owners));
-        }
-        let generation_id = self.generation.manifest().generation_id.clone();
-        let freshness = production_code_index_freshness(
-            self.generation.manifest().seal.sealed_at,
-            ComponentRevision::new("policy.daemon.v1")
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-        )?;
-        let metadata = CodeLexicalProjectionMetadataV1 {
-            generation: generation_id.clone(),
-            repository_id: Some(self.generation.snapshot().repository.clone()),
-            logical_paths: self
-                .generation
-                .snapshot()
-                .files
-                .iter()
-                .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
-                .collect(),
-            freshness: freshness.clone(),
-            exact_retriever_revision: ComponentRevision::new(
-                tracedecay_query::retrieval::QUERY_EXACT_RETRIEVER_REVISION_V1,
-            )
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            lexical_retriever_revision: ComponentRevision::new(
-                tracedecay_query::retrieval::QUERY_LEXICAL_RETRIEVER_REVISION_V1,
-            )
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            exact_score_domain: ScoreDomainId::new(
-                tracedecay_query::retrieval::QUERY_EXACT_SCORE_DOMAIN_V1,
-            )
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-        };
-        let admitted = self
-            .generation
-            .admitted_shared_chunks()
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
-        let authority = CentralExactAdmissionAuthorityV1::new(
-            ExactAdmissionRuleRevision::new(
-                tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
-            )
-            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-        );
-        let exact = ExactLane::new(
-            authority.clone(),
-            lexical_projection.exact_adapter(authority),
-        );
-        let lexical = LexicalLane::new(lexical_projection);
-        let graph = GraphLane::new(CodeGraphEvidenceAdapterV1::new_shared(
-            generation_id,
-            Some(self.generation.snapshot().repository.clone()),
-            freshness,
-            self.generation.shared_edges(),
-            self.generation.chunks().shared_chunks(),
-        )?);
-        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
-            exact,
-            lexical,
-            graph,
-        });
-        let _ = self.query_owners.set(Arc::clone(&owners));
-        Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
-    }
 }
 
 #[derive(Debug, Error)]
@@ -1297,6 +1161,8 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     ProductionOpen(String),
     #[error("code-index privacy sanitizer failed: {0}")]
     Privacy(String),
+    #[error("code-index serving lanes failed: {0}")]
+    Serving(String),
     /// Mount admission did not free a permit within its deadline. The store is
     /// healthy and the decode is merely queued behind other worktrees, so this
     /// is retryable — unlike every other variant here.
@@ -1355,6 +1221,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
+    retained_snapshot_reservation: Option<ResidentMemoryReservationV1>,
     publication: DaemonCodeIndexPublicationStoreV1,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
@@ -1363,7 +1230,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     shutting_down: Arc<AtomicBool>,
     reconcile_in_progress: Arc<AtomicBool>,
     latest_content_identity: Option<ContentDigest>,
-    query_owners: Mutex<Option<GenerationServingCachesV1>>,
+    query_owners: Arc<Mutex<BTreeMap<CodeGenerationId, Arc<GenerationServingCachesV1>>>>,
+    _serving_reclaimer: Arc<ResidentMemoryReclaimerRegistrationV1>,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
@@ -1512,6 +1380,28 @@ impl CodeIndexWorktreeSchedulerV1 {
         // freshness claim. Cadence must verify against gix before tier-1/tier-2
         // clocks may suppress reconciliation, EXCEPT when the restore-time
         // witness above already proved the generation current.
+        let query_owners = Arc::new(Mutex::new(BTreeMap::<
+            CodeGenerationId,
+            Arc<GenerationServingCachesV1>,
+        >::new()));
+        let weak_query_owners = Arc::downgrade(&query_owners);
+        let serving_reclaimer = publication
+            .resident_memory
+            .register_reclaimer(
+                90,
+                Arc::new(move |_| {
+                    let Some(query_owners) = weak_query_owners.upgrade() else {
+                        return;
+                    };
+                    let mut query_owners =
+                        query_owners.lock().unwrap_or_else(PoisonError::into_inner);
+                    for caches in query_owners.values() {
+                        caches.cancel();
+                    }
+                    query_owners.clear();
+                }),
+            )
+            .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         let scheduler = Self {
             project_id,
             project_root,
@@ -1528,6 +1418,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             freshness_unknown,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
+            retained_snapshot_reservation: None,
             publication,
             owner,
             hints,
@@ -1536,7 +1427,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             shutting_down: Arc::new(AtomicBool::new(false)),
             reconcile_in_progress: Arc::new(AtomicBool::new(false)),
             latest_content_identity,
-            query_owners: Mutex::new(None),
+            query_owners,
+            _serving_reclaimer: Arc::new(serving_reclaimer),
             semantic_schedule: None,
         };
         Ok(scheduler)
@@ -1625,6 +1517,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let mut captured = self.capture_authoritative_snapshot()?;
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+            self.retained_snapshot_reservation = Some(captured.reservation);
             let latest_snapshot = self
                 .publication
                 .load_active_shared()
@@ -1766,7 +1659,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let Some(stat_signature) = self.last_stat_signature.clone() else {
             return;
         };
-        let Some(latest) = self.latest_complete() else {
+        let Ok(Some(latest)) = self.try_latest_complete() else {
             return;
         };
         let witness = RestoreFreshnessWitnessV1 {
@@ -1812,7 +1705,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.request_background_reconcile();
             return Ok(None);
         }
-        Ok(self.latest_complete_with(admission))
+        self.latest_complete_with(admission)
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -1956,29 +1849,40 @@ impl CodeIndexWorktreeSchedulerV1 {
             .clone()
     }
 
-    pub fn latest_complete(&self) -> Option<LatestCompleteCodeIndexV1> {
+    pub fn try_latest_complete(
+        &self,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
         self.latest_complete_with(GenerationDecodeAdmissionV1::AwaitDecode)
     }
 
-    /// [`Self::latest_complete`] restricted to an already-decoded active
+    #[cfg(test)]
+    pub fn latest_complete(&self) -> Option<LatestCompleteCodeIndexV1> {
+        match self.try_latest_complete() {
+            Ok(latest) => latest,
+            Err(error) => panic!("latest code generation restore failed: {error}"),
+        }
+    }
+
+    /// [`Self::try_latest_complete`] restricted to an already-decoded active
     /// generation. Abstains instead of parking on the single-flight decode.
-    pub(super) fn latest_complete_already_decoded(&self) -> Option<LatestCompleteCodeIndexV1> {
+    pub(super) fn latest_complete_already_decoded(
+        &self,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
         self.latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
     }
 
     fn latest_complete_with(
         &self,
         admission: GenerationDecodeAdmissionV1,
-    ) -> Option<LatestCompleteCodeIndexV1> {
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
         let generation = match admission {
             GenerationDecodeAdmissionV1::AwaitDecode => self.publication.load_active_shared(),
             GenerationDecodeAdmissionV1::AlreadyDecoded => {
                 self.publication.active_already_decoded()
             }
         }
-        .ok()
-        .flatten()?;
-        Some(self.bind_latest_complete(generation))
+        .map_err(CodeIndexProductionErrorV1::Publication)?;
+        Ok(generation.map(|generation| self.bind_latest_complete(generation)))
     }
 
     /// Bind one decoded generation to this scheduler's per-generation serving
@@ -1992,29 +1896,51 @@ impl CodeIndexWorktreeSchedulerV1 {
             .query_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (query_owners, record_index, query_owners_build_gate) = match cached.as_ref() {
-            Some((cached_id, owners, index, gate)) if cached_id == &generation_id => {
-                (Arc::clone(owners), Arc::clone(index), Arc::clone(gate))
+        let caches = cached
+            .entry(generation_id.clone())
+            .or_insert_with(|| Arc::new(GenerationServingCachesV1::new()))
+            .clone();
+        while cached.len() > DECODED_GENERATION_CACHE_CAPACITY + 1 {
+            let evicted = cached
+                .keys()
+                .find(|candidate| **candidate != generation_id)
+                .cloned();
+            let Some(evicted) = evicted else {
+                break;
+            };
+            if let Some(caches) = cached.remove(&evicted) {
+                caches.cancel();
             }
-            _ => {
-                let owners = Arc::new(OnceLock::new());
-                let index = Arc::new(OnceLock::new());
-                let gate = Arc::new(Mutex::new(()));
-                *cached = Some((
-                    generation_id,
-                    Arc::clone(&owners),
-                    Arc::clone(&index),
-                    Arc::clone(&gate),
-                ));
-                (owners, index, gate)
-            }
-        };
+        }
+        let (query_owners, exact_lexical, graph, record_index, build_gate, control) = (
+            Arc::clone(&caches.query_owners),
+            Arc::clone(&caches.exact_lexical),
+            Arc::clone(&caches.graph),
+            Arc::clone(&caches.record_index),
+            Arc::clone(&caches.build_gate),
+            Arc::clone(&caches.control),
+        );
+        drop(cached);
         LatestCompleteCodeIndexV1 {
             generation,
             query_owners,
+            exact_lexical,
+            graph,
             record_index,
-            query_owners_build_gate,
+            query_owners_build_gate: build_gate,
+            warm_control: control,
         }
+    }
+
+    fn retire_serving_caches(&mut self) {
+        let mut cached = self
+            .query_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for cached in cached.values() {
+            cached.cancel();
+        }
+        cached.clear();
     }
 
     /// Decode, validate, mint, and warm the active generation eagerly.
@@ -2030,8 +1956,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// Best-effort by construction: nothing here is a gate, and every failure
     /// simply leaves the work for the serving path, which still fails closed.
     fn prime_serving_caches(&self) {
-        if let Some(latest) = self.latest_complete() {
-            latest.warm_serving_caches();
+        if let Ok(Some(latest)) = self.try_latest_complete() {
+            let _ = latest.warm_serving_caches();
         }
     }
 
@@ -2055,14 +1981,7 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
         self.publication
             .load_generation(generation_id)
-            .map(|generation| {
-                generation.map(|generation| LatestCompleteCodeIndexV1 {
-                    generation,
-                    query_owners: Arc::new(OnceLock::new()),
-                    record_index: Arc::new(OnceLock::new()),
-                    query_owners_build_gate: Arc::new(Mutex::new(())),
-                })
-            })
+            .map(|generation| generation.map(|generation| self.bind_latest_complete(generation)))
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 
@@ -2169,6 +2088,66 @@ impl CodeIndexWorktreeSchedulerV1 {
         // that same order and the lowest-index failure is the reported one,
         // so the captured snapshot is byte-identical to the sequential sweep.
         let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
+        let source_bytes = candidates.iter().try_fold(0_u64, |total, logical_path| {
+            let path = self.project_root.join(logical_path);
+            let bytes = match path.metadata() {
+                Ok(metadata) if metadata.is_file() => metadata.len(),
+                Ok(_) => 0,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(error) => return Err(CodeIndexSchedulerErrorV1::Io(error)),
+            };
+            total.checked_add(bytes).ok_or_else(|| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "code-index capture byte estimate exceeds u64".to_owned(),
+                )
+            })
+        })?;
+        let candidate_count = u64::try_from(candidates.len()).map_err(|_| {
+            CodeIndexSchedulerErrorV1::Identity(
+                "code-index capture candidate count exceeds u64".to_owned(),
+            )
+        })?;
+        let requested_bytes = source_bytes
+            .checked_mul(6)
+            .and_then(|bytes| {
+                candidate_count
+                    .checked_mul(64 * 1024)
+                    .and_then(|entries| bytes.checked_add(entries))
+            })
+            .and_then(|bytes| bytes.checked_add(8 * 1024 * 1024))
+            .and_then(NonZeroU64::new)
+            .ok_or_else(|| {
+                CodeIndexSchedulerErrorV1::Identity(
+                    "code-index capture resident estimate exceeds u64".to_owned(),
+                )
+            })?;
+        let reservation = self
+            .publication
+            .resident_memory
+            .reserve(
+                ResidentMemoryKeyV1 {
+                    project_id: self.project_id.clone(),
+                    worktree_id: self.worktree_id.clone(),
+                    generation_id: id::<CodeGenerationId>("generation.capture.v1")?,
+                    component: ResidentMemoryComponentIdV1::new(
+                        "code_index.capture_working_set.v1",
+                    )
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?,
+                },
+                requested_bytes,
+            )
+            .map_err(|failure| {
+                CodeIndexProductionErrorV1::Publication(
+                    CodeIndexPublicationStoreErrorV1::ResidentMemoryUnavailable {
+                        used_bytes: failure.used_bytes,
+                        requested_bytes: failure.requested_bytes,
+                        limit_bytes: failure.limit_bytes,
+                    },
+                )
+            })?;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
         let outcomes = crate::code_index::parallelism::install(|| {
             use rayon::prelude::*;
             candidates
@@ -2212,6 +2191,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files,
             changed_paths,
             retained_bytes,
+            reservation,
         })
     }
 }
@@ -2226,6 +2206,7 @@ fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
 impl Drop for CodeIndexWorktreeSchedulerV1 {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
+        self.retire_serving_caches();
     }
 }
 
@@ -2422,7 +2403,12 @@ pub(crate) mod identity;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod registry;
+mod resident_generation;
 pub(crate) mod semantic_query_runtime;
+mod serving_memory;
+
+use resident_generation::*;
+use serving_memory::*;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures

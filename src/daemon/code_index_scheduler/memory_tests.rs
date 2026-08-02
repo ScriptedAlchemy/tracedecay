@@ -53,7 +53,7 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
     let project_id = ProjectId::new("project.code-index-memory").expect("valid project");
     let store = TempDir::new().expect("store root");
     let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(64 * 1024 * 1024).expect("resident limit"),
+        NonZeroU64::new(128 * 1024 * 1024).expect("resident limit"),
     ));
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
         project_id.clone(),
@@ -72,22 +72,21 @@ fn latest_complete_reuses_the_immutable_generation_allocation() {
     let second = scheduler.latest_complete().expect("second generation read");
     let charged = resident_memory.snapshot();
     assert!(charged.used_bytes > 0);
-    assert_eq!(charged.charges.len(), 1);
-    assert_eq!(
-        charged.charges[0].key.component.as_str(),
-        "code_index.canonical_generation.v1"
-    );
-    let sealed = first
+    let canonical = charged
+        .charges
+        .iter()
+        .find(|charge| charge.key.component.as_str() == "code_index.canonical_generation.v1")
+        .expect("canonical resident charge");
+    let conservative = first
         .generation()
-        .encode_sealed()
-        .expect("sealed generation");
-    let measured = first
-        .generation()
-        .structural_resident_memory_bytes(u64::try_from(sealed.len()).expect("sealed byte length"))
-        .expect("canonical structural charge");
+        .encoded_sealed_len()
+        .and_then(
+            crate::code_index::production::CodeIndexPublishedGenerationV1::sealed_resident_memory_upper_bound,
+        )
+        .expect("canonical sealed upper bound");
     assert_eq!(
-        charged.charges[0].bytes, measured,
-        "the retained charge must shrink to the decoded structural measurement"
+        canonical.bytes, conservative,
+        "publication must retain its conservative opaque-allocation overcharge"
     );
 
     assert!(
@@ -167,7 +166,7 @@ fn failed_canonical_decode_releases_its_preflight_reservation() {
     let project = fixture();
     let published_store = TempDir::new().expect("published store root");
     let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
-        NonZeroU64::new(64 * 1024 * 1024).expect("resident limit"),
+        NonZeroU64::new(128 * 1024 * 1024).expect("resident limit"),
     ));
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
         ProjectId::new("project.code-index-memory-corrupt").expect("valid project"),
@@ -212,6 +211,141 @@ fn failed_canonical_decode_releases_its_preflight_reservation() {
     );
 }
 
+#[test]
+fn sealed_restore_denial_happens_before_the_first_generation_read() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        ProjectId::new("project.code-index-zero-read-seed").expect("project id"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("seed scheduler");
+    scheduler.reconcile_now().expect("seed generation");
+    drop(scheduler);
+
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(NonZeroU64::MIN));
+    let publication = DaemonCodeIndexPublicationStoreV1::new_with_resident_memory(
+        store.path(),
+        SanitizerRevision::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("sanitizer revision"),
+        resident_memory,
+        ProjectId::new("project.code-index-zero-read").expect("project id"),
+        WorktreeId::new("worktree.code-index-zero-read").expect("worktree id"),
+    )
+    .expect("publication store");
+    assert!(matches!(
+        publication.load_active_shared(),
+        Err(CodeIndexPublicationStoreErrorV1::ResidentMemoryUnavailable { limit_bytes: 1, .. })
+    ));
+    assert_eq!(
+        publication.sealed_read_attempt_count(),
+        0,
+        "admission must precede File::open/read"
+    );
+}
+
+#[test]
+fn cancelled_lane_warm_releases_every_unpublished_lane_charge() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(1024 * 1024 * 1024).expect("resident limit"),
+    ));
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+        ProjectId::new("project.code-index-cancel-warm").expect("project id"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+        Arc::clone(&resident_memory),
+    )
+    .expect("scheduler");
+    scheduler.reconcile_now().expect("generation");
+    let latest = scheduler.latest_complete().expect("latest");
+    latest.warm_control.cancel();
+    assert!(matches!(
+        latest.production_query_owners(),
+        Err(tracedecay_query::retrieval::ports::RetrievalPortError::Cancelled)
+    ));
+    assert!(
+        resident_memory.snapshot().charges.iter().all(|charge| {
+            !matches!(
+                charge.key.component.as_str(),
+                "code_index.record_index.v1"
+                    | "code_index.exact_lexical.v1"
+                    | "code_index.graph.v1"
+            )
+        }),
+        "cancelled warm must publish no derived lane reservation"
+    );
+}
+
+#[test]
+fn lane_admission_denies_before_publishing_any_derived_owner() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(256 * 1024 * 1024).expect("resident limit"),
+    ));
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+        ProjectId::new("project.code-index-lane-denial").expect("project id"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+        Arc::clone(&resident_memory),
+    )
+    .expect("scheduler");
+    scheduler.reconcile_now().expect("generation");
+    let latest = scheduler.latest_complete().expect("latest");
+    assert!(matches!(
+        latest.production_query_owners(),
+        Err(tracedecay_query::retrieval::ports::RetrievalPortError::AuthorityUnavailable(_))
+    ));
+    assert!(!latest.query_owners_are_warm());
+    assert!(
+        resident_memory.snapshot().charges.iter().all(|charge| {
+            !matches!(
+                charge.key.component.as_str(),
+                "code_index.exact_lexical.v1" | "code_index.graph.v1"
+            )
+        }),
+        "denied lane build must retain no partial reservation"
+    );
+}
+
+#[test]
+fn in_flight_lane_arc_retains_charge_until_its_final_reader_drops() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(1024 * 1024 * 1024).expect("resident limit"),
+    ));
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+        ProjectId::new("project.code-index-lane-reader").expect("project id"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+        Arc::clone(&resident_memory),
+    )
+    .expect("scheduler");
+    scheduler.reconcile_now().expect("generation");
+    let latest = scheduler.latest_complete().expect("latest");
+    latest.warm_serving_caches().expect("warm lanes");
+    let owners = latest.production_query_owners().expect("ready owners");
+    drop(latest);
+    drop(scheduler);
+    assert!(
+        resident_memory
+            .snapshot()
+            .charges
+            .iter()
+            .any(|charge| { charge.key.component.as_str() == "code_index.exact_lexical.v1" }),
+        "in-flight lane owner must retain its reservation"
+    );
+    drop(owners);
+    assert_eq!(resident_memory.snapshot().used_bytes, 0);
+}
+
 #[tokio::test]
 async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     let project = fixture();
@@ -243,4 +377,34 @@ async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
     assert_eq!(stats.reconciling_worktrees, 0);
     assert!(stats.retained_generation_encoded_bytes > 0);
     registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn unmount_cancels_workers_and_releases_code_index_reservations() {
+    let project = fixture();
+    let project_id = ProjectId::new("project.code-index-unmount").expect("project id");
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount");
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if registry
+                .latest_generation_id(project.path())
+                .await
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("generation becomes ready");
+    assert!(registry.resident_memory().snapshot().used_bytes > 0);
+    assert!(registry.unmount_worktree(project.path()).await);
+    assert_eq!(registry.resident_memory().snapshot().used_bytes, 0);
+    assert!(!registry.is_worktree_mounted(project.path()).await);
 }

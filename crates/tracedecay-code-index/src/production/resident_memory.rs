@@ -122,6 +122,29 @@ fn resident_add(total: &mut u64, bytes: u64) -> Result<(), CodeIndexProductionEr
 }
 
 impl CodeIndexPublishedGenerationV1 {
+    /// Conservative charge retained for a streamed sealed-generation restore.
+    ///
+    /// The sealed encoding contains every dynamic string and byte body. Six
+    /// complete payload widths cover the decoded envelope, canonical chunk /
+    /// symbol / edge copies, exact-authority copies, and decode scratch. The
+    /// fixed allowance covers bounded parser buffering and small-container
+    /// backing. This is intentionally retained as overcharge: allocator and
+    /// map overhead are opaque and must not be described as exact measurement.
+    pub fn sealed_resident_memory_upper_bound(
+        sealed_bytes: u64,
+    ) -> Result<u64, CodeIndexProductionErrorV1> {
+        const RETAINED_PAYLOAD_WIDTHS: u64 = 6;
+        const FIXED_STREAMING_ALLOWANCE_BYTES: u64 = 8 * 1024 * 1024;
+        sealed_bytes
+            .checked_mul(RETAINED_PAYLOAD_WIDTHS)
+            .and_then(|bytes| bytes.checked_add(FIXED_STREAMING_ALLOWANCE_BYTES))
+            .ok_or_else(|| {
+                CodeIndexProductionErrorV1::Contract(
+                    "sealed generation resident upper bound exceeds u64".to_owned(),
+                )
+            })
+    }
+
     /// Reserve an upper bound before materializing one authenticated sealed
     /// generation.
     ///

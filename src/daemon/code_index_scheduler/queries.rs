@@ -45,7 +45,9 @@ use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
     LexicalFieldFilterV1, LexicalFieldV1, LexicalLaneRequest, LexicalLaneRetriever,
 };
-use tracedecay_query::retrieval::ports::{CodeCandidateBindingV1, CodeOccurrenceRefV1};
+use tracedecay_query::retrieval::ports::{
+    CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
+};
 use tracedecay_query::retrieval::{
     AdmittedGenerationContextV1, NativeCodeOccurrenceV1, NativeExactRecordV1, NativeGraphRecordV1,
     NativeLaneOutcomeV1, NativeLanePageV1, NativeLexicalRecordV1, NativeRecordReadPortV1,
@@ -606,12 +608,14 @@ pub(in crate::daemon) struct GenerationRecordIndexV1 {
 }
 
 impl GenerationRecordIndexV1 {
-    pub(in crate::daemon) fn build(
+    pub(super) fn build(
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-    ) -> Self {
+        control: &super::ServingWarmControlV1,
+    ) -> Result<Self, RetrievalPortError> {
         let files = &generation.snapshot().files;
         let mut files_by_occurrence = HashMap::with_capacity(files.len());
         for (position, file) in files.iter().enumerate() {
+            control.checkpoint()?;
             files_by_occurrence
                 .entry(file.file_occurrence_id.clone())
                 .or_insert(position);
@@ -622,6 +626,7 @@ impl GenerationRecordIndexV1 {
         let mut chunk_by_symbol = HashMap::new();
         let mut chunk_by_file_symbol = HashMap::new();
         for (position, chunk) in chunks.iter().enumerate() {
+            control.checkpoint()?;
             chunks_by_id.entry(chunk.id.clone()).or_insert(position);
             if let Some(symbol) = chunk.anchor.symbol_occurrence_id.as_ref() {
                 chunk_by_symbol.entry(symbol.clone()).or_insert(position);
@@ -634,6 +639,7 @@ impl GenerationRecordIndexV1 {
         let symbols = &generation.symbols().symbols;
         let mut symbols_by_occurrence = HashMap::with_capacity(symbols.len());
         for (position, record) in symbols.iter().enumerate() {
+            control.checkpoint()?;
             symbols_by_occurrence
                 .entry(record.occurrence.clone())
                 .or_insert(position);
@@ -642,6 +648,7 @@ impl GenerationRecordIndexV1 {
         let mut edges_from: HashMap<SymbolOccurrenceId, Vec<usize>> = HashMap::new();
         let mut edges_to: HashMap<SymbolOccurrenceId, Vec<usize>> = HashMap::new();
         for (position, edge) in generation.edges().iter().enumerate() {
+            control.checkpoint()?;
             edges_from
                 .entry(edge.from_occurrence.clone())
                 .or_default()
@@ -652,7 +659,7 @@ impl GenerationRecordIndexV1 {
                 .push(position);
         }
 
-        Self {
+        Ok(Self {
             files_by_occurrence,
             chunks_by_id,
             symbols_by_occurrence,
@@ -660,7 +667,7 @@ impl GenerationRecordIndexV1 {
             chunk_by_file_symbol,
             edges_from,
             edges_to,
-        }
+        })
     }
 
     /// Position of the first snapshot file with this occurrence identity.
@@ -726,7 +733,10 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         if &binding.occurrence.generation != self.generation() {
             return Err(QueryExecutionContractErrorV1::GenerationMismatch);
         }
-        let index = self.latest.record_index();
+        let index = self
+            .latest
+            .record_index()
+            .map_err(|_| QueryExecutionContractErrorV1::RecordUnavailable)?;
         let file = index
             .file_position(&binding.occurrence.file)
             .map(|position| &self.latest.generation.snapshot().files[position])
@@ -759,7 +769,10 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         &self,
         chunk_id: &CodeSearchChunkId,
     ) -> Result<NativeCodeOccurrenceV1, QueryExecutionContractErrorV1> {
-        let index = self.latest.record_index();
+        let index = self
+            .latest
+            .record_index()
+            .map_err(|_| QueryExecutionContractErrorV1::RecordUnavailable)?;
         let chunk = index
             .chunk_position(chunk_id)
             .map(|position| &self.latest.generation.chunks().chunks()[position])
@@ -782,7 +795,10 @@ impl NativeRecordReadPortV1 for LatestCompleteNativeRecordReadPortV1<'_> {
         symbol: &SymbolOccurrenceId,
         file: &FileOccurrenceId,
     ) -> Result<NativeSymbolRecordV1, QueryExecutionContractErrorV1> {
-        let index = self.latest.record_index();
+        let index = self
+            .latest
+            .record_index()
+            .map_err(|_| QueryExecutionContractErrorV1::RecordUnavailable)?;
         let lineage = index
             .symbol_position(symbol)
             .map(|position| &self.latest.generation.symbols().symbols[position])
@@ -906,7 +922,10 @@ fn symbol_record_by_id(
     latest: &LatestCompleteCodeIndexV1,
     symbol: &SymbolOccurrenceId,
 ) -> Option<SymbolPrimitiveRecord> {
-    let position = latest.record_index().chunk_position_for_symbol(symbol)?;
+    let position = latest
+        .record_index()
+        .ok()?
+        .chunk_position_for_symbol(symbol)?;
     let chunk = &latest.generation.chunks().chunks()[position];
     symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)
 }
@@ -1123,8 +1142,8 @@ fn relation_records(
     reverse: bool,
     maximum_depth: u32,
     scope: &tracedecay_application::CodeQueryScope,
-) -> Vec<SymbolRelationRecord> {
-    let index = latest.record_index();
+) -> Result<Vec<SymbolRelationRecord>, RetrievalPortError> {
+    let index = latest.record_index()?;
     let edges = latest.generation.edges();
     let mut queue = VecDeque::from([(start.clone(), 0_u32)]);
     let mut visited = BTreeSet::from([start.clone()]);
@@ -1173,7 +1192,7 @@ fn relation_records(
             .cmp(&right.depth)
             .then(left.symbol.node_id.cmp(&right.symbol.node_id))
     });
-    records
+    Ok(records)
 }
 
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
@@ -1415,7 +1434,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.exact.retrieve_exact(&lane_request);
+            let outcome = owners.exact().retrieve_exact(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) =
@@ -1518,7 +1537,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.lexical.retrieve_lexical(&lane_request);
+            let outcome = owners.lexical().retrieve_lexical(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.lexical(outcome, |path| {
@@ -1571,7 +1590,8 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             };
             let Some(chunk) = latest
                 .record_index()
-                .chunk_position_for_symbol(&symbol)
+                .ok()
+                .and_then(|index| index.chunk_position_for_symbol(&symbol))
                 .map(|position| &latest.generation.chunks().chunks()[position])
             else {
                 return unavailable(finished_at);
@@ -1612,7 +1632,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.graph.retrieve_graph(&lane_request);
+            let outcome = owners.graph().retrieve_graph(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.graph(outcome, |path| {
@@ -1850,14 +1870,17 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                             .is_some_and(|name| name == selector)
                 })
             {
-                items.extend(relation_records(
+                let Ok(relations) = relation_records(
                     &prepared.latest,
                     &target.occurrence,
                     &[RelationEdgeKindV1::Implements],
                     true,
                     1,
                     &request.scope,
-                ));
+                ) else {
+                    return unavailable(query_finished_at());
+                };
+                items.extend(relations);
             }
             items.sort_by(|left, right| left.symbol.node_id.cmp(&right.symbol.node_id));
             items.dedup_by(|left, right| left.symbol.node_id == right.symbol.node_id);
@@ -1894,14 +1917,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let relations = relation_records(
+            let Ok(relations) = relation_records(
                 &prepared.latest,
                 &start,
                 &[RelationEdgeKindV1::Implements, RelationEdgeKindV1::Extends],
                 false,
                 request.maximum_depth,
                 &request.scope,
-            );
+            ) else {
+                return unavailable(query_finished_at());
+            };
             let items = relations
                 .into_iter()
                 .map(|relation| TypeHierarchyRecord {
@@ -1945,14 +1970,16 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let items = relation_records(
+            let Ok(items) = relation_records(
                 &prepared.latest,
                 &start,
                 &[RelationEdgeKindV1::Calls],
                 true,
                 request.maximum_depth,
                 &request.scope,
-            );
+            ) else {
+                return unavailable(query_finished_at());
+            };
             finish_generation_page(
                 &prepared,
                 &context,
@@ -1986,7 +2013,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let relations = relation_records(
+            let Ok(relations) = relation_records(
                 &prepared.latest,
                 &start,
                 &[
@@ -2001,7 +2028,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 true,
                 request.maximum_depth,
                 &request.scope,
-            );
+            ) else {
+                return unavailable(query_finished_at());
+            };
             let items = relations
                 .into_iter()
                 .map(|relation| relation.symbol)
@@ -2306,7 +2335,7 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 )
             );
             let start = resolve_start_symbol!(prepared, request.node_id);
-            let items = relation_records(
+            let Ok(items) = relation_records(
                 &prepared.latest,
                 &start,
                 &[
@@ -2318,7 +2347,9 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
                 true,
                 1,
                 &request.scope,
-            );
+            ) else {
+                return unavailable(query_finished_at());
+            };
             finish_generation_page(
                 &prepared,
                 &context,
@@ -2364,18 +2395,17 @@ fn navigation_symbol_query<'a>(
             }
         }
         if resolve_type && items.is_empty() {
-            items.extend(
-                relation_records(
-                    &prepared.latest,
-                    &start,
-                    &[RelationEdgeKindV1::TypeOf],
-                    false,
-                    1,
-                    &request.scope,
-                )
-                .into_iter()
-                .map(|relation| relation.symbol),
-            );
+            let Ok(relations) = relation_records(
+                &prepared.latest,
+                &start,
+                &[RelationEdgeKindV1::TypeOf],
+                false,
+                1,
+                &request.scope,
+            ) else {
+                return unavailable(query_finished_at());
+            };
+            items.extend(relations.into_iter().map(|relation| relation.symbol));
         }
         items.retain(|symbol| path_is_in_code_query_scope(&symbol.file, &request.scope));
         finish_generation_page(

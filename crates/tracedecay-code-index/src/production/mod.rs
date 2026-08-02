@@ -8,6 +8,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    io::{Cursor, Read, Write},
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -415,6 +416,25 @@ struct PersistedPublishedGenerationFormatProbeV1 {
 struct SealedPublishedGenerationEnvelopeRefV1<'a> {
     state_digest: &'a ManifestDigest,
     generation: PersistedPublishedGenerationRefV1<'a>,
+}
+
+#[derive(Default)]
+struct CountingWriterV1 {
+    bytes: u64,
+}
+
+impl Write for CountingWriterV1 {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self
+            .bytes
+            .checked_add(u64::try_from(buffer.len()).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("sealed generation length exceeds u64"))?;
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl FileGenerationArtifactsV1 {
@@ -828,6 +848,19 @@ impl CodeIndexPublishedGenerationV1 {
     /// Exact-admission authority internals are deliberately omitted. They are
     /// recomputed from the validated parser-produced chunks during restore.
     pub fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
+        let mut bytes = Vec::new();
+        self.write_sealed(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Exact encoded length without retaining the sealed payload.
+    pub fn encoded_sealed_len(&self) -> Result<u64, CodeIndexProductionErrorV1> {
+        let mut writer = CountingWriterV1::default();
+        self.write_sealed(&mut writer)?;
+        Ok(writer.bytes)
+    }
+
+    fn write_sealed(&self, writer: impl Write) -> Result<(), CodeIndexProductionErrorV1> {
         self.validate()?;
         let generation = PersistedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
@@ -850,10 +883,13 @@ impl CodeIndexPublishedGenerationV1 {
         };
         let state_digest = canonical_sha256(&generation)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        serde_json::to_vec(&SealedPublishedGenerationEnvelopeRefV1 {
-            state_digest: &state_digest,
-            generation,
-        })
+        serde_json::to_writer(
+            writer,
+            &SealedPublishedGenerationEnvelopeRefV1 {
+                state_digest: &state_digest,
+                generation,
+            },
+        )
         .map_err(|error| {
             CodeIndexProductionErrorV1::Contract(format!(
                 "sealed generation serialization failed: {error}"
@@ -864,17 +900,26 @@ impl CodeIndexPublishedGenerationV1 {
     /// Restore a complete sealed generation and repeat every canonical
     /// generation, chunk, graph, capability, and projection receipt check.
     pub fn decode_sealed(bytes: &[u8]) -> Result<Self, CodeIndexProductionErrorV1> {
-        if !Self::sealed_format_is_compatible(bytes)? {
-            return Err(CodeIndexProductionErrorV1::Contract(
-                "sealed generation format revision is incompatible".to_owned(),
-            ));
-        }
-        let envelope: SealedPublishedGenerationEnvelopeV1 =
-            serde_json::from_slice(bytes).map_err(|error| {
+        Self::decode_sealed_reader(Cursor::new(bytes))
+    }
+
+    /// Streaming sealed-generation restore.
+    ///
+    /// The caller owns admission and the reader's bounded buffering. This API
+    /// deliberately avoids materializing a second sealed-byte `Vec` before the
+    /// generation's retained allocations are admitted.
+    pub fn decode_sealed_reader(reader: impl Read) -> Result<Self, CodeIndexProductionErrorV1> {
+        let envelope: SealedPublishedGenerationEnvelopeV1 = serde_json::from_reader(reader)
+            .map_err(|error| {
                 CodeIndexProductionErrorV1::Contract(format!(
                     "sealed generation decoding failed: {error}"
                 ))
             })?;
+        if envelope.generation.format_revision != SEALED_GENERATION_FORMAT_REVISION_V1 {
+            return Err(CodeIndexProductionErrorV1::Contract(
+                "sealed generation format revision is incompatible".to_owned(),
+            ));
+        }
         let expected_digest = canonical_sha256(&envelope.generation)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         if expected_digest != envelope.state_digest {

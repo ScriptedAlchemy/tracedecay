@@ -1075,9 +1075,9 @@ fn saved_edit_incremental_publish() {
     let owners = latest
         .production_query_owners()
         .expect("production exact/lexical/graph owners connect");
-    let _ = owners.exact;
-    let _ = owners.lexical;
-    let _ = owners.graph;
+    let _ = owners.exact();
+    let _ = owners.lexical();
+    let _ = owners.graph();
 }
 
 #[test]
@@ -1518,9 +1518,9 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
         .production_query_owners()
         .expect("connect production query owners");
     assert!(
-        std::mem::size_of_val(&owners.exact) > 0
-            && std::mem::size_of_val(&owners.lexical) > 0
-            && std::mem::size_of_val(&owners.graph) > 0,
+        std::mem::size_of_val(owners.exact()) > 0
+            && std::mem::size_of_val(owners.lexical()) > 0
+            && std::mem::size_of_val(owners.graph()) > 0,
         "exact/lexical/graph production owners must be concrete lane values"
     );
     assert_eq!(
@@ -1585,7 +1585,7 @@ fn generation_record_index_matches_linear_scan_lookups() {
         "fixture must publish files, chunks, and symbols to compare"
     );
 
-    let index = latest.record_index();
+    let index = latest.record_index().expect("resident record index");
 
     for file in snapshot_files {
         let expected = snapshot_files

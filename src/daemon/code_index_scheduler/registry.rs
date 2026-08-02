@@ -133,6 +133,8 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     reconcile_in_progress: Arc<AtomicBool>,
     active_generation_encoded_bytes: Arc<AtomicU64>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
+    mount_warm_control: Option<Arc<super::ServingWarmControlV1>>,
+    pub(super) warm_task: Option<tokio::task::JoinHandle<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
 
@@ -233,6 +235,8 @@ impl CodeIndexSchedulerRegistryV1 {
         activations.retain(|_, activation| activation.strong_count() > 0);
         let scope_digest = scope.scope_digest.clone();
         let registered = Arc::downgrade(activation);
+        let project_root = activation.project_root().to_path_buf();
+        let registry = self.clone();
         activations.insert(scope_digest.clone(), registered.clone());
         drop(activations);
         let activations = Arc::clone(&self.activations);
@@ -245,6 +249,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 .is_some_and(|current| Weak::ptr_eq(current, &registered))
             {
                 activations.remove(&scope_digest);
+            }
+            let should_unmount = !activations.values().any(|activation| {
+                activation
+                    .upgrade()
+                    .is_some_and(|activation| activation.project_root() == project_root)
+            });
+            drop(activations);
+            if should_unmount && let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    registry.unmount_worktree(&project_root).await;
+                });
             }
         }));
         true
@@ -675,7 +690,9 @@ impl CodeIndexSchedulerRegistryV1 {
                         "mounted worktree belongs to a different project identity".to_owned(),
                     ));
                 }
-                let latest = scheduler.latest_complete().map(|latest| latest.generation);
+                let latest = scheduler
+                    .try_latest_complete()?
+                    .map(|latest| latest.generation);
                 scheduler.replace_semantic_schedule_hook(remount_hook);
                 Ok(latest)
             })
@@ -719,7 +736,7 @@ impl CodeIndexSchedulerRegistryV1 {
             if let Some(hook) = open_semantic_schedule {
                 opened.replace_semantic_schedule_hook(Some(hook));
             }
-            let restored = opened.latest_complete();
+            let restored = opened.try_latest_complete()?;
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, restored))
         })
         .await
@@ -739,7 +756,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         // Serve any retained complete generation immediately so admission stays
         // non-blocking, but never treat restore as a verified freshness claim.
-        let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
+        let serving_generation = Arc::new(RwLock::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
         let epoch = Arc::clone(&opened.epoch);
@@ -780,6 +797,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     return;
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
+                let reconcile_shutting_down = Arc::clone(&worker_shutting_down);
                 // Dequeue instant: admission is held and the reconcile is about
                 // to start, so queue wait ends here and service time begins.
                 let started_micros = now_micros().0;
@@ -797,12 +815,34 @@ impl CodeIndexSchedulerRegistryV1 {
                         }
                     };
                     let outcome = scheduler.reconcile_now();
-                    let latest = scheduler.latest_complete();
+                    let latest = match scheduler.try_latest_complete() {
+                        Ok(latest) => latest,
+                        Err(error) => {
+                            return BackgroundCodeIndexReconcileV1::Completed {
+                                outcome: Err(error),
+                                latest: None,
+                            };
+                        }
+                    };
+                    if reconcile_shutting_down.load(Ordering::Acquire) {
+                        if let Some(latest) = latest.as_ref() {
+                            latest.warm_control.cancel();
+                        }
+                        return BackgroundCodeIndexReconcileV1::Completed {
+                            outcome: Err(super::cancelled_code_index_reconcile()),
+                            latest: None,
+                        };
+                    }
                     // Reconcile completion is an activation point: build this
                     // generation's serving derivations here, on the blocking
                     // pool, so the first query against it stays O(result).
                     if let Some(latest) = latest.as_ref() {
-                        latest.warm_serving_caches();
+                        if let Err(error) = latest.warm_serving_caches() {
+                            return BackgroundCodeIndexReconcileV1::Completed {
+                                outcome: Err(CodeIndexSchedulerErrorV1::Serving(error.to_string())),
+                                latest: None,
+                            };
+                        }
                     }
                     BackgroundCodeIndexReconcileV1::Completed { outcome, latest }
                 })
@@ -900,6 +940,24 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is exhausted".to_owned(),
             ));
         }
+        let warm_serving_generation = Arc::clone(&serving_generation);
+        let mount_warm_control = restored_generation
+            .as_ref()
+            .map(|latest| Arc::clone(&latest.warm_control));
+        let warm_task = restored_generation.clone().map(|latest| {
+            tokio::spawn(async move {
+                let warmed = tokio::task::spawn_blocking({
+                    let latest = latest.clone();
+                    move || latest.warm_serving_caches()
+                })
+                .await;
+                if matches!(warmed, Ok(Ok(()))) {
+                    *warm_serving_generation
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest);
+                }
+            })
+        });
         mounted.insert(
             project_root,
             MountedCodeIndexWorktreeV1 {
@@ -918,20 +976,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 reconcile_in_progress,
                 active_generation_encoded_bytes,
                 semantic_evaluation_publication_gate,
+                mount_warm_control,
+                warm_task,
                 task,
             },
         );
-        // Warm the restored generation's serving derivations (exact-admission
-        // sweep, record indices, lane owners) on a detached blocking task. This
-        // used to run inline in the open task above, but the warm is O(store)
-        // and the worktree is invisible to every query until the mount
-        // publishes it — a live daemon sat unmountable for 15+ minutes building
-        // BM25 postings while search failed typed the whole time. The memos are
-        // shared OnceLocks, so a query racing the warm pays at most what it
-        // always paid, and the mount itself stays O(decode).
-        if let Some(latest) = restored_generation.clone() {
-            tokio::task::spawn_blocking(move || latest.warm_serving_caches());
-        }
         if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
             let _ = hook(&latest.generation);
         }
@@ -1284,7 +1333,17 @@ impl CodeIndexSchedulerRegistryV1 {
             let reconciled = scheduler.ensure_fresh_for_query().is_ok();
             let verified = scheduler.verified_against_source();
             let latest = if reconciled {
-                scheduler.latest_complete()
+                match scheduler.try_latest_complete() {
+                    Ok(latest) => latest,
+                    Err(error) => {
+                        tracing::warn!(
+                            event = "code_index_generation_restore_denied",
+                            error = %error,
+                            "code-index freshness read could not restore the active generation"
+                        );
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -1432,12 +1491,11 @@ impl CodeIndexSchedulerRegistryV1 {
                 if !scheduler.git_authority_available() {
                     return None;
                 }
-                let servable = serving_generation
+                let retained = serving_generation
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                    .or_else(|| scheduler.latest_complete_already_decoded());
-                if let Some(latest) = servable {
+                    .clone();
+                if let Some(latest) = retained {
                     // Something is servable, so freshness is a background concern.
                     // Only record an arrival when the ladder actually asked for a
                     // reconcile; a quiet repository must not turn every read into
@@ -1481,8 +1539,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 // elsewhere, and queuing on that O(store) sweep would block a
                 // lane that already has a complete generation to answer from.
                 let latest = match scheduler.latest_complete_already_decoded() {
-                    Some(latest) => latest,
-                    None => {
+                    Ok(Some(latest)) => latest,
+                    Ok(None) => {
                         let retained = serving_generation
                             .read()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1491,10 +1549,17 @@ impl CodeIndexSchedulerRegistryV1 {
                             Some(retained) => retained,
                             // Nothing is servable: only now may this await the
                             // in-flight decode rather than abstain.
-                            None => scheduler.latest_complete()?,
+                            None => match scheduler.try_latest_complete() {
+                                Ok(Some(latest)) => latest,
+                                Ok(None) | Err(_) => return None,
+                            },
                         }
                     }
+                    Err(_) => return None,
                 };
+                if latest.warm_serving_caches().is_err() {
+                    return None;
+                }
                 *serving_generation
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
@@ -1596,14 +1661,17 @@ impl CodeIndexSchedulerRegistryV1 {
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => return None,
             };
-            let latest = scheduler
-                .latest_complete_ready_for_query_with(admission)
-                .ok()
-                .flatten()?;
-            *serving_generation
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-            Some(latest)
+            let candidate = match scheduler.latest_complete_ready_for_query_with(admission) {
+                Ok(Some(candidate)) => candidate,
+                Ok(None) | Err(_) => return None,
+            };
+            let ready = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()?;
+            (ready.generation.manifest().generation_id
+                == candidate.generation.manifest().generation_id)
+                .then_some(ready)
         })
         .await
         .ok()
@@ -1824,8 +1892,7 @@ impl CodeIndexSchedulerRegistryV1 {
             let nothing_servable = serving_generation
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none()
-                && scheduler.latest_complete_already_decoded().is_none();
+                .is_none();
             // Nothing is servable at all, so the ladder's suppression cannot
             // apply: a reconcile is the only thing that can ever make this scope
             // answerable, and no other caller on this path will ask for it.
@@ -1956,11 +2023,49 @@ impl CodeIndexSchedulerRegistryV1 {
             .clear();
         for worktree in mounted.values() {
             worktree.shutting_down.store(true, Ordering::Release);
+            if let Some(control) = &worktree.mount_warm_control {
+                control.cancel();
+            }
+            *worktree
+                .serving_generation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             worktree.wake.notify_one();
         }
-        for (_, worktree) in mounted {
+        for (_, mut worktree) in mounted {
+            if let Some(task) = worktree.warm_task.take() {
+                let _ = task.await;
+            }
             let _ = worktree.task.await;
         }
+    }
+
+    pub(in crate::daemon) async fn unmount_worktree(&self, project_root: &Path) -> bool {
+        let project_root = match project_root.canonicalize() {
+            Ok(root) => root,
+            Err(_) => project_root.to_path_buf(),
+        };
+        let Some(mut worktree) = self.mounted.lock().await.remove(&project_root) else {
+            return false;
+        };
+        worktree.shutting_down.store(true, Ordering::Release);
+        if let Some(control) = &worktree.mount_warm_control {
+            control.cancel();
+        }
+        *worktree
+            .serving_generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        worktree.wake.notify_one();
+        if let Some(task) = worktree.warm_task.take() {
+            let _ = task.await;
+        }
+        let _ = worktree.task.await;
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&project_root);
+        true
     }
 }
 
