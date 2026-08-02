@@ -8,7 +8,8 @@ use thiserror::Error;
 
 use crate::{
     ManifestDigest, RunId, UtcMicros, WorkArtifactRefV1, WorkCommandId, WorkflowDefinitionV1,
-    WorkflowOutputName, WorkflowOutputReferenceV1, WorkflowStepId,
+    WorkflowOutputName, WorkflowOutputReferenceV1, WorkflowPlacementReceiptV1,
+    WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepId,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -33,6 +34,10 @@ pub enum WorkflowRunStateError {
     InputsUnavailable,
     #[error("workflow definition is invalid")]
     InvalidDefinition,
+    #[error("workflow placement receipt is invalid or stale")]
+    InvalidPlacementReceipt,
+    #[error("workflow step effect receipt is invalid or stale")]
+    InvalidEffectReceipt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -83,13 +88,16 @@ pub enum WorkflowStepStatusV1 {
 pub enum WorkflowRunCommandV1 {
     StartStep {
         step_id: WorkflowStepId,
+        placement: WorkflowPlacementReceiptV1,
     },
     CompleteStep {
         step_id: WorkflowStepId,
         outputs: Vec<WorkflowStepOutputV1>,
+        effect_receipt: WorkflowStepEffectReceiptV1,
     },
     FailStep {
         step_id: WorkflowStepId,
+        effect_receipt: WorkflowStepEffectReceiptV1,
     },
     Pause,
     Resume,
@@ -103,16 +111,20 @@ pub enum WorkflowRunEventKindV1 {
     Admitted {
         definition: WorkflowDefinitionV1,
         pinned_topology_digest: ManifestDigest,
+        pinned_provider_registry_digest: ManifestDigest,
     },
     StepStarted {
         step_id: WorkflowStepId,
+        placement: WorkflowPlacementReceiptV1,
     },
     StepCompleted {
         step_id: WorkflowStepId,
         outputs: Vec<WorkflowStepOutputV1>,
+        effect_receipt: WorkflowStepEffectReceiptV1,
     },
     StepFailed {
         step_id: WorkflowStepId,
+        effect_receipt: WorkflowStepEffectReceiptV1,
     },
     Paused,
     Resumed,
@@ -136,6 +148,7 @@ impl WorkflowRunEventV1 {
         run_id: RunId,
         definition: WorkflowDefinitionV1,
         pinned_topology_digest: ManifestDigest,
+        pinned_provider_registry_digest: ManifestDigest,
         context: WorkflowRunEventContextV1,
     ) -> Result<Self, WorkflowRunStateError> {
         definition
@@ -150,6 +163,7 @@ impl WorkflowRunEventV1 {
             event: WorkflowRunEventKindV1::Admitted {
                 definition,
                 pinned_topology_digest,
+                pinned_provider_registry_digest,
             },
         })
     }
@@ -184,6 +198,8 @@ impl WorkflowRunEventV1 {
 pub struct WorkflowStepRunProjectionV1 {
     status: WorkflowStepStatusV1,
     outputs: BTreeMap<WorkflowOutputName, WorkArtifactRefV1>,
+    placement_receipt: Option<WorkflowPlacementReceiptV1>,
+    effect_receipt: Option<WorkflowStepEffectReceiptV1>,
 }
 
 impl WorkflowStepRunProjectionV1 {
@@ -194,6 +210,14 @@ impl WorkflowStepRunProjectionV1 {
     pub fn outputs(&self) -> &BTreeMap<WorkflowOutputName, WorkArtifactRefV1> {
         &self.outputs
     }
+
+    pub fn placement_receipt(&self) -> Option<&WorkflowPlacementReceiptV1> {
+        self.placement_receipt.as_ref()
+    }
+
+    pub fn effect_receipt(&self) -> Option<&WorkflowStepEffectReceiptV1> {
+        self.effect_receipt.as_ref()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -202,6 +226,7 @@ pub struct WorkflowRunProjectionV1 {
     run_id: RunId,
     definition: WorkflowDefinitionV1,
     pinned_topology_digest: ManifestDigest,
+    pinned_provider_registry_digest: ManifestDigest,
     status: WorkflowRunStatusV1,
     sequence: u64,
     steps: BTreeMap<WorkflowStepId, WorkflowStepRunProjectionV1>,
@@ -214,6 +239,7 @@ impl WorkflowRunProjectionV1 {
         let WorkflowRunEventKindV1::Admitted {
             definition,
             pinned_topology_digest,
+            pinned_provider_registry_digest,
         } = first.event()
         else {
             return Err(WorkflowRunStateError::InvalidTransition);
@@ -235,6 +261,8 @@ impl WorkflowRunProjectionV1 {
                         WorkflowStepStatusV1::Blocked
                     },
                     outputs: BTreeMap::new(),
+                    placement_receipt: None,
+                    effect_receipt: None,
                 },
             );
         }
@@ -242,6 +270,7 @@ impl WorkflowRunProjectionV1 {
             run_id: first.run_id().clone(),
             definition: definition.clone(),
             pinned_topology_digest: pinned_topology_digest.clone(),
+            pinned_provider_registry_digest: pinned_provider_registry_digest.clone(),
             status: WorkflowRunStatusV1::Running,
             sequence: 1,
             steps,
@@ -259,18 +288,38 @@ impl WorkflowRunProjectionV1 {
         context: WorkflowRunEventContextV1,
     ) -> Result<WorkflowRunEventV1, WorkflowRunStateError> {
         let event = match command {
-            WorkflowRunCommandV1::StartStep { step_id } => {
+            WorkflowRunCommandV1::StartStep { step_id, placement } => {
                 self.require_step_status(&step_id, WorkflowStepStatusV1::Ready)?;
-                WorkflowRunEventKindV1::StepStarted { step_id }
+                self.validate_placement(&step_id, &placement)?;
+                WorkflowRunEventKindV1::StepStarted { step_id, placement }
             }
-            WorkflowRunCommandV1::CompleteStep { step_id, outputs } => {
+            WorkflowRunCommandV1::CompleteStep {
+                step_id,
+                outputs,
+                effect_receipt,
+            } => {
                 self.require_step_status(&step_id, WorkflowStepStatusV1::Running)?;
                 self.validate_outputs(&step_id, &outputs)?;
-                WorkflowRunEventKindV1::StepCompleted { step_id, outputs }
+                self.validate_effect_receipt(&step_id, &effect_receipt, Some(&outputs))?;
+                if effect_receipt.outcome() != WorkflowStepEffectOutcomeV1::Completed {
+                    return Err(WorkflowRunStateError::InvalidEffectReceipt);
+                }
+                WorkflowRunEventKindV1::StepCompleted {
+                    step_id,
+                    outputs,
+                    effect_receipt,
+                }
             }
-            WorkflowRunCommandV1::FailStep { step_id } => {
+            WorkflowRunCommandV1::FailStep {
+                step_id,
+                effect_receipt,
+            } => {
                 self.require_step_status(&step_id, WorkflowStepStatusV1::Running)?;
-                WorkflowRunEventKindV1::StepFailed { step_id }
+                self.validate_effect_receipt(&step_id, &effect_receipt, None)?;
+                WorkflowRunEventKindV1::StepFailed {
+                    step_id,
+                    effect_receipt,
+                }
             }
             WorkflowRunCommandV1::Pause => {
                 if self.status != WorkflowRunStatusV1::Running {
@@ -332,21 +381,33 @@ impl WorkflowRunProjectionV1 {
             WorkflowRunEventKindV1::Admitted { .. } => {
                 return Err(WorkflowRunStateError::InvalidTransition);
             }
-            WorkflowRunEventKindV1::StepStarted { step_id } => {
+            WorkflowRunEventKindV1::StepStarted { step_id, placement } => {
                 next.require_running()?;
                 next.require_step_status(step_id, WorkflowStepStatusV1::Ready)?;
-                next.step_mut(step_id)?.status = WorkflowStepStatusV1::Running;
+                next.validate_placement(step_id, placement)?;
+                let step = next.step_mut(step_id)?;
+                step.status = WorkflowStepStatusV1::Running;
+                step.placement_receipt = Some(placement.clone());
             }
-            WorkflowRunEventKindV1::StepCompleted { step_id, outputs } => {
+            WorkflowRunEventKindV1::StepCompleted {
+                step_id,
+                outputs,
+                effect_receipt,
+            } => {
                 next.require_running()?;
                 next.require_step_status(step_id, WorkflowStepStatusV1::Running)?;
                 next.validate_outputs(step_id, outputs)?;
+                next.validate_effect_receipt(step_id, effect_receipt, Some(outputs))?;
+                if effect_receipt.outcome() != WorkflowStepEffectOutcomeV1::Completed {
+                    return Err(WorkflowRunStateError::InvalidEffectReceipt);
+                }
                 let step = next.step_mut(step_id)?;
                 step.status = WorkflowStepStatusV1::Succeeded;
                 step.outputs = outputs
                     .iter()
                     .map(|output| (output.output_name.clone(), output.artifact.clone()))
                     .collect();
+                step.effect_receipt = Some(effect_receipt.clone());
                 next.release_dependents();
                 if next
                     .steps
@@ -356,10 +417,16 @@ impl WorkflowRunProjectionV1 {
                     next.status = WorkflowRunStatusV1::Completed;
                 }
             }
-            WorkflowRunEventKindV1::StepFailed { step_id } => {
+            WorkflowRunEventKindV1::StepFailed {
+                step_id,
+                effect_receipt,
+            } => {
                 next.require_running()?;
                 next.require_step_status(step_id, WorkflowStepStatusV1::Running)?;
-                next.step_mut(step_id)?.status = WorkflowStepStatusV1::Failed;
+                next.validate_effect_receipt(step_id, effect_receipt, None)?;
+                let step = next.step_mut(step_id)?;
+                step.status = WorkflowStepStatusV1::Failed;
+                step.effect_receipt = Some(effect_receipt.clone());
                 next.status = WorkflowRunStatusV1::Failed;
             }
             WorkflowRunEventKindV1::Paused => {
@@ -440,6 +507,56 @@ impl WorkflowRunProjectionV1 {
         Ok(())
     }
 
+    fn validate_placement(
+        &self,
+        step_id: &WorkflowStepId,
+        placement: &WorkflowPlacementReceiptV1,
+    ) -> Result<(), WorkflowRunStateError> {
+        placement
+            .validate()
+            .map_err(|_| WorkflowRunStateError::InvalidPlacementReceipt)?;
+        if placement.run_id() != &self.run_id
+            || placement.step_id() != step_id
+            || placement.configuration_digest() != self.definition.pinned_configuration_digest()
+            || placement.topology_digest() != &self.pinned_topology_digest
+            || placement.provider_registry_digest() != &self.pinned_provider_registry_digest
+        {
+            return Err(WorkflowRunStateError::InvalidPlacementReceipt);
+        }
+        Ok(())
+    }
+
+    fn validate_effect_receipt(
+        &self,
+        step_id: &WorkflowStepId,
+        effect_receipt: &WorkflowStepEffectReceiptV1,
+        outputs: Option<&[WorkflowStepOutputV1]>,
+    ) -> Result<(), WorkflowRunStateError> {
+        let step = self
+            .steps
+            .get(step_id)
+            .ok_or(WorkflowRunStateError::UnknownStep)?;
+        let placement = step
+            .placement_receipt
+            .as_ref()
+            .ok_or(WorkflowRunStateError::InvalidEffectReceipt)?;
+        effect_receipt
+            .validate()
+            .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
+        if let Some(outputs) = outputs {
+            effect_receipt
+                .validate_outputs(outputs)
+                .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
+        }
+        if effect_receipt.run_id() != &self.run_id
+            || effect_receipt.step_id() != step_id
+            || effect_receipt.placement_digest() != placement.placement_digest()
+        {
+            return Err(WorkflowRunStateError::InvalidEffectReceipt);
+        }
+        Ok(())
+    }
+
     fn release_dependents(&mut self) {
         for definition_step in self.definition.steps() {
             if self
@@ -512,6 +629,10 @@ impl WorkflowRunProjectionV1 {
         &self.pinned_topology_digest
     }
 
+    pub fn pinned_provider_registry_digest(&self) -> &ManifestDigest {
+        &self.pinned_provider_registry_digest
+    }
+
     pub const fn status(&self) -> WorkflowRunStatusV1 {
         self.status
     }
@@ -522,6 +643,10 @@ impl WorkflowRunProjectionV1 {
 
     pub fn history(&self) -> &[WorkflowRunEventV1] {
         &self.history
+    }
+
+    pub fn step(&self, step_id: &WorkflowStepId) -> Option<&WorkflowStepRunProjectionV1> {
+        self.steps.get(step_id)
     }
 
     pub fn ready_steps(&self) -> Vec<WorkflowStepId> {
