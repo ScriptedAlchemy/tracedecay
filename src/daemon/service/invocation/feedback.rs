@@ -291,7 +291,7 @@ impl DaemonInvocationService {
             .await
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) async fn feedback_cycle(
         &self,
         project_root: Option<&Path>,

@@ -41,10 +41,13 @@ pub enum RerankArtifactAdmissionErrorV1 {
 
 #[derive(Clone)]
 struct AdmittedRerankArtifactV1 {
+    #[cfg(feature = "semantic-fastembed")]
     artifact: AdmittedArtifactV1,
     pins: RerankCompatibilityPinsV1,
     max_batch_size: u32,
+    #[cfg(feature = "semantic-fastembed")]
     max_sequence_length: u32,
+    #[cfg(feature = "semantic-fastembed")]
     max_threads: u32,
     resident_byte_ceiling: u64,
 }
@@ -54,7 +57,7 @@ impl AdmittedRerankArtifactV1 {
         artifact: AdmittedArtifactV1,
         pins: RerankCompatibilityPinsV1,
     ) -> Result<Self, RerankArtifactAdmissionErrorV1> {
-        let (max_batch_size, max_sequence_length, max_threads, resident_byte_ceiling) = {
+        let resources = {
             let manifest = artifact.manifest();
             let resources = validate_reranker_manifest_pins(manifest, &pins)?;
             if artifact.artifact_digest() != &manifest.artifact_identity_digest()
@@ -62,20 +65,18 @@ impl AdmittedRerankArtifactV1 {
             {
                 return Err(RerankArtifactAdmissionErrorV1::IncompatiblePins);
             }
-            (
-                resources.max_batch_size,
-                resources.max_sequence_length,
-                resources.max_threads,
-                resources.max_resident_bytes,
-            )
+            resources
         };
         Ok(Self {
+            #[cfg(feature = "semantic-fastembed")]
             artifact,
             pins,
-            max_batch_size,
-            max_sequence_length,
-            max_threads,
-            resident_byte_ceiling,
+            max_batch_size: resources.max_batch_size,
+            #[cfg(feature = "semantic-fastembed")]
+            max_sequence_length: resources.max_sequence_length,
+            #[cfg(feature = "semantic-fastembed")]
+            max_threads: resources.max_threads,
+            resident_byte_ceiling: resources.max_resident_bytes,
         })
     }
 }
