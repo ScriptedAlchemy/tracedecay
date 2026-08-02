@@ -132,6 +132,12 @@ if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
     printf 'dogfood could not refresh build identity stamp: %s\n' "$build_identity_stamp" >&2
     exit 1
   fi
+  # Force build.rs to rerun and restamp the binary identity even when cargo's
+  # env/stamp fingerprints consider the last build fresh (observed: a 0s no-op
+  # build installed a binary stamped from a prior HEAD while concurrent workers
+  # kept committing). build.rs watches this file via rerun-if-changed, so a
+  # bumped mtime guarantees a restamp at the pinned checkout identity.
+  touch "$repo_root/src/version/build_identity.rs"
   TRACEDECAY_DOGFOOD_BUILD_IDENTITY_STAMP="$build_identity_stamp" \
     TRACEDECAY_DOGFOOD_BUILD_IDENTITY_REFRESH="$dogfood_build_identity_refresh" \
     TRACEDECAY_DOGFOOD_DASHBOARD_STAMP_PATH="$dashboard_source_stamp" \
