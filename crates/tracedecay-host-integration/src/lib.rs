@@ -647,6 +647,43 @@ macro_rules! host_bundle_storage_failure {
     };
 }
 
+/// Builds a [`HostBundleError::RecoveryRequired`] tagged with the `file:line` of
+/// the site that refused to mutate.
+///
+/// Dozens of journal, receipt, and rollback probes all fail closed with
+/// `RecoveryRequired`. Without a per-site tag, an operator staring at "requires
+/// recovery before mutation" cannot tell an genuinely interrupted operation from
+/// a probe that misread clean state. Always construct the variant through this
+/// macro.
+#[macro_export]
+macro_rules! host_bundle_recovery_required {
+    () => {
+        $crate::HostBundleError::RecoveryRequired(::core::concat!(
+            ::core::file!(),
+            ":",
+            ::core::line!()
+        ))
+    };
+}
+
+/// Builds a [`HostBundleError::StalePreview`] tagged with the `file:line` of the
+/// site that observed the drift.
+///
+/// Preview/apply matching is checked at many independent layers (plan digest,
+/// per-artifact digest, registration set, observed host state). They all collapse
+/// to `StalePreview`, so the tag is what distinguishes real host drift from a
+/// lifecycle bug. Always construct the variant through this macro.
+#[macro_export]
+macro_rules! host_bundle_stale_preview {
+    () => {
+        $crate::HostBundleError::StalePreview(::core::concat!(
+            ::core::file!(),
+            ":",
+            ::core::line!()
+        ))
+    };
+}
+
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum HostBundleError {
     #[error("host capability is unsupported and must not be emulated")]
@@ -685,8 +722,12 @@ pub enum HostBundleError {
     /// [`host_bundle_storage_failure!`] rather than by hand.
     #[error("host bundle atomic filesystem operation failed at {0}")]
     StorageFailure(&'static str),
-    #[error("host bundle interrupted operation requires recovery before mutation")]
-    RecoveryRequired,
+    /// A mutation refused because an earlier operation looks interrupted. The
+    /// payload names the probe that refused, so a false positive on clean state
+    /// is distinguishable from a genuine interrupted operation; build it with
+    /// [`host_bundle_recovery_required!`] rather than by hand.
+    #[error("host bundle interrupted operation requires recovery before mutation (at {0})")]
+    RecoveryRequired(&'static str),
     #[error(
         "a backed-up host configuration directory vanished and could not be recreated safely; restore the directory or its parent and retry recovery"
     )]
@@ -695,8 +736,12 @@ pub enum HostBundleError {
         "host recovery backup format is unsupported; use the TraceDecay version that created it or restore the host configuration from backup"
     )]
     UnsupportedRecoveryFormat,
-    #[error("confirmed host lifecycle preview is stale or does not match apply")]
-    StalePreview,
+    /// Apply observed drift from the confirmed preview. The payload names the
+    /// matching layer that rejected, so genuine host drift is distinguishable
+    /// from a lifecycle bug; build it with [`host_bundle_stale_preview!`] rather
+    /// than by hand.
+    #[error("confirmed host lifecycle preview is stale or does not match apply (at {0})")]
+    StalePreview(&'static str),
 }
 
 /// Bytes obtained from the verified embedded host bundle. They are checked
