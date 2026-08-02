@@ -205,11 +205,6 @@ impl ProductionProjectCompositionHarnessV1 {
                     .await
                 })
                 .await?;
-            wait_for_production_composition_code_index(
-                &invocation,
-                &composition.canonical_project_path,
-            )
-            .await?;
             semantic_auto_download_enabled |= composition
                 .semantic_auto_download_enabled
                 .ok_or_else(|| TraceDecayError::Config {
@@ -376,38 +371,58 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    pub async fn await_code_index_generation(&self, project_root: impl AsRef<Path>) -> Result<()> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        let project_root = std::fs::canonicalize(project_root.as_ref()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "failed to canonicalize production-composition project '{}': {error}",
+                    project_root.as_ref().display()
+                ),
+            }
+        })?;
+        let schedulers = &resources.invocation.code_index_schedulers;
+        let mut publications = schedulers.subscribe_generation_publications();
+        if schedulers
+            .latest_generation_id(&project_root)
+            .await
+            .is_some()
+        {
+            return Ok(());
+        }
+        loop {
+            match publications.recv().await {
+                Ok(publication) if publication.project_root == project_root => return Ok(()),
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_))
+                    if schedulers
+                        .latest_generation_id(&project_root)
+                        .await
+                        .is_some() =>
+                {
+                    return Ok(());
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    return Err(TraceDecayError::Config {
+                        message: "production-composition code-index publication channel closed"
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
     pub async fn shutdown(mut self) {
         if let Some(resources) = self.resources.take() {
             shutdown_production_project_harness(resources).await;
         }
     }
-}
-
-#[cfg(any(test, feature = "test-transport"))]
-async fn wait_for_production_composition_code_index(
-    invocation: &DaemonInvocationState,
-    project_root: &Path,
-) -> Result<()> {
-    timeout(Duration::from_secs(20), async {
-        loop {
-            if invocation
-                .code_index_schedulers
-                .latest_generation_id(project_root)
-                .await
-                .is_some()
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(|_| TraceDecayError::Config {
-        message: format!(
-            "production-composition code index did not publish for '{}'",
-            project_root.display()
-        ),
-    })
 }
 
 #[cfg(any(test, feature = "test-transport"))]

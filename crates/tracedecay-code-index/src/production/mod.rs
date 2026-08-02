@@ -20,7 +20,7 @@ use tracedecay_domain::{
     ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
     IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId,
     ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-    ProviderEvaluationStateV1, RefId, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
+    ProviderEvaluationStateV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
     SanitizerRevision, SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1,
     SymbolOccurrenceId, TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1,
     ValidatedCodeSnapshotV1, WorktreeId, canonical_sha256,
@@ -165,21 +165,19 @@ pub enum CodeIndexPublicationStoreErrorV1 {
 }
 
 /// Canonical active-generation slot inside one repository-owned code-index
-/// store. Paths are deliberately absent: linked worktrees share the repository
-/// store while their branch/worktree generations remain independently active.
+/// store. A physical checkout owns one active pointer; the immutable generation
+/// snapshot retains the exact reference and source revision it was sealed from.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(deny_unknown_fields)]
-pub struct CodeIndexGenerationScopeV1 {
+pub struct CodeIndexActiveSlotV1 {
     pub repository: RepositoryId,
-    pub reference: Option<RefId>,
     pub worktree: Option<WorktreeId>,
 }
 
-impl CodeIndexGenerationScopeV1 {
+impl CodeIndexActiveSlotV1 {
     pub fn for_snapshot(snapshot: &SanitizedCodeSnapshotV1) -> Self {
         Self {
             repository: snapshot.repository.clone(),
-            reference: snapshot.reference.clone(),
             worktree: snapshot.worktree.clone(),
         }
     }
@@ -187,50 +185,32 @@ impl CodeIndexGenerationScopeV1 {
     pub fn for_branch_stack_node(node: &tracedecay_domain::BranchStackNodeV1) -> Self {
         Self {
             repository: node.repository_id.clone(),
-            reference: Some(node.reference.clone()),
             worktree: node.worktree_id.clone(),
         }
-    }
-
-    /// Whether two scopes name the same physical checkout.
-    ///
-    /// Repository and worktree are identity: a generation sealed under either
-    /// of them differing belongs to another checkout and may never be adopted.
-    /// `reference` is not identity — it is the label HEAD happens to carry, and
-    /// it moves under a fixed worktree on every ordinary commit, branch switch,
-    /// or rebase. Treating it as identity made the active generation of the
-    /// branch you just left "incompatible", so the first reconcile after any
-    /// branch switch failed outright and the worktree stopped indexing until
-    /// the store was rebuilt. The reference the generation was sealed under is
-    /// still carried on its own snapshot, so attribution stays generation-bound.
-    #[must_use]
-    pub fn identifies_same_checkout(&self, other: &Self) -> bool {
-        self.repository == other.repository && self.worktree == other.worktree
     }
 
     fn validate(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         self.repository
             .validate()
-            .and_then(|()| self.reference.as_ref().map_or(Ok(()), RefId::validate))
             .and_then(|()| self.worktree.as_ref().map_or(Ok(()), WorktreeId::validate))
             .map_err(|error| CodeIndexPublicationStoreErrorV1::Unavailable(error.to_string()))
     }
 }
 
 /// The only persistence seam for this production owner. Implementations retain
-/// one physical store per canonical repository and partition only active
-/// generation pointers by [`CodeIndexGenerationScopeV1`]. They must make the
-/// complete generation and verified projection receipt visible as one scoped
+/// one physical store per canonical repository and partition active generation
+/// pointers by physical checkout [`CodeIndexActiveSlotV1`]. They must make the
+/// complete generation and verified projection receipt visible as one atomic
 /// compare-and-swap operation and return the same immutable value on restart.
 pub trait CodeIndexAtomicPublicationPort {
     fn load_active(
         &self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1>;
 
     fn publish_atomically(
         &mut self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1>;
@@ -1209,7 +1189,7 @@ where
     /// resumes from the publication authority rather than mutable worker state.
     pub fn active_generation(
         &self,
-        scope: &CodeIndexGenerationScopeV1,
+        scope: &CodeIndexActiveSlotV1,
     ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexProductionErrorV1> {
         scope.validate()?;
         if scope.repository != self.config.repository {
@@ -1221,8 +1201,7 @@ where
         if let Some(active) = &active {
             active.validate()?;
             if active.manifest.project_id != self.config.project_id
-                || !CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot)
-                    .identifies_same_checkout(scope)
+                || CodeIndexActiveSlotV1::for_snapshot(&active.snapshot) != *scope
                 || active.manifest.sanitizer_revision != self.config.sanitizer_revision
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain
@@ -1251,7 +1230,7 @@ where
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<CodeIndexPublishedGenerationV1, CodeIndexProductionErrorV1> {
         Self::checkpoint(control)?;
-        let scope = CodeIndexGenerationScopeV1::for_snapshot(&request.snapshot);
+        let scope = CodeIndexActiveSlotV1::for_snapshot(&request.snapshot);
         let active = self.active_generation(&scope)?;
         Self::checkpoint(control)?;
 
