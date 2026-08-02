@@ -4,14 +4,14 @@
 //! factory, and the currently published pool. Restart and reload construct a
 //! complete replacement before one atomic state swap; callers therefore see
 //! either the old pool or the replacement, never a half-reloaded runtime.
-#![allow(dead_code)] // staged embedding runtime service; Plan 31 — not yet wired
-
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, RwLockReadGuard};
+#[cfg(test)]
+use std::sync::RwLockWriteGuard;
 
 use serde::Serialize;
 use tracedecay_domain::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
@@ -43,6 +43,7 @@ pub fn fastembed_runtime_factory() -> SharedEmbeddingRuntimeFactory<FastEmbedEmb
 pub enum SemanticRuntimeServiceError {
     Factory(EmbedError),
     PoolConfig(SessionPoolConfigError),
+    #[cfg(test)]
     WorkerTerminated,
 }
 
@@ -51,6 +52,7 @@ impl fmt::Display for SemanticRuntimeServiceError {
         match self {
             Self::Factory(error) => write!(f, "embedding runtime factory failed: {error}"),
             Self::PoolConfig(error) => write!(f, "embedding session pool rejected config: {error}"),
+            #[cfg(test)]
             Self::WorkerTerminated => write!(f, "embedding runtime worker did not complete"),
         }
     }
@@ -59,6 +61,7 @@ impl fmt::Display for SemanticRuntimeServiceError {
 impl Error for SemanticRuntimeServiceError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 pub struct RuntimeReloadReportV1 {
     pub prior_generation: u64,
     pub current_generation: u64,
@@ -437,13 +440,16 @@ impl SemanticRuntimeSchedulingHandleV1 {
 struct ActiveRuntime<R: EmbeddingRuntime> {
     generation: u64,
     authority: Arc<AdmittedProjectionArtifactV1>,
+    #[cfg(test)]
     factory: SharedEmbeddingRuntimeFactory<R>,
     pool: Arc<SessionPool<R, SystemMonotonicClock>>,
 }
 
 /// Atomically replaceable production session-pool owner.
 pub struct SemanticRuntimeService<R: EmbeddingRuntime> {
+    #[cfg(test)]
     config: SessionPoolConfigV1,
+    #[cfg(test)]
     lifecycle: Mutex<()>,
     active: RwLock<ActiveRuntime<R>>,
 }
@@ -460,17 +466,21 @@ where
     ) -> Result<Arc<Self>, SemanticRuntimeServiceError> {
         let pool = Self::build_pool(&authority, &factory, &config)?;
         Ok(Arc::new(Self {
+            #[cfg(test)]
             config,
+            #[cfg(test)]
             lifecycle: Mutex::new(()),
             active: RwLock::new(ActiveRuntime {
                 generation: 1,
                 authority,
+                #[cfg(test)]
                 factory,
                 pool,
             }),
         }))
     }
 
+    #[cfg(test)]
     pub fn generation(&self) -> u64 {
         self.read_active().generation
     }
@@ -499,6 +509,7 @@ where
     }
 
     /// Recreate the active runtime from its current owned factory.
+    #[cfg(test)]
     pub fn restart(&self) -> Result<RuntimeReloadReportV1, SemanticRuntimeServiceError> {
         let _lifecycle = self
             .lifecycle
@@ -512,6 +523,7 @@ where
     }
 
     /// Recreate the runtime away from retrieval executor threads.
+    #[cfg(test)]
     pub async fn restart_async(
         self: &Arc<Self>,
     ) -> Result<RuntimeReloadReportV1, SemanticRuntimeServiceError> {
@@ -525,6 +537,7 @@ where
     ///
     /// Construction completes before the write lock is taken. If construction
     /// fails, the current generation remains untouched and usable.
+    #[cfg(test)]
     pub fn reload(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -539,6 +552,7 @@ where
 
     /// Construct and verify a replacement away from retrieval executor
     /// threads, then publish it with the same atomic swap as [`Self::reload`].
+    #[cfg(test)]
     pub async fn reload_async(
         self: &Arc<Self>,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -565,6 +579,7 @@ where
         )
     }
 
+    #[cfg(test)]
     fn replace_locked(
         &self,
         authority: Arc<AdmittedProjectionArtifactV1>,
@@ -578,6 +593,7 @@ where
             *active = ActiveRuntime {
                 generation: prior_generation.wrapping_add(1),
                 authority,
+                #[cfg(test)]
                 factory,
                 pool: replacement,
             };
@@ -609,6 +625,7 @@ where
         self.active.read().unwrap_or_else(PoisonError::into_inner)
     }
 
+    #[cfg(test)]
     fn write_active(&self) -> RwLockWriteGuard<'_, ActiveRuntime<R>> {
         self.active.write().unwrap_or_else(PoisonError::into_inner)
     }

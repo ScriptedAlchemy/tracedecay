@@ -31,6 +31,7 @@ mod bootstrap;
 mod code_index_hydration;
 mod compatibility;
 mod handshake;
+mod invocation_ownership;
 mod lifecycle;
 mod logging;
 mod multi_root_journey;
@@ -288,6 +289,28 @@ fn search_scope_resolution_failure_is_authority_unavailable() {
             }
         )
     ));
+}
+
+#[test]
+fn an_unservable_search_reports_every_lane_down() {
+    let code_search::CodeIndexSearchOutcomeV1::Unavailable(unavailable) =
+        super::code_index_scope_unavailable()
+    else {
+        panic!("an unresolvable scope has no servable lane");
+    };
+
+    assert!(
+        !unavailable.coverage.any_servable(),
+        "a typed failure must only be returned when no lane could serve"
+    );
+    assert_eq!(
+        unavailable
+            .coverage
+            .degraded_or_fail(unavailable.reason)
+            .unwrap_err(),
+        code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+        "all lanes down must fail fast with the typed reason, never block"
+    );
 }
 
 #[cfg(unix)]

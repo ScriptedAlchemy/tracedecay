@@ -458,12 +458,13 @@ impl<'a> GraphQueryManager<'a> {
     /// reported 73 overlapping "cycles" on real codebases — each just a
     /// different DFS path through the same component.
     pub async fn find_circular_dependencies(&self) -> Result<Vec<Vec<String>>> {
-        let all_files = self.db.get_all_files().await?;
-        let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
-        for file in &all_files {
-            let deps = self.get_file_dependencies(&file.path).await?;
-            adj.insert(file.path.clone(), deps.into_iter().collect());
-        }
+        // `build_file_adjacency` computes the same relation — distinct
+        // (source file, target file) pairs over `calls` and `uses` edges,
+        // self-edges excluded, every known file present as a key — through
+        // keyset pages instead of one query round trip per file in the
+        // project. Building it a file at a time cost thousands of sequential
+        // round trips on the request path for an identical result.
+        let adj = self.build_file_adjacency(None).await?;
 
         let sccs = super::scc::tarjan_scc(&adj);
         let mut cycles: Vec<Vec<String>> = sccs
