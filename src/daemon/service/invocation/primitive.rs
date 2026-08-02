@@ -918,37 +918,4 @@ impl DaemonPrimitiveRuntimeRegistrar {
             })?;
         Ok(dispatch)
     }
-
-    #[allow(dead_code)] // in-flight route unregister — staged
-    pub(crate) async fn unregister(&self, project_root: &Path) -> bool {
-        let runtime = self
-            .service
-            .project_runtimes
-            .withdraw::<Pr12PrimitiveProjectRuntime>(project_root)
-            .await;
-        runtime.is_some_and(|runtime| {
-            runtime.teardown();
-            true
-        })
-    }
-}
-
-#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
-impl DaemonInvocationService {
-    /// Exact in-process handler call for a daemon-retained PR12 primitive.
-    /// Callers must supply the authenticated request context minted during
-    /// project admission; no path or client selector is resolved here.
-    pub(crate) async fn dispatch_pr12_primitive(
-        &self,
-        project_root: &Path,
-        invocation: Pr12PrimitiveInvocation,
-        context: RequestContext,
-        observed_at: UtcMicros,
-    ) -> Option<ApplicationResult<serde_json::Value>> {
-        let dispatch = self
-            .project_runtimes
-            .read(project_root, Pr12PrimitiveProjectRuntime::dispatch)
-            .await?;
-        Some(dispatch.dispatch(invocation, context, observed_at).await)
-    }
 }
