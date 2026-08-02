@@ -629,6 +629,24 @@ pub fn validate_relative_install_path(path: &Path) -> Result<(), HostBundleError
     Ok(())
 }
 
+/// Builds a [`HostBundleError::StorageFailure`] tagged with the `file:line` of
+/// the site that observed the failure.
+///
+/// Host bundle lifecycle code has roughly a hundred atomic filesystem steps that
+/// all collapse to `StorageFailure`. Without a per-site tag every one of them
+/// renders the same sentence, which makes an install/uninstall failure report
+/// unactionable. Always construct the variant through this macro.
+#[macro_export]
+macro_rules! host_bundle_storage_failure {
+    () => {
+        $crate::HostBundleError::StorageFailure(::core::concat!(
+            ::core::file!(),
+            ":",
+            ::core::line!()
+        ))
+    };
+}
+
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum HostBundleError {
     #[error("host capability is unsupported and must not be emulated")]
@@ -661,8 +679,12 @@ pub enum HostBundleError {
     ArtifactContentMismatch,
     #[error("host bundle receipt or operation journal is invalid")]
     ReceiptCorrupted,
-    #[error("host bundle atomic filesystem operation failed")]
-    StorageFailure,
+    /// An atomic filesystem step failed. The payload names the source site that
+    /// observed the failure so the ~100 construction sites stay distinguishable
+    /// in user-facing output and bug reports; build it with
+    /// [`host_bundle_storage_failure!`] rather than by hand.
+    #[error("host bundle atomic filesystem operation failed at {0}")]
+    StorageFailure(&'static str),
     #[error("host bundle interrupted operation requires recovery before mutation")]
     RecoveryRequired,
     #[error(
