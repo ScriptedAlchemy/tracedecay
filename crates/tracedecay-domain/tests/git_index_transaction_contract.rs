@@ -9,7 +9,7 @@ use tracedecay_domain::{
     GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
     GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
     GitOperationStateV1, HunkDirectionV1, HunkRefV1, ManifestDigest, ProjectId, RepositoryId,
-    UtcMicros, WorktreeId, git_commit_timestamp_micros,
+    UtcMicros, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -501,17 +501,29 @@ fn commit_intent_digest_uses_git_second_precision_without_changing_wire_values()
         aligned.compute_digest().expect("aligned digest")
     );
 
-    assert!(
-        make_intent(i64::MIN, i64::MAX).compute_digest().is_ok(),
-        "timestamp canonicalization must not overflow at the i64 bounds"
-    );
-    let lower_bound_seconds = i64::MIN.div_euclid(1_000_000);
-    let lower_bound_micros = git_commit_timestamp_micros(lower_bound_seconds);
-    assert_eq!(lower_bound_micros, UtcMicros(i64::MIN));
+    // Whole-second V1 intents retain their historical digest. Inputs with
+    // subsecond timestamps were already unrecoverable because Git persisted
+    // only whole seconds, so the V1 domain remains the maximal compatibility
+    // surface while newly created intents reconcile correctly.
     assert_eq!(
-        lower_bound_micros,
-        git_commit_timestamp_micros(lower_bound_micros.0.div_euclid(1_000_000)),
-        "recovery must map Git's lower bound second to the same saturated micros"
+        aligned.compute_digest().expect("legacy aligned digest"),
+        digest("sha256:3fcfb47cf5fe4965337c4dfe33b23a84d11394c072e9491e85219bcc950f5b33")
+    );
+    assert_eq!(
+        make_intent(i64::MIN, i64::MAX).compute_digest(),
+        Err(tracedecay_domain::research::DomainError::NonCanonical {
+            field: "git commit identity timestamp",
+        }),
+        "the lower Git second cannot be represented in domain microseconds"
+    );
+    let lowest_exact_seconds = i64::MIN / 1_000_000;
+    let lowest_exact_micros = lowest_exact_seconds
+        .checked_mul(1_000_000)
+        .expect("lowest whole second remains representable");
+    assert!(
+        make_intent(lowest_exact_micros, lowest_exact_micros)
+            .compute_digest()
+            .is_ok()
     );
 }
 

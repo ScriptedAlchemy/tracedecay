@@ -23,7 +23,6 @@ use tracedecay_domain::{
     GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
     RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId, canonical_sha256,
-    git_commit_timestamp_micros,
 };
 use tracedecay_store::GitIndexTransactionRecordV1;
 
@@ -1278,17 +1277,23 @@ fn commit_intent_matches_preview(
     let Some(message) = parts.next() else {
         return false;
     };
+    let Some(author_micros) = author_seconds.checked_mul(1_000_000) else {
+        return false;
+    };
+    let Some(committer_micros) = committer_seconds.checked_mul(1_000_000) else {
+        return false;
+    };
     GitIndexCommitIntentV1::new(
         message.to_owned(),
         GitCommitIdentityV1 {
             name: author_name.to_owned(),
             email: author_email.to_owned(),
-            at: git_commit_timestamp_micros(author_seconds),
+            at: UtcMicros(author_micros),
         },
         GitCommitIdentityV1 {
             name: committer_name.to_owned(),
             email: committer_email.to_owned(),
-            at: git_commit_timestamp_micros(committer_seconds),
+            at: UtcMicros(committer_micros),
         },
         GitIndexSigningPolicyV1::UnsignedPermitted,
     )
