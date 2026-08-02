@@ -23,6 +23,7 @@ use tracedecay_domain::{
     GitStatusEntryV1, ManifestDigest, ProjectId, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
     RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId, canonical_sha256,
+    git_commit_timestamp_micros,
 };
 use tracedecay_store::GitIndexTransactionRecordV1;
 
@@ -1277,23 +1278,17 @@ fn commit_intent_matches_preview(
     let Some(message) = parts.next() else {
         return false;
     };
-    let Some(author_micros) = author_seconds.checked_mul(1_000_000) else {
-        return false;
-    };
-    let Some(committer_micros) = committer_seconds.checked_mul(1_000_000) else {
-        return false;
-    };
     GitIndexCommitIntentV1::new(
         message.to_owned(),
         GitCommitIdentityV1 {
             name: author_name.to_owned(),
             email: author_email.to_owned(),
-            at: UtcMicros(author_micros),
+            at: git_commit_timestamp_micros(author_seconds),
         },
         GitCommitIdentityV1 {
             name: committer_name.to_owned(),
             email: committer_email.to_owned(),
-            at: UtcMicros(committer_micros),
+            at: git_commit_timestamp_micros(committer_seconds),
         },
         GitIndexSigningPolicyV1::UnsignedPermitted,
     )
@@ -2350,6 +2345,45 @@ mod tests {
                 .expect("reconcile wrong intent")
                 .outcome,
             GitIndexReceiptOutcomeV1::NeedsInspection
+        );
+    }
+
+    #[test]
+    fn recovery_commits_when_git_normalizes_unaligned_intent_timestamps() {
+        let (directory, assembler, runner) = repository_fixture();
+        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
+        git(directory.path(), &["add", "packet.txt"]);
+        let identity = GitCommitIdentityV1 {
+            name: "TraceDecay Test".to_owned(),
+            email: "tracedecay@example.com".to_owned(),
+            at: UtcMicros(1_234_567),
+        };
+        let intent = GitIndexCommitIntentV1::new(
+            "unaligned timestamp transaction\n".to_owned(),
+            identity.clone(),
+            identity,
+            GitIndexSigningPolicyV1::UnsignedPermitted,
+        )
+        .expect("commit intent");
+        let preview = commit_preview(
+            &assembler,
+            &runner,
+            "git-index-preview.recovery-unaligned-timestamp",
+            &intent,
+        );
+        let lock = runner.acquire_index_lock().expect("commit lock");
+        runner
+            .commit_index(&lock, &preview, &intent)
+            .expect("commit exact index");
+        drop(lock);
+
+        let record = recovery_record(&preview, GitIndexJournalPhaseV1::RefCommitted);
+        assert_eq!(
+            assembler
+                .reconcile(&record)
+                .expect("reconcile normalized intent")
+                .outcome,
+            GitIndexReceiptOutcomeV1::Committed
         );
     }
 
