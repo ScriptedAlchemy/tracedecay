@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use serde_json::json;
 
@@ -269,6 +269,125 @@ type SessionRuntimeRegistries = HashMap<
     >,
 >;
 type SharedSessionRuntimeRegistries = Arc<tokio::sync::Mutex<SessionRuntimeRegistries>>;
+
+#[derive(Clone)]
+struct ProfileHostAdmissionBootstrapContext {
+    profile_root: PathBuf,
+    profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    session_runtime_registry: Arc<
+        tokio::sync::OnceCell<
+            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+        >,
+    >,
+    host_admission_brokers: Arc<
+        tokio::sync::Mutex<
+            HashMap<PathBuf, crate::application::host_admission::SharedHostAdmissionBroker>,
+        >,
+    >,
+    host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
+    profile_host_admission_replay: Weak<ProfileHostAdmissionReplayRegistry>,
+}
+
+impl ProfileHostAdmissionBootstrapContext {
+    async fn ensure(&self) -> Result<()> {
+        let profile_identity = self.profile_identity.clone();
+        let session_runtime_registry = self
+            .session_runtime_registry
+            .get_or_try_init(|| async move {
+                crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                    profile_identity,
+                )
+                .await
+                .map(Arc::new)
+            })
+            .await
+            .map(Arc::clone)
+            .map_err(|error| {
+                TraceDecayError::project_route(
+                    "registered_authority_unavailable",
+                    true,
+                    error.to_string(),
+                )
+            })?;
+        let user_session_db =
+            session_runtime_registry
+                .profile_sessions()
+                .await
+                .map_err(|error| {
+                    TraceDecayError::project_route(
+                        "registered_authority_unavailable",
+                        true,
+                        error.to_string(),
+                    )
+                })?;
+        let broker_path =
+            authority::canonical_identity_path(user_session_db.db_path()).map_err(|error| {
+                TraceDecayError::project_route(
+                    "host_admission_broker_unavailable",
+                    true,
+                    error.to_string(),
+                )
+            })?;
+        let state = self.open_broker(&broker_path).await;
+        let broker = match state {
+            HostAdmissionBrokerState::Available(broker) => broker,
+            HostAdmissionBrokerState::Unavailable(outcome) => {
+                return Err(TraceDecayError::project_route(
+                    outcome.reason_code.unwrap_or("spool_unavailable"),
+                    outcome.retryable,
+                    "user-profile host admission spool is unavailable",
+                ));
+            }
+        };
+        let Some(replay) = self.profile_host_admission_replay.upgrade() else {
+            return Err(TraceDecayError::project_route(
+                "daemon_shutting_down",
+                false,
+                "profile host-admission replay registry is unavailable",
+            ));
+        };
+        replay
+            .ensure(&broker_path, &self.profile_root, &broker)
+            .await;
+        Ok(())
+    }
+
+    async fn open_broker(&self, path: &Path) -> HostAdmissionBrokerState {
+        if let Some(broker) = self.host_admission_brokers.lock().await.get(path).cloned() {
+            return HostAdmissionBrokerState::Available(broker);
+        }
+
+        let _open = self.host_admission_broker_gate.lock().await;
+        let brokers = self.host_admission_brokers.lock().await;
+        if let Some(broker) = brokers.get(path) {
+            return HostAdmissionBrokerState::Available(Arc::clone(broker));
+        }
+        drop(brokers);
+        let open_path = path.to_path_buf();
+        let opened = tokio::task::spawn_blocking(move || {
+            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&open_path)
+        })
+        .await;
+        let state = match opened {
+            Ok(Ok((runtime, _))) => HostAdmissionBrokerState::Available(Arc::new(
+                crate::application::host_admission::HostAdmissionBroker::new(runtime),
+            )),
+            Ok(Err(outcome)) => HostAdmissionBrokerState::Unavailable(outcome),
+            Err(_) => HostAdmissionBrokerState::Unavailable(
+                crate::application::host_admission::HostAdmissionOutcome::retained_unavailable(
+                    "spool_runtime_unavailable",
+                ),
+            ),
+        };
+        if let HostAdmissionBrokerState::Available(broker) = &state {
+            self.host_admission_brokers
+                .lock()
+                .await
+                .insert(path.to_path_buf(), Arc::clone(broker));
+        }
+        state
+    }
+}
 
 /// Coordinates every daemon operation that can create, rekey, or remove a
 /// database owner. There is intentionally one gate and one copy of each shared
@@ -633,9 +752,36 @@ impl StoreAdministration {
     pub(super) async fn ensure_profile_host_admission_bootstrap(
         &self,
         profile_root: &Path,
-        operation: ProfileHostAdmissionBootstrapOperation,
     ) -> Result<()> {
         let profile_root = authority::canonical_identity_path(profile_root)?;
+        let profile_identity = self.profile_identity()?.clone();
+        let authority_profile_root =
+            authority::canonical_identity_path(profile_identity.profile_root())?;
+        if profile_root != authority_profile_root {
+            return Err(TraceDecayError::Config {
+                message: "profile host-admission bootstrap identity mismatch".to_owned(),
+            });
+        }
+        let session_runtime_registry = {
+            let mut registries = self.session_runtime_registries.lock().await;
+            Arc::clone(
+                registries
+                    .entry(profile_root.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let context = ProfileHostAdmissionBootstrapContext {
+            profile_root: profile_root.clone(),
+            profile_identity,
+            session_runtime_registry,
+            host_admission_brokers: Arc::clone(&self.host_admission_brokers),
+            host_admission_broker_gate: Arc::clone(&self.host_admission_broker_gate),
+            profile_host_admission_replay: Arc::downgrade(&self.profile_host_admission_replay),
+        };
+        let operation: ProfileHostAdmissionBootstrapOperation = Arc::new(move || {
+            let context = context.clone();
+            Box::pin(async move { context.ensure().await })
+        });
         self.profile_host_admission_replay
             .ensure_bootstrap(&profile_root, operation)
             .await;
