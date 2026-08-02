@@ -52,8 +52,9 @@ const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
 const MAX_CONCURRENT_RECONCILE_WORKTREES: usize = 2;
 
 fn bounded_daemon_admission_permits() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, |cores| cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES))
+    std::thread::available_parallelism().map_or(1, |cores| {
+        cores.get().min(MAX_CONCURRENT_RECONCILE_WORKTREES)
+    })
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
