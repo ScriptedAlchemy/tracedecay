@@ -1,9 +1,8 @@
 use super::{
-    CapturedMemoryV2Frontiers, Connection, Database, DatabaseEngineConnection,
-    DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseMemoryWriter,
-    DatabaseWriteTransaction, DatabaseWriterConnection, FactOwnerV1, MemoryV2BackfillBatchOutcome,
-    ReadSnapshot, Result, SourceStoreId, TraceDecayError, TransactionBehavior,
-    database_query_error, integrity, memory_v2,
+    Connection, Database, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
+    DatabaseMemoryTransaction, DatabaseMemoryWriter, DatabaseWriteTransaction,
+    DatabaseWriterConnection, ReadSnapshot, Result, TraceDecayError, TransactionBehavior,
+    database_query_error, integrity,
 };
 
 impl Database {
@@ -169,51 +168,6 @@ impl Database {
                 .writer_connection("memory store writer capability")
                 .await?,
         })
-    }
-
-    /// Whether this owner has no V1 legacy memory at all, so the cutover
-    /// ladder would only manufacture an all-zero backfill row and a receipt
-    /// for a migration that never happened.
-    pub(crate) async fn memory_v2_cutover_is_vacuous(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-    ) -> Result<bool> {
-        let writer = self
-            .writer_connection("probe memory v2 legacy cutover source")
-            .await?;
-        memory_v2::memory_v2_cutover_is_vacuous(&writer.conn, owner, source_store_id).await
-    }
-
-    pub(crate) async fn load_or_capture_memory_v2_frontiers(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-    ) -> Result<CapturedMemoryV2Frontiers> {
-        let writer = self
-            .writer_connection("capture memory v2 backfill frontiers")
-            .await?;
-        memory_v2::load_or_capture_memory_v2_frontiers(&writer.conn, owner, source_store_id).await
-    }
-
-    pub async fn backfill_memory_v2_batch(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-        frontiers: CapturedMemoryV2Frontiers,
-        batch_size: i64,
-    ) -> Result<MemoryV2BackfillBatchOutcome> {
-        let writer = self
-            .writer_connection("backfill one memory v2 batch")
-            .await?;
-        memory_v2::backfill_memory_v2_batch(
-            &writer.conn,
-            owner,
-            source_store_id,
-            frontiers,
-            batch_size,
-        )
-        .await
     }
 
     /// Starts a query-only snapshot on a separate connection that cannot join

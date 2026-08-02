@@ -26,14 +26,8 @@ use tracedecay_policy::retrieval_selection::{
 };
 
 use crate::config::SemanticResourceCeilings;
-use crate::retention::code_index_generations::{
-    CodeGenerationRetentionModeV1, CodeGenerationRetentionReceiptV1,
-    DEFAULT_SUPERSEDED_GENERATION_FLOOR, execute_code_generation_retention,
-    plan_code_generation_retention, recover_code_generation_retention,
-};
 use crate::store::vector_generations::{
-    DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
-    DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    DatabaseVectorEvaluationStoreV1, DatabaseVectorGenerationStoreV1, PublishedVectorGenerationV1,
     VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorProjectionCheckpointV1,
 };
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
@@ -62,12 +56,6 @@ use tracedecay_search_eval::semantic_native::{
 use tracedecay_search_eval::{
     CandidateOutputError, ProductionCandidateNativeGenerationResourcesV1,
     ProductionCandidateNativeQueryContextV1, ProductionCandidateNativeQueryInputsV1,
-};
-use tracedecay_semantic::legacy_migration::{
-    CanonicalEligibleChunkSetV1, LegacyVectorInventoryPortV1, LegacyVectorMigrationErrorV1,
-    LegacyVectorMigrationOwnerTransactionV1, LegacyVectorMigrationReceiptV1,
-    NeverCancelLegacyVectorMigrationV1, ProductionLegacyVectorCanonicalRebuilderV1,
-    StagedCanonicalVectorRebuildV1, prepare_legacy_vector_migration,
 };
 use tracedecay_semantic::projector::PreparedVectorGenerationV1;
 use tracedecay_semantic::rerank_adapter::{
@@ -270,74 +258,6 @@ impl ProductionSemanticRuntimeV1 {
         }
     }
 
-    async fn retain_code_generations(
-        &self,
-        store: &DatabaseVectorGenerationStoreV1<'_>,
-        inventory: &DatabaseLegacyVectorInventoryV1,
-    ) -> Result<Option<CodeGenerationRetentionReceiptV1>, SemanticRuntimeScheduleFailureV1> {
-        let snapshot = inventory
-            .read_only_inventory()
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let vector_readable_sources = snapshot.retained_readable_sources();
-        let store_root = self.code_index_store_root.clone();
-        let plan_root = store_root.clone();
-        let planned_sources = vector_readable_sources.clone();
-        let plan = tokio::task::spawn_blocking(move || {
-            recover_code_generation_retention(&plan_root, &planned_sources)?;
-            plan_code_generation_retention(
-                &plan_root,
-                &planned_sources,
-                DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-            )
-        })
-        .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        if plan.collectable_generations.is_empty() {
-            return Ok(None);
-        }
-
-        // Hold the canonical vector writer lane while re-reading liveness and
-        // unlinking candidates. A vector publication cannot begin naming a
-        // previously unmarked source between the final mark check and sweep.
-        let writer = self
-            .database
-            .begin_write_transaction("retain code-index generations")
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let current_sources = store
-            .read_legacy_inventory()
-            .await
-            .and_then(|inventory| {
-                inventory.read_only_inventory().map_err(|error| {
-                    crate::store::vector_generations::VectorGenerationStoreErrorV1::Storage(
-                        error.to_string(),
-                    )
-                })
-            })
-            .map(|inventory| inventory.retained_readable_sources())
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication);
-        let result = match current_sources {
-            Ok(current_sources) if current_sources == vector_readable_sources => {
-                execute_code_generation_retention(
-                    &store_root,
-                    plan,
-                    CodeGenerationRetentionModeV1::Apply,
-                    now_micros(),
-                )
-                .map(|report| report.receipt)
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)
-            }
-            Ok(_) => Ok(None),
-            Err(error) => Err(error),
-        };
-        writer
-            .rollback()
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        result
-    }
-
     /// Restore a compatible immutable generation after daemon restart.
     pub async fn restore_current(
         &self,
@@ -411,167 +331,6 @@ impl ProductionSemanticRuntimeV1 {
     /// changed-chunk embedding, and database publication remain background work.
     pub fn schedule_saved_generation(&self, generation: &CodeIndexPublishedGenerationV1) -> bool {
         self.schedule_saved_generation_inner(generation, None)
-    }
-
-    /// Rebuild legacy vector state from the current retained canonical code in
-    /// scratch storage, then replace it under one database revision CAS.
-    ///
-    /// This runs only from the daemon's background semantic work lane. A crash,
-    /// cancellation, model failure, or stale revision before the final swap
-    /// leaves the prior state untouched; a committed receipt makes restart
-    /// idempotent.
-    async fn migrate_legacy_vectors_for_generation(
-        &self,
-        generation: &CodeIndexPublishedGenerationV1,
-        cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
-    ) -> Result<Option<LegacyVectorMigrationReceiptV1>, SemanticRuntimeScheduleFailureV1> {
-        let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(self.database.as_ref())
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let inventory = store.read_legacy_inventory().await;
-        if let Ok(inventory) = inventory.as_ref()
-            && let Err(error) = self.retain_code_generations(&store, inventory).await
-        {
-            tracing::warn!(
-                event = "code_generation_retention",
-                outcome = "deferred",
-                error = %format!("{error:?}"),
-                "code-generation retention failed closed; semantic scheduling continues"
-            );
-        }
-        if let Some(receipt) = store
-            .completed_legacy_migration_receipt()
-            .await
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
-        {
-            return Ok(Some(receipt));
-        }
-        let inventory = inventory.map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        let snapshot = inventory
-            .read_only_inventory()
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        if snapshot.entries.is_empty() {
-            return Ok(None);
-        }
-        if cancelled() {
-            return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
-        }
-
-        let lifecycle = Arc::clone(&self.lifecycle);
-        let resources = self.resources;
-        let generation = generation.clone();
-        let generations_root = self.code_index_store_root.join("code-generations-v1");
-        let inventory_for_prepare = inventory.clone();
-        let cancelled_for_prepare = Arc::clone(&cancelled);
-        let (replacement, transaction) = tokio::task::spawn_blocking(move || {
-            if cancelled_for_prepare() {
-                return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
-            }
-            let generations =
-                load_retained_code_generations(&generations_root, &generation, &snapshot)?;
-            let retained = retained_canonical_chunk_sets(&snapshot, |source| {
-                Ok(generations
-                    .get(source)
-                    .map(|generation| generation.chunks().chunks().to_vec()))
-            })?;
-            let mut prepared = BTreeMap::new();
-            for chunks in retained.iter().filter(|chunks| !chunks.chunks().is_empty()) {
-                let retained_generation = generations
-                    .get(chunks.source_generation())
-                    .ok_or(SemanticRuntimeScheduleFailureV1::Projection)?;
-                let artifact = LoadedSemanticArtifactV1::from_lifecycle(
-                    &lifecycle,
-                    retained_generation.manifest(),
-                    resources,
-                )?;
-                let projection = artifact.projection().clone();
-                let request = semantic_projection_request(retained_generation, &projection, None)?;
-                let projection = prepare_semantic_evaluation_projection(
-                    artifact,
-                    request,
-                    chunks.chunks(),
-                    resources.max_concurrent_sessions as usize,
-                    resources.max_resident_bytes,
-                )?
-                .prepared;
-                if prepared
-                    .insert(chunks.source_generation().clone(), projection)
-                    .is_some()
-                {
-                    return Err(SemanticRuntimeScheduleFailureV1::Projection);
-                }
-            }
-            if cancelled_for_prepare() {
-                return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
-            }
-
-            let replacement =
-                std::rc::Rc::new(std::cell::RefCell::new(FakeVectorGenerationStoreV1::new()));
-            let prepared = std::rc::Rc::new(std::cell::RefCell::new(prepared));
-            let replacement_for_stage = std::rc::Rc::clone(&replacement);
-            let prepared_for_stage = std::rc::Rc::clone(&prepared);
-            let mut rebuilder =
-                ProductionLegacyVectorCanonicalRebuilderV1::try_new(retained, move |chunks| {
-                    let prepared = prepared_for_stage
-                        .borrow_mut()
-                        .remove(chunks.source_generation())
-                        .ok_or(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch)?;
-                    if prepared.request.changes.to_generation != *chunks.source_generation()
-                        || prepared.request.changes.added_or_changed.len() != chunks.chunks().len()
-                    {
-                        return Err(LegacyVectorMigrationErrorV1::RebuildIdentityMismatch);
-                    }
-                    let plan = VectorGenerationPlanV1 {
-                        target_projection_key: prepared.request.target_projection_key.clone(),
-                        source_generation: prepared.request.changes.to_generation.clone(),
-                        source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-                        expected_chunk_ids: chunks
-                            .chunks()
-                            .iter()
-                            .map(|chunk| chunk.id.clone())
-                            .collect(),
-                        base_generation: None,
-                    };
-                    let mut replacement = replacement_for_stage.borrow_mut();
-                    let build = replacement
-                        .rebuild_generation(plan)
-                        .map_err(map_legacy_store)?;
-                    replacement
-                        .commit_batch(&build, None, prepared)
-                        .map_err(map_legacy_store)?;
-                    let publication = replacement
-                        .seal_generation_inactive(&build)
-                        .map_err(map_legacy_store)?;
-                    Ok(StagedCanonicalVectorRebuildV1 {
-                        source_generation: chunks.source_generation().clone(),
-                        rebuilt_generation: publication.generation_id,
-                        canonical_chunk_set_digest: chunks.digest().clone(),
-                    })
-                })
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-            let transaction = prepare_legacy_vector_migration(
-                &inventory_for_prepare,
-                &mut rebuilder,
-                &NeverCancelLegacyVectorMigrationV1,
-            )
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-            drop(rebuilder);
-            let replacement = std::rc::Rc::try_unwrap(replacement)
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-                .into_inner();
-            Ok((replacement, transaction))
-        })
-        .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)??;
-        let receipt = replace_legacy_vectors_after_rebuild(
-            &store,
-            &inventory,
-            replacement,
-            &transaction,
-            cancelled.as_ref(),
-        )
-        .await?;
-        Ok(Some(receipt))
     }
 
     /// Build an evaluator-only exact-flat lane from the checked-in sanitized
@@ -2775,17 +2534,6 @@ pub fn production_saved_generation_schedule_hook(
                         if lease.is_cancelled() {
                             return;
                         }
-                        let cancellation_lease = Arc::clone(&lease);
-                        let cancelled: Arc<dyn Fn() -> bool + Send + Sync> =
-                            Arc::new(move || cancellation_lease.is_cancelled());
-                        if runtime
-                            .migrate_legacy_vectors_for_generation(&generation, cancelled)
-                            .await
-                            .is_err()
-                            || lease.is_cancelled()
-                        {
-                            return;
-                        }
                         let Ok(lease) = Arc::try_unwrap(lease) else {
                             return;
                         };
@@ -2817,115 +2565,6 @@ fn fair_schedule_failure(
     }
 }
 
-fn retained_readable_sources(
-    inventory: &tracedecay_semantic::legacy_migration::LegacyVectorInventoryV1,
-) -> BTreeSet<CodeGenerationId> {
-    inventory.retained_readable_sources()
-}
-
-fn load_retained_code_generations(
-    generations_root: &Path,
-    current: &CodeIndexPublishedGenerationV1,
-    inventory: &tracedecay_semantic::legacy_migration::LegacyVectorInventoryV1,
-) -> Result<
-    BTreeMap<CodeGenerationId, CodeIndexPublishedGenerationV1>,
-    SemanticRuntimeScheduleFailureV1,
-> {
-    let required = retained_readable_sources(inventory);
-    let mut retained = BTreeMap::new();
-    if required.contains(&current.manifest().generation_id) {
-        retained.insert(current.manifest().generation_id.clone(), current.clone());
-    }
-    if retained.len() == required.len() {
-        return Ok(retained);
-    }
-
-    let entries = match std::fs::read_dir(generations_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(retained),
-        Err(_) => return Err(SemanticRuntimeScheduleFailureV1::Publication),
-    };
-    let mut paths = entries
-        .map(|entry| {
-            entry
-                .map(|entry| entry.path())
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    paths.sort();
-    for path in paths {
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !file_name.starts_with("generation-") || !file_name.ends_with(".json") {
-            continue;
-        }
-        let bytes =
-            std::fs::read(&path).map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-        if !CodeIndexPublishedGenerationV1::sealed_format_is_compatible(&bytes)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
-        {
-            continue;
-        }
-        let generation = CodeIndexPublishedGenerationV1::decode_sealed(&bytes)
-            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        let source = generation.manifest().generation_id.clone();
-        if required.contains(&source) {
-            retained.entry(source).or_insert(generation);
-            if retained.len() == required.len() {
-                break;
-            }
-        }
-    }
-    Ok(retained)
-}
-
-fn retained_canonical_chunk_sets<Load>(
-    inventory: &tracedecay_semantic::legacy_migration::LegacyVectorInventoryV1,
-    mut load: Load,
-) -> Result<Vec<CanonicalEligibleChunkSetV1>, SemanticRuntimeScheduleFailureV1>
-where
-    Load: FnMut(
-        &CodeGenerationId,
-    ) -> Result<Option<Vec<CodeSearchChunkV1>>, SemanticRuntimeScheduleFailureV1>,
-{
-    retained_readable_sources(inventory)
-        .into_iter()
-        .filter_map(|source| match load(&source) {
-            Ok(Some(chunks)) => Some(Ok((source, chunks))),
-            Ok(None) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .map(|result| {
-            let (source, chunks) = result?;
-            CanonicalEligibleChunkSetV1::try_from_chunks(source, chunks)
-                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)
-        })
-        .collect()
-}
-
-fn map_legacy_store(
-    error: crate::store::vector_generations::VectorGenerationStoreErrorV1,
-) -> LegacyVectorMigrationErrorV1 {
-    LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string())
-}
-
-async fn replace_legacy_vectors_after_rebuild(
-    store: &DatabaseVectorGenerationStoreV1<'_>,
-    inventory: &DatabaseLegacyVectorInventoryV1,
-    replacement: FakeVectorGenerationStoreV1,
-    transaction: &LegacyVectorMigrationOwnerTransactionV1,
-    cancelled: &(dyn Fn() -> bool + Send + Sync),
-) -> Result<LegacyVectorMigrationReceiptV1, SemanticRuntimeScheduleFailureV1> {
-    if cancelled() {
-        return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
-    }
-    store
-        .replace_legacy_vectors_atomically(inventory, replacement, transaction)
-        .await
-        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2950,7 +2589,6 @@ mod tests {
     };
 
     use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
-    use tracedecay_semantic::legacy_migration::ProductionLegacyVectorCanonicalRebuilderV1;
     use tracedecay_semantic::{
         DaemonSemanticRuntimeHandleV1, FastEmbedSemanticGenerationRequestV1,
         PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
@@ -3188,141 +2826,6 @@ mod tests {
             source_occurrence,
             SourceOccurrenceId::new(format!("code-chunk:{}", chunk.id.as_str()))
                 .expect("source occurrence")
-        );
-    }
-
-    #[derive(Clone)]
-    struct LegacyInventoryFixture(tracedecay_semantic::legacy_migration::LegacyVectorInventoryV1);
-
-    impl LegacyVectorInventoryPortV1 for LegacyInventoryFixture {
-        fn read_only_inventory(
-            &self,
-        ) -> Result<
-            tracedecay_semantic::legacy_migration::LegacyVectorInventoryV1,
-            LegacyVectorMigrationErrorV1,
-        > {
-            Ok(self.0.clone())
-        }
-    }
-
-    #[test]
-    fn retained_multi_generation_projections_are_all_rebuilt() {
-        use tracedecay_semantic::legacy_migration::{
-            LegacyVectorInventoryEntryV1, LegacyVectorInventoryV1,
-        };
-
-        let source_a = source_generation('a');
-        let source_b = source_generation('b');
-        let legacy_a = vector_generation('a');
-        let legacy_b = vector_generation('b');
-        let inventory = LegacyInventoryFixture(LegacyVectorInventoryV1 {
-            expected_active_generation: Some(legacy_b.clone()),
-            entries: vec![
-                LegacyVectorInventoryEntryV1::Readable {
-                    legacy_generation: legacy_a,
-                    source_generation: source_a.clone(),
-                },
-                LegacyVectorInventoryEntryV1::Readable {
-                    legacy_generation: legacy_b,
-                    source_generation: source_b.clone(),
-                },
-            ],
-        });
-        let available = BTreeMap::from([
-            (source_a.clone(), vec![canonical_chunk(&source_a, 'a')]),
-            (source_b.clone(), vec![canonical_chunk(&source_b, 'b')]),
-        ]);
-        let retained = retained_canonical_chunk_sets(&inventory.0, |source| {
-            Ok(available.get(source).cloned())
-        })
-        .expect("retained canonical chunks");
-        let mut rebuilder =
-            ProductionLegacyVectorCanonicalRebuilderV1::try_new(retained, |chunks| {
-                let value = if chunks.source_generation() == &source_a {
-                    'c'
-                } else {
-                    'd'
-                };
-                Ok(StagedCanonicalVectorRebuildV1 {
-                    source_generation: chunks.source_generation().clone(),
-                    rebuilt_generation: vector_generation(value),
-                    canonical_chunk_set_digest: chunks.digest().clone(),
-                })
-            })
-            .expect("rebuilder");
-
-        let transaction = prepare_legacy_vector_migration(
-            &inventory,
-            &mut rebuilder,
-            &NeverCancelLegacyVectorMigrationV1,
-        )
-        .expect("migration");
-
-        assert_eq!(transaction.receipt.counts.rebuilt, 2);
-        assert_eq!(transaction.receipt.counts.dropped, 0);
-        assert_eq!(rebuilder.staged_rebuilds().len(), 2);
-    }
-
-    #[tokio::test]
-    async fn cancellation_after_rebuild_cannot_publish_legacy_replacement() {
-        let temporary = tempfile::tempdir().expect("temporary project database");
-        let path = temporary.path().join("project.db");
-        crate::register_test_schema_installer();
-        let authority = DatabaseAuthority::acquire_test(&path, "cancelled legacy replacement")
-            .expect("database authority");
-        let (database, _) =
-            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
-                .await
-                .expect("database");
-        let store = DatabaseVectorGenerationStoreV1::open_legacy_migration(&database)
-            .await
-            .expect("migration store");
-        let inventory = store
-            .read_legacy_inventory()
-            .await
-            .expect("legacy inventory");
-        let mut rebuilder = ProductionLegacyVectorCanonicalRebuilderV1::try_new(Vec::new(), |_| {
-            unreachable!("empty inventory cannot request a rebuild")
-        })
-        .expect("empty rebuilder");
-        let transaction = prepare_legacy_vector_migration(
-            &inventory,
-            &mut rebuilder,
-            &NeverCancelLegacyVectorMigrationV1,
-        )
-        .expect("prepared replacement");
-        let before = database
-            .query_scalar_i64(
-                "read vector revision before cancellation",
-                "SELECT revision
-                 FROM semantic_vector_generation_state_v1
-                 WHERE singleton = 1",
-            )
-            .await
-            .expect("vector revision");
-
-        assert_eq!(
-            replace_legacy_vectors_after_rebuild(
-                &store,
-                &inventory,
-                FakeVectorGenerationStoreV1::new(),
-                &transaction,
-                &|| true,
-            )
-            .await,
-            Err(SemanticRuntimeScheduleFailureV1::Cancelled)
-        );
-        assert_eq!(
-            database
-                .query_scalar_i64(
-                    "prove cancelled replacement did not publish",
-                    "SELECT revision
-                     FROM semantic_vector_generation_state_v1
-                     WHERE singleton = 1",
-                )
-                .await
-                .expect("vector revision"),
-            before
         );
     }
 

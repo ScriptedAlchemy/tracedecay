@@ -268,7 +268,6 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
             Some("derived/rebuilt")
         }
         "observation_projection_checkpoints"
-        | "observation_projection_migrations"
         | "observation_projection_rebuild_aliases"
         | "observation_projection_rebuild_dispositions"
         | "observation_projection_rebuild_messages"

@@ -66,13 +66,6 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             )
             .await
         }
-        MigrateAction::MemoryCutover {
-            project,
-            profile_root,
-            apply,
-            confirm_token,
-            json,
-        } => handle_memory_cutover(project, profile_root, apply, confirm_token, json).await,
         MigrateAction::Plan {
             roots,
             include_all_registered,
@@ -113,12 +106,6 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             apply,
             json,
         } => handle_migrate_reconstruct(profile_root, apply, json).await,
-        MigrateAction::RepairSessions {
-            profile_root,
-            project_id,
-            apply,
-            json,
-        } => handle_migrate_repair_sessions(profile_root, project_id, apply, json).await,
         MigrateAction::RegistryGc {
             prefix,
             apply,
@@ -145,54 +132,6 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             confirm_token,
         } => handle_migrate_cleanup_sources(manifest, confirm_token),
     }
-}
-
-async fn handle_memory_cutover(
-    project: String,
-    profile_root: Option<String>,
-    apply: bool,
-    confirm_token: Option<String>,
-    json: bool,
-) -> tracedecay::errors::Result<()> {
-    let profile_root = profile_root.map_or_else(
-        || {
-            tracedecay::config::user_data_dir().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "could not determine TraceDecay profile root".to_string(),
-                }
-            })
-        },
-        |value| Ok(PathBuf::from(value)),
-    )?;
-    let options = tracedecay::migrate::memory_cutover::MemoryCutoverOptions {
-        project_root: PathBuf::from(project),
-        profile_root,
-    };
-    let report = if apply {
-        let token = confirm_token.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "--confirm-token is required with --apply".to_string(),
-        })?;
-        tracedecay::migrate::memory_cutover::apply(&options, &token).await?
-    } else {
-        tracedecay::migrate::memory_cutover::plan(&options).await?
-    };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!(
-            "project memory cutover: {} branch store(s), applied={}",
-            report.sources.len(),
-            report.applied
-        );
-        println!("project graph: {}", report.project_graph.display());
-        if report.applied {
-            println!("cutover passes: {}", report.cutover_passes);
-        } else {
-            println!("confirmation token: {}", report.confirmation_token);
-            println!("No files changed.");
-        }
-    }
-    Ok(())
 }
 
 async fn handle_migrate_consolidate(
@@ -649,107 +588,6 @@ async fn handle_migrate_reconstruct(
             } else {
                 "no"
             }
-        );
-    }
-    Ok(())
-}
-
-async fn handle_migrate_repair_sessions(
-    profile_root: String,
-    project_id: Option<String>,
-    apply: bool,
-    json: bool,
-) -> tracedecay::errors::Result<()> {
-    let profile_root = PathBuf::from(profile_root);
-    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
-        &profile_root,
-        tracedecay::tracedecay::current_timestamp(),
-    );
-    let stores = report
-        .plans
-        .iter()
-        .filter(|plan| {
-            plan.status == tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible
-                && project_id
-                    .as_ref()
-                    .is_none_or(|expected| &plan.project.project_id == expected)
-        })
-        .filter_map(|plan| {
-            plan.artifacts
-                .iter()
-                .find(|artifact| artifact.artifact_kind == "sessions_db")
-                .map(|artifact| {
-                    (
-                        plan.project.project_id.clone(),
-                        plan.project.project_root.clone(),
-                        profile_root.join(&artifact.relpath),
-                    )
-                })
-        })
-        .filter(|(_, _, path)| path.is_file())
-        .collect::<Vec<_>>();
-    if !apply {
-        if json {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "apply": false,
-                    "candidate_count": stores.len(),
-                    "project_ids": stores.iter().map(|(id, _, _)| id).collect::<Vec<_>>(),
-                }))?
-            );
-        } else {
-            println!(
-                "session repair: {} profile store candidate(s); rerun with --apply under exclusive maintenance",
-                stores.len()
-            );
-        }
-        return Ok(());
-    }
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
-        &profile_root,
-        "session temporal repair",
-    )?;
-    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
-        &lifecycle_lease,
-        &profile_root,
-        "session temporal repair",
-    )?;
-    let migration_runtime =
-        tracedecay::migrate::registry::MigrationRegistryRuntime::try_open_existing(&profile_root)
-            .await?
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: "profile registry is required for session temporal repair".to_string(),
-            })?;
-    let mut repaired = Vec::new();
-    let mut failed = Vec::new();
-    for (project_id, project_root, path) in stores {
-        match migration_runtime
-            .repair_project_sessions(&project_id, &project_root, &path)
-            .await
-        {
-            Ok(()) => repaired.push(project_id),
-            Err(error) => failed.push(serde_json::json!({
-                "project_id": project_id,
-                "error": error.to_string(),
-            })),
-        }
-    }
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "apply": true,
-                "repaired_count": repaired.len(),
-                "project_ids": repaired,
-                "failed": failed,
-            }))?
-        );
-    } else {
-        println!(
-            "session repair applied to {} profile store(s); {} failed",
-            repaired.len(),
-            failed.len(),
         );
     }
     Ok(())

@@ -221,7 +221,6 @@ pub struct CompatibilityMemoryStatusV1 {
     helpful_count: u64,
     unhelpful_count: u64,
     missing_vector_count: u64,
-    legacy_backfill_complete: bool,
     projection_state: CompatibilityProjectionStateV1,
     repair: CompatibilityMemoryRepairStatsV1,
     feedback_history_repair: CompatibilityFeedbackRepairProgressV1,
@@ -246,28 +245,6 @@ pub enum CompatibilityFeedbackRepairProgressV1 {
         processed: u64,
         remaining: Option<u64>,
     },
-}
-
-/// Exact result of one daemon-owned, bounded V1 raw-memory cutover step.
-/// `Incomplete` means the persisted job still owns work and must be scheduled
-/// again; it never authorizes a caller to read legacy rows directly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CompatibilityLegacyMemoryCutoverProgressV1 {
-    Incomplete { processed: u64 },
-    Complete,
-}
-
-impl CompatibilityLegacyMemoryCutoverProgressV1 {
-    pub fn is_complete(self) -> bool {
-        matches!(self, Self::Complete)
-    }
-
-    pub fn processed(self) -> u64 {
-        match self {
-            Self::Incomplete { processed } => processed,
-            Self::Complete => 0,
-        }
-    }
 }
 
 impl CompatibilityFeedbackRepairProgressV1 {
@@ -395,7 +372,6 @@ impl CompatibilityMemoryStatusV1 {
         helpful_count: u64,
         unhelpful_count: u64,
         missing_vector_count: u64,
-        legacy_backfill_complete: bool,
         projection_state: CompatibilityProjectionStateV1,
         repair: CompatibilityMemoryRepairStatsV1,
         feedback_funnel: CompatibilityMemoryFeedbackFunnelV1,
@@ -415,7 +391,6 @@ impl CompatibilityMemoryStatusV1 {
             helpful_count,
             unhelpful_count,
             missing_vector_count,
-            legacy_backfill_complete,
             projection_state,
             repair,
             feedback_history_repair: CompatibilityFeedbackRepairProgressV1::Unknown,
@@ -469,9 +444,6 @@ impl CompatibilityMemoryStatusV1 {
     }
     pub fn missing_vector_count(&self) -> u64 {
         self.missing_vector_count
-    }
-    pub fn legacy_backfill_complete(&self) -> bool {
-        self.legacy_backfill_complete
     }
     pub fn feedback_history_repair(&self) -> CompatibilityFeedbackRepairProgressV1 {
         self.feedback_history_repair
