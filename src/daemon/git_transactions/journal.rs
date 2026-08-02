@@ -16,9 +16,6 @@ pub(crate) enum GitIndexJournalError {
     Domain(#[from] DomainError),
     #[error(transparent)]
     Store(#[from] GitIndexTransactionStoreError),
-    #[error("git index receipt outcome does not map to a legal journal terminal phase")]
-    #[allow(dead_code)] // PR11/Plan 36 terminal outcome variant — staged
-    InvalidTerminalOutcome,
 }
 
 pub(crate) struct DurableGitIndexJournal<'a, S> {
