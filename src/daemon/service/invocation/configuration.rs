@@ -990,25 +990,12 @@ impl DaemonSemanticRuntimeRegistrar {
     }
 }
 
-#[allow(dead_code)] // PR12 primitive + Plan 37 feedback publication — staged
 impl DaemonInvocationService {
     pub(super) async fn configuration_runtime(
         &self,
         project_root: Option<&Path>,
     ) -> Option<RegisteredConfigurationRuntime> {
         self.project_runtimes.get(project_root?).await
-    }
-
-    pub(crate) async fn semantic_configuration_operation(
-        &self,
-        project_root: &Path,
-    ) -> Option<Arc<ProductionSemanticConfigurationOperationV1>> {
-        self.project_runtimes
-            .read::<RegisteredConfigurationRuntime, _, _>(project_root, |registered| {
-                registered.semantic_operation.get().cloned()
-            })
-            .await
-            .flatten()
     }
 
     pub(super) async fn execute_semantic_evaluation(
