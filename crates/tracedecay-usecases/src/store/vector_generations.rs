@@ -1704,23 +1704,6 @@ impl LegacyVectorInventoryPortV1 for DatabaseLegacyVectorInventoryV1 {
     }
 }
 
-/// Read only the code-generation identities named by structurally readable
-/// vector generations, without opening a daemon runtime or deserializing vector
-/// payloads. This is the offline equivalent of
-/// [`DatabaseVectorGenerationStoreV1::read_legacy_inventory`] followed by
-/// [`LegacyVectorInventoryV1::retained_readable_sources`].
-#[cfg(test)]
-pub(crate) fn retained_readable_sources_from_read_only_database(
-    database_path: &Path,
-) -> Result<BTreeSet<CodeGenerationId>, VectorGenerationStoreErrorV1> {
-    retained_readable_sources_from_optional_read_only_database(database_path)?.ok_or_else(|| {
-        VectorGenerationStoreErrorV1::Storage(format!(
-            "vector generation state table is missing from '{}'",
-            database_path.display()
-        ))
-    })
-}
-
 /// Union readable code-generation sources across every graph database in a
 /// project store. Code-index files are project-scoped while vector inventories
 /// may reside in the root graph database or a branch graph database, so an
@@ -3857,13 +3840,10 @@ fn validate_base_digest(
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        BoundedSanitizedText, ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision,
-        CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, EmbeddingDeviceClassV1, EmbeddingMetricV1,
-        EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
-        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, FileOccurrenceId,
-        LanguageDescriptorRevision, PolicyRevisionId, PrivacyDomainId, ProjectionBatchRequestV1,
-        ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-        SourceSpan,
+        ChangedCodeChunkSetV1, ChangedCodeChunkV1, ChunkerRevision, EmbeddingDeviceClassV1,
+        EmbeddingMetricV1, EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+        EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1, PrivacyDomainId,
+        ProjectionBatchRequestV1, ProjectionReplayReasonV1,
     };
     use tracedecay_runtime_core::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
 
@@ -3881,39 +3861,6 @@ mod tests {
 
     fn content_digest(byte: char) -> ContentDigest {
         id(&format!("sha256:{}", byte.to_string().repeat(64)))
-    }
-
-    fn canonical_chunk(
-        chunk_id: &str,
-        source_generation: &CodeGenerationId,
-        digest: char,
-    ) -> tracedecay_domain::CodeSearchChunkV1 {
-        tracedecay_domain::CodeSearchChunkV1 {
-            id: id(chunk_id),
-            anchor: CodeSearchChunkAnchorV1 {
-                generation_id: source_generation.clone(),
-                file_occurrence_id: id::<FileOccurrenceId>("file.rs"),
-                symbol_occurrence_id: None,
-                parent_chunk_id: None,
-                source_span: SourceSpan {
-                    start_byte: 0,
-                    end_byte: 4,
-                },
-                grain: CodeSearchChunkGrainV1::FileWindow,
-                ordinal: 0,
-            },
-            content_digest: content_digest(digest),
-            language_descriptor_revision: id::<LanguageDescriptorRevision>("rust.v1"),
-            chunker_revision: id::<ChunkerRevision>("chunker.v1"),
-            sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
-            sensitivity: SensitivityDecision {
-                level: SensitivityLevelV1::Public,
-                policy_revision: id::<PolicyRevisionId>("policy.v1"),
-            },
-            exact_terms: vec![],
-            subtokens: vec![],
-            sanitized_text: BoundedSanitizedText::new("code").expect("sanitized text"),
-        }
     }
 
     fn admitted_embedding() -> AdmittedEmbeddingProjectionKeyV1 {
@@ -5343,18 +5290,5 @@ mod tests {
             peak as f64 / (1024.0 * 1024.0 * 1024.0),
             publication.generation_id.as_digest(),
         );
-    }
-
-    async fn state_revision(database: &Database) -> i64 {
-        let mut rows = database
-            .engine_conn()
-            .query(
-                "SELECT revision FROM semantic_vector_generation_state_v1 WHERE singleton = 1",
-                (),
-            )
-            .await
-            .expect("revision");
-        let row = rows.next().await.expect("revision row").expect("row");
-        row.get::<i64>(0).expect("revision")
     }
 }
