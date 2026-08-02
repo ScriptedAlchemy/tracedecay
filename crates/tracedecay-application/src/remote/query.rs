@@ -705,7 +705,7 @@ pub(super) fn validate_returned_observation_identity(
 pub(super) fn validate_protocol_authority_binding(
     request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
-    if request.expected_authority.as_ref() != Some(&request.body.expected_authority) {
+    if request.expected_authority != request.body.expected_authority {
         return Err(RemoteExactObservationQueryErrorV1::StaleFence);
     }
     Ok(())

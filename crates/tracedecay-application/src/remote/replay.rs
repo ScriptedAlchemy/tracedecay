@@ -553,7 +553,7 @@ impl RemoteReplayServiceV1 {
         let writer = current.writer.as_ref().ok_or_else(|| {
             RemoteReplayServiceErrorV1::AuthorityUnavailable(Box::new(current.state.clone()))
         })?;
-        if request.expected_authority.as_ref() != Some(&writer.authority.fence) {
+        if request.expected_authority != writer.authority.fence {
             return Err(RemoteReplayServiceErrorV1::ExpectedAuthorityMismatch(
                 Box::new(current.state.clone()),
             ));
@@ -633,17 +633,11 @@ impl RemoteProtocolPortV1<RemoteReplayRequestV1> for RemoteReplayProtocolAdapter
     ) -> RemoteProtocolResponseV1<Self::Output> {
         let request_id = request.request_id.clone();
         let observed_at = request.sent_at;
-        let fallback_authority = request.expected_authority.clone().map_or_else(
-            || CurrentRemoteAuthorityStateV1::Unavailable {
-                reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
-                observed_at,
-            },
-            |known_fence| CurrentRemoteAuthorityStateV1::Partial {
-                known_fence: Some(known_fence),
-                missing: BTreeSet::from([RemoteAuthorityUnavailableReasonV1::FenceUnverified]),
-                observed_at,
-            },
-        );
+        let fallback_authority = CurrentRemoteAuthorityStateV1::Partial {
+            known_fence: Some(request.expected_authority.clone()),
+            missing: BTreeSet::from([RemoteAuthorityUnavailableReasonV1::FenceUnverified]),
+            observed_at,
+        };
         match self.service.replay(&request, &credential) {
             Ok(outcome) => {
                 let authority = outcome.authority.clone();

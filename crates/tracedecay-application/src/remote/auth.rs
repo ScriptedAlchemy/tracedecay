@@ -22,8 +22,8 @@ use crate::{
 };
 
 use super::protocol::{
-    EnrollmentRequestV1, REMOTE_ENROLLMENT_USE_CASE_ID_V1, RemoteEnrollmentProtocolPortV1,
-    RemoteProtocolFailureV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
+    REMOTE_ENROLLMENT_USE_CASE_ID_V1, RemoteEnrollmentProtocolPortV1,
+    RemoteEnrollmentProtocolRequestV1, RemoteProtocolFailureV1, RemoteProtocolResponseV1,
     remote_enrollment_result_contract_v1, remote_protocol_problem,
 };
 
@@ -433,7 +433,7 @@ where
 
     pub fn enroll(
         &self,
-        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentProtocolRequestV1,
         grant_credential: &OpaqueRemoteCredential,
         enrollment_credential: &OpaqueRemoteCredential,
     ) -> Result<RemoteEnrollmentEffectOutcomeV1, RemoteEnrollmentServiceErrorV1> {
@@ -564,7 +564,7 @@ where
 {
     fn execute_enrollment(
         &self,
-        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentProtocolRequestV1,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
     ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
@@ -942,6 +942,7 @@ mod tests {
     use crate::{CapabilityGrantId, DisclosureClass, PolicyDecisionRef, RequestId};
 
     use super::*;
+    use crate::remote::protocol::EnrollmentRequestV1;
     use tracedecay_domain::{
         AuthorityEpoch, ComponentVersion, ProjectId, ProjectionGenerationId, RefId,
         RemotePlacementRevisionV1, RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId,
@@ -1128,9 +1129,9 @@ mod tests {
         service.authority.admission.authority.policy.digest = digest;
     }
 
-    fn protocol_enrollment_request(node_id: &str) -> RemoteProtocolRequestV1<EnrollmentRequestV1> {
+    fn protocol_enrollment_request(node_id: &str) -> RemoteEnrollmentProtocolRequestV1 {
         let brain_id = BrainId::new("brain.remote").unwrap();
-        RemoteProtocolRequestV1::new_initial_enrollment(
+        RemoteEnrollmentProtocolRequestV1::new_initial_enrollment(
             RequestId::new("request.remote.enrollment").unwrap(),
             brain_id.clone(),
             BrainNodeId::new(node_id).unwrap(),

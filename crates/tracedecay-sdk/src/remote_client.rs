@@ -12,7 +12,10 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use serde::Deserialize;
 use serde::Serialize;
 use tracedecay_application::RequestId;
-use tracedecay_application::remote::protocol::{RemoteProtocolBodyV1, RemoteProtocolRequestV1};
+use tracedecay_application::remote::protocol::{
+    RemoteAuthorityDiscoveryProtocolRequestV1, RemoteEnrollmentProtocolRequestV1,
+    RemoteProtocolBodyV1, RemoteProtocolRequestV1,
+};
 use tracedecay_domain::CurrentRemoteAuthorityStateV1;
 
 const MAX_CREDENTIAL_BYTES: usize = 4_096;
@@ -133,11 +136,71 @@ impl EnrolledRemoteClient {
         response
             .json::<serde_json::Value>()
             .map_err(|error| RemoteClientError::Protocol(error.to_string()))
-            .and_then(|value| {
-                serde_json::from_value(value.get("response").cloned().unwrap_or(value))
-                    .map_err(|error| RemoteClientError::Protocol(error.to_string()))
-            })
+            .and_then(decode_wire_response)
     }
+
+    pub fn discover_authority(
+        &self,
+        request: &RemoteAuthorityDiscoveryProtocolRequestV1,
+    ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
+        request
+            .validate_metadata()
+            .and_then(|()| request.body.validate_remote_protocol_body(request.sent_at))
+            .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
+        let url = self
+            .endpoint
+            .join("discovery")
+            .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+        let response = self
+            .http
+            .post(url)
+            .header(AUTHORIZATION, self.authorization.clone())
+            .header(CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({ "request": request }))
+            .send()
+            .map_err(|error| RemoteClientError::Transport(error.to_string()))?;
+        response
+            .json::<serde_json::Value>()
+            .map_err(|error| RemoteClientError::Protocol(error.to_string()))
+            .and_then(decode_wire_response)
+    }
+
+    pub fn execute_enrollment(
+        &self,
+        request: &RemoteEnrollmentProtocolRequestV1,
+        enrollment_credential: impl AsRef<[u8]>,
+    ) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
+        request
+            .validate_initial_enrollment_metadata()
+            .and_then(|()| request.body.validate_remote_protocol_body(request.sent_at))
+            .map_err(|error| RemoteClientError::Protocol(error.to_string()))?;
+        let enrollment_credential = HeaderValue::from_bytes(enrollment_credential.as_ref())
+            .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+        let url = self
+            .endpoint
+            .join("enrollment")
+            .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
+        let response = self
+            .http
+            .post(url)
+            .header(AUTHORIZATION, self.authorization.clone())
+            .header("x-tracedecay-enrollment-credential", enrollment_credential)
+            .header(CONTENT_TYPE, "application/json")
+            .json(&serde_json::json!({ "request": request }))
+            .send()
+            .map_err(|error| RemoteClientError::Transport(error.to_string()))?;
+        response
+            .json::<serde_json::Value>()
+            .map_err(|error| RemoteClientError::Protocol(error.to_string()))
+            .and_then(decode_wire_response)
+    }
+}
+
+fn decode_wire_response(
+    value: serde_json::Value,
+) -> Result<RemoteProtocolWireResponseV1, RemoteClientError> {
+    serde_json::from_value(value.get("response").cloned().unwrap_or(value))
+        .map_err(|error| RemoteClientError::Protocol(error.to_string()))
 }
 
 #[cfg(test)]

@@ -69,10 +69,20 @@ pub trait RemoteProtocolPortV1<Request> {
 pub trait RemoteEnrollmentProtocolPortV1: Send + Sync {
     fn execute_enrollment(
         &self,
-        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentProtocolRequestV1,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
     ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>;
+}
+
+/// Authority discovery authenticates an enrolled caller but intentionally has
+/// no writer fence: discovering the current fence is the operation's purpose.
+pub trait RemoteAuthorityDiscoveryProtocolPortV1: Send + Sync {
+    fn discover_authority(
+        &self,
+        request: RemoteAuthorityDiscoveryProtocolRequestV1,
+        credential: OpaqueRemoteCredential,
+    ) -> RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1>;
 }
 
 /// Validates canonical protocol metadata before delegating exactly once to the
@@ -104,7 +114,7 @@ impl<Port> RemoteProtocolServiceV1<Port> {
 
     pub fn execute_enrollment(
         &self,
-        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentProtocolRequestV1,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
     ) -> Result<RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>, ApplicationContractError>
@@ -119,10 +129,24 @@ impl<Port> RemoteProtocolServiceV1<Port> {
             .port
             .execute_enrollment(request, grant_credential, enrollment_credential))
     }
+
+    pub fn discover_authority(
+        &self,
+        request: RemoteAuthorityDiscoveryProtocolRequestV1,
+        credential: OpaqueRemoteCredential,
+    ) -> Result<RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1>, ApplicationContractError>
+    where
+        Port: RemoteAuthorityDiscoveryProtocolPortV1,
+    {
+        request.validate_metadata()?;
+        request
+            .body
+            .validate_remote_protocol_body(request.sent_at)?;
+        Ok(self.port.discover_authority(request, credential))
+    }
 }
 
-/// Versioned request metadata common to enrollment, authority discovery,
-/// rotation, revocation, and subsequent remote operations.
+/// Versioned request metadata for operations already bound to a current writer.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteProtocolRequestV1<T> {
@@ -131,8 +155,7 @@ pub struct RemoteProtocolRequestV1<T> {
     pub brain_id: BrainId,
     pub caller_node_id: BrainNodeId,
     pub enrollment_revision: u64,
-    /// `None` is legal only while discovering or enrolling with authority.
-    pub expected_authority: Option<RemoteWriterFenceV1>,
+    pub expected_authority: RemoteWriterFenceV1,
     pub sent_at: UtcMicros,
     pub body: T,
 }
@@ -143,7 +166,7 @@ impl<T> RemoteProtocolRequestV1<T> {
         brain_id: BrainId,
         caller_node_id: BrainNodeId,
         enrollment_revision: u64,
-        expected_authority: Option<RemoteWriterFenceV1>,
+        expected_authority: RemoteWriterFenceV1,
         sent_at: UtcMicros,
         body: T,
     ) -> Result<Self, ApplicationContractError> {
@@ -179,19 +202,30 @@ impl<T> RemoteProtocolRequestV1<T> {
         }
         self.brain_id.validate()?;
         self.caller_node_id.validate()?;
-        if let Some(authority) = &self.expected_authority {
-            authority.validate()?;
-            if authority.brain_id != self.brain_id {
-                return Err(ApplicationContractError::Inconsistent {
-                    field: "remote request authority Brain identity",
-                });
-            }
+        self.expected_authority.validate()?;
+        if self.expected_authority.brain_id != self.brain_id {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "remote request authority Brain identity",
+            });
         }
         Ok(())
     }
 }
 
-impl RemoteProtocolRequestV1<EnrollmentRequestV1> {
+/// Initial enrollment metadata. It cannot carry an enrollment revision or
+/// writer fence because neither exists before admission commits.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteEnrollmentProtocolRequestV1 {
+    pub protocol_version: u16,
+    pub request_id: RequestId,
+    pub brain_id: BrainId,
+    pub caller_node_id: BrainNodeId,
+    pub sent_at: UtcMicros,
+    pub body: EnrollmentRequestV1,
+}
+
+impl RemoteEnrollmentProtocolRequestV1 {
     pub fn new_initial_enrollment(
         request_id: RequestId,
         brain_id: BrainId,
@@ -204,8 +238,6 @@ impl RemoteProtocolRequestV1<EnrollmentRequestV1> {
             request_id,
             brain_id,
             caller_node_id,
-            enrollment_revision: 0,
-            expected_authority: None,
             sent_at,
             body,
         };
@@ -214,14 +246,81 @@ impl RemoteProtocolRequestV1<EnrollmentRequestV1> {
     }
 
     pub fn validate_initial_enrollment_metadata(&self) -> Result<(), ApplicationContractError> {
-        self.validate_common_metadata()?;
-        if self.enrollment_revision != 0 || self.expected_authority.is_some() {
+        validate_unbound_metadata(self.protocol_version, &self.brain_id, &self.caller_node_id)?;
+        if self.body.brain_id != self.brain_id || self.body.node_id != self.caller_node_id {
             return Err(ApplicationContractError::Inconsistent {
                 field: "initial remote enrollment metadata",
             });
         }
         Ok(())
     }
+}
+
+/// Enrolled current-authority discovery metadata. The fence is absent by type,
+/// while the non-zero enrollment revision remains mandatory.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteAuthorityDiscoveryProtocolRequestV1 {
+    pub protocol_version: u16,
+    pub request_id: RequestId,
+    pub brain_id: BrainId,
+    pub caller_node_id: BrainNodeId,
+    pub enrollment_revision: u64,
+    pub sent_at: UtcMicros,
+    pub body: CurrentAuthorityRequestV1,
+}
+
+impl RemoteAuthorityDiscoveryProtocolRequestV1 {
+    pub fn new(
+        request_id: RequestId,
+        brain_id: BrainId,
+        caller_node_id: BrainNodeId,
+        enrollment_revision: u64,
+        sent_at: UtcMicros,
+        body: CurrentAuthorityRequestV1,
+    ) -> Result<Self, ApplicationContractError> {
+        let request = Self {
+            protocol_version: REMOTE_PROTOCOL_VERSION_V1,
+            request_id,
+            brain_id,
+            caller_node_id,
+            enrollment_revision,
+            sent_at,
+            body,
+        };
+        request.validate_metadata()?;
+        Ok(request)
+    }
+
+    pub fn validate_metadata(&self) -> Result<(), ApplicationContractError> {
+        validate_unbound_metadata(self.protocol_version, &self.brain_id, &self.caller_node_id)?;
+        if self.enrollment_revision == 0 {
+            return Err(ApplicationContractError::ZeroValue {
+                field: "remote enrollment revision",
+            });
+        }
+        if self.body.brain_id != self.brain_id {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "remote authority discovery Brain identity",
+            });
+        }
+        Ok(())
+    }
+}
+
+fn validate_unbound_metadata(
+    protocol_version: u16,
+    brain_id: &BrainId,
+    caller_node_id: &BrainNodeId,
+) -> Result<(), ApplicationContractError> {
+    if protocol_version != REMOTE_PROTOCOL_VERSION_V1 {
+        return Err(ApplicationContractError::Inconsistent {
+            field: "remote protocol version",
+        });
+    }
+    brain_id.validate()?;
+    caller_node_id.validate()?;
+    Ok(())
 }
 
 /// Server response preserves the canonical application result and separately
@@ -578,7 +677,7 @@ mod tests {
             BrainId::new("brain.remote").unwrap(),
             BrainNodeId::new("node.caller").unwrap(),
             1,
-            None,
+            fence(),
             UtcMicros(10),
             EmptyTestBody,
         )
@@ -668,7 +767,7 @@ mod tests {
             BrainId::new("brain.remote").unwrap(),
             BrainNodeId::new("node.caller").unwrap(),
             1,
-            None,
+            fence(),
             UtcMicros(10),
             resource,
         )
@@ -709,7 +808,7 @@ mod tests {
                 BrainId::new("brain.remote").unwrap(),
                 BrainNodeId::new("node.caller").unwrap(),
                 1,
-                Some(authority),
+                authority,
                 UtcMicros(10),
                 (),
             )
@@ -781,7 +880,7 @@ mod tests {
                 snapshot_id: RepositoryStateSnapshotId::new("repository.state.remote").unwrap(),
             },
         };
-        let request = RemoteProtocolRequestV1::new_initial_enrollment(
+        let request = RemoteEnrollmentProtocolRequestV1::new_initial_enrollment(
             RequestId::new("request.remote").unwrap(),
             body.brain_id.clone(),
             body.node_id.clone(),

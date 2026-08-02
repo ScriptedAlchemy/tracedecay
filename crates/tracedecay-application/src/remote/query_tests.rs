@@ -199,23 +199,24 @@ fn protocol_and_body_authority_must_match_exactly() {
         body.expected_authority.brain_id.clone(),
         BrainNodeId::new("node.remote-query").unwrap(),
         1,
-        Some(body.expected_authority.clone()),
+        body.expected_authority.clone(),
         tracedecay_domain::UtcMicros(10),
         body.clone(),
     )
     .unwrap();
     assert!(validate_protocol_authority_binding(&exact).is_ok());
 
-    let mut missing = exact.clone();
-    missing.expected_authority = None;
-    assert!(validate_protocol_authority_binding(&missing).is_err());
+    let mut missing = serde_json::to_value(&exact).unwrap();
+    missing
+        .as_object_mut()
+        .unwrap()
+        .remove("expected_authority");
+    assert!(
+        serde_json::from_value::<RemoteProtocolRequestV1<RemoteQueryRequestV1>>(missing).is_err()
+    );
 
     let mut mismatched = exact;
-    mismatched
-        .expected_authority
-        .as_mut()
-        .unwrap()
-        .authority_epoch = AuthorityEpoch(2);
+    mismatched.expected_authority.authority_epoch = AuthorityEpoch(2);
     assert!(validate_protocol_authority_binding(&mismatched).is_err());
 }
 
@@ -561,7 +562,7 @@ fn protocol_request(sent_at: UtcMicros) -> RemoteProtocolRequestV1<RemoteQueryRe
         body.expected_authority.brain_id.clone(),
         BrainNodeId::new("node.remote-query").unwrap(),
         1,
-        Some(body.expected_authority.clone()),
+        body.expected_authority.clone(),
         sent_at,
         body,
     )
