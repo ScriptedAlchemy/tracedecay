@@ -434,7 +434,7 @@ fn published_generation_validation_is_amortized_per_loaded_generation() {
     assert!(
         first_admitted
             .iter()
-            .zip(&second_admitted)
+            .zip(second_admitted.iter())
             .all(|(first, second)| first.chunk() == second.chunk()),
         "amortized admission must return the same chunks as the first admission"
     );
