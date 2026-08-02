@@ -286,7 +286,6 @@ pub(super) async fn dispatch_git_tools(
                     args,
                     options.application_deadline.clone(),
                     options.application_cancellation.clone(),
-                    options.registered_project_session_db.clone(),
                 )
                 .await
             }

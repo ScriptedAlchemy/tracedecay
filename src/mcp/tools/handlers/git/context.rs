@@ -7,7 +7,6 @@ use super::shell::{
 use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tracedecay_global_db::RegisteredGlobalDb;
 
 /// Runs one synchronous gix span on the blocking pool.
 ///
@@ -473,7 +472,6 @@ pub(crate) async fn handle_pr_context(
     args: Value,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
-    _registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
 ) -> Result<ToolResult> {
     pr_context_checkpoint(cancellation.as_ref(), deadline.as_ref())?;
     let base = args
