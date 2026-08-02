@@ -436,7 +436,6 @@ mod health_delta_tests {
             .await
             .expect("initialize graph");
         graph.index_all().await.expect("index fixture");
-        crate::daemon::store_runtime::session_registry::register_profile_sessions_port();
         let observations =
             crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("health-delta").await;
         let db = observations.registered.as_ref();

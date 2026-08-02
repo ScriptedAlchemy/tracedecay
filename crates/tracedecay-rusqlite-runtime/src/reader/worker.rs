@@ -299,24 +299,9 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                     return;
                 }
             };
-            #[cfg(unix)]
-            if locator.expected_file_identity().is_some() {
-                let locator_path = match std::fs::canonicalize(locator.path()) {
-                    Ok(path) => path,
-                    Err(_) => {
-                        let _ = started.send(Err(ReaderStartError::OpenedDatabasePathMismatch));
-                        return;
-                    }
-                };
-                if connection
-                    .path()
-                    .and_then(|path| std::fs::canonicalize(path).ok())
-                    .as_deref()
-                    != Some(locator_path.as_path())
-                {
-                    let _ = started.send(Err(ReaderStartError::OpenedDatabasePathMismatch));
-                    return;
-                }
+            if let Err(error) = locator.verify_connection(&connection) {
+                let _ = started.send(Err(error));
+                return;
             }
             let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
                 Ok(opened) => opened.identity(),

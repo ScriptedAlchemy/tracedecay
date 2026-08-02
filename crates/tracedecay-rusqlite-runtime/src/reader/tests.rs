@@ -26,7 +26,7 @@ use tracedecay_store::{
 
 use super::pool::FOREGROUND_RESERVED_GENERAL_WORKERS;
 use super::*;
-use crate::SqliteStoreSizeTelemetryPort;
+use crate::{SqliteStoreSizeTelemetryPort, connection::OpenedDatabaseFile};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
@@ -106,12 +106,16 @@ impl TestStore {
     }
 
     fn locator(&self) -> ExistingReaderLocator {
+        self.locator_at(self.path.clone())
+    }
+
+    fn locator_at(&self, path: PathBuf) -> ExistingReaderLocator {
         let locator = VerifiedStoreLocatorV1::new(
             self.binding.shard_id.clone(),
             self.binding.incarnation,
             LocatorDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
         );
-        ExistingReaderLocator::new(self.binding.clone(), locator, self.path.clone()).unwrap()
+        ExistingReaderLocator::new(self.binding.clone(), locator, path).unwrap()
     }
 }
 
@@ -270,6 +274,21 @@ fn two_reader_budget() -> tracedecay_store::ReaderBudgetV1 {
     budget.min_per_hot_shard = 2;
     budget.max_per_hot_shard = 2;
     budget
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_reader_accepts_an_equivalent_hard_link_spelling() {
+    let store = TestStore::new();
+    let alias = store._directory.path().join("reader-alias.db");
+    std::fs::hard_link(&store.path, &alias).unwrap();
+    let opened = OpenedDatabaseFile::pin(&store.path).unwrap();
+    let locator = store.locator_at(alias).with_opened_database(opened);
+
+    let pool = ReaderPool::start(locator, AdmissionConfigV1::default().readers, CountExecutor)
+        .expect("reader startup is bound by file identity, not pathname spelling");
+
+    assert!(pool.opened_file_identity().is_some());
 }
 
 #[test]
