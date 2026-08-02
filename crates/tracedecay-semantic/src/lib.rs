@@ -29,7 +29,7 @@ use self::fastembed_adapter::{
 };
 use self::projector::{
     CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
-    prepare_vector_generation_async,
+    prepare_vector_generation_async, split_projection_request,
 };
 use self::runtime_query::{
     CurrentSemanticQueryRuntimeV1, PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory,
@@ -166,8 +166,22 @@ type SemanticProjectionStageFutureV1 = Pin<
             + 'static,
     >,
 >;
+type SemanticProjectionCommitFutureV1 =
+    Pin<Box<dyn Future<Output = Result<(), SemanticRuntimeScheduleFailureV1>> + Send + 'static>>;
+/// Durably commits one prepared batch. Called once per batch, in order, and
+/// the batch's vectors are dropped as soon as it returns.
+type SemanticProjectionCommitV1 =
+    Box<dyn FnMut(PreparedVectorGenerationV1) -> SemanticProjectionCommitFutureV1 + Send + 'static>;
+type SemanticProjectionResumeFutureV1 =
+    Pin<Box<dyn Future<Output = Result<u64, SemanticRuntimeScheduleFailureV1>> + Send + 'static>>;
+/// Opens the staged build and reports how many leading batches are already
+/// durable. Called once, before any encoder work, so a resumed run skips what
+/// it already committed instead of re-embedding it.
+type SemanticProjectionResumeV1 =
+    Box<dyn FnOnce() -> SemanticProjectionResumeFutureV1 + Send + 'static>;
+/// Seals the staged build once every batch has committed.
 type SemanticProjectionStageV1 =
-    Box<dyn FnOnce(PreparedVectorGenerationV1) -> SemanticProjectionStageFutureV1 + Send + 'static>;
+    Box<dyn FnOnce() -> SemanticProjectionStageFutureV1 + Send + 'static>;
 type FastEmbedArtifactLoaderV1 = Box<
     dyn FnOnce() -> Result<LoadedSemanticArtifactV1, SemanticRuntimeScheduleFailureV1>
         + Send
@@ -308,23 +322,47 @@ pub struct FastEmbedSemanticGenerationRequestV1 {
     target_generation: CodeGenerationId,
     projection_request: ProjectionBatchRequestV1,
     canonical_chunks: Vec<CodeSearchChunkV1>,
+    max_embeds_per_batch: usize,
     load_artifact: FastEmbedArtifactLoaderV1,
+    resume_projection: SemanticProjectionResumeV1,
+    commit_batch: SemanticProjectionCommitV1,
     stage_projection: SemanticProjectionStageV1,
 }
 
 impl FastEmbedSemanticGenerationRequestV1 {
-    pub fn new<LoadArtifact, StageProjection, StageFuture>(
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each callback is a distinct store boundary of the incremental commit flow"
+    )]
+    pub fn new<
+        LoadArtifact,
+        ResumeProjection,
+        ResumeFuture,
+        CommitBatch,
+        CommitFuture,
+        StageProjection,
+        StageFuture,
+    >(
         target_generation: CodeGenerationId,
         projection_request: ProjectionBatchRequestV1,
         canonical_chunks: Vec<CodeSearchChunkV1>,
+        max_embeds_per_batch: usize,
         load_artifact: LoadArtifact,
+        resume_projection: ResumeProjection,
+        commit_batch: CommitBatch,
         stage_projection: StageProjection,
     ) -> Result<Self, SemanticRuntimeScheduleFailureV1>
     where
         LoadArtifact: FnOnce() -> Result<LoadedSemanticArtifactV1, SemanticRuntimeScheduleFailureV1>
             + Send
             + 'static,
-        StageProjection: FnOnce(PreparedVectorGenerationV1) -> StageFuture + Send + 'static,
+        ResumeProjection: FnOnce() -> ResumeFuture + Send + 'static,
+        ResumeFuture:
+            Future<Output = Result<u64, SemanticRuntimeScheduleFailureV1>> + Send + 'static,
+        CommitBatch: FnMut(PreparedVectorGenerationV1) -> CommitFuture + Send + 'static,
+        CommitFuture:
+            Future<Output = Result<(), SemanticRuntimeScheduleFailureV1>> + Send + 'static,
+        StageProjection: FnOnce() -> StageFuture + Send + 'static,
         StageFuture: Future<
                 Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>,
             > + Send
@@ -333,12 +371,16 @@ impl FastEmbedSemanticGenerationRequestV1 {
         if projection_request.changes.to_generation != target_generation {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
+        let mut commit_batch = commit_batch;
         Ok(Self {
             target_generation,
             projection_request,
             canonical_chunks,
+            max_embeds_per_batch,
             load_artifact: Box::new(load_artifact),
-            stage_projection: Box::new(move |prepared| Box::pin(stage_projection(prepared))),
+            resume_projection: Box::new(move || Box::pin(resume_projection())),
+            commit_batch: Box::new(move |prepared| Box::pin(commit_batch(prepared))),
+            stage_projection: Box::new(move || Box::pin(stage_projection())),
         })
     }
 }
@@ -570,22 +612,56 @@ impl DaemonSemanticRuntimeHandleV1 {
                 let candidate =
                     SemanticRuntimeService::new_owned(Arc::clone(&authority), factory, pool_config)
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-                let encoder =
-                    RuntimeChunkVectorEncoderV1::new(Arc::clone(&candidate), Arc::clone(&progress));
-                let prepared = prepare_vector_generation_async(
-                    authority.projection().clone(),
-                    request.projection_request,
-                    request.canonical_chunks,
-                    encoder,
+                // Embed and commit batch by batch. A batch's vectors are
+                // durable and released before the next batch is embedded, so
+                // the live float set is bounded by one batch rather than by
+                // the corpus, and a crash resumes from the last committed
+                // checkpoint instead of re-embedding everything.
+                let batches = split_projection_request(
+                    &request.projection_request,
+                    &request.canonical_chunks,
+                    request.max_embeds_per_batch,
                 )
-                .await
                 .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+                drop(request.canonical_chunks);
+                // Batches are deterministic and committed in order, so the
+                // durable batch count is exactly how far a prior run got.
+                let committed_batches =
+                    usize::try_from((request.resume_projection)().await?).unwrap_or(usize::MAX);
+                let mut commit_batch = request.commit_batch;
+                let mut embedded_units = batches
+                    .iter()
+                    .take(committed_batches)
+                    .map(|batch| batch.request.changes.added_or_changed.len() as u64)
+                    .sum::<u64>();
+                progress.set_completed_units(embedded_units.min(total_units));
+                for batch in batches.into_iter().skip(committed_batches) {
+                    let encoder = RuntimeChunkVectorEncoderV1::new(
+                        Arc::clone(&candidate),
+                        Arc::clone(&progress),
+                    );
+                    let batch_units = batch.request.changes.added_or_changed.len() as u64;
+                    let prepared = prepare_vector_generation_async(
+                        authority.projection().clone(),
+                        batch.request,
+                        batch.canonical_chunks,
+                        encoder,
+                    )
+                    .await
+                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
+                    if progress.cancelled() {
+                        return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                    }
+                    commit_batch(prepared).await?;
+                    embedded_units = embedded_units.saturating_add(batch_units);
+                    progress.set_completed_units(embedded_units.min(total_units));
+                }
                 if progress.cancelled() {
                     return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
                 }
                 progress.set_completed_units(total_units);
 
-                let commit = (request.stage_projection)(prepared).await?;
+                let commit = (request.stage_projection)().await?;
                 Ok(commit.on_success(move |pointer| {
                     if pointer.source_generation != target_generation
                         || pointer.projection_key != projection_key
@@ -1173,12 +1249,15 @@ mod scheduling_tests {
             source_generation('a'),
             projection_request('a'),
             Vec::new(),
+            8,
             move || {
                 let _ = started_tx.send(());
                 let _ = release_rx.recv();
                 Err(SemanticRuntimeScheduleFailureV1::Projection)
             },
-            move |_| async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
+            || async { Ok(0) },
+            |_prepared| async { Ok(()) },
+            move || async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
         )
         .expect("saved generation request");
         assert!(handle.schedule_generation(request));

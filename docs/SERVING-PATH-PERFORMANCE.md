@@ -299,30 +299,95 @@ row-per-vector, for the *same* published generation digest. Above the ~66MB
 process floor that is 161MB versus 59MB — a 6MB float corpus was costing 155MB
 to persist.
 
-### What remains
+### The metadata split
 
-The state document is still **O(store) in metadata**, and that is now the
-binding constraint. Per-vector row metadata, the per-chunk projection receipts
-(`ProjectionBatchReceiptV1::receipts`), `plan.expected_chunk_ids`,
-`committed_chunk_effects`, and the batch's changed-chunk set all scale with the
-corpus and are all still rendered into one JSON value bound as a single SQL
-parameter. The runtime caps a request at 64MB (`MAX_REQUEST_BYTES`), so a
-whole-corpus commit fails outright past a corpus-size ceiling:
+The state document was still **O(store) in metadata** after the payload split,
+and that was the binding constraint. Per-vector row metadata, the per-chunk
+projection receipts, `plan.expected_chunk_ids`, `committed_chunk_effects`, the
+prepared batches, the tombstone map and the physical-byte bindings all scaled
+with the corpus and were all rendered into one JSON value bound as a single SQL
+parameter against the runtime's 64MB `MAX_REQUEST_BYTES`:
 
 | encoding | 2,000 chunks | 5,000 | 10,000 | 20,000 |
 |---|---|---|---|---|
 | inline floats | ok | `RequestLimitExceeded` | — | — |
 | row-per-vector | ok | ok | ok | `RequestLimitExceeded` |
+| externalized metadata | ok | ok | ok | ok |
 
-A 150K-chunk generation therefore still cannot be persisted at all. Two things
-close it, and they are independent:
+Every one of those collections now lives in `semantic_vector_state_slice_v1`,
+content-addressed by the SHA-256 of its encoded bytes, cut into bounded slices,
+and verified against that address before it is parsed. The document keeps
+generation-level identity only. Content addressing also makes publication free:
+a staged collection and the published one it becomes hash alike, so the swap
+writes no new slices.
 
-- Move per-vector row metadata and per-chunk receipts into their own tables,
-  leaving the state document with generation-level identity only. The serde
-  adapters that elide the float payload today are the pattern: serde elides,
-  and a separate context-carrying walk does the row I/O.
-- Use the incremental commit path production already has available.
-  `commit_batch` takes an `expected_checkpoint` and tracks `completed_batches`,
-  so bounded incremental commits are supported by the contract — production
-  simply performs exactly one whole-corpus commit. Splitting it bounds both the
-  document and the live float set per commit.
+`ExternalV1` serializes *transparently*, so a digest over a value containing one
+is byte-identical to a digest over the bare collection — the build-identity
+digest still hashes the full expected chunk list. Only the state-document
+adapters elide. `DerefMut` clears the address, so a stale address is not
+representable, and a pre-migration document is still readable and migrates
+forward under the existing revision CAS.
+
+### Incremental commits
+
+Production performed exactly one whole-corpus commit, so the entire float corpus
+stayed live until a single terminal write and a crash mid-run discarded every
+embedding. It now splits the request, commits each batch as it completes, and
+resumes from the durable checkpoint.
+
+Splitting is identity-preserving by construction. Boundaries land on multiples
+of the projector's encoder group size, so every group holds exactly the changes
+a whole-corpus pass would have given it; the tensor shape never changes, so
+vector bytes, every `output_digest`, and the generation manifest digest built
+from them are byte-identical. The plan is decided from the whole request before
+any batch runs, so the generation's watermark and expected membership stay the
+corpus's. Only execution lineage differs — one receipt per batch rather than one
+for the corpus — which generation identity deliberately ignores.
+
+Resume reads the staged checkpoint once, before any encoder work. The build
+identity is a digest of the plan, so reopening the same plan re-adopts the same
+staged build and skips the batches already durable rather than re-embedding
+them.
+
+Measured (768 dimensions, release build, 96-core host), where
+`widest state document` is the value that used to grow with the corpus until it
+hit the request limit:
+
+| chunks | commits | widest state document | peak RSS |
+|---:|---:|---:|---:|
+| 30,000 | 1 | 2,961 B | 0.68 GiB |
+| 30,000 | 8 | 2,961 B | 0.66 GiB |
+| 75,000 | 19 | 2,962 B | 1.54 GiB |
+
+The document is flat: the curve is per-batch, not per-corpus. The 30,000-chunk
+rows publish the *same* generation `sha256:90f0a889…ed28dea8` at one commit and
+at eight, which is the digest-equality proof that splitting moves no identity.
+
+### Open: the whole-corpus publication transaction
+
+At 150,000 chunks every batch commits, and the publication then fails with
+`SQLite execute failed: interrupted`. This is not the document ceiling — the
+document is still ~3KB — it is the publication transaction itself running past
+a runtime guard. `MIGRATION_SQL_EXECUTION_LIMIT` bounds one guarded execution at
+30 seconds, and the batch progress handler also trips on a repeated authority
+check, so either can produce this.
+
+Publication is where the remaining O(store) SQL lives: it seals and writes two
+collections built fresh at that moment — the concatenated per-chunk receipts and
+the physical-byte bindings — and runs reclamation over every payload address.
+Two things are worth trying, in order:
+
+- `physical_vector_bindings` is fully derived from the generation's vectors and
+  embedding key; `ensure_physical_reuse_index` already rebuilds the pool from
+  them at load. Eliding the map entirely removes a corpus-sized collection from
+  the publication write, at the cost of making the load-time binding check
+  tautological.
+- Reclamation is provably a no-op on a first publication, because content
+  addressing means the staged collections' addresses are exactly the published
+  ones. Skipping the sweep when the loaded reference set is a subset of the new
+  one avoids hundreds of statements that delete nothing. Measured alone it did
+  not lift the 150K ceiling, so it is a latency win rather than the fix.
+
+Reclamation's anti-join was rewritten from `NOT IN (SELECT …)` to `NOT EXISTS`
+against the scratch table's primary key, which is one index probe per row rather
+than a scan of the reference set per row.
