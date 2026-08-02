@@ -14,60 +14,6 @@ pub mod daemon {
         pub(crate) use crate::profile_identity::load_or_create;
     }
 
-    pub mod code_index_scheduler {
-        pub mod identity {
-            use std::path::Path;
-
-            use sha2::{Digest, Sha256};
-            use tracedecay_domain::{RepositoryId, WorktreeId};
-            use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-
-            pub(crate) struct IndexingIdentityV1 {
-                repository_id: RepositoryId,
-                worktree_id: WorktreeId,
-            }
-
-            impl IndexingIdentityV1 {
-                pub(crate) fn resolve(project_root: &Path) -> Result<Self> {
-                    let common = tracedecay_runtime_core::worktree::git_common_dir(project_root)
-                        .unwrap_or_else(|| project_root.to_path_buf());
-                    let repository_id = RepositoryId::new(format!(
-                        "repository.daemon.{}",
-                        sha256_hex(common.to_string_lossy().as_bytes())
-                    ))
-                    .map_err(identity_error)?;
-                    let worktree_id = WorktreeId::new(format!(
-                        "worktree.daemon.{}",
-                        sha256_hex(project_root.to_string_lossy().as_bytes())
-                    ))
-                    .map_err(identity_error)?;
-                    Ok(Self {
-                        repository_id,
-                        worktree_id,
-                    })
-                }
-
-                pub(crate) fn repository_id(&self) -> &RepositoryId {
-                    &self.repository_id
-                }
-
-                pub(crate) fn worktree_id(&self) -> &WorktreeId {
-                    &self.worktree_id
-                }
-            }
-
-            fn sha256_hex(bytes: &[u8]) -> String {
-                hex::encode(Sha256::digest(bytes))
-            }
-
-            fn identity_error(error: impl std::fmt::Display) -> TraceDecayError {
-                TraceDecayError::Config {
-                    message: format!("code-index identity: {error}"),
-                }
-            }
-        }
-    }
-
     pub mod store_runtime {
         pub use tracedecay_runtime_core::store_runtime::*;
 
@@ -147,174 +93,18 @@ pub mod agents {
     }
 }
 
+/// Host admission for migration composition.
+///
+/// This is the same facade the composition root uses
+/// (`tracedecay::application::host_admission` re-exports it verbatim). The
+/// legacy Hermes `state.db` import drives real observation capture and cursor
+/// advance through it, so this must stay the production implementation rather
+/// than a locally-defined stand-in.
 pub mod application {
     pub mod host_admission {
-        use tracedecay_domain::{
-            BrainId, ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceIdentityV1,
-            ProjectId, UserProfileId,
+        pub use tracedecay_usecases::host_admission::{
+            HostAdmissionAuthorities, HostAdmissionFacade,
         };
-        use tracedecay_sessions::admission::{
-            AdmissionFuture, HostAdmission, HostAdmissionOutcome, HostProjectionDrainOutcome,
-        };
-        use tracedecay_sessions::observation::{
-            CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
-        };
-        use tracedecay_store::ParseOffset;
-        use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
-
-        use crate::root_seam::global_db::RegisteredGlobalDb;
-
-        pub struct HostAdmissionAuthorities<'a> {
-            project_id: ProjectId,
-            registered: &'a RegisteredGlobalDb,
-            _brain_id: BrainId,
-            _profile_id: UserProfileId,
-        }
-
-        impl<'a> HostAdmissionAuthorities<'a> {
-            pub fn for_project(
-                brain_id: BrainId,
-                profile_id: UserProfileId,
-                project_id: ProjectId,
-                registered: &'a RegisteredGlobalDb,
-            ) -> Self {
-                Self {
-                    project_id,
-                    registered,
-                    _brain_id: brain_id,
-                    _profile_id: profile_id,
-                }
-            }
-        }
-
-        pub struct HostAdmissionFacade<'a> {
-            authorities: HostAdmissionAuthorities<'a>,
-        }
-
-        impl<'a> HostAdmissionFacade<'a> {
-            pub const fn new(authorities: HostAdmissionAuthorities<'a>) -> Self {
-                Self { authorities }
-            }
-
-            fn validate_scope(
-                &self,
-                scope: &ObservationScopeV1,
-            ) -> Result<(), HostAdmissionOutcome> {
-                match scope {
-                    ObservationScopeV1::Project { project_id }
-                        if project_id == &self.authorities.project_id =>
-                    {
-                        Ok(())
-                    }
-                    ObservationScopeV1::Project { .. } => {
-                        Err(HostAdmissionOutcome::project_authority_mismatch())
-                    }
-                    _ => Err(HostAdmissionOutcome::project_authority_unbound()),
-                }
-            }
-        }
-
-        impl HostAdmission for HostAdmissionFacade<'_> {
-            fn capture_observation<'a>(
-                &'a self,
-                request: CaptureObservationRequest,
-            ) -> AdmissionFuture<'a, CaptureObservationOutcome> {
-                Box::pin(async move {
-                    self.validate_scope(request.scope())?;
-                    Err(HostAdmissionOutcome::retained_unavailable(
-                        "migration_host_admission_unavailable",
-                    ))
-                })
-            }
-
-            fn advance_non_durable_source_cursor<'a>(
-                &'a self,
-                advance: ObservationCursorAdvance,
-                _cancellation: ObservationCancellation,
-            ) -> AdmissionFuture<'a, CursorAdvanceOutcome> {
-                Box::pin(async move {
-                    self.validate_scope(advance.next_cursor().scope())?;
-                    Err(HostAdmissionOutcome::retained_unavailable(
-                        "migration_host_admission_unavailable",
-                    ))
-                })
-            }
-
-            fn get_source_cursor<'a>(
-                &'a self,
-                _source: &'a ObservationSourceIdentityV1,
-                scope: &'a ObservationScopeV1,
-            ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
-                Box::pin(async move {
-                    self.validate_scope(scope)?;
-                    Err(HostAdmissionOutcome::retained_unavailable(
-                        "migration_host_admission_unavailable",
-                    ))
-                })
-            }
-
-            fn drain_projection_queue<'a>(
-                &'a self,
-                _provider: &'a str,
-                scope: &'a ObservationScopeV1,
-                _cancellation: &'a ObservationCancellation,
-                _max: usize,
-            ) -> AdmissionFuture<'a, HostProjectionDrainOutcome> {
-                Box::pin(async move {
-                    self.validate_scope(scope)?;
-                    Err(HostAdmissionOutcome::retained_unavailable(
-                        "migration_host_admission_unavailable",
-                    ))
-                })
-            }
-
-            fn has_session_message<'a>(
-                &'a self,
-                scope: &'a ObservationScopeV1,
-                provider: &'a str,
-                message_id: &'a str,
-            ) -> AdmissionFuture<'a, bool> {
-                Box::pin(async move {
-                    self.validate_scope(scope)?;
-                    self.authorities
-                        .registered
-                        .has_session_message(provider, message_id)
-                        .await
-                        .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
-                })
-            }
-
-            fn get_parse_offset<'a>(
-                &'a self,
-                scope: &'a ObservationScopeV1,
-                path: &'a str,
-            ) -> AdmissionFuture<'a, Option<ParseOffset>> {
-                Box::pin(async move {
-                    self.validate_scope(scope)?;
-                    self.authorities
-                        .registered
-                        .get_parse_offset_result(path)
-                        .await
-                        .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
-                })
-            }
-
-            fn advance_parse_offset<'a>(
-                &'a self,
-                scope: &'a ObservationScopeV1,
-                path: &'a str,
-                offset: ParseOffset,
-            ) -> AdmissionFuture<'a, ()> {
-                Box::pin(async move {
-                    self.validate_scope(scope)?;
-                    self.authorities
-                        .registered
-                        .advance_parse_offset_result(path, offset)
-                        .await
-                        .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())
-                })
-            }
-        }
     }
 }
 

@@ -5847,6 +5847,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "tokio",
+ "tracedecay-agent-hosts",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-domain",
@@ -5855,6 +5856,7 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-sessions",
  "tracedecay-store",
+ "tracedecay-usecases",
  "tracing",
 ]
 
