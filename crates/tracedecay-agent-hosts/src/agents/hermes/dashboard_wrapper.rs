@@ -147,7 +147,7 @@ fn manifest_json() -> Result<String> {
         serde_json::from_str(MANIFEST_JSON).map_err(|e| TraceDecayError::Config {
             message: format!("embedded hermes-wrapper manifest.json is invalid: {e}"),
         })?;
-    manifest["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
+    manifest["version"] = serde_json::Value::String(crate::PRODUCT_VERSION.to_string());
     serde_json::to_string_pretty(&manifest)
         .map(|json| format!("{json}\n"))
         .map_err(|e| TraceDecayError::Config {
@@ -233,7 +233,7 @@ mod tests {
     fn manifest_is_stamped_with_crate_version() {
         let manifest = manifest_json().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-        assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(parsed["version"], crate::PRODUCT_VERSION);
         assert_eq!(parsed["name"], "tracedecay");
         assert_eq!(parsed["label"], "TraceDecay");
         assert_eq!(parsed["api"], "plugin_api.py");
