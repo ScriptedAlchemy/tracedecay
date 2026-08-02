@@ -133,17 +133,28 @@ impl TraceDecay {
         self.db.get_nodes_by_file(file_path).await
     }
 
-    /// Returns one deterministic node snapshot for every requested file.
-    pub async fn get_nodes_by_files_controlled<F>(
+    /// Returns one stable, bounded symbol page across requested files.
+    pub async fn get_nodes_by_files_page_controlled<F>(
         &self,
         file_paths: &[String],
+        config_paths: &[String],
+        added_paths: &[String],
+        after: Option<&crate::db::NodesByFilesPageKey>,
+        limit: usize,
         checkpoint: F,
-    ) -> Result<Vec<Node>>
+    ) -> Result<crate::db::NodesByFilesPage>
     where
         F: FnMut() -> Result<()>,
     {
         self.db
-            .get_nodes_by_files_controlled(file_paths, checkpoint)
+            .get_nodes_by_files_page_controlled(
+                file_paths,
+                config_paths,
+                added_paths,
+                after,
+                limit,
+                checkpoint,
+            )
             .await
     }
 

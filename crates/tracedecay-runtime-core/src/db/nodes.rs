@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use crate::db::engine::{Value, params, params_from_iter};
 
-use super::connection::{Database, DatabaseWriteTransaction};
+use super::connection::{Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction};
 use super::rows::{NODE_COLUMNS, node_select_columns, row_to_node};
 use super::sql::{
     build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with,
@@ -11,6 +11,8 @@ use super::sql::{
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
+const CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS: usize = 64;
+
 /// One `rowid` keyset page of the nodes declared by a single file.
 pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
     "SELECT ",
@@ -18,16 +20,47 @@ pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
     ", rowid FROM nodes WHERE file_path = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
 );
 
-/// One page of nodes declared by any path in one JSON-array bind.
+/// One stable, bounded symbol page across a set of files.
 ///
-/// The path count never changes the SQL parameter count, so a repository-scale
-/// PR remains one bulk snapshot read rather than one query per changed file.
-pub(super) const NODES_BY_FILES_PAGE_SQL: &str = concat!(
-    "SELECT ",
+/// Config paths collapse to one representative row carrying their underlying
+/// key count. Window totals are computed before the keyset predicate, so the
+/// caller gets exact added/modified/omitted coverage without materializing the
+/// omitted nodes in Rust.
+pub(super) const NODES_BY_FILES_SYMBOL_PAGE_SQL: &str = concat!(
+    "WITH ranked AS (\
+         SELECT ",
     node_select_columns!(),
-    ", rowid FROM nodes \
-     WHERE file_path IN (SELECT value FROM json_each(?1)) \
-       AND rowid > ?2 ORDER BY rowid LIMIT ?3"
+    ", \
+             CASE WHEN file_path IN (SELECT value FROM json_each(?2)) \
+                  THEN ROW_NUMBER() OVER (\
+                      PARTITION BY file_path ORDER BY start_line, id\
+                  ) \
+                  ELSE 1 \
+             END AS file_rank, \
+             COUNT(*) OVER (PARTITION BY file_path) AS file_node_count \
+         FROM nodes \
+         WHERE file_path IN (SELECT value FROM json_each(?1))\
+     ), symbols AS (\
+         SELECT * FROM ranked \
+         WHERE file_path NOT IN (SELECT value FROM json_each(?2)) OR file_rank = 1\
+     ), counted AS (\
+         SELECT *, \
+             COUNT(*) OVER () AS symbol_total, \
+             SUM(CASE WHEN file_path IN (SELECT value FROM json_each(?3)) \
+                      THEN 1 ELSE 0 END) OVER () AS added_total, \
+             ROW_NUMBER() OVER (ORDER BY file_path, start_line, id) AS symbol_ordinal \
+         FROM symbols\
+     ) \
+     SELECT ",
+    node_select_columns!(),
+    ", file_node_count, symbol_total, added_total, symbol_ordinal \
+     FROM counted \
+     WHERE ?4 IS NULL \
+        OR file_path > ?4 \
+        OR (file_path = ?4 AND start_line > ?5) \
+        OR (file_path = ?4 AND start_line = ?5 AND id > ?6) \
+     ORDER BY file_path, start_line, id \
+     LIMIT ?7"
 );
 
 /// One page of nodes selected by an arbitrary-size JSON-array id bind.
@@ -49,6 +82,235 @@ pub(super) const NODES_BY_KIND_PAGE_SQL: &str = concat!(
     node_select_columns!(),
     ", rowid FROM nodes WHERE kind = ?1 AND rowid > ?2 ORDER BY rowid LIMIT ?3"
 );
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodesByFilesPageKey {
+    pub file_path: String,
+    pub start_line: u32,
+    pub id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct NodesByFilesPageEntry {
+    pub node: Node,
+    pub source_node_count: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct NodesByFilesPage {
+    pub entries: Vec<NodesByFilesPageEntry>,
+    pub offset: usize,
+    pub total_symbols: usize,
+    pub added_symbols: usize,
+}
+
+pub(super) async fn read_nodes_by_files_page_controlled<C, F>(
+    conn: &C,
+    file_paths: &[String],
+    config_paths: &[String],
+    added_paths: &[String],
+    after: Option<&NodesByFilesPageKey>,
+    limit: usize,
+    mut checkpoint: F,
+) -> Result<NodesByFilesPage>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
+    if file_paths.is_empty() {
+        return Ok(NodesByFilesPage {
+            entries: Vec::new(),
+            offset: 0,
+            total_symbols: 0,
+            added_symbols: 0,
+        });
+    }
+    let encode = |values: &[String], field: &'static str| {
+        serde_json::to_string(values).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to encode {field}: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })
+    };
+    let limit = i64::try_from(limit)
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or_else(|| TraceDecayError::Database {
+            message: "node page limit must be positive".to_owned(),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+    let (after_path, after_line, after_id) =
+        after.map_or((Value::Null, Value::Null, Value::Null), |key| {
+            (
+                Value::Text(key.file_path.clone()),
+                Value::Integer(i64::from(key.start_line)),
+                Value::Text(key.id.clone()),
+            )
+        });
+    checkpoint()?;
+    let mut rows = conn
+        .query(
+            NODES_BY_FILES_SYMBOL_PAGE_SQL,
+            params_from_iter([
+                Value::Text(encode(file_paths, "file paths")?),
+                Value::Text(encode(config_paths, "config paths")?),
+                Value::Text(encode(added_paths, "added paths")?),
+                after_path,
+                after_line,
+                after_id,
+                Value::Integer(limit),
+            ]),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to query bounded nodes by files: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    let mut total_symbols = 0;
+    let mut added_symbols = 0;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read bounded node page: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?
+    {
+        if !entries.is_empty() && entries.len() % CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS == 0 {
+            checkpoint()?;
+        }
+        let source_node_count =
+            usize::try_from(
+                row.get::<i64>(23)
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to read file node count: {error}"),
+                        operation: "get_nodes_by_files_page".to_owned(),
+                    })?,
+            )
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid file node count: {error}"),
+                operation: "get_nodes_by_files_page".to_owned(),
+            })?;
+        total_symbols =
+            usize::try_from(
+                row.get::<i64>(24)
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to read symbol total: {error}"),
+                        operation: "get_nodes_by_files_page".to_owned(),
+                    })?,
+            )
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid symbol total: {error}"),
+                operation: "get_nodes_by_files_page".to_owned(),
+            })?;
+        added_symbols =
+            usize::try_from(
+                row.get::<i64>(25)
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to read added symbol total: {error}"),
+                        operation: "get_nodes_by_files_page".to_owned(),
+                    })?,
+            )
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid added symbol total: {error}"),
+                operation: "get_nodes_by_files_page".to_owned(),
+            })?;
+        if entries.is_empty() {
+            offset = usize::try_from(
+                row.get::<i64>(26)
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!("failed to read symbol ordinal: {error}"),
+                        operation: "get_nodes_by_files_page".to_owned(),
+                    })?
+                    .saturating_sub(1),
+            )
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("invalid symbol ordinal: {error}"),
+                operation: "get_nodes_by_files_page".to_owned(),
+            })?;
+        }
+        entries.push(NodesByFilesPageEntry {
+            node: row_to_node(&row).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to map bounded node page: {error}"),
+                operation: "get_nodes_by_files_page".to_owned(),
+            })?,
+            source_node_count,
+        });
+    }
+    checkpoint()?;
+    Ok(NodesByFilesPage {
+        entries,
+        offset,
+        total_symbols,
+        added_symbols,
+    })
+}
+
+async fn read_nodes_by_ids_controlled<C, F>(
+    conn: &C,
+    ids: &[String],
+    checkpoint: F,
+) -> Result<Vec<Node>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = serde_json::to_string(ids).map_err(|error| TraceDecayError::Database {
+        message: format!("failed to encode node ids: {error}"),
+        operation: "get_nodes_by_ids".to_string(),
+    })?;
+    collect_rowid_pages_with_controlled(
+        conn,
+        NODES_BY_IDS_PAGE_SQL,
+        &[Value::Text(encoded)],
+        NODE_COLUMNS,
+        row_to_node,
+        "get_nodes_by_ids",
+        checkpoint,
+    )
+    .await
+}
+
+impl DatabaseEngineReadSnapshot {
+    pub async fn get_nodes_by_files_page_controlled<F>(
+        &self,
+        file_paths: &[String],
+        config_paths: &[String],
+        added_paths: &[String],
+        after: Option<&NodesByFilesPageKey>,
+        limit: usize,
+        checkpoint: F,
+    ) -> Result<NodesByFilesPage>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_nodes_by_files_page_controlled(
+            self,
+            file_paths,
+            config_paths,
+            added_paths,
+            after,
+            limit,
+            checkpoint,
+        )
+        .await
+    }
+
+    pub async fn get_nodes_by_ids_controlled<F>(
+        &self,
+        ids: &[String],
+        checkpoint: F,
+    ) -> Result<Vec<Node>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_nodes_by_ids_controlled(self, ids, checkpoint).await
+    }
+}
 
 impl Database {
     /// Inserts or replaces a single node.
@@ -432,23 +694,7 @@ impl Database {
     where
         F: FnMut() -> Result<()>,
     {
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let encoded = serde_json::to_string(ids).map_err(|error| TraceDecayError::Database {
-            message: format!("failed to encode node ids: {error}"),
-            operation: "get_nodes_by_ids".to_string(),
-        })?;
-        collect_rowid_pages_with_controlled(
-            &self.engine_conn(),
-            NODES_BY_IDS_PAGE_SQL,
-            &[Value::Text(encoded)],
-            NODE_COLUMNS,
-            row_to_node,
-            "get_nodes_by_ids",
-            checkpoint,
-        )
-        .await
+        read_nodes_by_ids_controlled(&self.engine_conn(), ids, checkpoint).await
     }
 
     /// Returns all nodes for a given file, ordered by start line.
@@ -472,46 +718,29 @@ impl Database {
         Ok(nodes)
     }
 
-    /// Returns one deterministic snapshot of every node declared by `file_paths`.
-    pub async fn get_nodes_by_files(&self, file_paths: &[String]) -> Result<Vec<Node>> {
-        self.get_nodes_by_files_controlled(file_paths, || Ok(()))
-            .await
-    }
-
-    /// [`Database::get_nodes_by_files`] with cooperative page checkpoints.
-    pub async fn get_nodes_by_files_controlled<F>(
+    /// Returns one stable, bounded symbol page across `file_paths`.
+    pub async fn get_nodes_by_files_page_controlled<F>(
         &self,
         file_paths: &[String],
+        config_paths: &[String],
+        added_paths: &[String],
+        after: Option<&NodesByFilesPageKey>,
+        limit: usize,
         checkpoint: F,
-    ) -> Result<Vec<Node>>
+    ) -> Result<NodesByFilesPage>
     where
         F: FnMut() -> Result<()>,
     {
-        if file_paths.is_empty() {
-            return Ok(Vec::new());
-        }
-        let encoded =
-            serde_json::to_string(file_paths).map_err(|error| TraceDecayError::Database {
-                message: format!("failed to encode file paths: {error}"),
-                operation: "get_nodes_by_files".to_string(),
-            })?;
-        let mut nodes = collect_rowid_pages_with_controlled(
+        read_nodes_by_files_page_controlled(
             &self.engine_conn(),
-            NODES_BY_FILES_PAGE_SQL,
-            &[Value::Text(encoded)],
-            NODE_COLUMNS,
-            row_to_node,
-            "get_nodes_by_files",
+            file_paths,
+            config_paths,
+            added_paths,
+            after,
+            limit,
             checkpoint,
         )
-        .await?;
-        nodes.sort_by(|left, right| {
-            left.file_path
-                .cmp(&right.file_path)
-                .then(left.start_line.cmp(&right.start_line))
-                .then(left.id.cmp(&right.id))
-        });
-        Ok(nodes)
+        .await
     }
 
     /// Returns every node whose `parent_id` matches `parent_id`. Replaces

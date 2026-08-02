@@ -118,7 +118,7 @@ pub(super) fn def_pr_context() -> ToolDefinition {
                 },
                 "cursor": {
                     "type": "string",
-                    "description": "Opaque continuation returned by the previous PR context page"
+                    "description": "Authenticated continuation cursor returned by a previous page"
                 }
             }
         }),

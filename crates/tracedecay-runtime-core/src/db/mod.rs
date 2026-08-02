@@ -45,8 +45,8 @@ pub use access::{
 pub use analytics::HealthFileAggregate;
 pub use connection::Database;
 pub use connection::{
-    DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
-    DatabaseWriteTransaction,
+    DatabaseAccessMode, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction,
 };
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
 pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
@@ -65,6 +65,7 @@ pub(crate) use memory_v2::{
     MemoryV2FeedbackHistoryRepairBatchOutcome, MemoryV2FeedbackHistoryRepairProgress,
     MemoryV2LegacyPurgeReceipt,
 };
+pub use nodes::{NodesByFilesPage, NodesByFilesPageEntry, NodesByFilesPageKey};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
     publish_anchor_derivative, publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,

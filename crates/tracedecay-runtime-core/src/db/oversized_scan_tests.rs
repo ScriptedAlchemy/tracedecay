@@ -27,12 +27,17 @@ use super::analytics::{
 use super::coverage::{
     SKIP_TEST_COVERAGE_PAGE_SQL, TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
 };
-use super::edges::{bulk_edges_by_endpoint_page_sql, single_edges_by_endpoint_page_sql};
+use super::edges::{
+    bulk_edges_by_endpoint_page_sql, read_edges_by_endpoint_controlled,
+    single_edges_by_endpoint_page_sql,
+};
 use super::engine::{
     IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, Value,
 };
 use super::files::FILE_PATH_PAGE_SQL;
-use super::nodes::{NODES_BY_FILES_PAGE_SQL, NODES_BY_KIND_PAGE_SQL};
+use super::nodes::{
+    NODES_BY_KIND_PAGE_SQL, NodesByFilesPageKey, read_nodes_by_files_page_controlled,
+};
 use super::sql::{collect_rowid_pages, collect_rowid_pages_with};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -535,39 +540,156 @@ async fn bulk_endpoint_edges_page_past_the_runtime_query_limit() {
     assert_eq!(i64::try_from(edges.len()).expect("edge count"), ROWS + 1);
 }
 
-/// The bulk node snapshot binds the complete file set as one value: its query
-/// count is independent of the number of changed paths when the result cardinality
-/// is unchanged.
+/// A repository-scale matching set still performs one bounded query per stable
+/// page and materializes only that page.
 #[tokio::test]
-async fn nodes_by_files_query_count_is_independent_of_file_count() {
+async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
     let directory = TempDir::new().expect("bulk node query-count tempdir");
     let conn = seed_oversized_graph(&directory).await;
     let counted = CountingConnection {
         inner: &conn,
         queries: AtomicUsize::new(0),
     };
-
-    for paths in [
-        vec!["missing/one.rs".to_owned()],
-        (0..3_815)
-            .map(|index| format!("missing/{index:04}.rs"))
-            .collect(),
-    ] {
-        let before = counted.queries.load(Ordering::Relaxed);
-        let encoded = serde_json::to_string(&paths).expect("path JSON");
-        let nodes = collect_rowid_pages_with(
-            &counted,
-            NODES_BY_FILES_PAGE_SQL,
-            &[Value::Text(encoded)],
-            super::rows::NODE_COLUMNS,
-            super::rows::row_to_node,
-            "get_nodes_by_files",
-        )
+    let mut paths: Vec<String> = (0..3_815)
+        .map(|index| format!("{FUNCTION_DIR}m{index:05}.rs"))
+        .collect();
+    paths.push("src/hub.rs".to_owned());
+    let added_paths = paths[..1_900].to_vec();
+    let first =
+        read_nodes_by_files_page_controlled(&counted, &paths, &[], &added_paths, None, 100, || {
+            Ok(())
+        })
         .await
-        .expect("bulk node snapshot");
-        assert!(nodes.is_empty());
-        assert_eq!(counted.queries.load(Ordering::Relaxed) - before, 1);
-    }
+        .expect("first bounded node page");
+    assert_eq!(first.entries.len(), 100);
+    assert_eq!(first.offset, 0);
+    assert_eq!(
+        first.total_symbols,
+        3_815 + usize::try_from(ROWS + 1).unwrap()
+    );
+    assert_eq!(first.added_symbols, 1_900);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
+
+    let last = &first.entries[99].node;
+    let after = NodesByFilesPageKey {
+        file_path: last.file_path.clone(),
+        start_line: last.start_line,
+        id: last.id.clone(),
+    };
+    let second = read_nodes_by_files_page_controlled(
+        &counted,
+        &paths,
+        &[],
+        &added_paths,
+        Some(&after),
+        100,
+        || Ok(()),
+    )
+    .await
+    .expect("second bounded node page");
+    assert_eq!(second.entries.len(), 100);
+    assert_eq!(second.offset, 100);
+    assert_eq!(second.total_symbols, first.total_symbols);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 2);
+    let first_ids: std::collections::HashSet<&str> = first
+        .entries
+        .iter()
+        .map(|entry| entry.node.id.as_str())
+        .collect();
+    assert!(
+        second
+            .entries
+            .iter()
+            .all(|entry| !first_ids.contains(entry.node.id.as_str())),
+        "stable keyset pages must not repeat symbols",
+    );
+}
+
+#[tokio::test]
+async fn nodes_by_files_page_cancellation_stops_mid_page() {
+    let directory = TempDir::new().expect("bulk node cancellation tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let paths = vec!["src/hub.rs".to_owned()];
+    let checkpoints = AtomicUsize::new(0);
+    let error = read_nodes_by_files_page_controlled(&conn, &paths, &[], &[], None, 500, || {
+        let observed = checkpoints.fetch_add(1, Ordering::Relaxed);
+        if observed == 1 {
+            Err(crate::errors::TraceDecayError::Config {
+                message: "cancelled mid-page".to_owned(),
+            })
+        } else {
+            Ok(())
+        }
+    })
+    .await
+    .expect_err("the second checkpoint cancels during row collection");
+    assert!(error.to_string().contains("cancelled mid-page"));
+    assert_eq!(checkpoints.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write() {
+    let directory = TempDir::new().expect("PR context snapshot tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let paths = vec![format!("{FUNCTION_DIR}m00000.rs")];
+    let snapshot = conn.read_snapshot().await.expect("begin graph snapshot");
+    let before =
+        read_nodes_by_files_page_controlled(&snapshot, &paths, &[], &[], None, 10, || Ok(()))
+            .await
+            .expect("read snapshot symbol page");
+    assert_eq!(before.total_symbols, 1);
+
+    conn.execute(
+        "INSERT INTO nodes (
+             id, kind, name, qualified_name, file_path,
+             start_line, end_line, start_column, end_column,
+             visibility, is_async, branches, loops, returns, max_nesting,
+             unsafe_blocks, unchecked_calls, assertions, updated_at,
+             attrs_start_line
+         ) VALUES (
+             'concurrent::caller', 'function', 'concurrent_caller',
+             'concurrent::caller', ?1,
+             2, 2, 0, 1, 'private', 0, 0, 0, 0, 0, 0, 0, 0, 2, 2
+         )",
+        [paths[0].as_str()],
+    )
+    .await
+    .expect("publish concurrent node");
+    conn.execute(
+        "INSERT INTO edges (source, target, kind, line)
+         VALUES ('concurrent::caller', ?1, 'calls', 2)",
+        [HUB_ID],
+    )
+    .await
+    .expect("publish concurrent edge");
+
+    let stable =
+        read_nodes_by_files_page_controlled(&snapshot, &paths, &[], &[], None, 10, || Ok(()))
+            .await
+            .expect("repeat snapshot symbol page");
+    assert_eq!(stable.total_symbols, 1);
+    let stable_edges = read_edges_by_endpoint_controlled(
+        &snapshot,
+        "target",
+        &[HUB_ID.to_owned()],
+        &[],
+        "snapshot incoming edges",
+        || Ok(()),
+    )
+    .await
+    .expect("snapshot edge expansion");
+    assert!(
+        stable_edges
+            .iter()
+            .all(|edge| edge.source != "concurrent::caller"),
+    );
+
+    let current = conn.read_snapshot().await.expect("begin current snapshot");
+    let current_page =
+        read_nodes_by_files_page_controlled(&current, &paths, &[], &[], None, 10, || Ok(()))
+            .await
+            .expect("read current symbol page");
+    assert_eq!(current_page.total_symbols, 2);
 }
 
 /// `get_nodes_by_file` and the id gather in `delete_nodes_by_file` read one

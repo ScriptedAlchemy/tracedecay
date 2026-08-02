@@ -3,11 +3,59 @@ use std::collections::HashMap;
 
 use crate::db::engine::params;
 
-use super::connection::Database;
+use super::connection::{Database, DatabaseEngineReadSnapshot};
 use super::engine::QueryExecutor;
 use super::sql::collect_rowid_pages;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+impl DatabaseEngineReadSnapshot {
+    /// Returns the indexing generation bound to this read snapshot.
+    ///
+    /// Both metadata values are published by the indexing transaction path.
+    /// Reading them through this capability ensures every later graph query
+    /// observes the same SQLite snapshot.
+    pub async fn graph_generation_identity(&self) -> Result<String> {
+        let mut rows = self
+            .query(
+                "SELECT \
+                   COALESCE((SELECT value FROM metadata WHERE key = 'last_sync_at'), '0'), \
+                   COALESCE((SELECT value FROM metadata WHERE key = 'last_synced_commit'), ''), \
+                   COALESCE((SELECT value FROM metadata \
+                             WHERE key = 'graph_generation_schema_version'), '0')",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query graph generation: {error}"),
+                operation: "graph_generation_identity".to_owned(),
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read graph generation: {error}"),
+                operation: "graph_generation_identity".to_owned(),
+            })?
+            .ok_or_else(|| TraceDecayError::Database {
+                message: "graph generation query returned no row".to_owned(),
+                operation: "graph_generation_identity".to_owned(),
+            })?;
+        let sync_at: String = row.get(0).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read graph sync generation: {error}"),
+            operation: "graph_generation_identity".to_owned(),
+        })?;
+        let commit: String = row.get(1).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read graph commit generation: {error}"),
+            operation: "graph_generation_identity".to_owned(),
+        })?;
+        let schema: String = row.get(2).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to read graph schema generation: {error}"),
+            operation: "graph_generation_identity".to_owned(),
+        })?;
+        Ok(format!("{sync_at}:{commit}:{schema}"))
+    }
+}
 
 impl Database {
     /// Returns aggregate statistics about the code graph.

@@ -907,10 +907,15 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
         "pub fn feature_fn() {}\npub fn second_feature_fn() {}\n",
     )
     .unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"added-config\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
     run_git_in(&project, &["add", "."]);
     run_git_in(&project, &["commit", "-m", "feature commit"]);
 
-    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+    let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
         &project,
         "project.mcp-git-pr-context-ok",
     )
@@ -920,12 +925,15 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
 
     let options = ToolCallRegistryOptions {
         application_deadline: Some(deadline_from_now(30_000_000)),
+        registered_project_session_db: runtime.registered_database_arc(
+            crate::application::host_admission::HostAdmissionScope::Project,
+        ),
         ..ToolCallRegistryOptions::default()
     };
     let result = dispatch_git_tools(
         "tracedecay_pr_context",
         &cg,
-        json!({ "base_ref": "main", "head_ref": "HEAD" }),
+        json!({ "base_ref": "main", "head_ref": "HEAD", "format": "json" }),
         options,
     )
     .await
@@ -945,6 +953,21 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
         rendered.contains("files_changed"),
         "the payload must carry the PR-context summary: {rendered}",
     );
+    let normal: serde_json::Value = serde_json::from_str(
+        result.value["content"][0]["text"]
+            .as_str()
+            .expect("JSON tool text"),
+    )
+    .expect("JSON PR context");
+    assert!(
+        normal["added"].as_array().is_some_and(|symbols| {
+            symbols
+                .iter()
+                .any(|symbol| symbol["file"] == "Cargo.toml" && symbol["kind"] == "config_summary")
+        }),
+        "an added config file must remain in the added lane",
+    );
+    assert_eq!(normal["symbols_modified"], 0);
     assert!(
         result
             .internal_analytics()
@@ -966,6 +989,9 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
         }),
         ToolCallRegistryOptions {
             application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
             ..ToolCallRegistryOptions::default()
         },
     )
@@ -983,48 +1009,129 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
         .expect("exact symbol total");
     assert!(total > 1);
     assert_eq!(first["symbol_page"]["complete"], false);
-    let mut cursor = first["next_cursor"]
+    assert_eq!(first["symbol_page"]["omitted"], total - 1);
+    assert_eq!(first["symbol_page"]["continuation_available"], true);
+    let cursor = first["next_cursor"]
         .as_str()
-        .expect("a non-exhausted page returns a cursor")
+        .expect("authenticated continuation");
+    let second = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "cursor": cursor,
+            "format": "json",
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect("authenticated continuation succeeds");
+    let second: serde_json::Value = serde_json::from_str(
+        second.value["content"][0]["text"]
+            .as_str()
+            .expect("JSON tool text"),
+    )
+    .expect("second JSON PR context");
+    assert_eq!(second["symbol_page"]["offset"], 1);
+    assert_ne!(second["added"], first["added"]);
+
+    let mut tampered = cursor.as_bytes().to_vec();
+    let last = tampered.last_mut().expect("non-empty cursor");
+    *last = if *last == b'0' { b'1' } else { b'0' };
+    let tampered = String::from_utf8(tampered).expect("ASCII cursor");
+    let tampered_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "cursor": tampered,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("tampered cursor must fail authentication");
+    assert!(
+        tampered_error
+            .to_string()
+            .contains("invalid or stale PR context cursor")
+    );
+
+    let original_head = first["head_oid"]
+        .as_str()
+        .expect("resolved head OID")
         .to_owned();
-    let mut returned = 1_u64;
-    loop {
-        let next = dispatch_git_tools(
-            "tracedecay_pr_context",
-            &cg,
-            json!({
-                "base_ref": "main",
-                "head_ref": "HEAD",
-                "maximum_symbols": 1,
-                "cursor": cursor,
-                "format": "json",
-            }),
-            ToolCallRegistryOptions {
-                application_deadline: Some(deadline_from_now(30_000_000)),
-                ..ToolCallRegistryOptions::default()
-            },
-        )
+    fs::write(project.join("after-cursor.txt"), "advance head\n").unwrap();
+    run_git_in(&project, &["add", "."]);
+    run_git_in(&project, &["commit", "-m", "advance after cursor"]);
+    let oid_stale_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+            "base_ref": "main",
+            "head_ref": "HEAD",
+            "maximum_symbols": 1,
+            "cursor": cursor,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("cursor must become stale when the resolved head OID advances");
+    assert!(
+        oid_stale_error
+            .to_string()
+            .contains("invalid or stale PR context cursor")
+    );
+
+    cg.db()
+        .set_metadata("last_sync_at", "stale-cursor-generation")
         .await
-        .expect("the next bounded symbol page succeeds");
-        let next: serde_json::Value = serde_json::from_str(
-            next.value["content"][0]["text"]
-                .as_str()
-                .expect("JSON tool text"),
-        )
-        .expect("JSON PR context");
-        assert_eq!(next["symbol_page"]["total"], total);
-        returned += next["symbol_page"]["returned"]
-            .as_u64()
-            .expect("returned count");
-        match next["next_cursor"].as_str() {
-            Some(next_cursor) => cursor = next_cursor.to_owned(),
-            None => {
-                assert_eq!(next["symbol_page"]["complete"], true);
-                break;
-            }
-        }
-    }
-    assert_eq!(returned, total, "cursor exhaustion covers every symbol");
+        .expect("advance graph generation");
+    let stale_error = dispatch_git_tools(
+        "tracedecay_pr_context",
+        &cg,
+        json!({
+                "base_ref": "main",
+                "head_ref": original_head,
+            "maximum_symbols": 1,
+            "cursor": cursor,
+        }),
+        ToolCallRegistryOptions {
+            application_deadline: Some(deadline_from_now(30_000_000)),
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            ..ToolCallRegistryOptions::default()
+        },
+    )
+    .await
+    .expect_err("cursor must become stale after graph generation advances");
+    assert!(
+        stale_error
+            .to_string()
+            .contains("invalid or stale PR context cursor")
+    );
 
     let cancellation =
         tracedecay_application::CancellationSignal::active("cancel.pr-context-fixture").unwrap();

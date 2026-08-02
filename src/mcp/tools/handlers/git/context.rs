@@ -1,13 +1,19 @@
 //! `tracedecay_diff_context`, `tracedecay_changelog`, `tracedecay_commit_context`, and `tracedecay_pr_context`.
 
+use super::pr_context_cursor::{
+    PrContextCursorBinding, decode_pr_context_cursor, encode_pr_context_cursor,
+    pr_context_cursor_authority,
+};
 use super::shell::{
     classify_file_role, default_pr_base_ref, git_changed_files, git_diff_file_changes,
-    git_pr_comparison, git_recent_commits,
+    git_pr_comparison_controlled, git_recent_commits,
 };
 use super::*;
 use crate::types::{EdgeKind, Node};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tracedecay_global_db::RegisteredGlobalDb;
+use tracedecay_runtime_core::db::{DatabaseEngineReadSnapshot, NodesByFilesPageKey};
 
 /// Runs one synchronous gix span on the blocking pool.
 ///
@@ -29,6 +35,114 @@ where
         .map_err(|join_error| TraceDecayError::Config {
             message: format!("git {label} task failed: {join_error}"),
         })
+}
+
+struct CancelBlockingGitOnDrop {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for CancelBlockingGitOnDrop {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
+struct MarkBlockingGitExited(Arc<AtomicBool>);
+
+impl Drop for MarkBlockingGitExited {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+struct BlockingGitWorkerState {
+    cancelled: Arc<AtomicBool>,
+    exited: Arc<AtomicBool>,
+}
+
+impl BlockingGitWorkerState {
+    fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            exited: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+async fn blocking_git_span_controlled<T, F>(
+    label: &str,
+    request_cancellation: Option<tracedecay_application::CancellationSignal>,
+    request_deadline: Option<tracedecay_application::Deadline>,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    blocking_git_span_controlled_with_state(
+        label,
+        request_cancellation,
+        request_deadline,
+        BlockingGitWorkerState::new(),
+        work,
+    )
+    .await
+}
+
+async fn blocking_git_span_controlled_with_state<T, F>(
+    label: &str,
+    request_cancellation: Option<tracedecay_application::CancellationSignal>,
+    request_deadline: Option<tracedecay_application::Deadline>,
+    state: BlockingGitWorkerState,
+    work: F,
+) -> Result<T>
+where
+    F: FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let cancel_on_drop = CancelBlockingGitOnDrop {
+        cancelled: Arc::clone(&state.cancelled),
+    };
+    let worker_cancelled = Arc::clone(&state.cancelled);
+    let worker_exited = Arc::clone(&state.exited);
+    let worker_request_cancellation = request_cancellation.clone();
+    let worker_request_deadline = request_deadline.clone();
+    let mut worker = tokio::task::spawn_blocking(move || {
+        let _mark_exited = MarkBlockingGitExited(worker_exited);
+        let checkpoint = || {
+            worker_cancelled.load(Ordering::Acquire)
+                || worker_request_cancellation
+                    .as_ref()
+                    .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+                || worker_request_deadline.as_ref().is_some_and(|deadline| {
+                    crate::daemon_client::deadline_remaining(deadline).is_none()
+                })
+        };
+        work(&checkpoint)
+    });
+    let joined = loop {
+        tokio::select! {
+            joined = &mut worker => break joined,
+            () = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
+                let request_stopped = request_cancellation.as_ref().is_some_and(
+                    tracedecay_application::CancellationSignal::is_cancelled,
+                ) || request_deadline.as_ref().is_some_and(|deadline| {
+                    crate::daemon_client::deadline_remaining(deadline).is_none()
+                });
+                if request_stopped {
+                    state.cancelled.store(true, Ordering::Release);
+                    break worker.await;
+                }
+            }
+        }
+    }
+    .map_err(|join_error| TraceDecayError::Config {
+        message: format!("git {label} task failed: {join_error}"),
+    })?;
+    drop(cancel_on_drop);
+    debug_assert!(state.exited.load(Ordering::Acquire));
+    Ok(joined)
 }
 
 /// Handles `tracedecay_diff_context` tool calls.
@@ -345,14 +459,6 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 const PR_CONTEXT_DEFAULT_SYMBOLS: usize = 200;
 const PR_CONTEXT_MAX_SYMBOLS: usize = 500;
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct PrContextCursorV1 {
-    version: u8,
-    fingerprint: String,
-    next_offset: usize,
-}
-
 #[derive(Clone)]
 struct PrContextControls {
     deadline: Option<tracedecay_application::Deadline>,
@@ -387,71 +493,46 @@ impl PrContextControls {
     }
 }
 
-struct PrContextSymbol {
-    status: &'static str,
-    identity: String,
-    file: String,
-    line: u32,
-    value: Value,
-}
-
-fn pr_context_cursor(encoded: Option<&str>) -> Result<Option<PrContextCursorV1>> {
-    let Some(encoded) = encoded else {
-        return Ok(None);
-    };
-    if encoded.len() > 4_096 {
-        return Err(TraceDecayError::Config {
-            message: "PR context cursor exceeds its bounded envelope".to_owned(),
-        });
-    }
-    let bytes = hex::decode(encoded).map_err(|_| TraceDecayError::Config {
-        message: "PR context cursor is invalid".to_owned(),
-    })?;
-    let cursor = serde_json::from_slice::<PrContextCursorV1>(&bytes).map_err(|_| {
-        TraceDecayError::Config {
-            message: "PR context cursor is invalid".to_owned(),
-        }
-    })?;
-    if cursor.version != 1 {
-        return Err(TraceDecayError::Config {
-            message: "PR context cursor version is unsupported".to_owned(),
-        });
-    }
-    Ok(Some(cursor))
-}
-
-fn encode_pr_context_cursor(fingerprint: &str, next_offset: usize) -> Result<String> {
-    serde_json::to_vec(&PrContextCursorV1 {
-        version: 1,
-        fingerprint: fingerprint.to_owned(),
-        next_offset,
-    })
-    .map(hex::encode)
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("failed to encode PR context cursor: {error}"),
-    })
-}
-
-fn pr_context_fingerprint(
-    base: &str,
-    head: &str,
-    merge_base: &str,
-    symbols: &[PrContextSymbol],
-) -> Result<String> {
-    let identities: Vec<(&str, &str)> = symbols
-        .iter()
-        .map(|symbol| (symbol.status, symbol.identity.as_str()))
-        .collect();
-    let encoded = serde_json::to_vec(&(base, head, merge_base, identities)).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("failed to bind PR context cursor: {error}"),
-        }
-    })?;
-    Ok(hex::encode(Sha256::digest(encoded)))
-}
-
 fn elapsed_micros(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).map_or(u64::MAX, |value| value)
+}
+
+async fn pr_context_impact_snapshot(
+    snapshot: &DatabaseEngineReadSnapshot,
+    seed_nodes: &[Node],
+    max_depth: usize,
+    controls: &PrContextControls,
+) -> Result<Vec<Node>> {
+    let mut visited: HashSet<String> = seed_nodes.iter().map(|node| node.id.clone()).collect();
+    let mut result = seed_nodes.to_vec();
+    let mut frontier: Vec<String> = seed_nodes.iter().map(|node| node.id.clone()).collect();
+    for _depth in 0..max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        controls.checkpoint()?;
+        let edges = snapshot
+            .get_incoming_edges_bulk_controlled(&frontier, &[], || controls.checkpoint())
+            .await?;
+        let mut next_ids = Vec::new();
+        for edge in edges {
+            if visited.insert(edge.source.clone()) {
+                next_ids.push(edge.source);
+            }
+        }
+        if next_ids.is_empty() {
+            break;
+        }
+        let nodes = snapshot
+            .get_nodes_by_ids_controlled(&next_ids, || controls.checkpoint())
+            .await?;
+        frontier.clear();
+        for node in nodes {
+            frontier.push(node.id.clone());
+            result.push(node);
+        }
+    }
+    Ok(result)
 }
 
 /// Handles `tracedecay_pr_context` tool calls.
@@ -460,6 +541,7 @@ pub(crate) async fn handle_pr_context(
     args: Value,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
+    registered_project_session_db: Option<Arc<RegisteredGlobalDb>>,
 ) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_pr_context")?;
     let controls = PrContextControls {
@@ -478,40 +560,42 @@ pub(crate) async fn handle_pr_context(
         .and_then(|v| v.as_str())
         .unwrap_or("HEAD");
 
-    // The gix repo open, merge-base resolution, tree diff, and revwalk are all
-    // synchronous and unbounded on a diverged or pathological ref. Run them on
-    // the blocking pool so they never starve the async worker and so the
-    // dispatch deadline enforced in `dispatch_git_tools` can actually preempt
-    // this span (a `tokio::time::timeout` cannot interrupt an inline blocking
-    // call — only the `spawn_blocking` join future it awaits here).
     let stage_started = std::time::Instant::now();
     let comparison = {
         let project_root = cg.project_root().to_path_buf();
         let base_ref = base.clone();
         let head_ref = head.to_owned();
-        match tokio::task::spawn_blocking(move || {
-            git_pr_comparison(&project_root, &base_ref, &head_ref)
-        })
-        .await
+        match blocking_git_span_controlled(
+            "PR comparison",
+            controls.cancellation.clone(),
+            controls.deadline.clone(),
+            move |cancelled| {
+                git_pr_comparison_controlled(&project_root, &base_ref, &head_ref, cancelled)
+            },
+        )
+        .await?
         {
-            Ok(Ok(comparison)) => comparison,
-            Ok(Err(e)) => {
+            Ok(comparison) => comparison,
+            Err(e) => {
+                controls.checkpoint()?;
                 return Ok(git_error_result(cg, &args, "diff", &e));
-            }
-            Err(join_error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("git PR comparison task failed: {join_error}"),
-                });
             }
         }
     };
     controls.checkpoint()?;
     stage_timings.insert("git".to_owned(), json!(elapsed_micros(stage_started)));
     let GitPrComparison {
+        base_oid,
+        head_oid,
         merge_base,
-        changes,
+        mut changes,
         commits,
     } = comparison;
+    changes.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.status.cmp(right.status))
+    });
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
     let changed_paths: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
 
@@ -521,14 +605,54 @@ pub(crate) async fn handle_pr_context(
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(PR_CONTEXT_DEFAULT_SYMBOLS)
         .clamp(1, PR_CONTEXT_MAX_SYMBOLS);
-    let supplied_cursor = pr_context_cursor(args.get("cursor").and_then(Value::as_str))?;
+    let encoded_cursor = match args.get("cursor") {
+        Some(Value::String(cursor)) => Some(cursor.as_str()),
+        Some(_) => {
+            return Err(TraceDecayError::Config {
+                message: "PR context cursor must be a string".to_owned(),
+            });
+        }
+        None => None,
+    };
+
+    let graph_snapshot = cg
+        .db()
+        .begin_engine_read_snapshot("PR context graph snapshot")
+        .await?;
+    let graph_generation = graph_snapshot.graph_generation_identity().await?;
+    let project_root = cg.project_root().to_string_lossy();
+    let cursor_binding = PrContextCursorBinding {
+        protocol: "tracedecay.pr-context.cursor.v1",
+        project_root: &project_root,
+        base_oid: &base_oid,
+        head_oid: &head_oid,
+        merge_base: &merge_base,
+        graph_generation: &graph_generation,
+        maximum_symbols,
+        changes: &changes,
+    };
+    let cursor_authority = match registered_project_session_db.as_deref() {
+        Some(session_db) => Some(pr_context_cursor_authority(session_db, &cursor_binding).await?),
+        None if encoded_cursor.is_some() => {
+            return Err(TraceDecayError::Config {
+                message: "PR context cursor authority is unavailable".to_owned(),
+            });
+        }
+        None => None,
+    };
+    let after = match (encoded_cursor, cursor_authority.as_ref()) {
+        (Some(cursor), Some((snapshot, authenticator))) => {
+            Some(decode_pr_context_cursor(cursor, snapshot, authenticator)?)
+        }
+        _ => None,
+    };
 
     let mut test_files_changed: Vec<String> = Vec::new();
     let mut impacted_modules: HashSet<String> = HashSet::new();
 
     // Pre-compute files with inline test modules.
     let stage_started = std::time::Instant::now();
-    let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
+    let files_with_inline_tests = graph_snapshot.get_files_with_test_annotations().await?;
     controls.checkpoint()?;
     stage_timings.insert(
         "test_annotations".to_owned(),
@@ -537,86 +661,88 @@ pub(crate) async fn handle_pr_context(
     let has_tests = |path: &str| {
         crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
     };
-
-    let stage_started = std::time::Instant::now();
-    let nodes = cg
-        .get_nodes_by_files_controlled(&changed_files, || controls.checkpoint())
-        .await?;
-    controls.checkpoint()?;
-    stage_timings.insert(
-        "node_snapshot".to_owned(),
-        json!(elapsed_micros(stage_started)),
-    );
-    let mut nodes_by_file: HashMap<&str, Vec<&Node>> = HashMap::new();
-    for node in &nodes {
-        nodes_by_file
-            .entry(node.file_path.as_str())
-            .or_default()
-            .push(node);
-    }
-    let mut symbols = Vec::with_capacity(nodes.len());
+    let config_paths: Vec<String> = changes
+        .iter()
+        .filter(|change| classify_file_role(&change.path, &files_with_inline_tests) == "config")
+        .map(|change| change.path.clone())
+        .collect();
+    let added_paths: Vec<String> = changes
+        .iter()
+        .filter(|change| change.status == "added")
+        .map(|change| change.path.clone())
+        .collect();
+    let config_path_set: HashSet<&str> = config_paths.iter().map(String::as_str).collect();
+    let added_path_set: HashSet<&str> = added_paths.iter().map(String::as_str).collect();
     for change in &changes {
-        let file = &change.path;
-        if has_tests(file) {
-            test_files_changed.push(file.clone());
-        }
-
-        let file_nodes = nodes_by_file
-            .get(file.as_str())
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-
-        // Config files explode into one node per key — Cargo.toml with 50
-        // dependencies blows past the response budget. Treat them as a
-        // single summary symbol attributed to `symbols_modified` (they're
-        // never "added" since the file pre-exists in a typical PR).
-        if classify_file_role(file, &files_with_inline_tests) == "config" {
-            symbols.push(PrContextSymbol {
-                status: "modified",
-                identity: format!("config:{file}:{}", file_nodes.len()),
-                file: file.clone(),
-                line: 0,
-                value: json!({
-                    "file": file,
-                    "kind": "config_summary",
-                    "config_keys": file_nodes.len(),
-                }),
-            });
-            continue;
-        }
-
-        for node in file_nodes {
-            let status = if change.status == "added" {
-                "added"
-            } else {
-                "modified"
-            };
-            symbols.push(PrContextSymbol {
-                status,
-                identity: node.id.clone(),
-                file: node.file_path.clone(),
-                line: node.start_line,
-                value: json!({
-                    "name": node.name,
-                    "kind": node.kind.as_str(),
-                    "file": node.file_path,
-                    "line": node.start_line,
-                }),
-            });
+        if has_tests(&change.path) {
+            test_files_changed.push(change.path.clone());
         }
     }
-    symbols.sort_by(|left, right| {
-        left.file
-            .cmp(&right.file)
-            .then(left.line.cmp(&right.line))
-            .then(left.identity.cmp(&right.identity))
-    });
     test_files_changed.sort();
     test_files_changed.dedup();
 
+    let stage_started = std::time::Instant::now();
+    let symbol_page = graph_snapshot
+        .get_nodes_by_files_page_controlled(
+            &changed_files,
+            &config_paths,
+            &added_paths,
+            after.as_ref(),
+            maximum_symbols,
+            || controls.checkpoint(),
+        )
+        .await?;
+    controls.checkpoint()?;
+    stage_timings.insert(
+        "symbol_page".to_owned(),
+        json!(elapsed_micros(stage_started)),
+    );
+    let total_symbols = symbol_page.total_symbols;
+    let page_offset = symbol_page.offset;
+    let symbols_added = symbol_page.added_symbols;
+    let symbols_modified = total_symbols.saturating_sub(symbols_added);
+    let next_page_key = symbol_page.entries.last().map(|entry| NodesByFilesPageKey {
+        file_path: entry.node.file_path.clone(),
+        start_line: entry.node.start_line,
+        id: entry.node.id.clone(),
+    });
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut nodes = Vec::with_capacity(symbol_page.entries.len());
+    for entry in symbol_page.entries {
+        controls.checkpoint()?;
+        let node = entry.node;
+        let is_config = config_path_set.contains(node.file_path.as_str());
+        let symbol = if is_config {
+            json!({
+                "file": &node.file_path,
+                "kind": "config_summary",
+                "config_keys": entry.source_node_count,
+            })
+        } else {
+            json!({
+                "name": &node.name,
+                "kind": node.kind.as_str(),
+                "file": &node.file_path,
+                "line": node.start_line,
+            })
+        };
+        if added_path_set.contains(node.file_path.as_str()) {
+            added.push(symbol);
+        } else {
+            modified.push(symbol);
+        }
+        if !is_config {
+            nodes.push(node);
+        }
+    }
+    let returned_symbols = added.len().saturating_add(modified.len());
+    let omitted_symbols =
+        total_symbols.saturating_sub(page_offset.saturating_add(returned_symbols));
+
     let node_ids: Vec<String> = nodes.iter().map(|node| node.id.clone()).collect();
     let stage_started = std::time::Instant::now();
-    let incoming_calls = cg
+    let incoming_calls = graph_snapshot
         .get_incoming_edges_bulk_controlled(&node_ids, &[EdgeKind::Calls], || controls.checkpoint())
         .await?;
     controls.checkpoint()?;
@@ -628,10 +754,7 @@ pub(crate) async fn handle_pr_context(
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let mut checkpoint = || controls.checkpoint();
-    let impact = cg
-        .get_impact_radius_multi_from_nodes_controlled(&nodes, 2, &mut checkpoint)
-        .await?;
+    let impact = pr_context_impact_snapshot(&graph_snapshot, &nodes, 2, &controls).await?;
     controls.checkpoint()?;
     let impacted_by_id: HashMap<&str, &Node> =
         impact.iter().map(|node| (node.id.as_str(), node)).collect();
@@ -661,63 +784,54 @@ pub(crate) async fn handle_pr_context(
     affected_sorted.sort();
 
     let stage_started = std::time::Instant::now();
-    let fingerprint = pr_context_fingerprint(&base, head, &merge_base, &symbols)?;
-    let offset = match supplied_cursor {
-        Some(cursor)
-            if cursor.fingerprint == fingerprint && cursor.next_offset <= symbols.len() =>
-        {
-            cursor.next_offset
-        }
-        Some(_) => {
-            return Err(TraceDecayError::Config {
-                message: "PR context cursor does not match the current comparison".to_owned(),
-            });
-        }
-        None => 0,
-    };
-    let page_end = offset.saturating_add(maximum_symbols).min(symbols.len());
-    let page = &symbols[offset..page_end];
-    let symbols_added = symbols
-        .iter()
-        .filter(|symbol| symbol.status == "added")
-        .count();
-    let symbols_modified = symbols.len().saturating_sub(symbols_added);
-    let added: Vec<Value> = page
-        .iter()
-        .filter(|symbol| symbol.status == "added")
-        .map(|symbol| symbol.value.clone())
-        .collect();
-    let modified: Vec<Value> = page
-        .iter()
-        .filter(|symbol| symbol.status == "modified")
-        .map(|symbol| symbol.value.clone())
-        .collect();
-    let next_cursor = if page_end < symbols.len() {
-        Some(encode_pr_context_cursor(&fingerprint, page_end)?)
-    } else {
+    let complete = omitted_symbols == 0;
+    let next_cursor = if complete {
         None
+    } else {
+        let key = next_page_key
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "PR context page omitted symbols without a continuation key".to_owned(),
+            })?;
+        let (snapshot, authenticator) =
+            cursor_authority
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "PR context cursor authority is unavailable".to_owned(),
+                })?;
+        Some(encode_pr_context_cursor(key, snapshot, authenticator)?)
     };
-    let complete = page_end == symbols.len();
     let output = json!({
         "base": base,
         "head": head,
+        "base_oid": base_oid,
+        "head_oid": head_oid,
         "merge_base": merge_base,
+        "graph_generation": graph_generation,
         "commits": commits,
         "files_changed": changed_files.len(),
         "symbols_added": symbols_added,
         "symbols_modified": symbols_modified,
         "added": added,
         "modified": modified,
+        "next_cursor": next_cursor,
         "symbol_page": {
-            "offset": offset,
             "limit": maximum_symbols,
-            "returned": page.len(),
-            "total": symbols.len(),
-            "covered_through": page_end,
-            "remaining": symbols.len().saturating_sub(page_end),
+            "returned": returned_symbols,
+            "offset": page_offset,
+            "total": total_symbols,
+            "omitted": omitted_symbols,
+            "complete": complete,
+            "selection": "stable_prefix",
+            "continuation_available": !complete,
+        },
+        "analysis_coverage": {
+            "seed_symbols_analyzed": nodes.len(),
+            "symbols_returned": returned_symbols,
+            "symbols_total": total_symbols,
+            "omitted_symbols": omitted_symbols,
             "complete": complete,
         },
-        "next_cursor": next_cursor,
         "test_files_changed": test_files_changed,
         "affected_tests": affected_sorted,
         "impacted_modules": impacted_sorted,
@@ -728,7 +842,7 @@ pub(crate) async fn handle_pr_context(
     tracing::info!(
         tool = "tracedecay_pr_context",
         files = changed_files.len(),
-        symbols = symbols.len(),
+        symbols = total_symbols,
         timings = %timing_value,
         "PR context stage timings"
     );
@@ -744,7 +858,9 @@ pub(crate) async fn handle_pr_context(
 
 #[cfg(test)]
 mod blocking_git_span_tests {
-    use super::blocking_git_span;
+    use super::{
+        BlockingGitWorkerState, blocking_git_span, blocking_git_span_controlled_with_state,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -782,6 +898,65 @@ mod blocking_git_span_tests {
             "a concurrent task must have run while the gix span was blocking"
         );
         ticker.await.expect("ticker joins");
+    }
+
+    #[tokio::test]
+    async fn dropping_a_cancelled_git_span_stops_the_live_worker() {
+        let state = BlockingGitWorkerState::new();
+        let observed = state.clone();
+        let span = blocking_git_span_controlled_with_state(
+            "live cancellation test",
+            None,
+            None,
+            state,
+            move |cancelled| {
+                while !cancelled() {
+                    std::thread::yield_now();
+                }
+            },
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), span)
+                .await
+                .is_err(),
+            "the deadline must drop the in-flight join"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !observed.exited.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled blocking worker exits promptly");
+    }
+
+    #[tokio::test]
+    async fn request_cancellation_joins_the_live_git_worker() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancel.git-worker-test")
+                .expect("valid cancellation");
+        let canceller = cancellation.clone();
+        let state = BlockingGitWorkerState::new();
+        let observed = state.clone();
+        let trigger = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            canceller.cancel(tracedecay_domain::UtcMicros(1));
+        });
+        blocking_git_span_controlled_with_state(
+            "request cancellation test",
+            Some(cancellation),
+            None,
+            state,
+            move |cancelled| {
+                while !cancelled() {
+                    std::thread::yield_now();
+                }
+            },
+        )
+        .await
+        .expect("cancelled worker joins");
+        trigger.await.expect("cancellation trigger joins");
+        assert!(observed.exited.load(Ordering::Acquire));
     }
 }
 

@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use crate::db::engine::{Value, params, params_from_iter};
 
-use super::connection::{Database, DatabaseWriteTransaction};
+use super::connection::{Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction};
 use super::rows::row_to_edge;
 use super::sql::{collect_rowid_pages, collect_rowid_pages_with_controlled, collect_rows};
 use crate::errors::{Result, TraceDecayError};
@@ -51,6 +51,74 @@ pub(super) fn bulk_edges_by_endpoint_page_sql(endpoint_column: &str, kind_count:
            AND rowid > ?{cursor_param} ORDER BY rowid LIMIT ?{}",
         cursor_param + 1
     )
+}
+
+pub(super) async fn read_edges_by_endpoint_controlled<C, F>(
+    conn: &C,
+    endpoint_column: &'static str,
+    node_ids: &[String],
+    kinds: &[EdgeKind],
+    operation: &'static str,
+    checkpoint: F,
+) -> Result<Vec<Edge>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+    F: FnMut() -> Result<()>,
+{
+    if node_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (mut leading, sql) = if let [node_id] = node_ids {
+        (
+            vec![Value::Text(node_id.clone())],
+            single_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+        )
+    } else {
+        let encoded =
+            serde_json::to_string(node_ids).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to encode bulk edge endpoints: {error}"),
+                operation: operation.to_string(),
+            })?;
+        (
+            vec![Value::Text(encoded)],
+            bulk_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
+        )
+    };
+    for kind in kinds {
+        leading.push(Value::Text(kind.as_str().to_string()));
+    }
+    collect_rowid_pages_with_controlled(
+        conn,
+        &sql,
+        &leading,
+        EDGE_COLUMNS,
+        row_to_edge,
+        operation,
+        checkpoint,
+    )
+    .await
+}
+
+impl DatabaseEngineReadSnapshot {
+    pub async fn get_incoming_edges_bulk_controlled<F>(
+        &self,
+        target_ids: &[String],
+        kinds: &[EdgeKind],
+        checkpoint: F,
+    ) -> Result<Vec<Edge>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        read_edges_by_endpoint_controlled(
+            self,
+            "target",
+            target_ids,
+            kinds,
+            "get_incoming_edges_bulk",
+            checkpoint,
+        )
+        .await
+    }
 }
 
 impl Database {
@@ -255,34 +323,11 @@ impl Database {
     where
         F: FnMut() -> Result<()>,
     {
-        if node_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let (mut leading, sql) = if let [node_id] = node_ids {
-            (
-                vec![Value::Text(node_id.clone())],
-                single_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
-            )
-        } else {
-            let encoded =
-                serde_json::to_string(node_ids).map_err(|error| TraceDecayError::Database {
-                    message: format!("failed to encode bulk edge endpoints: {error}"),
-                    operation: operation.to_string(),
-                })?;
-            (
-                vec![Value::Text(encoded)],
-                bulk_edges_by_endpoint_page_sql(endpoint_column, kinds.len()),
-            )
-        };
-        for k in kinds {
-            leading.push(Value::Text(k.as_str().to_string()));
-        }
-        collect_rowid_pages_with_controlled(
+        read_edges_by_endpoint_controlled(
             &self.engine_conn(),
-            &sql,
-            &leading,
-            EDGE_COLUMNS,
-            row_to_edge,
+            endpoint_column,
+            node_ids,
+            kinds,
             operation,
             checkpoint,
         )

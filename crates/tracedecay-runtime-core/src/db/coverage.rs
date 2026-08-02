@@ -1,7 +1,7 @@
 // Rust guideline compliant 2025-10-17
 use std::collections::HashSet;
 
-use super::connection::{Database, DatabaseWriteTransaction};
+use super::connection::{Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction};
 use super::engine::{Value, params_from_iter};
 use super::sql::{build_qmark_placeholders, collect_rowid_pages};
 use crate::errors::{Result, TraceDecayError};
@@ -37,6 +37,20 @@ pub(super) const TEST_MARKER_PAGE_SQL: &str = "SELECT id, rowid FROM nodes
                      )
                      AND rowid > ?1
                    ORDER BY rowid LIMIT ?2";
+
+impl DatabaseEngineReadSnapshot {
+    pub async fn get_files_with_test_annotations(&self) -> Result<HashSet<String>> {
+        let paths = collect_rowid_pages(
+            self,
+            TEST_ANNOTATION_FILE_PAGE_SQL,
+            1,
+            |row| row.get::<String>(0),
+            "get_files_with_test_annotations",
+        )
+        .await?;
+        Ok(paths.into_iter().collect())
+    }
+}
 
 impl Database {
     /// Returns the subset of `candidate_ids` that are annotated with `#[test]`
