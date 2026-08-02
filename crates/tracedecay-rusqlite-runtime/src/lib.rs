@@ -20,6 +20,7 @@ mod operation;
 mod persistence;
 pub mod read_consistency;
 pub mod reader;
+pub mod remote;
 pub mod repository;
 pub mod runtime;
 mod telemetry;

@@ -239,7 +239,8 @@ impl RemoteReplayCommitReceiptV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteReplaySpoolStateV1 {
     pub state: RemoteReplayStateV1,
     pub receipt: Option<RemoteReplayCommitReceiptV1>,
