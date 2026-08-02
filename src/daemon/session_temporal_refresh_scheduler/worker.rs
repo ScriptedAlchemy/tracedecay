@@ -23,6 +23,23 @@ use crate::store::{
     GlobalDbSessionTemporalStore, SessionRefreshRecoveryV1, SessionRefreshRestartStateV1,
 };
 
+/// Migration slices that may run back-to-back before the loop treats the
+/// migration as not converging.
+///
+/// `advance_projection_version_migration_until_cancelled` returns `Ok(false)`
+/// for "still pending" and exposes no remaining-work count, so consecutive
+/// incomplete rounds are the only progress signal available here. A healthy
+/// migration clears in a handful of rounds; anything past that is a stall, and
+/// a stall must not be re-driven at yield speed.
+const MIGRATION_UNCONVERGED_ROUNDS: u32 = 8;
+
+/// Pause between consecutive migration slices while it is still converging.
+///
+/// A bare `yield_now()` is not a pause: the loop is immediately repolled, so an
+/// incomplete migration re-drives the whole advance in a tight spin that burns
+/// a runtime worker and hammers the write connection.
+const MIGRATION_SLICE_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
 pub(super) async fn run_session_temporal_refresh_scheduler(
     database: Arc<RegisteredGlobalDb>,
     state: Arc<SessionTemporalRefreshWakeState>,
@@ -30,6 +47,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
     policy: SessionTemporalRefreshPolicy,
 ) {
     let mut retry_attempt = 0u32;
+    let mut migration_rounds = 0u32;
     state.mark_running();
     loop {
         if state.cancelled.load(Ordering::Acquire) {
@@ -46,10 +64,32 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                 return;
             }
             match migration_complete {
-                Ok(true) => {}
+                Ok(true) => {
+                    migration_rounds = 0;
+                }
                 Ok(false) => {
+                    migration_rounds = migration_rounds.saturating_add(1);
                     state.dirty.store(true, Ordering::Release);
-                    tokio::task::yield_now().await;
+                    let pause = if migration_rounds <= MIGRATION_UNCONVERGED_ROUNDS {
+                        MIGRATION_SLICE_PAUSE
+                    } else {
+                        if migration_rounds == MIGRATION_UNCONVERGED_ROUNDS + 1 {
+                            tracing::warn!(
+                                database = %database.db_path().display(),
+                                rounds = migration_rounds,
+                                "background observation projection migration is not \
+                                 converging; backing off instead of re-driving it"
+                            );
+                        }
+                        session_refresh_retry_delay(
+                            SessionTemporalRefreshRetryClass::Storage,
+                            migration_rounds - MIGRATION_UNCONVERGED_ROUNDS,
+                        )
+                    };
+                    tokio::select! {
+                        () = state.wait_for_cancellation() => return,
+                        () = tokio::time::sleep(pause) => {}
+                    }
                     continue;
                 }
                 Err(error) => {

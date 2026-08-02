@@ -27,9 +27,9 @@ pub const MAX_OPEN_DOCUMENTS: usize = 128;
 /// overlay slots before their terminal clear is emitted.
 pub const MAX_PENDING_OVERLAY_DIAGNOSTICS: usize = 128;
 /// Consecutive document changes coalesce before an analyzer refresh.
-pub const OVERLAY_DIAGNOSTIC_DEBOUNCE_MS: u64 = 50;
+pub const OVERLAY_DIAGNOSTIC_DEBOUNCE_MS: u64 = 75;
 /// A stream of edits cannot postpone the latest diagnostic indefinitely.
-pub const OVERLAY_DIAGNOSTIC_MAX_WAIT_MS: u64 = 200;
+pub const OVERLAY_DIAGNOSTIC_MAX_WAIT_MS: u64 = 250;
 
 /// One LSP `TextDocumentContentChangeEvent` projected without JSON transport
 /// details. A missing range replaces the entire document.
@@ -661,9 +661,9 @@ mod tests {
         let mut debounce = OverlayDiagnosticDebouncer::default();
         assert!(debounce.schedule_refresh("file:///root/a.rs", 1, 0));
         assert!(debounce.schedule_refresh("file:///root/a.rs", 2, 40));
-        assert!(debounce.take_due(89).is_empty());
+        assert!(debounce.take_due(114).is_empty());
         assert_eq!(
-            debounce.take_due(90),
+            debounce.take_due(115),
             vec![DebouncedDiagnostic {
                 uri: "file:///root/a.rs".into(),
                 version: 2,
@@ -671,10 +671,10 @@ mod tests {
             }]
         );
 
-        assert!(debounce.schedule_refresh("file:///root/a.rs", 3, 100));
-        assert!(debounce.schedule_clear("file:///root/a.rs", 3, 110));
+        assert!(debounce.schedule_refresh("file:///root/a.rs", 3, 120));
+        assert!(debounce.schedule_clear("file:///root/a.rs", 3, 130));
         assert_eq!(
-            debounce.take_due(160),
+            debounce.take_due(205),
             vec![DebouncedDiagnostic {
                 uri: "file:///root/a.rs".into(),
                 version: 3,

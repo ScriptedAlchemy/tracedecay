@@ -34,7 +34,7 @@ use crate::retention::code_index_generations::{
 use crate::store::vector_generations::{
     DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
     DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
-    VectorGenerationPlanV1,
+    VectorGenerationBuildIdV1, VectorGenerationPlanV1, VectorProjectionCheckpointV1,
 };
 use tracedecay_code_index::production::CodeIndexPublishedGenerationV1;
 use tracedecay_code_index::projection::expected_request_digest;
@@ -95,6 +95,28 @@ use super::{
     DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
     SemanticProjectionLeaseV1, SemanticProjectionScheduleErrorV1,
 };
+
+/// Chunks embedded before the run commits and releases them.
+///
+/// This bounds the live float set and the work a crash discards, and it is a
+/// multiple of the projector's encoder group size so splitting a run never
+/// changes a tensor shape and therefore never changes a vector. It is sizing,
+/// not semantics: the generation a run publishes is identical at any value.
+///
+/// Smaller values bound memory harder but make each commit re-encode a growing
+/// staged build more often; 4,096 keeps a 150K-chunk corpus at a few dozen
+/// commits while holding roughly 12MB of floats in flight at 768 dimensions.
+const SEMANTIC_EMBEDS_PER_COMMIT: usize = 4_096;
+
+/// Staged-build identity shared by the resume, commit, and publish boundaries
+/// of one incremental run.
+#[derive(Default)]
+struct BatchCommitStateV1 {
+    build: Option<VectorGenerationBuildIdV1>,
+    /// The last committed checkpoint, which the next commit presents as its
+    /// expected watermark. `None` until the first batch commits.
+    checkpoint: Option<VectorProjectionCheckpointV1>,
+}
 
 /// Map daemon schedule projection into the application/Doctor status shape.
 ///
@@ -165,7 +187,7 @@ where
     LoadArtifact: FnOnce() -> Result<LoadedSemanticArtifactV1, SemanticRuntimeScheduleFailureV1>
         + Send
         + 'static,
-    StageProjection: FnOnce(PreparedVectorGenerationV1) -> StageFuture + Send + 'static,
+    StageProjection: FnOnce() -> StageFuture + Send + 'static,
     StageFuture: Future<Output = Result<PreparedSemanticRuntimeCommitV1, SemanticRuntimeScheduleFailureV1>>
         + Send
         + 'static,
@@ -174,7 +196,13 @@ where
         generation.manifest().generation_id.clone(),
         generation.projection().request().clone(),
         generation.chunks().chunks().to_vec(),
+        SEMANTIC_EMBEDS_PER_COMMIT,
         load_artifact,
+        // This helper owns no staged build, so it never resumes and its
+        // batches commit nowhere; callers that need durability go through
+        // `ProductionSemanticRuntimeV1`.
+        || async { Ok(0) },
+        |_prepared| async { Ok(()) },
         stage_projection,
     ) else {
         return false;
@@ -1073,13 +1101,43 @@ impl ProductionSemanticRuntimeV1 {
                     &self.handle,
                     generation,
                     || Err(SemanticRuntimeScheduleFailureV1::Artifact),
-                    move |_prepared| async move {
+                    move || async move {
                         drop(fair_lease);
                         Err(SemanticRuntimeScheduleFailureV1::Publication)
                     },
                 );
             }
         };
+        // A full projection of this corpus under this projection key may have
+        // already been proven to fail terminally at publish time. Rescheduling
+        // it re-embeds the whole corpus inside the shared reservation before
+        // failing identically, so the memo suppresses it under backoff. This is
+        // a scheduling guard only: the memo clears on anything that could
+        // change the outcome (key, corpus-size class, witness, or a success).
+        let failure_key = super::SemanticPublishFailureKeyV1::new(
+            projection.projection_key().clone(),
+            generation.chunks().chunks().len(),
+        );
+        let failure_witness =
+            super::publish_failure_witness(&self.code_index_store_root, &self.resources);
+        if let super::SemanticPublishAdmissionV1::Suppressed(suppressed) =
+            super::semantic_publish_failure_memo().admit(&failure_key, &failure_witness)
+        {
+            tracing::warn!(
+                event = "semantic_projection_schedule",
+                outcome = "suppressed",
+                stored_failure = %suppressed.reason,
+                failures = suppressed.failures,
+                retry_after_ms = u64::try_from(suppressed.retry_after.as_millis())
+                    .unwrap_or(u64::MAX),
+                corpus_size_class = failure_key.corpus_size_class,
+                projection_kind = ?failure_key.projection_key.kind,
+                "semantic publication previously failed for this projection key and \
+                 corpus-size class; suppressing the full re-projection until backoff elapses"
+            );
+            drop(fair_lease);
+            return false;
+        }
         let current = self.handle.current();
         let request = match semantic_projection_request(generation, &projection, current.as_ref()) {
             Ok(request) => request,
@@ -1118,52 +1176,100 @@ impl ProductionSemanticRuntimeV1 {
         let manifest = generation.manifest().clone();
         let resources = self.resources;
         let total_units = request.changes.added_or_changed.len().max(1) as u64;
+        // The plan is decided from the whole request before any batch runs, so
+        // splitting the run never moves the generation identity: the plan's
+        // source watermark and expected membership are the corpus's, not any
+        // one batch's.
+        let published_source_generation = request.changes.to_generation.clone();
+        let published_projection_key = request.target_projection_key.clone();
+        let plan = VectorGenerationPlanV1 {
+            target_projection_key: published_projection_key.clone(),
+            source_generation: published_source_generation.clone(),
+            source_manifest_digest: request.changes.manifest_digest.clone(),
+            expected_chunk_ids: expected_chunk_ids.into(),
+            base_generation: base_generation.clone(),
+        };
+        let commit_state = Arc::new(tokio::sync::Mutex::new(BatchCommitStateV1::default()));
+        let fair_lease = fair_lease.map(Arc::new);
+        let resume_state = Arc::clone(&commit_state);
+        let resume_database = Arc::clone(&database);
+        let commit_lease = fair_lease.clone();
+        let commit_database = Arc::clone(&database);
+        let stage_state = Arc::clone(&commit_state);
         let _ = self.lifecycle.mark_loading();
         let _ = self.lifecycle.mark_indexing(0, total_units);
         let request = match FastEmbedSemanticGenerationRequestV1::new(
             target_generation,
             request,
             canonical_chunks,
+            SEMANTIC_EMBEDS_PER_COMMIT,
             move || {
                 LoadedSemanticArtifactV1::from_lifecycle(&lifecycle_for_load, &manifest, resources)
             },
-            move |prepared| async move {
-                if fair_lease
-                    .as_ref()
-                    .is_some_and(SemanticProjectionLeaseV1::is_cancelled)
-                {
-                    return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
-                }
-                let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
+            move || async move {
+                let store = DatabaseVectorGenerationStoreV1::open(resume_database.as_ref())
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-                let published_source_generation = prepared.request.changes.to_generation.clone();
-                let published_projection_key = prepared.request.target_projection_key.clone();
-                let plan = VectorGenerationPlanV1 {
-                    target_projection_key: published_projection_key.clone(),
-                    source_generation: published_source_generation.clone(),
-                    source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
-                    expected_chunk_ids,
-                    base_generation: base_generation.clone(),
-                };
+                // The build identity is a digest of the plan, so reopening the
+                // same plan re-adopts the same staged build rather than
+                // starting a second one.
                 let build = store
                     .begin_generation(plan)
                     .await
                     .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
-                store
-                    .commit_batch(&build, None, prepared)
+                let checkpoint = store
+                    .staged_checkpoint(&build)
                     .await
-                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?
+                    .filter(|checkpoint| checkpoint.completed_batches > 0);
+                let committed_batches = checkpoint.as_ref().map_or(0, |it| it.completed_batches);
+                let mut state = resume_state.lock().await;
+                state.build = Some(build);
+                state.checkpoint = checkpoint;
+                Ok(committed_batches)
+            },
+            move |prepared| {
+                let state = Arc::clone(&commit_state);
+                let database = Arc::clone(&commit_database);
+                let lease = commit_lease.clone();
+                async move {
+                    if lease
+                        .as_deref()
+                        .is_some_and(SemanticProjectionLeaseV1::is_cancelled)
+                    {
+                        return Err(SemanticRuntimeScheduleFailureV1::Cancelled);
+                    }
+                    let mut state = state.lock().await;
+                    let build = state
+                        .build
+                        .clone()
+                        .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
+                        .await
+                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    let next = store
+                        .commit_batch(&build, state.checkpoint.as_ref(), prepared)
+                        .await
+                        .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+                    state.checkpoint = Some(next);
+                    Ok(())
+                }
+            },
+            move || async move {
+                let build = stage_state
+                    .lock()
+                    .await
+                    .build
+                    .clone()
+                    .ok_or(SemanticRuntimeScheduleFailureV1::Publication)?;
                 let _ = lifecycle_for_stage.mark_indexing(total_units, total_units);
-                let _ = store;
-                let database_for_commit = Arc::clone(&database);
                 Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
                     let _publication_lease = fair_lease
-                        .as_ref()
+                        .as_deref()
                         .map(SemanticProjectionLeaseV1::try_begin_publication)
                         .transpose()
                         .map_err(fair_schedule_failure)?;
-                    let store = DatabaseVectorGenerationStoreV1::open(database_for_commit.as_ref())
+                    let store = DatabaseVectorGenerationStoreV1::open(database.as_ref())
                         .await
                         .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
                     let publication = store
@@ -1197,10 +1303,22 @@ impl ProductionSemanticRuntimeV1 {
                             let _ = lifecycle.mark_indexing(completed_units, total_units);
                         }
                         SemanticRuntimeScheduleStatusV1::Current { .. } => {
+                            super::semantic_publish_failure_memo().record_success(&failure_key);
                             let _ = lifecycle.mark_ready();
                             break;
                         }
                         SemanticRuntimeScheduleStatusV1::Failed { reason, .. } => {
+                            // Publication failure is the reproducible one: it is
+                            // decided by the corpus and the projection key, not
+                            // by this attempt. Memoize it so the next published
+                            // generation does not pay the full re-embed again.
+                            if matches!(reason, SemanticRuntimeScheduleFailureV1::Publication) {
+                                super::semantic_publish_failure_memo().record_failure(
+                                    &failure_key,
+                                    &failure_witness,
+                                    &format!("{reason:?}"),
+                                );
+                            }
                             let _ = lifecycle
                                 .mark_runtime_failed(format!("semantic runtime {reason:?}"), true);
                             break;
@@ -3234,12 +3352,15 @@ mod tests {
             source_generation('a'),
             projection_request('a'),
             Vec::<CodeSearchChunkV1>::new(),
+            SEMANTIC_EMBEDS_PER_COMMIT,
             move || {
                 let _ = started_tx.send(());
                 let _ = release_rx.recv();
                 Err(SemanticRuntimeScheduleFailureV1::Projection)
             },
-            move |_| async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
+            || async { Ok(0) },
+            |_prepared| async { Ok(()) },
+            move || async move { Err(SemanticRuntimeScheduleFailureV1::Publication) },
         )
         .expect("saved generation request");
         assert!(handle.schedule_generation(request));

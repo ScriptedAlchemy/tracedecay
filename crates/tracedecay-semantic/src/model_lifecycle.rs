@@ -1625,10 +1625,13 @@ mod distribution_acquisition_acceptance;
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    #[cfg(feature = "semantic-fastembed")]
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc::{self, Receiver, SyncSender};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
+    #[cfg(feature = "semantic-fastembed")]
+    use std::time::Instant;
 
     use super::super::manifest::{
         ArtifactMemberPinV1, ArtifactPackageMemberV1, ArtifactProfileKindV1, DeviceClassV1,
@@ -1695,12 +1698,14 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     struct FixtureHub {
         endpoint: String,
         requests: Arc<AtomicUsize>,
         worker: Option<JoinHandle<()>>,
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     impl FixtureHub {
         fn start(model: &CatalogedFastEmbedModelV1, fixture: &Path) -> Self {
             let members = model
@@ -1752,6 +1757,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "semantic-fastembed")]
     fn serve_fixture_hub_request(
         stream: &mut TcpStream,
         members: &BTreeMap<String, Vec<u8>>,

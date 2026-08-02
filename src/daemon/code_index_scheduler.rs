@@ -160,6 +160,23 @@ impl SharedCodeIndexBytePoolV1 {
 /// superseded generations.
 const DECODED_GENERATION_CACHE_CAPACITY: usize = 4;
 
+/// Whether one generation resolution may enter the single-flight sealed-decode.
+///
+/// Decoding a sealed generation is O(store). A query that already has a
+/// complete generation it can serve must never queue behind that decode:
+/// awaiting a *new* generation may not preempt serving an *old* one. Such a
+/// query resolves with [`Self::AlreadyDecoded`] and abstains rather than
+/// parking; only a query with nothing servable resolves with
+/// [`Self::AwaitDecode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum GenerationDecodeAdmissionV1 {
+    /// Join (or start) the single-flight decode of the active generation.
+    AwaitDecode,
+    /// Serve the active generation only if it is already decoded; never claim a
+    /// decode lease and never park on the barrier.
+    AlreadyDecoded,
+}
+
 /// Which sealed generation one decode lease covers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum DecodeSubjectV1 {
@@ -320,6 +337,34 @@ impl Drop for DecodeLeaseV1<'_> {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             state.in_flight.retain(|pending| *pending != self.subject);
+        }
+        self.cache.ready.notify_all();
+    }
+}
+
+/// Test-only occupation of the active decode barrier. See
+/// [`DaemonCodeIndexPublicationStoreV1::hold_active_decode`].
+#[cfg(test)]
+pub(super) struct HeldActiveDecodeV1 {
+    cache: Arc<DecodedGenerationCacheV1>,
+    restore: Option<Arc<CodeIndexPublishedGenerationV1>>,
+}
+
+#[cfg(test)]
+impl Drop for HeldActiveDecodeV1 {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .cache
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state
+                .in_flight
+                .retain(|pending| *pending != DecodeSubjectV1::Active);
+            if state.active.is_none() {
+                state.active = self.restore.take();
+            }
         }
         self.cache.ready.notify_all();
     }
@@ -498,6 +543,40 @@ impl DaemonCodeIndexPublicationStoreV1 {
             }
         }
         Ok(matched)
+    }
+
+    /// Serve the active generation only when it is already decoded.
+    ///
+    /// Pure bookkeeping: it takes the cache lock for a pointer read and returns.
+    /// It never claims a decode lease, never parks on the barrier, and never
+    /// reads sealed bytes, so a caller that already has something servable can
+    /// resolve freshness without being preempted by an in-flight O(store)
+    /// decode. `None` means "not decoded here, yet" — it is an abstention, not
+    /// evidence that no generation exists, and callers must never turn it into a
+    /// fail-closed verdict on its own.
+    fn active_already_decoded(
+        &self,
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+        Ok(self.cache.lock_state()?.active.as_ref().map(Arc::clone))
+    }
+
+    /// Occupy the active-generation decode barrier exactly as a cold activation
+    /// does: the pinned slot is empty and one decode is in flight. Restores both
+    /// on drop, so a parked reader is never stranded.
+    #[cfg(test)]
+    fn hold_active_decode(&self) -> HeldActiveDecodeV1 {
+        let mut state = self
+            .cache
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let restore = state.active.take();
+        state.in_flight.push(DecodeSubjectV1::Active);
+        drop(state);
+        HeldActiveDecodeV1 {
+            cache: Arc::clone(&self.cache),
+            restore,
+        }
     }
 
     /// Serve the active generation, decoding it at most once per publication.
@@ -1079,6 +1158,18 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     ProductionOpen(String),
     #[error("code-index privacy sanitizer failed: {0}")]
     Privacy(String),
+    /// Mount admission did not free a permit within its deadline. The store is
+    /// healthy and the decode is merely queued behind other worktrees, so this
+    /// is retryable — unlike every other variant here.
+    #[error("code-index mount admission is warming: no permit within {waited_ms}ms; retry")]
+    MountAdmissionWarming { waited_ms: u64 },
+}
+
+impl CodeIndexSchedulerErrorV1 {
+    /// Whether retrying the same mount against this daemon can succeed.
+    pub(super) fn is_retryable(&self) -> bool {
+        matches!(self, Self::MountAdmissionWarming { .. })
+    }
 }
 
 struct AtomicFlagReset(Arc<AtomicBool>);
@@ -1516,6 +1607,16 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn latest_complete_ready_for_query(
         &mut self,
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        self.latest_complete_ready_for_query_with(GenerationDecodeAdmissionV1::AwaitDecode)
+    }
+
+    /// [`Self::latest_complete_ready_for_query`] under an explicit decode
+    /// admission. The freshness checks are identical; only whether an
+    /// undecoded active generation is awaited or abstained on differs.
+    fn latest_complete_ready_for_query_with(
+        &mut self,
+        admission: GenerationDecodeAdmissionV1,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
@@ -1530,7 +1631,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             self.request_background_reconcile();
             return Ok(None);
         }
-        Ok(self.latest_complete())
+        Ok(self.latest_complete_with(admission))
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -1602,6 +1703,48 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
     }
 
+    /// Whether this worktree's git authority still resolves.
+    ///
+    /// The freshness ladder used to run inline at query admission, so a
+    /// vanished or unreadable `.git` surfaced as a `reconcile_now` error and the
+    /// query failed closed rather than serving retained bytes attributed to an
+    /// identity nothing could confirm. Now that the rebuild is backgrounded
+    /// (see [`Self::request_fresh_for_query_background`]) that error is no
+    /// longer reached on the request path, so the fail-closed gate needs its own
+    /// cheap probe. Opening the repository is the O(1) part of what reconcile
+    /// did: it proves the authority exists without walking, hashing, or
+    /// classifying anything.
+    pub(super) fn git_authority_available(&self) -> bool {
+        gix::open(&self.project_root).is_ok()
+    }
+
+    /// [`Self::ensure_fresh_for_query`] with the O(store) rebuild moved off the
+    /// request path.
+    ///
+    /// Runs the identical ladder — unverified restore, tier-1 git metadata,
+    /// tier-2 bounded staleness — but where `ensure_fresh_for_query` calls
+    /// `reconcile_now()` inline this only *requests* the background worker.
+    /// The ladder's checks are cheap (stat-level metadata); its remedy is not,
+    /// and a query must never pay for it. This mirrors what
+    /// [`Self::latest_complete_ready_for_query_with`] already does for the
+    /// latency-sensitive application paths.
+    ///
+    /// Returns whether a reconcile was actually requested. A quiet repository
+    /// must answer `false` and wake nothing: the ladder suppressing work is the
+    /// common case, and waking the worker on every read would turn each query
+    /// into a rebuild trigger — exactly the coupling this change removes.
+    pub(super) fn request_fresh_for_query_background(&mut self) -> bool {
+        if !self.verified_against_source
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
+        {
+            self.request_background_reconcile();
+            return true;
+        }
+        false
+    }
+
     /// The exact identity this scheduler is currently bound to.
     pub fn identity(&self) -> &identity::IndexingIdentityV1 {
         &self.identity
@@ -1633,33 +1776,57 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn latest_complete(&self) -> Option<LatestCompleteCodeIndexV1> {
-        self.publication
-            .load_active_shared()
-            .ok()
-            .flatten()
-            .map(|generation| {
-                let generation_id = generation.manifest().generation_id.clone();
-                let mut cached = self
-                    .query_owners
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (query_owners, record_index) = match cached.as_ref() {
-                    Some((cached_id, owners, index)) if cached_id == &generation_id => {
-                        (Arc::clone(owners), Arc::clone(index))
-                    }
-                    _ => {
-                        let owners = Arc::new(OnceLock::new());
-                        let index = Arc::new(OnceLock::new());
-                        *cached = Some((generation_id, Arc::clone(&owners), Arc::clone(&index)));
-                        (owners, index)
-                    }
-                };
-                LatestCompleteCodeIndexV1 {
-                    generation,
-                    query_owners,
-                    record_index,
-                }
-            })
+        self.latest_complete_with(GenerationDecodeAdmissionV1::AwaitDecode)
+    }
+
+    /// [`Self::latest_complete`] restricted to an already-decoded active
+    /// generation. Abstains instead of parking on the single-flight decode.
+    pub(super) fn latest_complete_already_decoded(&self) -> Option<LatestCompleteCodeIndexV1> {
+        self.latest_complete_with(GenerationDecodeAdmissionV1::AlreadyDecoded)
+    }
+
+    fn latest_complete_with(
+        &self,
+        admission: GenerationDecodeAdmissionV1,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let generation = match admission {
+            GenerationDecodeAdmissionV1::AwaitDecode => self.publication.load_active_shared(),
+            GenerationDecodeAdmissionV1::AlreadyDecoded => {
+                self.publication.active_already_decoded()
+            }
+        }
+        .ok()
+        .flatten()?;
+        Some(self.bind_latest_complete(generation))
+    }
+
+    /// Bind one decoded generation to this scheduler's per-generation serving
+    /// derivations, so every reader of the same generation shares one build.
+    fn bind_latest_complete(
+        &self,
+        generation: Arc<CodeIndexPublishedGenerationV1>,
+    ) -> LatestCompleteCodeIndexV1 {
+        let generation_id = generation.manifest().generation_id.clone();
+        let mut cached = self
+            .query_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (query_owners, record_index) = match cached.as_ref() {
+            Some((cached_id, owners, index)) if cached_id == &generation_id => {
+                (Arc::clone(owners), Arc::clone(index))
+            }
+            _ => {
+                let owners = Arc::new(OnceLock::new());
+                let index = Arc::new(OnceLock::new());
+                *cached = Some((generation_id, Arc::clone(&owners), Arc::clone(&index)));
+                (owners, index)
+            }
+        };
+        LatestCompleteCodeIndexV1 {
+            generation,
+            query_owners,
+            record_index,
+        }
     }
 
     /// Decode, validate, mint, and warm the active generation eagerly.
@@ -1685,6 +1852,13 @@ impl CodeIndexWorktreeSchedulerV1 {
     #[cfg(test)]
     fn sealed_decode_count(&self) -> u64 {
         self.publication.sealed_decode_count()
+    }
+
+    /// Occupy this worktree's active-generation decode barrier, reproducing the
+    /// window in which a new generation is being decoded/activated.
+    #[cfg(test)]
+    pub(super) fn hold_active_decode(&self) -> HeldActiveDecodeV1 {
+        self.publication.hold_active_decode()
     }
 
     fn generation(
