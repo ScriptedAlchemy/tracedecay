@@ -568,15 +568,17 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
         request.lifecycle.operation,
     )
     .unwrap();
-    assert_eq!(
-        transaction.execute_confirmed(
-            &component_set.component_set,
-            &request,
-            &contested,
-            &component_set,
-            &mut registration,
+    assert!(
+        matches!(
+            transaction.execute_confirmed(
+                &component_set.component_set,
+                &request,
+                &contested,
+                &component_set,
+                &mut registration,
+            ),
+            Err(HostBundleError::StalePreview(_))
         ),
-        Err(HostBundleError::StalePreview),
         "apply must refuse a preview confirmed before the newest competing claim"
     );
 }
@@ -787,7 +789,7 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
         assert_eq!(replay, install);
         let mut wrong_preview = install_preview.clone();
         wrong_preview.plan_digest[0] ^= 1;
-        assert_eq!(
+        assert!(matches!(
             HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
                 &component_set.component_set,
                 &install_request,
@@ -795,8 +797,8 @@ fn embedded_component_sets_complete_lifecycle_for_all_supported_hosts() {
                 &component_set,
                 &mut registration,
             ),
-            Err(HostBundleError::StalePreview)
-        );
+            Err(HostBundleError::StalePreview(_))
+        ));
         assert!(
             inspect_installed_host_bundle_components_at(
                 artifacts.path(),
@@ -1029,7 +1031,7 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
         .unwrap();
     let mut stale = repair_preview.clone();
     stale.plan_digest[0] ^= 1;
-    assert_eq!(
+    assert!(matches!(
         HostComponentSetTransactionV1::new(&mut writer).execute_confirmed(
             &component_set.component_set,
             &repair_request,
@@ -1037,8 +1039,8 @@ fn cursor_core_drift_warns_and_reinstall_converges_with_a_backup() {
             &component_set,
             &mut registration,
         ),
-        Err(HostBundleError::StalePreview)
-    );
+        Err(HostBundleError::StalePreview(_))
+    ));
     assert_eq!(fs::read(&unrelated).unwrap(), unrelated_bytes);
     assert_eq!(fs::read(&deployed).unwrap(), REFRESHED);
 
