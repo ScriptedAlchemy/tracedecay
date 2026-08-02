@@ -149,6 +149,7 @@ pub enum ProductionCiFailureDiscoveryOutcomeV1 {
     NotFound,
     Ambiguous,
     RateLimited(CiFailureRateLimitCheckpointV1),
+    Stale,
     Failed(CiFailureSourceFailureV1),
     Denied,
     Unavailable,
@@ -166,6 +167,7 @@ impl ProductionCiFailureDiscoveryOutcomeV1 {
             | Self::NotFound
             | Self::Ambiguous
             | Self::RateLimited(_)
+            | Self::Stale
             | Self::Failed(_)
             | Self::Denied
             | Self::Unavailable => None,
@@ -279,19 +281,6 @@ pub async fn discover_production_ci_failure_request_v1(
     discover_production_ci_failure_request_with_v1(context, config, scope, &client).await
 }
 
-#[allow(dead_code)]
-fn assert_production_ci_discovery_future_is_send(
-    context: &RequestContext,
-    config: &ProductionCiProviderConfigV1,
-    scope: &FeedbackScopeV1,
-) {
-    fn assert_send<T: Send>(_: T) {}
-
-    assert_send(discover_production_ci_failure_request_v1(
-        context, config, scope,
-    ));
-}
-
 async fn discover_production_ci_failure_request_with_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
@@ -365,6 +354,10 @@ fn consensus_ci_discovery_outcome(
             ProductionCiFailureDiscoveryOutcomeV1::Found(_),
             ProductionCiFailureDiscoveryOutcomeV1::Denied,
         ) => ProductionCiFailureDiscoveryOutcomeV1::Denied,
+        (
+            ProductionCiFailureDiscoveryOutcomeV1::Found(_),
+            ProductionCiFailureDiscoveryOutcomeV1::Stale,
+        ) => ProductionCiFailureDiscoveryOutcomeV1::Stale,
         (
             ProductionCiFailureDiscoveryOutcomeV1::Found(_),
             ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint),
@@ -528,9 +521,8 @@ async fn authorize_ci_source(
     match config.source_access.authorize_ci(context, scope).await {
         CiSourceAccessOutcomeV1::Ready => Ok(()),
         CiSourceAccessOutcomeV1::Denied => Err(ProductionCiFailureDiscoveryOutcomeV1::Denied),
-        CiSourceAccessOutcomeV1::Stale
-        | CiSourceAccessOutcomeV1::Ambiguous
-        | CiSourceAccessOutcomeV1::Unavailable => {
+        CiSourceAccessOutcomeV1::Stale => Err(ProductionCiFailureDiscoveryOutcomeV1::Stale),
+        CiSourceAccessOutcomeV1::Ambiguous | CiSourceAccessOutcomeV1::Unavailable => {
             Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
         }
     }
@@ -1494,6 +1486,18 @@ mod discovery_tests {
         }
     }
 
+    struct StaleSourceAccess;
+
+    impl CiSourceAccessAuthorityV1 for StaleSourceAccess {
+        fn authorize_ci<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _scope: &'a FeedbackScopeV1,
+        ) -> FeedbackPortFuture<'a, CiSourceAccessOutcomeV1> {
+            Box::pin(async { CiSourceAccessOutcomeV1::Stale })
+        }
+    }
+
     fn scope(
         fixture: &crate::advisory::fixtures::Pr13SourceBackedCompositeFixtureV1,
     ) -> FeedbackScopeV1 {
@@ -1678,6 +1682,28 @@ mod discovery_tests {
             .await,
             ProductionCiFailureDiscoveryOutcomeV1::Denied
         );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_ci_access_remains_stale_without_a_network_read() {
+        let fixture =
+            crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+        let scope = scope(&fixture);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = CountingDiscoveryClient {
+            calls: Arc::clone(&calls),
+        };
+
+        let outcome = discover_production_ci_failure_request_with_v1(
+            &context(&scope, UtcMicros(i64::MAX)),
+            &config_with_source(&fixture, Arc::new(StaleSourceAccess)),
+            &scope,
+            &client,
+        )
+        .await;
+
+        assert_eq!(outcome, ProductionCiFailureDiscoveryOutcomeV1::Stale);
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
