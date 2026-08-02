@@ -84,8 +84,160 @@ pub(crate) enum DaemonClientAdmissionClass {
     ReservedControl,
 }
 
+/// How long a park may keep its admission permit before surrendering it.
+///
+/// A request that finishes inside this grace never touches the semaphore, so
+/// the hot path costs one timer registration and nothing else. Only a request
+/// that is genuinely parked — waiting on a project open, on the writer gate, or
+/// on a single-flight generation decode — gives its slot back.
+pub(crate) const ADMISSION_PARK_GRACE: Duration = Duration::from_millis(50);
+
+/// The admission slot one accepted connection currently holds.
+///
+/// Live defect this exists for: the 60 general admission slots were held by
+/// requests *parked* on warm-up, on the writer gate, or on a generation decode
+/// while the reader pool sat completely idle. Every arriving request — including
+/// tools that need no generation at all — was then shed with the retryable
+/// `bulk_capacity_reached`. Admission must bound concurrent *work*, and a
+/// request asleep on a barrier is not work.
+///
+/// The permit therefore lives here behind a lock instead of inside the connection
+/// future, so [`park_admission`] can take it out for the duration of a park and
+/// put it back afterwards.
+pub(crate) struct ParkableConnectionAdmission {
+    permits: Arc<tokio::sync::Semaphore>,
+    held: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+}
+
+impl ParkableConnectionAdmission {
+    fn new(
+        permits: Arc<tokio::sync::Semaphore>,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
+        Self {
+            permits,
+            held: std::sync::Mutex::new(Some(permit)),
+        }
+    }
+
+    /// Surrender the slot. Reports whether this call is the one that released it,
+    /// so a nested park leaves the outer park's re-acquisition as the only one.
+    fn release(&self) -> bool {
+        self.held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_some()
+    }
+
+    /// Re-take a slot after the park ended.
+    ///
+    /// The wait is fair and unbounded on purpose. It cannot deadlock: no park in
+    /// this daemon completes by way of another *admitted* request — project opens
+    /// and generation rebuilds run on their own background tasks — so the permits
+    /// this caller waits on are held only by requests that are actively finishing.
+    /// Tokio hands a released permit to a queued waiter before any newly arriving
+    /// `try_acquire`, so a request resuming from a park is served ahead of a fresh
+    /// connection rather than being starved by the load that made it park.
+    async fn reacquire(&self) {
+        let Ok(permit) = Arc::clone(&self.permits).acquire_owned().await else {
+            return;
+        };
+        let mut held = self
+            .held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.is_none() {
+            *held = Some(permit);
+        }
+    }
+}
+
+tokio::task_local! {
+    static CONNECTION_ADMISSION: Arc<ParkableConnectionAdmission>;
+}
+
+/// Run `future` without holding a general admission slot across a long park.
+///
+/// Wrap the wait, never the work: the returned future keeps its slot for
+/// [`ADMISSION_PARK_GRACE`], and only surrenders it if the wait outlives that
+/// grace. Nesting is safe — the innermost park that still finds a held permit is
+/// the one that releases and re-acquires it.
+///
+/// Outside a connection scope (tests, background tasks, reserved-control
+/// clients) this is a transparent passthrough.
+pub(crate) async fn park_admission<F>(future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    // The same pinned future is resumed after the grace expires, so the grace is
+    // an observation of the wait, never a cancellation of it.
+    let mut future = std::pin::pin!(future);
+    if let Ok(output) = timeout(ADMISSION_PARK_GRACE, &mut future).await {
+        return output;
+    }
+    let Ok(lease) = CONNECTION_ADMISSION.try_with(Arc::clone) else {
+        return future.await;
+    };
+    if !lease.release() {
+        return future.await;
+    }
+    let output = future.await;
+    lease.reacquire().await;
+    output
+}
+
+/// Capture the calling connection's admission lease, if it has one.
+///
+/// Needed because `rmcp` serves each connection from a task it spawns itself.
+/// A task-local does not cross that spawn, so the adapter captures the lease
+/// while it is still constructed on the connection task and re-enters the scope
+/// per request with [`in_connection_admission`]. Without that, every MCP
+/// `tools/call` — the daemon's main serving path — would park on a generation
+/// decode while still holding its admission slot.
+pub(crate) fn current_connection_admission() -> Option<Arc<ParkableConnectionAdmission>> {
+    CONNECTION_ADMISSION.try_with(Arc::clone).ok()
+}
+
+/// Re-enter a captured connection's admission scope on another task.
+pub(crate) async fn in_connection_admission<F>(
+    lease: Option<Arc<ParkableConnectionAdmission>>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    match lease {
+        Some(lease) => CONNECTION_ADMISSION.scope(lease, future).await,
+        None => future.await,
+    }
+}
+
+/// Serve one accepted connection under its admission permit.
+///
+/// General clients run inside the parkable scope so every [`park_admission`]
+/// site below them can hand the slot back. Reserved-control clients answer
+/// catalog and status traffic that touches no barrier, so they simply hold their
+/// permit for the connection.
+pub(crate) async fn with_connection_admission<F>(permit: DaemonClientPermit, future: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    if permit.class == DaemonClientAdmissionClass::General {
+        let lease = Arc::clone(&permit.lease);
+        return CONNECTION_ADMISSION
+            .scope(lease, async move {
+                let _permit = permit;
+                future.await
+            })
+            .await;
+    }
+    let _permit = permit;
+    future.await
+}
+
 pub(crate) struct DaemonClientPermit {
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    lease: Arc<ParkableConnectionAdmission>,
     class: DaemonClientAdmissionClass,
 }
 
@@ -227,16 +379,29 @@ impl DaemonClientAdmission {
         }
     }
 
+    /// General slots currently free. Test probe for "the park gave its slot
+    /// back" and for permit-leak assertions.
+    #[cfg(test)]
+    pub(crate) fn available_general_permits(&self) -> usize {
+        self.general_permits.available_permits()
+    }
+
     pub(crate) fn try_admit(&self) -> DaemonClientAdmissionOutcome {
         if let Ok(permit) = Arc::clone(&self.general_permits).try_acquire_owned() {
             return DaemonClientAdmissionOutcome::Admitted(DaemonClientPermit {
-                _permit: permit,
+                lease: Arc::new(ParkableConnectionAdmission::new(
+                    Arc::clone(&self.general_permits),
+                    permit,
+                )),
                 class: DaemonClientAdmissionClass::General,
             });
         }
         if let Ok(permit) = Arc::clone(&self.reserved_permits).try_acquire_owned() {
             return DaemonClientAdmissionOutcome::Admitted(DaemonClientPermit {
-                _permit: permit,
+                lease: Arc::new(ParkableConnectionAdmission::new(
+                    Arc::clone(&self.reserved_permits),
+                    permit,
+                )),
                 class: DaemonClientAdmissionClass::ReservedControl,
             });
         }
