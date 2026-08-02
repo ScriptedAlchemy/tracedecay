@@ -289,7 +289,14 @@ fn semantic_config_defaults_to_offline_healthy_baseline() {
     let model_bytes = model.members.get("model").expect("model member").length;
     assert!(config.semantic.resources.max_model_bytes >= model_bytes);
     assert!(config.semantic.resources.max_resident_bytes >= model_bytes.saturating_mul(2));
-    assert_eq!(config.semantic.resources.max_concurrent_sessions, 1);
+    // Concurrent sessions are host-derived sizing (the serving reservation
+    // divided by the pinned intra-op width), not a fixed constant. Only the
+    // floor is a contract: every host embeds with at least one session.
+    assert_eq!(
+        config.semantic.resources.max_concurrent_sessions,
+        tracedecay_semantic::embedding_parallelism::default_max_concurrent_sessions(),
+    );
+    assert!(config.semantic.resources.max_concurrent_sessions >= 1);
 
     let json = serde_json::to_string(&config).unwrap();
     let parsed: TraceDecayConfig = serde_json::from_str(&json).unwrap();
