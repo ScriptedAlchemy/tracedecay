@@ -264,6 +264,11 @@ impl ProfileHostAdmissionReplayRegistry {
     }
 
     pub(super) async fn wait_idle(&self, broker_path: &Path, timeout: Duration) -> bool {
+        if self.shutting_down.load(Ordering::Acquire)
+            || self.cancellation.cancelled.load(Ordering::Acquire)
+        {
+            return false;
+        }
         let worker = {
             let workers = self.workers.lock().await;
             workers
@@ -271,7 +276,8 @@ impl ProfileHostAdmissionReplayRegistry {
                 .map(|entry| Arc::clone(&entry.worker))
         };
         let Some(worker) = worker else {
-            return true;
+            return !self.shutting_down.load(Ordering::Acquire)
+                && !self.cancellation.cancelled.load(Ordering::Acquire);
         };
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -288,7 +294,8 @@ impl ProfileHostAdmissionReplayRegistry {
                 idle = worker.is_idle() => idle,
             };
             if idle {
-                return true;
+                return !self.shutting_down.load(Ordering::Acquire)
+                    && !self.cancellation.cancelled.load(Ordering::Acquire);
             }
             tokio::select! {
                 () = self.cancellation.wait() => return false,
@@ -540,6 +547,8 @@ impl ProfileHostAdmissionReplayWorker {
             return false;
         }
         self.has_pending_replay_or_cancelled().await == Some(false)
+            && !self.busy.load(Ordering::Acquire)
+            && !self.dirty.load(Ordering::Acquire)
     }
 
     async fn wait_for_cancellation(&self) {
@@ -592,8 +601,8 @@ impl ProfileHostAdmissionReplayWorker {
                 if !has_work {
                     break;
                 }
-                let _ = self.dirty.swap(false, Ordering::AcqRel);
                 self.busy.store(true, Ordering::Release);
+                let _ = self.dirty.swap(false, Ordering::AcqRel);
                 self.pass_count.fetch_add(1, Ordering::AcqRel);
                 let Some(pending_before) = self.pending_replay_count_or_cancelled().await else {
                     self.mark_idle();
@@ -1191,6 +1200,69 @@ mod tests {
             "a fresh idle probe must observe the completed replay"
         );
         registry.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kick_during_pending_probe_keeps_worker_non_idle() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let profile_root = temp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        let db_path = crate::sessions::user_sessions_db_path(&profile_root);
+        let (runtime, _) =
+            crate::application::host_admission::HostAdmissionRuntime::open_for_database(&db_path)
+                .unwrap();
+        let broker =
+            Arc::new(crate::application::host_admission::HostAdmissionBroker::new(runtime));
+        let cancellation = Arc::new(ProfileHostAdmissionCancellation::new());
+        let probe_started = Arc::new(Notify::new());
+        let release_probe = Arc::new(Notify::new());
+        let pending_count_override: PendingReplayCountOverride = {
+            let probe_started = Arc::clone(&probe_started);
+            let release_probe = Arc::clone(&release_probe);
+            Arc::new(move || {
+                let probe_started = Arc::clone(&probe_started);
+                let release_probe = Arc::clone(&release_probe);
+                Box::pin(async move {
+                    probe_started.notify_one();
+                    release_probe.notified().await;
+                    0
+                })
+            })
+        };
+        let worker = Arc::new(ProfileHostAdmissionReplayWorker::new(
+            &broker,
+            &profile_root,
+            cancellation,
+            None,
+            Some(pending_count_override),
+        ));
+
+        let probe_worker = Arc::clone(&worker);
+        let probe = tokio::spawn(async move { probe_worker.is_idle().await });
+        probe_started.notified().await;
+        worker.kick();
+        release_probe.notify_one();
+
+        assert!(
+            !probe.await.expect("idle probe task"),
+            "a concurrent kick must keep replay readiness non-idle"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_never_reports_replay_ready() {
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        registry.shutdown().await;
+
+        assert!(
+            !registry
+                .wait_idle(
+                    Path::new("missing-user-sessions.db"),
+                    Duration::from_secs(1)
+                )
+                .await,
+            "shutdown replay authority must never report ready"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
