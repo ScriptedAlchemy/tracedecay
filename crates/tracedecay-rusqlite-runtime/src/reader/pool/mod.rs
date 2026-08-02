@@ -31,7 +31,7 @@ pub use lease::{ReaderLease, SnapshotLease};
 pub use outcome::{ReaderAcquireError, ReaderPoolSnapshot, ReaderPoolState};
 use outcome::{interruption, validate_probe};
 
-const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
+pub(super) const ACQUISITION_POLL_QUANTUM: Duration = Duration::from_millis(5);
 pub(super) const SNAPSHOT_END_GRACE: Duration = Duration::from_millis(5);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -389,6 +389,16 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         validate_probe(request, probe)?;
         let lane = ReaderLane::for_priority(request.priority());
         self.acquire_lane(lane, max_wait, || interruption(probe))
+    }
+
+    /// Give a direct dispatch one bounded poll quantum to absorb a transient
+    /// lease handoff instead of reporting saturation immediately.
+    pub(crate) fn acquire_for_dispatch(
+        &self,
+        request: &RuntimeReadRequestV1,
+        probe: &dyn RuntimeRequestProbeV1,
+    ) -> Result<ReaderLease<E>, ReaderAcquireError> {
+        self.acquire(request, probe, ACQUISITION_POLL_QUANTUM)
     }
 
     fn acquire_lane<F>(

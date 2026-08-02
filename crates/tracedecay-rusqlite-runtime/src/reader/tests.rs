@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
     time::{Duration, Instant},
@@ -183,6 +183,56 @@ impl RuntimeRequestProbeV1 for Probe {
             1 => Some(RuntimeInterruptionV1::Cancelled),
             _ => Some(RuntimeInterruptionV1::DeadlineExceeded),
         }
+    }
+}
+
+enum SecondPollAction {
+    Cancel,
+    Release(ReaderLease<CountExecutor>),
+}
+
+struct SecondPollProbe {
+    base: Probe,
+    polls: AtomicU8,
+    action: Mutex<Option<SecondPollAction>>,
+}
+
+impl SecondPollProbe {
+    fn cancelling(request: &RuntimeReadRequestV1) -> Self {
+        Self {
+            base: Probe::for_request(request),
+            polls: AtomicU8::new(0),
+            action: Mutex::new(Some(SecondPollAction::Cancel)),
+        }
+    }
+
+    fn releasing(request: &RuntimeReadRequestV1, lease: ReaderLease<CountExecutor>) -> Self {
+        Self {
+            base: Probe::for_request(request),
+            polls: AtomicU8::new(0),
+            action: Mutex::new(Some(SecondPollAction::Release(lease))),
+        }
+    }
+}
+
+impl RuntimeRequestProbeV1 for SecondPollProbe {
+    fn cancellation_identity(&self) -> &RuntimeCancellationIdentityV1 {
+        self.base.cancellation_identity()
+    }
+
+    fn deadline_identity(&self) -> &RuntimeDeadlineV1 {
+        self.base.deadline_identity()
+    }
+
+    fn interruption(&self) -> Option<RuntimeInterruptionV1> {
+        if self.polls.fetch_add(1, Ordering::SeqCst) > 0 {
+            match self.action.lock().unwrap().take() {
+                Some(SecondPollAction::Cancel) => self.base.cancel(),
+                Some(SecondPollAction::Release(lease)) => drop(lease),
+                None => {}
+            }
+        }
+        self.base.interruption()
     }
 }
 
@@ -556,6 +606,72 @@ fn saturated_general_lane_does_not_consume_reserved_health_reader() {
         .unwrap();
     let snapshot = pool.snapshot();
     assert_eq!((snapshot.leased_general, snapshot.leased_health), (2, 1));
+}
+
+#[test]
+fn dispatch_acquisition_grace_admits_after_transient_lease_release() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let occupancy_probe = Probe::for_request(&read);
+    let _first = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let second = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let dispatch_probe = SecondPollProbe::releasing(&read, second);
+
+    let _replacement = pool
+        .acquire_for_dispatch(&read, &dispatch_probe)
+        .expect("one dispatch grace quantum should absorb a lease handoff");
+
+    assert_eq!(pool.snapshot().leased_general, 2);
+}
+
+#[test]
+fn dispatch_acquisition_grace_observes_cancellation_while_waiting() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let occupancy_probe = Probe::for_request(&read);
+    let _first = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let _second = pool
+        .acquire(&read, &occupancy_probe, Duration::ZERO)
+        .unwrap();
+    let dispatch_probe = SecondPollProbe::cancelling(&read);
+    let before = pool.snapshot();
+
+    assert!(matches!(
+        pool.acquire_for_dispatch(&read, &dispatch_probe),
+        Err(ReaderAcquireError::Interrupted {
+            reason: tracedecay_store::UnavailableReasonV1::Cancelled
+        })
+    ));
+    assert_eq!(pool.snapshot(), before);
+}
+
+#[test]
+fn dispatch_acquisition_grace_keeps_true_saturation_bounded() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
+    let read = request(&store.binding, OperationPriorityV1::Foreground);
+    let probe = Probe::for_request(&read);
+    let _first = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+    let _second = pool.acquire(&read, &probe, Duration::ZERO).unwrap();
+
+    let started = Instant::now();
+    assert!(matches!(
+        pool.acquire_for_dispatch(&read, &probe),
+        Err(ReaderAcquireError::Saturated {
+            scope: tracedecay_store::SaturationScopeV1::ReaderPool
+        })
+    ));
+    let elapsed = started.elapsed();
+    assert!(elapsed >= pool::ACQUISITION_POLL_QUANTUM);
+    assert!(elapsed < Duration::from_secs(1));
 }
 
 #[test]
