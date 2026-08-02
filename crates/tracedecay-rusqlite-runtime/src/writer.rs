@@ -344,11 +344,18 @@ pub enum WriterStartError {
     ThreadSpawn(std::io::Error),
     StartupChannelClosed,
     OpenFailed,
-    BusyTimeoutSetupFailed,
+    /// Carries the connection-policy stage that actually failed. Collapsing
+    /// every non-open policy error into one label hid which pragma rejected the
+    /// connection, which is the only thing that identifies a platform-specific
+    /// SQLite difference.
+    ConnectionPolicyFailed(String),
     CheckpointSetupFailed,
     CheckpointSchedulerSetupFailed,
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
-    OpenedDatabaseIdentityMismatch { expected: u64, actual: u64 },
+    OpenedDatabaseIdentityMismatch {
+        expected: u64,
+        actual: u64,
+    },
     OpenedDatabasePathMismatch,
 }
 
@@ -370,8 +377,11 @@ impl fmt::Display for WriterStartError {
                 f.write_str("SQLite writer thread exited before reporting startup")
             }
             Self::OpenFailed => f.write_str("failed to open verified SQLite store"),
-            Self::BusyTimeoutSetupFailed => {
-                f.write_str("failed to disable SQLite writer busy waiting")
+            Self::ConnectionPolicyFailed(detail) => {
+                write!(
+                    f,
+                    "failed to apply SQLite writer connection policy: {detail}"
+                )
             }
             Self::CheckpointSetupFailed => {
                 f.write_str("failed to initialize SQLite writer checkpoint policy")
