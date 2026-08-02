@@ -73,6 +73,15 @@ fn elapsed_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
+fn completed_elapsed_us(
+    started_at: Option<Instant>,
+    handler_elapsed_us: Option<u64>,
+) -> Option<u64> {
+    started_at
+        .map(|started| elapsed_micros(started.elapsed()))
+        .or(handler_elapsed_us)
+}
+
 fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal {
     let error_data = response
         .error
@@ -1826,9 +1835,8 @@ impl McpServer {
                             Some(resolve) => match resolve(Arc::clone(&cg)).await {
                                 Ok(wake) => Some(wake),
                                 Err(error) => {
-                                    let elapsed_us = started_at
-                                        .map(|started| elapsed_micros(started.elapsed()))
-                                        .or(handler_elapsed_us);
+                                    let elapsed_us =
+                                        completed_elapsed_us(started_at, handler_elapsed_us);
                                     self.record_mcp_tool_error_analytics(
                                         McpToolErrorAnalyticsRequest {
                                             project_root: cg.project_root(),
@@ -1866,9 +1874,7 @@ impl McpServer {
                     )
                     .await
                     {
-                        let elapsed_us = started_at
-                            .map(|started| elapsed_micros(started.elapsed()))
-                            .or(handler_elapsed_us);
+                        let elapsed_us = completed_elapsed_us(started_at, handler_elapsed_us);
                         self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                             project_root: cg.project_root(),
                             session_id: analytics_session_id,
@@ -1881,9 +1887,7 @@ impl McpServer {
                         return tool_error_response(id, &tool_name, &error);
                     }
                 }
-                let elapsed_us = started_at
-                    .map(|started| elapsed_micros(started.elapsed()))
-                    .or(handler_elapsed_us);
+                let elapsed_us = completed_elapsed_us(started_at, handler_elapsed_us);
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1913,9 +1917,7 @@ impl McpServer {
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => {
-                let elapsed_us = started_at
-                    .map(|started| elapsed_micros(started.elapsed()))
-                    .or(handler_elapsed_us);
+                let elapsed_us = completed_elapsed_us(started_at, handler_elapsed_us);
                 self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
                     project_root: cg.project_root(),
                     session_id: analytics_session_id,
@@ -2160,6 +2162,22 @@ mod execution_control_tests {
             assert!(registry.lock().expect("registry").contains_key(&request_id));
         }
         assert!(!registry.lock().expect("registry").contains_key(&request_id));
+    }
+
+    #[test]
+    fn attached_duration_is_measured_at_completion_after_post_handler_work() {
+        let started_at = Instant::now();
+        let handler_elapsed_us = Some(1);
+        std::thread::sleep(Duration::from_millis(2));
+        let elapsed_us = completed_elapsed_us(Some(started_at), handler_elapsed_us);
+        let mut result = ToolResult::new(json!({"content": []}), Vec::new());
+
+        McpServer::attach_tool_timing(&mut result, elapsed_us);
+
+        assert!(
+            result.value["_meta"]["duration_us"].as_u64().unwrap() > 1,
+            "duration must include work performed after the handler returns"
+        );
     }
 
     #[test]
