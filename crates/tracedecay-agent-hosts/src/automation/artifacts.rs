@@ -73,11 +73,7 @@ pub(crate) async fn write_improvement_artifacts(
     let created_at = record.completed_at.clone();
     let prompt_version = prompt_version(task);
     let policy = artifact_policy(task);
-    // A missing or unreadable outcomes snapshot must never block the run's
-    // artifact trail; it only means no post-approval signal is available yet.
-    let outcomes = load_outcomes_snapshot(dashboard_root)
-        .await
-        .unwrap_or_default();
+    let outcomes = load_outcomes_snapshot(dashboard_root).await?;
     let publication_identity = serde_json::json!({
         "sha256": sha256_json(&serde_json::json!({
             "task": task_key,
@@ -193,4 +189,91 @@ pub(crate) async fn write_improvement_artifacts(
         .await?;
 
     writer.finish(&publication_identity).await
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::super::outcomes::automation_outcomes_path;
+    use super::super::run_ledger::{AutomationRunStatus, AutomationTrigger};
+    use super::*;
+
+    fn artifact_record(run_id: &str) -> AutomationRunLedgerRecord {
+        AutomationRunLedgerRecord {
+            schema_version: 2,
+            run_id: run_id.to_string(),
+            trigger: AutomationTrigger::ManualCli,
+            task: AgentTaskKind::SkillWriter,
+            task_key: Some("skill_writer".to_string()),
+            backend: "test".to_string(),
+            host_mode: None,
+            prompt_version: None,
+            response_schema: None,
+            strict_json: None,
+            model: None,
+            status: AutomationRunStatus::Succeeded,
+            evidence_hash: Some("sha256:evidence".to_string()),
+            input_hash: None,
+            output_hash: None,
+            proposed_ops: None,
+            applied_ops: None,
+            rejected_ops: None,
+            validation_report: None,
+            reviewed_count: 0,
+            accepted_count: 0,
+            rejected_count: 0,
+            skipped_count: 0,
+            error: None,
+            error_classification: None,
+            error_retryable: None,
+            backend_attempt_count: 0,
+            backend_attempts: Vec::new(),
+            fallback_status: None,
+            report_ref: None,
+            artifacts: Vec::new(),
+            started_at: "0".to_string(),
+            completed_at: "1".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn corrupt_outcomes_snapshot_blocks_improvement_artifact_publication() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let run_id = "corrupt-outcomes";
+        std::fs::write(automation_outcomes_path(temp.path()), b"not json").unwrap();
+        let request = AgentTaskRequest::new(
+            run_id.to_string(),
+            AgentTaskKind::SkillWriter,
+            "propose skills".to_string(),
+            Some("sha256:evidence".to_string()),
+            serde_json::json!({}),
+        );
+        let response = AgentTaskResponse {
+            run_id: run_id.to_string(),
+            task: AgentTaskKind::SkillWriter,
+            output_text: "{\"skills\":[]}".to_string(),
+            output_json: Some(serde_json::json!({"skills": []})),
+            model: None,
+            input_tokens: None,
+            output_tokens: None,
+        };
+
+        let error = write_improvement_artifacts(
+            temp.path(),
+            run_id,
+            AgentTaskKind::SkillWriter,
+            &request,
+            &response,
+            &artifact_record(run_id),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to parse automation outcomes snapshot")
+        );
+        assert!(!temp.path().join("automation_artifacts").exists());
+    }
 }
