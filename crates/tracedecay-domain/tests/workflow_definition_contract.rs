@@ -1,13 +1,16 @@
 use std::collections::BTreeSet;
 
 use serde_json::json;
+use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     MAX_WORKFLOW_FAN_OUT, MAX_WORKFLOW_INPUTS, MAX_WORKFLOW_OUTPUTS, MAX_WORKFLOW_PREDECESSORS,
-    MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, RunId, UtcMicros, WorkArtifactId,
-    WorkArtifactRefV1, WorkCommandId, WorkflowDefinitionError, WorkflowDefinitionId,
-    WorkflowDefinitionV1, WorkflowFanOutV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowOutputReferenceV1, WorkflowRunCommandV1, WorkflowRunEventContextV1, WorkflowRunEventV1,
-    WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepId, WorkflowStepOutputV1,
+    MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros, WorkArtifactId,
+    WorkArtifactRefV1, WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId,
+    WorkProviderRouteV1, WorkflowDefinitionError, WorkflowDefinitionId, WorkflowDefinitionV1,
+    WorkflowFanOutV1, WorkflowOperationRef, WorkflowOutputName, WorkflowOutputReferenceV1,
+    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
+    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError, WorkflowRunStatusV1,
+    WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1,
     WorkflowStepV1,
 };
 
@@ -355,6 +358,31 @@ fn run_context(command: &str, byte: char, occurred_at: i64) -> WorkflowRunEventC
     }
 }
 
+fn placement(
+    run_id: &str,
+    step_id: &str,
+    configuration: char,
+    topology: char,
+    registry: char,
+) -> WorkflowPlacementReceiptV1 {
+    WorkflowPlacementReceiptV1::new(
+        id::<RunId>(run_id),
+        id::<WorkflowStepId>(step_id),
+        WorkProviderRouteV1::new(
+            id::<ProviderId>("provider.workflow.test"),
+            id::<WorkProviderRouteId>("route.workflow.test.v1"),
+        )
+        .unwrap(),
+        WorkProviderBackendV1::CodexAppServer,
+        "model.workflow.test".to_owned(),
+        digest(configuration),
+        digest(topology),
+        digest(registry),
+        safe_work_topology_policy_v1().placement,
+    )
+    .unwrap()
+}
+
 #[test]
 fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
     let definition = definition(vec![
@@ -371,6 +399,7 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
         id::<RunId>("run.workflow.dataflow"),
         definition,
         digest('d'),
+        digest('8'),
         run_context("workflow.admit", 'e', 1),
     )
     .unwrap();
@@ -381,6 +410,7 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
         .next_event(
             WorkflowRunCommandV1::StartStep {
                 step_id: id("prepare"),
+                placement: placement("run.workflow.dataflow", "prepare", 'b', 'd', '8'),
             },
             run_context("workflow.prepare.start", 'f', 2),
         )
@@ -397,6 +427,20 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
                     output_name: id("context"),
                     artifact: artifact.clone(),
                 }],
+                effect_receipt: WorkflowStepEffectReceiptV1::new(
+                    id::<RunId>("run.workflow.dataflow"),
+                    id::<WorkflowStepId>("prepare"),
+                    placement("run.workflow.dataflow", "prepare", 'b', 'd', '8')
+                        .placement_digest()
+                        .clone(),
+                    WorkflowStepEffectOutcomeV1::Completed,
+                    digest('9'),
+                    &[WorkflowStepOutputV1 {
+                        output_name: id("context"),
+                        artifact: artifact.clone(),
+                    }],
+                )
+                .unwrap(),
             },
             run_context("workflow.prepare.complete", '2', 3),
         )
@@ -424,6 +468,7 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
         id::<RunId>("run.workflow.invalid-output"),
         definition,
         digest('d'),
+        digest('8'),
         run_context("workflow.invalid.admit", '3', 1),
     )
     .unwrap();
@@ -433,6 +478,7 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
             &run.next_event(
                 WorkflowRunCommandV1::StartStep {
                     step_id: id("prepare"),
+                    placement: placement("run.workflow.invalid-output", "prepare", 'b', 'd', '8'),
                 },
                 run_context("workflow.invalid.start", '4', 2),
             )
@@ -448,8 +494,22 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
                 step_id: id("prepare"),
                 outputs: vec![WorkflowStepOutputV1 {
                     output_name: id("undeclared"),
-                    artifact: wrong,
+                    artifact: wrong.clone(),
                 }],
+                effect_receipt: WorkflowStepEffectReceiptV1::new(
+                    id::<RunId>("run.workflow.invalid-output"),
+                    id::<WorkflowStepId>("prepare"),
+                    placement("run.workflow.invalid-output", "prepare", 'b', 'd', '8')
+                        .placement_digest()
+                        .clone(),
+                    WorkflowStepEffectOutcomeV1::Completed,
+                    digest('9'),
+                    &[WorkflowStepOutputV1 {
+                        output_name: id("undeclared"),
+                        artifact: wrong,
+                    }],
+                )
+                .unwrap(),
             },
             run_context("workflow.invalid.complete", '6', 3),
         )
@@ -458,5 +518,126 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
     assert_eq!(
         error,
         tracedecay_domain::WorkflowRunStateError::InvalidStepOutputs
+    );
+}
+
+#[test]
+fn run_projection_journals_bound_placement_and_effect_receipts() {
+    let run_id = id::<RunId>("run.workflow.receipts");
+    let step_id = id::<WorkflowStepId>("prepare");
+    let configuration_digest = digest('b');
+    let topology_digest = digest('d');
+    let registry_digest = digest('8');
+    let admitted = WorkflowRunEventV1::admitted(
+        run_id.clone(),
+        definition(vec![step("prepare", &[], vec![], &["context"])]).unwrap(),
+        topology_digest.clone(),
+        registry_digest.clone(),
+        run_context("workflow.receipts.admit", 'e', 1),
+    )
+    .unwrap();
+    let run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    let placement = WorkflowPlacementReceiptV1::new(
+        run_id.clone(),
+        step_id.clone(),
+        WorkProviderRouteV1::new(
+            id::<ProviderId>("provider.workflow.test"),
+            id::<WorkProviderRouteId>("route.workflow.test.v1"),
+        )
+        .unwrap(),
+        WorkProviderBackendV1::CodexAppServer,
+        "model.workflow.test".to_owned(),
+        configuration_digest,
+        topology_digest,
+        registry_digest,
+        safe_work_topology_policy_v1().placement,
+    )
+    .unwrap();
+    let started = run
+        .next_event(
+            WorkflowRunCommandV1::StartStep {
+                step_id: step_id.clone(),
+                placement: placement.clone(),
+            },
+            run_context("workflow.receipts.start", 'f', 2),
+        )
+        .unwrap();
+    let run = run.apply(&started).unwrap();
+    let outputs = vec![WorkflowStepOutputV1 {
+        output_name: id("context"),
+        artifact: WorkArtifactRefV1::new(
+            id::<WorkArtifactId>("artifact.workflow.receipts"),
+            digest('1'),
+            42,
+        )
+        .unwrap(),
+    }];
+    let effect = WorkflowStepEffectReceiptV1::new(
+        run_id,
+        step_id.clone(),
+        placement.placement_digest().clone(),
+        WorkflowStepEffectOutcomeV1::Completed,
+        digest('2'),
+        &outputs,
+    )
+    .unwrap();
+    let completed = run
+        .next_event(
+            WorkflowRunCommandV1::CompleteStep {
+                step_id: step_id.clone(),
+                outputs,
+                effect_receipt: effect.clone(),
+            },
+            run_context("workflow.receipts.complete", '3', 3),
+        )
+        .unwrap();
+    let rebuilt =
+        WorkflowRunProjectionV1::rebuild(&[run.history()[0].clone(), started, completed]).unwrap();
+
+    let step = rebuilt.step(&step_id).unwrap();
+    assert_eq!(step.placement_receipt(), Some(&placement));
+    assert_eq!(step.effect_receipt(), Some(&effect));
+}
+
+#[test]
+fn run_projection_rejects_receipts_bound_to_other_runtime_state() {
+    let run_id = id::<RunId>("run.workflow.receipt-binding");
+    let step_id = id::<WorkflowStepId>("prepare");
+    let admitted = WorkflowRunEventV1::admitted(
+        run_id.clone(),
+        definition(vec![step("prepare", &[], vec![], &[])]).unwrap(),
+        digest('d'),
+        digest('8'),
+        run_context("workflow.receipt-binding.admit", 'e', 1),
+    )
+    .unwrap();
+    let run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    let stale_placement = WorkflowPlacementReceiptV1::new(
+        run_id,
+        step_id.clone(),
+        WorkProviderRouteV1::new(
+            id::<ProviderId>("provider.workflow.test"),
+            id::<WorkProviderRouteId>("route.workflow.test.v1"),
+        )
+        .unwrap(),
+        WorkProviderBackendV1::CodexAppServer,
+        "model.workflow.test".to_owned(),
+        digest('9'),
+        digest('d'),
+        digest('8'),
+        safe_work_topology_policy_v1().placement,
+    )
+    .unwrap();
+
+    assert_eq!(
+        run.next_event(
+            WorkflowRunCommandV1::StartStep {
+                step_id,
+                placement: stale_placement,
+            },
+            run_context("workflow.receipt-binding.start", 'f', 2),
+        )
+        .unwrap_err(),
+        WorkflowRunStateError::InvalidPlacementReceipt
     );
 }

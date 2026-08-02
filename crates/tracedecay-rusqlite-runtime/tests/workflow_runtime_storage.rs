@@ -1,20 +1,31 @@
 //! Durable workflow authority over the registered Work exact-SQL channel.
 
+use std::sync::Arc;
+
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildReceiptV1, WorkflowChildRecordV1,
     WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
     WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
     WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1, WorkflowExecutionTruthV1,
-    WorkflowFanOutCheckpointV1,
+    WorkflowFanOutCheckpointV1, WorkflowRunAppendOutcomeV1, WorkflowRunAppendRequestV1,
+    WorkflowRunStoragePort,
 };
+use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkAttemptIdentityV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
+    ActorId, AttemptId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId,
+    ThreadId, UtcMicros, WorkAttemptIdentityV1, WorkCommandId, WorkFenceEpochV1, WorkLeaseFenceV1,
+    WorkLeaseId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
     WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
+    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
+    WorkflowRunEventV1, WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
 };
-use tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlError, MigrationSqlHandle, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+};
+use tracedecay_rusqlite_runtime::workflow::{
+    WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError, migrate_workflow_schema_v2,
+};
 
 mod work_registered_store;
 
@@ -79,6 +90,25 @@ fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
 }
 
+fn placement(run_id: RunId) -> WorkflowPlacementReceiptV1 {
+    WorkflowPlacementReceiptV1::new(
+        run_id,
+        id::<WorkflowStepId>("prepare"),
+        WorkProviderRouteV1::new(
+            id::<ProviderId>("provider.workflow.runtime-store"),
+            id::<WorkProviderRouteId>("route.workflow.runtime-store.v1"),
+        )
+        .unwrap(),
+        WorkProviderBackendV1::CodexAppServer,
+        "model.workflow.runtime-store".to_owned(),
+        digest('b'),
+        digest('d'),
+        digest('8'),
+        safe_work_topology_policy_v1().placement,
+    )
+    .unwrap()
+}
+
 fn execution_identity() -> WorkflowExecutionIdentityV1 {
     WorkflowExecutionIdentityV1 {
         definition_id: id("workflow.definition.runtime-store"),
@@ -131,6 +161,122 @@ fn terminal_truth() -> WorkflowExecutionTruthV1 {
     WorkflowExecutionTruthV1::Completed {
         checkpoint: checkpoint(plan_digest('5')),
     }
+}
+
+struct AllowWorkflowSchemaMigration;
+
+impl MigrationSqlWriteAuthority for AllowWorkflowSchemaMigration {
+    fn verify(&self, _: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+        Ok(())
+    }
+}
+
+fn schema_migration_handle(store: &RegisteredWorkStore) -> MigrationSqlHandle {
+    store
+        .migration_handle()
+        .clone()
+        .with_write_authority(Arc::new(AllowWorkflowSchemaMigration))
+        .unwrap()
+}
+
+fn migrated_authority(store: &RegisteredWorkStore) -> WorkflowSqliteAuthority {
+    migrate_workflow_schema_v2(&schema_migration_handle(store)).unwrap();
+    WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap()
+}
+
+#[test]
+fn runtime_requires_explicit_workflow_migration() {
+    let store = RegisteredWorkStore::start("workflow-explicit-migration");
+
+    assert!(matches!(
+        WorkflowSqliteAuthority::from_work_storage(store.storage()),
+        Err(WorkflowSqliteAuthorityBuildError::MigrationRequired)
+    ));
+    assert_eq!(
+        store.inspect(|connection| {
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema
+                     WHERE type = 'table' AND name LIKE 'workflow_%'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        }),
+        0,
+        "runtime attachment must not create workflow schema"
+    );
+
+    assert!(migrate_workflow_schema_v2(store.migration_handle()).is_err());
+    migrate_workflow_schema_v2(&schema_migration_handle(&store)).unwrap();
+    assert!(WorkflowSqliteAuthority::from_work_storage(store.storage()).is_ok());
+    assert_eq!(store.count("workflow_schema_v2"), 1);
+}
+
+#[test]
+fn run_journal_appends_replays_and_rebuilds_after_restart() {
+    let store = RegisteredWorkStore::start("workflow-run-journal");
+    let authority = migrated_authority(&store);
+    let run_id = id::<RunId>("run.workflow.runtime-store.journal");
+    let admitted = WorkflowRunEventV1::admitted(
+        run_id.clone(),
+        definition(1, "operation.prepare.v1"),
+        digest('d'),
+        digest('8'),
+        WorkflowRunEventContextV1 {
+            command_id: id::<WorkCommandId>("command.workflow.runtime-store.admit"),
+            input_digest: digest('e'),
+            occurred_at: UtcMicros(10),
+        },
+    )
+    .unwrap();
+    let request = WorkflowRunAppendRequestV1 {
+        expected_sequence: None,
+        event: admitted,
+    };
+    let projection = match WorkflowRunStoragePort::append(&authority, &request).unwrap() {
+        WorkflowRunAppendOutcomeV1::Appended(projection) => projection,
+        WorkflowRunAppendOutcomeV1::Replayed(_) => panic!("first append replayed"),
+    };
+    assert!(matches!(
+        WorkflowRunStoragePort::append(&authority, &request).unwrap(),
+        WorkflowRunAppendOutcomeV1::Replayed(_)
+    ));
+
+    let started = projection
+        .next_event(
+            WorkflowRunCommandV1::StartStep {
+                step_id: id::<WorkflowStepId>("prepare"),
+                placement: placement(run_id.clone()),
+            },
+            WorkflowRunEventContextV1 {
+                command_id: id::<WorkCommandId>("command.workflow.runtime-store.start"),
+                input_digest: digest('f'),
+                occurred_at: UtcMicros(11),
+            },
+        )
+        .unwrap();
+    WorkflowRunStoragePort::append(
+        &authority,
+        &WorkflowRunAppendRequestV1 {
+            expected_sequence: Some(1),
+            event: started,
+        },
+    )
+    .unwrap();
+
+    let store = store.restart("workflow-run-journal");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let history = WorkflowRunStoragePort::load(&authority, &run_id).unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(
+        WorkflowRunStoragePort::projection(&authority, &run_id)
+            .unwrap()
+            .sequence(),
+        2
+    );
+    assert_eq!(store.count("workflow_run_events_v2"), 2);
+    assert_eq!(store.count("workflow_run_heads_v2"), 1);
 }
 
 #[test]
@@ -314,7 +460,7 @@ fn execution_completion_rejects_child_without_terminal_receipt() {
 #[test]
 fn definitions_activate_and_reject_conflicting_payloads() {
     let store = RegisteredWorkStore::start("workflow-definitions");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let authority = migrated_authority(&store);
     let first = definition(1, "operation.prepare.v1");
     let second = definition(2, "operation.prepare.v1");
     let conflicting = definition(1, "operation.prepare.v2");
@@ -381,7 +527,7 @@ fn definitions_activate_and_reject_conflicting_payloads() {
 #[test]
 fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     let store = RegisteredWorkStore::start("workflow-handoff");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let authority = migrated_authority(&store);
     let scope = handoff_scope();
     let secret = "s".repeat(48);
     let grant = TaskHandoffGrantV1::new(
@@ -487,7 +633,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
 #[test]
 fn execution_checkpoints_recover_replay_and_survive_restart() {
     let store = RegisteredWorkStore::start("workflow-execution");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let authority = migrated_authority(&store);
     let identity = execution_identity();
     let plan = plan_digest('5');
     let first_fence = fence(1, "attempt.workflow.runtime-store.1");
@@ -600,7 +746,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
 #[test]
 fn definition_and_handoff_survive_registered_store_restart() {
     let store = RegisteredWorkStore::start("workflow-restart");
-    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let authority = migrated_authority(&store);
     let first = definition(1, "operation.prepare.v1");
     WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
     WorkflowDefinitionAuthorityPort::compare_and_swap_activation(
