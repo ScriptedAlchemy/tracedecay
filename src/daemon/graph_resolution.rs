@@ -129,3 +129,37 @@ pub(super) fn retained_project_graph_resolver(
         })
     })
 }
+
+pub(super) fn retained_project_session_refresh_resolver(
+    administration: StoreAdministration,
+) -> crate::mcp::server::RetainedProjectSessionRefreshResolver {
+    Arc::new(move |graph| {
+        let administration = administration.clone();
+        Box::pin(async move {
+            let owner = administration
+                .mounted_project_owner(&graph)
+                .await
+                .ok_or_else(|| {
+                    TraceDecayError::session_refresh(
+                        "temporal_refresh_authority_unavailable",
+                        true,
+                        "selected project no longer has a mounted refresh owner",
+                    )
+                })?;
+            let database = administration
+                .registered_project_session_database(graph.project_root(), graph.store_layout())
+                .await
+                .map_err(|error| {
+                    TraceDecayError::session_refresh(
+                        "temporal_refresh_authority_unavailable",
+                        true,
+                        format!("selected project session authority is unavailable: {error}"),
+                    )
+                })?;
+            Ok(administration
+                .session_temporal_refresh_schedulers()
+                .ensure_project(owner, database)
+                .await)
+        })
+    })
+}

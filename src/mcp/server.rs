@@ -48,6 +48,7 @@ mod hook_dispatch;
 mod hook_writes;
 mod ledger;
 mod lifecycle;
+mod live_transcript_refresh;
 mod project_registry;
 mod protocol;
 mod read_coalescing;
@@ -68,6 +69,9 @@ pub(crate) use hook_writes::*;
 pub(crate) use ledger::McpToolErrorAnalyticsRequest;
 pub(crate) use lifecycle::{
     ProjectServerResponseLifecycle, StartupCatchUpMachineV1, VersionCheckState,
+};
+pub(crate) use live_transcript_refresh::{
+    LiveTranscriptRefreshJoin, LiveTranscriptRefreshRoute, join_required_live_transcript_refresh,
 };
 pub(crate) use protocol::*;
 use read_coalescing::*;
@@ -186,6 +190,19 @@ pub(crate) type RetainedProjectGraphFuture = std::pin::Pin<
 >;
 pub(crate) type RetainedProjectGraphResolver =
     Arc<dyn Fn(RetainedProjectGraphRequest) -> RetainedProjectGraphFuture + Send + Sync + 'static>;
+
+pub(crate) type RetainedProjectSessionRefreshFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake,
+                >,
+            > + Send
+            + 'static,
+    >,
+>;
+pub(crate) type RetainedProjectSessionRefreshResolver =
+    Arc<dyn Fn(Arc<TraceDecay>) -> RetainedProjectSessionRefreshFuture + Send + Sync + 'static>;
 
 /// Dashboard admission erases the concrete graph only at its consumer
 /// boundary.
@@ -316,6 +333,7 @@ pub struct McpServer {
     /// deliberately absent until such a route/grant is available.
     code_index_search_authority: Option<CodeIndexSearchAuthorityV1>,
     retained_project_graph_resolver: Option<RetainedProjectGraphResolver>,
+    retained_project_session_refresh_resolver: Option<RetainedProjectSessionRefreshResolver>,
     #[cfg(any(test, feature = "test-transport"))]
     _host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -695,6 +713,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
+            retained_project_session_refresh_resolver,
             project_routes,
             application_invocation_executor,
             project_server_live,
@@ -905,6 +924,7 @@ impl McpServer {
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
             retained_project_graph_resolver,
+            retained_project_session_refresh_resolver,
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),

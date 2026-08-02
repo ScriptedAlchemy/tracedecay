@@ -69,6 +69,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) retained_project_session_refresh_resolver:
+        Option<super::RetainedProjectSessionRefreshResolver>,
     pub(crate) project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     pub(crate) application_invocation_executor:
         Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
@@ -167,6 +169,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            retained_project_session_refresh_resolver: None,
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             application_invocation_executor: None,
             project_server_live: None,
@@ -244,6 +247,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            retained_project_session_refresh_resolver: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -300,6 +304,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            retained_project_session_refresh_resolver: None,
             project_routes,
             application_invocation_executor: None,
             project_server_live: None,
@@ -359,6 +364,14 @@ impl McpServerConstructionContext {
         resolver: super::RetainedProjectGraphResolver,
     ) -> Self {
         self.retained_project_graph_resolver = Some(resolver);
+        self
+    }
+
+    pub(crate) fn with_retained_project_session_refresh_resolver(
+        mut self,
+        resolver: super::RetainedProjectSessionRefreshResolver,
+    ) -> Self {
+        self.retained_project_session_refresh_resolver = Some(resolver);
         self
     }
 

@@ -22,7 +22,9 @@ pub(super) fn map_claude_observation_ingest_error(
 }
 
 pub(crate) fn structured_hook_error_data(error: &TraceDecayError) -> Option<Value> {
-    let (reason_code, retryable, detail) = error.hook_runtime_context()?;
+    let (reason_code, retryable, detail) = error
+        .hook_runtime_context()
+        .or_else(|| error.session_refresh_context())?;
     Some(json!({
         "tool": "tracedecay_hook_runtime",
         "status": hook_admission_error_status(reason_code),

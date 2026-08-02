@@ -56,6 +56,13 @@ pub enum TraceDecayError {
         detail: String,
     },
 
+    #[error("session refresh error ({reason_code}): {detail}")]
+    SessionRefresh {
+        reason_code: String,
+        retryable: bool,
+        detail: String,
+    },
+
     #[error("sync lock: {message}")]
     SyncLock { message: String },
 
@@ -163,6 +170,30 @@ impl TraceDecayError {
             return None;
         };
         Some((reason_code, stage, *retryable, detail))
+    }
+
+    pub fn session_refresh(
+        reason_code: impl Into<String>,
+        retryable: bool,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::SessionRefresh {
+            reason_code: reason_code.into(),
+            retryable,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn session_refresh_context(&self) -> Option<(&str, bool, &str)> {
+        let Self::SessionRefresh {
+            reason_code,
+            retryable,
+            detail,
+        } = self
+        else {
+            return None;
+        };
+        Some((reason_code, *retryable, detail))
     }
 
     pub fn database_operation(

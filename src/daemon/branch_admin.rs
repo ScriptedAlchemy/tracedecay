@@ -677,6 +677,30 @@ impl StoreAdministration {
         graphs
     }
 
+    pub(super) async fn mounted_project_owner(
+        &self,
+        graph: &Arc<crate::tracedecay::TraceDecay>,
+    ) -> Option<StoreOwnerKey> {
+        let profile_root = self.profile_identity().ok().and_then(|identity| {
+            authority::canonical_identity_path(identity.profile_root()).ok()
+        })?;
+        let servers = {
+            let servers = self.project_servers.lock().await;
+            servers
+                .servers
+                .iter()
+                .filter(|(key, _)| key.owner.profile_root == profile_root)
+                .map(|(key, entry)| (key.owner.clone(), Arc::clone(&entry.server)))
+                .collect::<Vec<_>>()
+        };
+        for (owner, server) in servers {
+            if Arc::ptr_eq(&server.cg().await, graph) {
+                return Some(owner);
+            }
+        }
+        None
+    }
+
     pub(super) async fn registered_project_session_database(
         &self,
         project_root: &Path,

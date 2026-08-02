@@ -196,7 +196,9 @@ mod git_transactions;
 mod git_watch;
 mod github_credential_lifecycle;
 mod graph_resolution;
-use graph_resolution::retained_project_graph_resolver;
+use graph_resolution::{
+    retained_project_graph_resolver, retained_project_session_refresh_resolver,
+};
 mod http_application;
 mod http_application_router;
 use http_application_router::{

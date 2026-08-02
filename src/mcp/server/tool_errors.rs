@@ -99,6 +99,26 @@ pub(crate) fn tool_error_response(
     tool_name: &str,
     error: &TraceDecayError,
 ) -> JsonRpcResponse {
+    if let Some((reason, retryable, detail)) = error.session_refresh_context() {
+        let code = if tool_name.starts_with("tracedecay_lcm_") {
+            "lcm_retrieval_service_unavailable"
+        } else {
+            "session_retrieval_service_unavailable"
+        };
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            format!("tool execution failed: {detail}"),
+            Some(json!({
+                "tool": tool_name,
+                "code": code,
+                "status": "unavailable",
+                "reason": reason,
+                "retryable": retryable,
+                "detail": detail,
+            })),
+        );
+    }
     if let Some((reason_code, stage, retryable, detail)) = error.mcp_tool_dispatch_context() {
         let code = if retryable {
             ErrorCode::InternalError
