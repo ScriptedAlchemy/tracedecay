@@ -88,9 +88,21 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
+    fixture_with_schema(Some(REMOTE_NODE_LOCAL_SCHEMA))
+}
+
+fn empty_fixture() -> Fixture {
+    fixture_with_schema(None)
+}
+
+fn fixture_with_schema(schema: Option<&str>) -> Fixture {
     let directory = TempDir::new().unwrap();
     let path = directory.path().join("remote.sqlite3");
-    rusqlite::Connection::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    if let Some(schema) = schema {
+        connection.execute_batch(schema).unwrap();
+    }
+    drop(connection);
     let path = path.canonicalize().unwrap();
     let binding: StoreRuntimeBindingV1 = serde_json::from_value(serde_json::json!({
         "shard_id": {
@@ -170,16 +182,7 @@ impl RemoteReplayTransportPortV1 for UnreachableTransport {
     }
 }
 
-fn install_remote_schema_fixture(fixture: &Fixture) {
-    let transaction = fixture.handle.begin_schema_migration_immediate().unwrap();
-    transaction
-        .execute_schema_batch_step(REMOTE_NODE_LOCAL_SCHEMA.to_owned())
-        .unwrap();
-    transaction.commit().unwrap();
-}
-
 fn storage(fixture: &Fixture) -> RemoteSqliteStorageV1 {
-    install_remote_schema_fixture(fixture);
     RemoteSqliteStorageV1::attach(
         fixture.handle.clone(),
         fixture.binding.clone(),
@@ -298,44 +301,27 @@ fn admitted() -> AdmittedRemoteCaptureV1 {
 
 #[test]
 fn runtime_attachment_requires_explicit_remote_migration() {
-    let canonical = fixture();
+    let empty = empty_fixture();
     assert!(matches!(
-        validate_remote_schema(&canonical.handle),
+        validate_remote_schema(&empty.handle),
         Err(RemoteSqliteStorageErrorV1::MigrationRequired)
     ));
 
-    install_remote_schema_fixture(&canonical);
+    let canonical = fixture();
     assert!(validate_remote_schema(&canonical.handle).is_ok());
 
-    let incompatible = fixture();
-    let transaction = incompatible
-        .handle
-        .begin_schema_migration_immediate()
-        .unwrap();
-    transaction
-        .execute_schema_batch_step(
-            "CREATE TABLE remote_observations_v1 (
+    let incompatible = fixture_with_schema(Some(
+        "CREATE TABLE remote_observations_v1 (
                 event_id TEXT PRIMARY KEY
-            ) STRICT;"
-                .to_owned(),
-        )
-        .unwrap();
-    transaction.commit().unwrap();
+            ) STRICT;",
+    ));
     assert!(matches!(
         validate_remote_schema(&incompatible.handle),
         Err(RemoteSqliteStorageErrorV1::ResetRequired)
     ));
 
-    let mixed_store = fixture();
-    install_remote_schema_fixture(&mixed_store);
-    let transaction = mixed_store
-        .handle
-        .begin_schema_migration_immediate()
-        .unwrap();
-    transaction
-        .execute_schema_batch_step(REMOTE_OBSERVATION_EVENTS_SCHEMA.to_owned())
-        .unwrap();
-    transaction.commit().unwrap();
+    let mixed_schema = format!("{REMOTE_NODE_LOCAL_SCHEMA}\n{REMOTE_OBSERVATION_EVENTS_SCHEMA}");
+    let mixed_store = fixture_with_schema(Some(&mixed_schema));
     assert!(matches!(
         validate_remote_schema(&mixed_store.handle),
         Err(RemoteSqliteStorageErrorV1::ResetRequired)
