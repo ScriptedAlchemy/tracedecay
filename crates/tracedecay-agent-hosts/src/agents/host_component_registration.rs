@@ -823,6 +823,18 @@ impl HostComponentRegistrationDelegate {
         Ok(())
     }
 
+    /// Whether `directory` can only have come into existence because this
+    /// transaction wrote a declared artifact underneath it.
+    ///
+    /// The caller has already established that the backup recorded `directory`
+    /// as absent, so a strict ancestor relationship to a declared write is
+    /// proof of authorship: nothing else in the operation touches that path.
+    fn declared_write_created_directory(&self, directory: &Path) -> bool {
+        self.declared_artifact_writes
+            .iter()
+            .any(|write| write != directory && write.starts_with(directory))
+    }
+
     fn prepare_missing_registration_directories(
         &self,
         operation_id: [u8; 16],
@@ -836,6 +848,28 @@ impl HostComponentRegistrationDelegate {
                 continue;
             }
             match fs::symlink_metadata(path) {
+                // `apply` runs *after* the transaction wrote its declared
+                // artifacts, and writing `<dir>/artifact` creates `<dir>`. A
+                // registration directory that the backup recorded as absent is
+                // therefore expected to exist by now whenever it is an ancestor
+                // of one of this transaction's own declared writes. Treating
+                // that as foreign drift made the very first install into a
+                // fresh home fail, so adopt the directory instead: record the
+                // applied state the rollback path needs, then move on. Any
+                // other pre-existing entry is still genuine drift.
+                Ok(metadata)
+                    if !metadata.file_type().is_symlink()
+                        && metadata.is_dir()
+                        && self.declared_write_created_directory(path) =>
+                {
+                    let applied = registration_directory_applied_state(path)?;
+                    write_registration_backup(
+                        &self.directory_applied_metadata_marker(operation_id, index),
+                        &serde_json::to_vec(&applied)
+                            .map_err(|_| host_bundle_storage_failure!())?,
+                    )?;
+                    continue;
+                }
                 Ok(_) => return Err(host_bundle_stale_preview!()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => {
@@ -1933,6 +1967,157 @@ pub fn project_local_registration_path(
 mod tests {
     use super::*;
     use crate::agents::host_bundle_v2::HostBundleError;
+
+    fn empty_claude_component_set() -> crate::agents::host_bundle_v2::HostComponentSetV1 {
+        crate::agents::host_bundle_v2::HostComponentSetV1 {
+            host: crate::agents::host_bundle_v2::HostKindV1::ClaudeCode,
+            components: Vec::new(),
+        }
+    }
+
+    /// Build a delegate plus an on-disk registration backup whose mutation plan
+    /// declares `directories`, marking every one of them absent at backup time.
+    fn missing_directory_fixture(
+        home: &Path,
+        lifecycle_root: &Path,
+        directories: &[PathBuf],
+    ) -> (HostComponentRegistrationDelegate, [u8; 16]) {
+        let delegate = HostComponentRegistrationDelegate::new_with_tracedecay_bin(
+            "claude",
+            home,
+            lifecycle_root,
+            crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
+            "tracedecay".to_string(),
+        )
+        .expect("delegate");
+        let operation_id = [7u8; 16];
+        fs::create_dir_all(delegate.backup_dir(operation_id)).expect("backup dir");
+        let registration_paths = delegate.registration_paths(&empty_claude_component_set());
+        let plan = RegistrationMutationPlanV1 {
+            schema_version: 2,
+            integration_id: "claude".to_string(),
+            operation: crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Install,
+            paths: registration_paths.clone(),
+            directories: directories.to_vec(),
+        };
+        write_registration_backup(
+            &delegate.mutation_plan_path(operation_id),
+            &serde_json::to_vec(&plan).unwrap(),
+        )
+        .expect("plan");
+        for (index, directory) in directories.iter().enumerate() {
+            write_registration_backup(
+                &delegate.directory_missing_marker(operation_id, index),
+                b"missing",
+            )
+            .expect("missing marker");
+            write_registration_backup(
+                &delegate.directory_path_marker(operation_id, index),
+                &serde_json::to_vec(directory).unwrap(),
+            )
+            .expect("directory path marker");
+        }
+        // Every registration path the rollback will consult needs an original
+        // state on disk; this fixture is only about the directory inventory, so
+        // record them all as absent.
+        for (index, path) in registration_paths.iter().enumerate() {
+            write_registration_backup(
+                &delegate.missing_marker_path(operation_id, index),
+                b"missing",
+            )
+            .expect("registration missing marker");
+            write_registration_backup(
+                &delegate.registration_path_marker(operation_id, index),
+                &serde_json::to_vec(path).unwrap(),
+            )
+            .expect("registration path marker");
+        }
+        let identity = RegistrationBackupIdentityV1::new(
+            "claude",
+            home,
+            lifecycle_root,
+            delegate.rollback_project_path(),
+        )
+        .expect("identity");
+        write_registration_backup(
+            &delegate.identity_path(operation_id),
+            &serde_json::to_vec(&identity).unwrap(),
+        )
+        .expect("identity write");
+        (delegate, operation_id)
+    }
+
+    /// The transaction writes its declared artifacts *before* `apply` runs, and
+    /// writing `<dir>/artifact.md` creates `<dir>`. A registration directory the
+    /// backup recorded as absent is therefore expected to be present by then.
+    /// Reporting that as foreign drift made the very first `install` into a
+    /// fresh home fail outright.
+    #[test]
+    fn declared_artifact_write_directory_is_adopted_not_reported_as_drift() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let managed = home.path().join(".claude/agents");
+
+        let (mut delegate, operation_id) =
+            missing_directory_fixture(home.path(), lifecycle.path(), &[managed.clone()]);
+        delegate.declared_artifact_writes = [managed.join("code-explorer.md")].into();
+
+        // The artifact writer already created the directory tree.
+        fs::create_dir_all(&managed).unwrap();
+
+        delegate
+            .prepare_missing_registration_directories(operation_id)
+            .expect("a directory created by this transaction's own write is not foreign drift");
+
+        assert!(
+            delegate
+                .directory_applied_metadata_marker(operation_id, 0)
+                .is_file(),
+            "adoption must record the applied state that rollback needs to reclaim the directory"
+        );
+        assert!(managed.is_dir(), "the adopted directory is left in place");
+    }
+
+    /// The same directory appearing without any declared write underneath it is
+    /// still a genuinely foreign mutation and must abort the apply.
+    #[test]
+    fn undeclared_directory_reappearing_is_still_drift() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let foreign = home.path().join(".claude/agents");
+
+        let (delegate, operation_id) =
+            missing_directory_fixture(home.path(), lifecycle.path(), &[foreign.clone()]);
+        fs::create_dir_all(&foreign).unwrap();
+
+        assert!(
+            matches!(
+                delegate.prepare_missing_registration_directories(operation_id),
+                Err(HostBundleError::StalePreview(_))
+            ),
+            "nothing in this transaction claims the path, so its reappearance is foreign"
+        );
+    }
+
+    /// A directory is only adopted for a *strict* descendant write. A declared
+    /// write whose path is the directory itself is a file, not a parent, and
+    /// proves nothing about who created the directory.
+    #[test]
+    fn declared_write_equal_to_the_directory_does_not_claim_it() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let path = home.path().join(".claude/agents");
+
+        let (mut delegate, operation_id) =
+            missing_directory_fixture(home.path(), lifecycle.path(), &[path.clone()]);
+        delegate.declared_artifact_writes = [path.clone()].into();
+        fs::create_dir_all(&path).unwrap();
+
+        assert!(matches!(
+            delegate.prepare_missing_registration_directories(operation_id),
+            Err(HostBundleError::StalePreview(_))
+        ));
+    }
 
     #[test]
     fn project_registration_rejects_corrupt_structured_config() {
