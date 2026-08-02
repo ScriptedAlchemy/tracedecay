@@ -190,6 +190,34 @@ impl ExactStoreSchemaV2 {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StoreSchemaAdmissionErrorV2 {
+    ResetRequired(ResetRequiredV2),
+}
+
+pub async fn validate_store_schema(
+    connection: &Connection,
+    path: &Path,
+    contract: &StoreSchemaContractV2,
+) -> Result<ExactStoreSchemaV2, StoreSchemaAdmissionErrorV2> {
+    let observed = observe_store_schema(connection).await.map_err(|_| {
+        StoreSchemaAdmissionErrorV2::ResetRequired(ResetRequiredV2::unreadable(
+            path,
+            contract.clone(),
+        ))
+    })?;
+    let proof = contract
+        .classify(path, observed)
+        .map_err(StoreSchemaAdmissionErrorV2::ResetRequired)?;
+    validate_quick_check(connection).await.map_err(|_| {
+        StoreSchemaAdmissionErrorV2::ResetRequired(ResetRequiredV2::unreadable(
+            path,
+            contract.clone(),
+        ))
+    })?;
+    Ok(proof)
+}
+
 pub async fn observe_store_schema(
     connection: &Connection,
 ) -> Result<ObservedStoreSchemaV2, EngineError> {
@@ -405,5 +433,21 @@ mod tests {
         let directory = TempDir::new().unwrap();
         let connection = TestConnection::open(&directory.path().join("schema.db"));
         validate_quick_check(&connection).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn validation_returns_typed_reset_for_existing_empty_store() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("schema.db");
+        let connection = TestConnection::open(&path);
+        let error =
+            validate_store_schema(&connection, &path, &contract(StoreSchemaKindV2::Registered))
+                .await
+                .unwrap_err();
+        assert!(matches!(
+            error,
+            StoreSchemaAdmissionErrorV2::ResetRequired(reset)
+                if reset.reason() == StoreSchemaResetReasonV2::Empty
+        ));
     }
 }

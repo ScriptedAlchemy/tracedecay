@@ -398,7 +398,7 @@ async fn migrate_before_publication(
         StoreShardScopeV1::Profile
         | StoreShardScopeV1::ProfileSessions
         | StoreShardScopeV1::ProjectSessions { .. } => {
-            crate::ports::registered_schema::ensure_registered_schema(&connection)
+            crate::ports::registered_schema::install_final_registered_schema(&connection)
                 .await
                 .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                     operation: "create initialized global/session schema",

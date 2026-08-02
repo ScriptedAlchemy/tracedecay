@@ -199,11 +199,16 @@ impl DaemonSessionRuntimeRegistryV1 {
 }
 
 fn register_registered_schema_installer() {
-    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
-        Box::pin(crate::root_seam::global_db::ensure_registered_schema(
-            connection,
-        ))
-    });
+    tracedecay_runtime_core::ports::registered_schema::register(
+        |connection| {
+            Box::pin(
+                crate::root_seam::global_db::schema_contract::install_final_registered_schema(
+                    connection,
+                ),
+            )
+        },
+        crate::root_seam::global_db::schema_contract::final_registered_schema_contract,
+    );
 }
 
 fn runtime_incarnation() -> Result<StoreIncarnationV1> {

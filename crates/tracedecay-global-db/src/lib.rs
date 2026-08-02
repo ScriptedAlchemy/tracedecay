@@ -46,9 +46,10 @@ pub use schema_stages::ensure_registered_schema;
 /// gains a registrar and the port stays fail-closed when nothing registers.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_test_schema_installer() {
-    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
-        Box::pin(ensure_registered_schema(connection))
-    });
+    tracedecay_runtime_core::ports::registered_schema::register(
+        |connection| Box::pin(schema_contract::install_final_registered_schema(connection)),
+        schema_contract::final_registered_schema_contract,
+    );
 }
 
 pub mod session_temporal;

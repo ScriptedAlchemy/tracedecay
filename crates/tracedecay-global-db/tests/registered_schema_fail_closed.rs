@@ -28,10 +28,11 @@ async fn unregistered_installer_refuses_to_initialize_a_registered_shard() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let connection = TestConnection::open(&directory.path().join("registered.db"));
 
-    let error =
-        tracedecay_runtime_core::ports::registered_schema::ensure_registered_schema(&connection)
-            .await
-            .expect_err("an unregistered installer must fail closed, never converge silently");
+    let error = tracedecay_runtime_core::ports::registered_schema::install_final_registered_schema(
+        &connection,
+    )
+    .await
+    .expect_err("an unregistered installer must fail closed, never converge silently");
 
     assert!(
         matches!(error, TraceDecayError::Database { .. }),
