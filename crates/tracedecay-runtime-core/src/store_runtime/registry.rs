@@ -593,6 +593,9 @@ impl fmt::Debug for StoreRuntimeHandle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreRuntimeRegistryFailure {
+    ResetRequired {
+        reset: Box<crate::store_runtime::schema::ResetRequiredV2>,
+    },
     InvalidProjectCodeBudget {
         requested: usize,
         maximum: usize,
