@@ -20,13 +20,13 @@ deb256e4276da2c7be8729a4db767e56ebffd4ca # PR #178 subject 86 chars; published b
 63f21295226b1ab86cc0bd61d179c0310d99c078 # fix(projection): reconcile session rows across symlinked project-path families
 73b02d1eaf8e249e1fe3f398cbe507c2121c5368 # refactor(projection): collapse output-collision handling into one mechanism
 7576eb9124b8387657fdaa71acd198ef22665fad # fix(scripts): stop swallowing touched-unit timing metrics in pr7-build-feedback
-7b91cdf6e7e95a12b79f431abc736b00acc553b4 # docs(skill): dogfood guardrail for build wrappers; verify upgrade on live profile
+7b91cdf6e7e95a12b79f431abc736b00acc553b4 # docs(skill): build-wrapper guardrail; verify upgrade on live profile
 7e7f04513df237bf38014d43e1bfa5e311b582da # fix(dashboard): restore V1 fact-detail entities and canonical graph links
 93c3535824514f16829b3a4ff4627399cfc36179 # fix(memory): converge HRR banks and refused admissions on migrated stores
 975ace4c23499072d77420305960002fb530e28e # fix(memory): read-only status, atomic idempotent remove, one convergence policy
 9c2c1181c3825900afdaa6b16cf4af67e527bd81 # fix(errors): stop doubling self-displaying source layers in database_operation
 9cacc19e3e40eb66e7cfe2a3e1a9306f9f3e93c3 # fix(dashboard): warn instead of silently exhausting derived-memory repair
-ba22dd1dd66d6af1d6cbdf73a7c7842a2c12728d # docs(v2): encode PR7 dogfooding weak points as normative plan requirements
+ba22dd1dd66d6af1d6cbdf73a7c7842a2c12728d # docs(v2): encode PR7 build-wrapper weak points as normative plan requirements
 be423f2c61168cffd4f7d4426341fa6a61647d69 # feat(daemon,store): semantic-runtime registrar, session refresh coverage mode
 aa08e03f351892317c3c15af0cf55d40c0dec08d # feat(application): advisory GitHub runtime, code-index control, feedback composition
 7a33a78f8f60b7d73da02071e26c4f47a57223ca # feat(index): semantic runtime service, code-index production path, vector generations
