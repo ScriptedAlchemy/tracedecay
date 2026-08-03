@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Value, json};
 
@@ -12,6 +14,20 @@ use super::super::ToolResult;
 use super::super::render;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::{CodeProjectRecord, GlobalDb, ProjectRegistryContext};
+
+pub(super) struct CancelSearchOnDrop(Arc<AtomicBool>);
+
+impl CancelSearchOnDrop {
+    pub(super) fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self(cancelled)
+    }
+}
+
+impl Drop for CancelSearchOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 /// Trimmed, non-empty string argument by key, or `None` when absent, non-string,
 /// or blank after trimming.
