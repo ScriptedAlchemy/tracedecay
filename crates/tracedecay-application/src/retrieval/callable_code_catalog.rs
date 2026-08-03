@@ -244,6 +244,7 @@ fn code_query_capability(
         deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
         pagination: Some(PaginationContract::new(10, 1_000, 15 * 60 * 1_000)?),
         idempotency: IdempotencyContract::NotRequired,
+        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,

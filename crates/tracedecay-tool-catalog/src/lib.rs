@@ -32,10 +32,11 @@ pub use id::{
 pub use manifest::{
     AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
     CapabilityManifestInputV1, CapabilityManifestV1, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass, PaginationContract,
-    PrivacyClass, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaRef, ScopeDimension, ScopeRequirement, StreamResumeContract,
-    StreamingContract, TerminalState, TerminalStateContract, UnavailabilityReason,
+    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, InverseContract,
+    InverseUnavailableReason, LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamResumeContract, StreamingContract, TerminalState,
+    TerminalStateContract, UnavailabilityReason,
 };
 pub use profile::{
     ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,

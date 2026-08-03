@@ -102,6 +102,7 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 .then(|| PaginationContract::new(10, 100, 60_000))
                 .transpose()?,
             idempotency: IdempotencyContract::NotRequired,
+            inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
             authority_revalidation: RevalidationContract::required(vec![
                 RevalidationPoint::Authority,
                 RevalidationPoint::Scope,
