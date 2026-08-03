@@ -20,8 +20,6 @@ mod corruption_test;
 mod db_query_test;
 #[path = "storage_suite/fact_merge_hydration_test.rs"]
 mod fact_merge_hydration;
-#[path = "storage_suite/migration_manifest_test.rs"]
-mod migration_manifest;
 
 #[path = "../crates/tracedecay-domain/tests/session_contract.rs"]
 mod domain_session_contract;
