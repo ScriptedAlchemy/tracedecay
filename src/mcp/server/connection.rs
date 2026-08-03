@@ -961,20 +961,26 @@ mod cancellable_queue_tests {
     #[test]
     fn queued_request_cancellation_is_type_preserving() {
         let pending = VecDeque::from([
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "tools/call",
-                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
-            })
-            .to_string(),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "tracedecay_git_status", "arguments": {}},
-            })
-            .to_string(),
+            PendingMcpRequestLine {
+                line: serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "method": "tools/call",
+                    "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
+                })
+                .to_string(),
+                enqueued_at: std::time::Instant::now(),
+            },
+            PendingMcpRequestLine {
+                line: serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": {"name": "tracedecay_git_status", "arguments": {}},
+                })
+                .to_string(),
+                enqueued_at: std::time::Instant::now(),
+            },
         ]);
 
         assert!(
