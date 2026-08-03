@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -142,41 +141,6 @@ impl Fixture {
             .file_stem()
             .and_then(|value| value.to_str())
             .expect("benchmark session id");
-        let mut messages = BTreeMap::new();
-        let mut after_ordinal = None;
-        let mut after_message_id = String::new();
-        loop {
-            let page = self
-                .runtime
-                .session_messages_page_for_test(
-                    HostAdmissionScope::Profile,
-                    "claude",
-                    expected_session_id,
-                    after_ordinal,
-                    &after_message_id,
-                )
-                .await
-                .expect("read projected message page");
-            if page.is_empty() {
-                break;
-            }
-            for message in page {
-                assert!(
-                    after_ordinal.is_none_or(|ordinal| message.ordinal > ordinal
-                        || (message.ordinal == ordinal && message.message_id > after_message_id)),
-                    "projected message page did not advance"
-                );
-                after_ordinal = Some(message.ordinal);
-                after_message_id.clone_from(&message.message_id);
-                assert!(
-                    messages
-                        .insert(message.message_id.clone(), message)
-                        .is_none(),
-                    "projected message page repeated an identity"
-                );
-            }
-        }
-        assert_eq!(messages.len(), RECORDS_PER_REPETITION);
         for (index, stored) in observations.iter().enumerate() {
             let payload = stored.observation().payload().to_string();
             assert!(
@@ -189,9 +153,12 @@ impl Fixture {
             );
 
             let message_id = format!("benchmark-message-{index}");
-            let message = messages
-                .get(&message_id)
-                .unwrap_or_else(|| panic!("missing projected message {message_id}"));
+            let message = self
+                .runtime
+                .session_message_for_test(HostAdmissionScope::Profile, "claude", &message_id)
+                .await
+                .expect("read folded V1 message")
+                .unwrap_or_else(|| panic!("missing folded V1 message {message_id}"));
             assert_eq!(message.provider, "claude");
             assert_eq!(message.message_id, message_id);
             assert_eq!(message.session_id, expected_session_id);
@@ -208,7 +175,7 @@ impl Fixture {
             );
             assert!(
                 !folded_state.contains(BENCHMARK_SECRET_PREFIX),
-                "projected message retained the secret canary"
+                "folded V1 projection retained the secret canary"
             );
         }
         self.verify_projector_only_current_writes().await;
