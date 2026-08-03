@@ -171,6 +171,9 @@ pub(crate) fn git_capture_at(repo_root: &Path, args: &[&str]) -> GitCaptureAtRes
 
 fn git_command_at(repo_root: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(git_program());
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    command.env_remove("GIT_COMMON_DIR");
     command.arg("-C").arg(repo_root).args(args);
     command
 }
@@ -264,6 +267,22 @@ mod tests {
                 OsString::from("--git-common-dir"),
             ]
         );
+    }
+
+    #[test]
+    fn git_at_command_clears_repository_selection_overrides() {
+        let command = git_command_at(Path::new("/problematic/project/root"), &["status"]);
+
+        for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(candidate, _)| *candidate == OsStr::new(key))
+                    .map(|(_, value)| value),
+                Some(None),
+                "git -C must resolve the supplied root rather than inherited {key}"
+            );
+        }
     }
 
     #[cfg(unix)]
