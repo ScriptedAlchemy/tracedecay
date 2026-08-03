@@ -104,17 +104,3 @@ pub struct GlobalDbInventory {
     pub registered_project_paths: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
-
-#[cfg(test)]
-mod tests {
-    use super::StoreStatus;
-
-    #[test]
-    fn store_status_uses_the_existing_snake_case_wire_format() {
-        assert_eq!(
-            serde_json::to_value(StoreStatus::NeedsManualReview)
-                .expect("inventory status serializes"),
-            serde_json::json!("needs_manual_review")
-        );
-    }
-}

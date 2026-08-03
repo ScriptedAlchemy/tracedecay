@@ -39,7 +39,7 @@ use sha2::{Digest, Sha256};
 
 pub use crate::runtime::shared::{NewRows, StoredCursor, TranscriptIngestStats};
 #[allow(unused_imports)]
-pub use crate::runtime::shared::{
+pub(crate) use crate::runtime::shared::{
     append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
     message_storage_text, paths_equal, preview_title, read_new_rows, title_from_messages,
     usage_counters_from,

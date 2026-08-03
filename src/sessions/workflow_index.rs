@@ -5,5 +5,5 @@ pub use tracedecay_sessions::runtime::workflow_index::{
     upsert_agent, upsert_run,
 };
 pub(crate) use tracedecay_sessions::runtime::workflow_index::{
-    WorkflowScopeFilter, ensure_workflow_index_schema, workflow_scope_exists_predicate,
+    ensure_workflow_index_schema, workflow_scope_exists_predicate,
 };

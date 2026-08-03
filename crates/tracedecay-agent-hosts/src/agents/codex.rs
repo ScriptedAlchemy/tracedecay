@@ -328,7 +328,7 @@ fn codex_cached_marketplace_name(home: &Path) -> String {
 
 fn codex_plugin_current_cached_install_dir(home: &Path) -> PathBuf {
     codex_plugin_cached_root(home, &codex_cached_marketplace_name(home))
-        .join(env!("CARGO_PKG_VERSION"))
+        .join(env!("TRACEDECAY_PRODUCT_VERSION"))
 }
 
 fn codex_plugin_cached_install_dirs(home: &Path) -> Vec<PathBuf> {
@@ -1805,10 +1805,10 @@ fn doctor_check_plugin_dir(
         ));
     }
     match manifest.get("version").and_then(|value| value.as_str()) {
-        Some(env!("CARGO_PKG_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
+        Some(env!("TRACEDECAY_PRODUCT_VERSION")) => dc.pass("Codex plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
             "Codex plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
-            env!("CARGO_PKG_VERSION")
+            env!("TRACEDECAY_PRODUCT_VERSION")
         )),
         None => dc.warn("Codex plugin manifest does not contain a version"),
     }
@@ -1926,7 +1926,7 @@ fn doctor_check_hooks(
 /// `~/.codex/memories/` — the holographic fact store stays the single source
 /// of truth and delivery is rendered prompt context only.
 fn doctor_suggest_native_memories_off(dc: &mut DoctorCounters, home: &Path) {
-    if !crate::hooks::memory_inject::memory_injection_enabled() {
+    if !crate::ports::memory_injection_enabled().unwrap_or(false) {
         return;
     }
     let config_path = codex_config_path(home);

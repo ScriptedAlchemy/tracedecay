@@ -35,7 +35,6 @@ use serde::Serialize;
 use crate::automation::skill_targets::SkillInstallSummary;
 use crate::errors::Result;
 use crate::errors::TraceDecayError;
-use crate::mcp::tools::get_tool_definitions;
 
 pub use antigravity::AntigravityIntegration;
 pub use claude::ClaudeIntegration;
@@ -826,7 +825,7 @@ pipe it via `--args -` (a quoted heredoc) when it contains quotes or newlines"
 /// `using-the-cli` skill: when the MCP transport fails, agents should fall
 /// back to the `tracedecay tool` CLI instead of abandoning tracedecay or
 /// poking at `.tracedecay` databases directly.
-pub(crate) const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
+pub const CLI_FALLBACK_PROMPT_RULES: &str = concat!(
     "If a tracedecay MCP call errors, times out, \
 or the server is disconnected, every tool is also available as a shell command: ",
     cli_fallback_args_invocation_lit!(),
@@ -1932,28 +1931,25 @@ mod git_hook_tests {
 }
 
 pub fn tool_names() -> Vec<String> {
-    get_tool_definitions()
+    crate::ports::tool_definitions()
+        .unwrap_or_default()
         .iter()
         .map(|t| t.name.clone())
         .collect()
 }
 
 pub fn read_only_tool_names() -> Vec<String> {
-    get_tool_definitions()
+    crate::ports::tool_definitions()
+        .unwrap_or_default()
         .iter()
-        .filter(|t| {
-            t.annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get("readOnlyHint"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        })
+        .filter(|t| t.read_only)
         .map(|t| t.name.clone())
         .collect()
 }
 
 pub fn expected_tool_perms() -> Vec<String> {
-    get_tool_definitions()
+    crate::ports::tool_definitions()
+        .unwrap_or_default()
         .iter()
         .map(|t| format!("mcp__tracedecay__{}", t.name))
         .collect()

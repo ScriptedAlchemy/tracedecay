@@ -4925,9 +4925,27 @@ dependencies = [
 name = "tracedecay-agent-hosts"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "libsql",
+ "regex",
+ "rustls 0.23.38",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
  "tracedecay-automation",
+ "tracedecay-lsp",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracing",
+ "url",
+ "webpki-roots 1.0.7",
 ]
 
 [[package]]
@@ -5080,6 +5098,7 @@ dependencies = [
  "gix",
  "hex",
  "libsql",
+ "rayon",
  "regex",
  "serde",
  "serde_json",

@@ -11,8 +11,7 @@ use crate::registry_adapter::{RegistryDatabase, RegistryRuntime};
 mod inspect;
 mod verify;
 
-#[cfg(test)]
-pub(super) use inspect::count_rows;
+pub use inspect::count_rows;
 pub(super) use inspect::{
     GraphLogicalIdentities, acquire_offline_guards, count_rows_in, extend_graph_identities,
     inspect_collisions, quick_check_connection, quick_check_in,
@@ -41,7 +40,8 @@ pub(super) struct GraphMergeOffsets {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct SessionMergeOffsets {
+#[doc(hidden)]
+pub struct SessionMergeOffsets {
     pub raw: i64,
     pub span: i64,
     pub savings: i64,
@@ -334,7 +334,7 @@ async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Re
     Ok(())
 }
 
-pub(super) async fn plan_session_offsets<R: RegistryRuntime>(
+pub async fn plan_session_offsets<R: RegistryRuntime>(
     target: &Path,
     source: &Path,
     registry: &R,
@@ -516,7 +516,7 @@ async fn reject_session_content_collisions(
     Ok(())
 }
 
-pub(super) fn session_variant_family_cte() -> &'static str {
+pub fn session_variant_family_cte() -> &'static str {
     "WITH RECURSIVE variant_family(provider, message_id) AS (
          SELECT provider, original_id FROM consolidation_message_map
          UNION
@@ -528,7 +528,7 @@ pub(super) fn session_variant_family_cte() -> &'static str {
      )"
 }
 
-pub(super) fn reserved_message_collision_sql() -> &'static str {
+pub fn reserved_message_collision_sql() -> &'static str {
     "SELECT COUNT(*) FROM consolidation_message_map m
      WHERE EXISTS (
          SELECT 1 FROM consolidation_reserved_message_ids r
@@ -559,7 +559,7 @@ fn scalar_parent_rows_sql(schema: &str, table: &str, include_child: bool) -> Str
     )
 }
 
-pub(super) async fn build_consolidation_message_map(
+pub async fn build_consolidation_message_map(
     conn: &Connection,
     source_schema: &str,
     target_schema: &str,
@@ -774,7 +774,7 @@ pub(super) fn mapped_parent_metadata(alias: &str, raw_family_only: bool) -> Stri
     )
 }
 
-pub(super) fn mapped_turn_message_id(alias: &str) -> String {
+pub fn mapped_turn_message_id(alias: &str) -> String {
     format!(
         "COALESCE((
              SELECT m.mapped_id

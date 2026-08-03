@@ -32,25 +32,39 @@ use super::skill_writer::{
 use super::text::truncate_chars_for_prompt;
 use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
 use crate::memory::user::open_user_memory_db;
 use crate::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSessionReplayRequest, LcmSessionReplaySlice,
 };
-use crate::sessions::user_sessions_db_path;
-use crate::tracedecay::{TraceDecay, current_timestamp};
+use crate::sessions::SessionQueryDb;
+use crate::tracedecay::current_timestamp;
 
 pub use super::memory_curator::{
     MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, run_memory_curator_with_backend,
-    run_user_memory_curator_with_backend,
 };
 
 const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 2_000;
 const USER_AUTOMATION_DIR: &str = "user-automation";
+const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
+
+pub trait ProjectAutomationStore: Send + Sync {
+    fn dashboard_root(&self) -> PathBuf;
+    fn sessions_db_path(&self) -> PathBuf;
+    fn project_root(&self) -> &std::path::Path;
+    fn open_project_memory_db<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<crate::db::Database>> + Send + 'a>,
+    >;
+}
 
 /// Profile-level artifact, ledger, and lock root for projectless automation.
 pub fn user_automation_root(profile_root: &std::path::Path) -> PathBuf {
     profile_root.join(USER_AUTOMATION_DIR)
+}
+
+fn user_sessions_db_path(profile_root: &std::path::Path) -> PathBuf {
+    profile_root.join(USER_SESSIONS_DB_FILENAME)
 }
 
 /// Bounds for the session-replay evidence channel. Worst case per session is
@@ -210,9 +224,13 @@ pub async fn run_user_session_automation_with_backend(
         options.session_reflector,
     )
     .await?;
-    let memory_curator =
-        run_user_memory_curator_with_backend(profile_root, config, backend, options.memory_curator)
-            .await?;
+    let memory_curator = crate::ports::run_user_memory_curator(
+        profile_root,
+        config,
+        backend,
+        options.memory_curator,
+    )
+    .await?;
     let skill_writer =
         run_user_skill_writer_with_backend(profile_root, config, backend, options.skill_writer)
             .await?;
@@ -251,17 +269,17 @@ enum SessionReflectorEvidenceOutcome {
 }
 
 pub async fn run_session_reflector_with_backend(
-    cg: &TraceDecay,
+    store: &dyn ProjectAutomationStore,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SessionReflectorAutomationOptions,
 ) -> Result<SessionReflectorAutomationRun> {
-    let memory_db = cg.open_project_store_db().await?;
+    let memory_db = store.open_project_memory_db().await?;
     run_session_reflector_for_store(
-        cg.store_layout().dashboard_root.clone(),
-        cg.store_layout().sessions_db_path.clone(),
+        store.dashboard_root(),
+        store.sessions_db_path(),
         memory_db.conn(),
-        Some(cg.store_layout().project_root.as_path()),
+        Some(store.project_root()),
         config,
         backend,
         options,
@@ -562,15 +580,15 @@ async fn auto_apply_session_fact_proposals(
 }
 
 pub async fn run_skill_writer_with_backend(
-    cg: &TraceDecay,
+    store: &dyn ProjectAutomationStore,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
 ) -> Result<SkillWriterAutomationRun> {
     run_skill_writer_for_store(
-        cg.store_layout().dashboard_root.clone(),
-        cg.store_layout().sessions_db_path.clone(),
-        Some(cg.project_root()),
+        store.dashboard_root(),
+        store.sessions_db_path(),
+        Some(store.project_root()),
         config,
         backend,
         options,
@@ -831,7 +849,7 @@ async fn build_session_reflector_evidence(
             evidence_hash: None,
         });
     }
-    let Some(lcm_db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
+    let Some(lcm_db) = SessionQueryDb::open_read_only_at(sessions_db_path).await else {
         return Ok(SessionReflectorEvidenceOutcome::Skipped {
             reason: "lcm_unavailable",
             evidence_hash: None,
@@ -937,7 +955,7 @@ async fn build_skill_writer_evidence(
             evidence_hash: None,
         });
     }
-    let Some(lcm_db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
+    let Some(lcm_db) = SessionQueryDb::open_read_only_at(sessions_db_path).await else {
         return Ok(SkillWriterEvidenceOutcome::Skipped {
             reason: "lcm_unavailable",
             evidence_hash: None,
@@ -978,11 +996,9 @@ async fn build_skill_writer_evidence(
     };
     let existing_skills = list_managed_skills(&profile_root).await?;
     if let Some(project_root) = analytics_project_root {
-        let global_db = GlobalDb::open().await;
         ingest_project_analytics_events(
             &profile_root,
             project_root,
-            global_db.as_ref(),
             SKILL_ANALYTICS_IMPORT_LIMIT,
         )
         .await?;
@@ -1164,7 +1180,7 @@ pub enum CombinedReviewDispatch {
 /// `input_hash` and a `combined_run_id` correlation in `report_ref`, with
 /// `prompt_version` set to the combined contract's version.
 pub async fn run_combined_review_with_backend(
-    cg: &TraceDecay,
+    store: &dyn ProjectAutomationStore,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: CombinedReviewAutomationOptions,
@@ -1174,9 +1190,9 @@ pub async fn run_combined_review_with_backend(
             reason: "combined_mode_disabled",
         });
     }
-    let dashboard_root = cg.store_layout().dashboard_root.clone();
-    let sessions_db_path = cg.store_layout().sessions_db_path.clone();
-    let memory_db = cg.open_project_store_db().await?;
+    let dashboard_root = store.dashboard_root();
+    let sessions_db_path = store.sessions_db_path();
+    let memory_db = store.open_project_memory_db().await?;
     let started_at = current_timestamp().to_string();
 
     let (reflector_gate, _) = task_run_gate(
@@ -1229,7 +1245,7 @@ pub async fn run_combined_review_with_backend(
     };
     let skill_bundle = match build_skill_writer_evidence(
         &sessions_db_path,
-        Some(cg.project_root()),
+        Some(store.project_root()),
         options.skill_writer,
     )
     .await?
@@ -1326,6 +1342,7 @@ pub async fn run_combined_review_with_backend(
     {
         Ok(output) => output,
         Err(err) => {
+            let err: TraceDecayError = err.into();
             let (reflector_record, skill_record) = append_combined_failed_records(
                 &reflector_finalizer,
                 &skill_finalizer,
@@ -1366,7 +1383,7 @@ pub async fn run_combined_review_with_backend(
 
     let (reflector_report, reflector_record) = finalize_session_reflector_success(
         memory_db.conn(),
-        Some(cg.store_layout().project_root.as_path()),
+        Some(store.project_root()),
         &reflector_finalizer,
         &dashboard_root,
         &reflector_run_id,
@@ -1561,7 +1578,7 @@ struct ReplaySessionTarget {
 /// Returns `None` when no session has any raw messages, so callers can fall
 /// back to grep-only evidence.
 async fn recent_session_replay_evidence(
-    lcm_db: &GlobalDb,
+    lcm_db: &SessionQueryDb,
     provider: &str,
     explicit_session_id: Option<&str>,
     include_summaries: bool,

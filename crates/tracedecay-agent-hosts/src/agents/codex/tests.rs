@@ -474,7 +474,7 @@ fn sync_codex_hook_trust_reads_a_custom_marketplace_cache() {
     .unwrap();
     let plugin_dir = home.path().join(format!(
         ".codex/plugins/cache/my-marketplace/tracedecay/{}",
-        env!("CARGO_PKG_VERSION")
+        env!("TRACEDECAY_PRODUCT_VERSION")
     ));
     install_codex_plugin_bundle(&plugin_dir, TEST_BIN, InstallScope::Global, home.path()).unwrap();
     let hooks_path = plugin_dir.join("hooks/hooks.json");
@@ -673,7 +673,7 @@ fn codex_embedded_file_list_covers_the_whole_source_bundle() {
         .collect();
 
     // Every skill dir under plugin/skills is deployed by Codex (all 14).
-    let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
+    let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin/skills");
     let mut skill_dirs: Vec<String> = std::fs::read_dir(&skills_root)
         .expect("plugin/skills should be readable")
         .flatten()

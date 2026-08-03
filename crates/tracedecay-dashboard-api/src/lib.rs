@@ -34,8 +34,7 @@ pub mod util;
 // These are concrete lower-layer crates. Keeping the compatibility names
 // local lets the moved live-source bodies retain their exact route logic
 // without a dependency back to the root composition crate.
-pub use tracedecay_agent_hosts::{agents, analytics};
-pub use tracedecay_automation as automation;
+pub use tracedecay_agent_hosts::{agents, analytics, automation};
 pub use tracedecay_runtime_core::{config, memory, project_registry, timeutil};
 pub use tracedecay_sessions as sessions;
 pub use tracedecay_usecases::user_config;

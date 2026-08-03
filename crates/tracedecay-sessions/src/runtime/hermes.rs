@@ -33,6 +33,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use rayon::prelude::*;
 use serde_json::{Map, Value};
 
 use crate::runtime::shared::{
@@ -503,7 +504,7 @@ async fn try_ingest_state_db_for_projects(
         &table_columns(&conn, "sessions").await,
     );
     let destination_matchers = states
-        .iter()
+        .par_iter()
         .map(|state| ProjectRootMatcher::new(state.destination.project_root))
         .collect::<Vec<_>>();
     let mut destination_routes = HashMap::<PathBuf, Vec<usize>>::new();

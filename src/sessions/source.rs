@@ -5,11 +5,9 @@ use tracedecay_sessions::{SessionMessageRecord, SessionRecord};
 
 pub use tracedecay_sessions::runtime::source::{
     ChangedFile, JsonlLine, NewJsonl, ParsedTranscript, SessionDraft, TranscriptSource,
-    ingest_source, read_changed_file, stream_new_jsonl,
+    StoredCursor, ingest_source, read_changed_file, stream_new_jsonl,
 };
-pub(crate) use tracedecay_sessions::runtime::source::{
-    TranscriptIngestStore, collect_files_with_ext, content_hash64, read_changed_with_companion,
-};
+pub(crate) use tracedecay_sessions::runtime::source::TranscriptIngestStore;
 
 impl TranscriptIngestStore for GlobalDb {
     fn load_cursor(&self, path: &str) -> impl Future<Output = StoredCursor> + Send {

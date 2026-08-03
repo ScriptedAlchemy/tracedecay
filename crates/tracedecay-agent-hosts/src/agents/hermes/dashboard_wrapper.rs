@@ -7,12 +7,11 @@
 //! (`<hermes_home>/plugins/<name>/dashboard/manifest.json` — both stock and
 //! forked Hermes scan user plugins this way).
 //!
-//! Everything is embedded at compile time so installs need no source
-//! checkout: the wrapper entry/manifest/api come straight from
-//! `dashboard/hermes-wrapper/`, and the child UI bundles reuse the exact
-//! same embedded dist data the standalone `tracedecay dashboard` server
-//! serves (`crate::dashboard::assets`), so the deployed copies are
-//! byte-identical to the standalone UI by construction.
+//! Everything is embedded at build time so installs need no source checkout:
+//! the wrapper entry/manifest/api come straight from `dashboard/hermes-wrapper/`;
+//! the build script resolves the product dashboard dist assets from the
+//! repository root and embeds the same source files used by the standalone
+//! dashboard server.
 //!
 //! On hosts whose Hermes predates dashboard-plugin discovery the deployed
 //! directory is inert: the agent-plugin loader only reads `plugin.yaml` and
@@ -21,6 +20,10 @@
 use std::path::Path;
 
 use crate::errors::{Result, TraceDecayError};
+
+mod assets {
+    include!(concat!(env!("OUT_DIR"), "/hermes_dashboard_assets_generated.rs"));
+}
 
 /// Manifest for the wrapper plugin (canonical source: `dashboard/hermes-wrapper/`).
 const MANIFEST_JSON: &str = include_str!("../../../../../dashboard/hermes-wrapper/manifest.json");
@@ -90,16 +93,16 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
     super::write_text_file(
         &dist_dir.join("holographic.js"),
-        crate::dashboard::assets::HOLOGRAPHIC_JS,
+        assets::HOLOGRAPHIC_JS,
     )?;
-    super::write_text_file(&dist_dir.join("lcm.js"), crate::dashboard::assets::LCM_JS)?;
+    super::write_text_file(&dist_dir.join("lcm.js"), assets::LCM_JS)?;
     super::write_text_file(
         &dist_dir.join("graph.js"),
-        crate::dashboard::assets::GRAPH_JS,
+        assets::GRAPH_JS,
     )?;
     super::write_text_file(
         &dist_dir.join("savings.js"),
-        crate::dashboard::assets::SAVINGS_JS,
+        assets::SAVINGS_JS,
     )?;
     super::write_text_file(&dist_dir.join("style.css"), &wrapper_style_css())?;
 
@@ -153,7 +156,7 @@ fn manifest_json() -> Result<String> {
         serde_json::from_str(MANIFEST_JSON).map_err(|e| TraceDecayError::Config {
             message: format!("embedded hermes-wrapper manifest.json is invalid: {e}"),
         })?;
-    manifest["version"] = serde_json::Value::String(env!("CARGO_PKG_VERSION").to_string());
+    manifest["version"] = serde_json::Value::String(env!("TRACEDECAY_PRODUCT_VERSION").to_string());
     serde_json::to_string_pretty(&manifest)
         .map(|json| format!("{json}\n"))
         .map_err(|e| TraceDecayError::Config {
@@ -191,10 +194,10 @@ fn plugin_api(tracedecay_bin: &str) -> Result<String> {
 fn wrapper_style_css() -> String {
     [
         WRAPPER_CSS,
-        crate::dashboard::assets::HOLOGRAPHIC_CSS,
-        crate::dashboard::assets::LCM_CSS,
-        crate::dashboard::assets::GRAPH_CSS,
-        crate::dashboard::assets::SAVINGS_CSS,
+        assets::HOLOGRAPHIC_CSS,
+        assets::LCM_CSS,
+        assets::GRAPH_CSS,
+        assets::SAVINGS_CSS,
     ]
     .join("\n")
 }
@@ -239,7 +242,7 @@ mod tests {
     fn manifest_is_stamped_with_crate_version() {
         let manifest = manifest_json().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-        assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(parsed["version"], env!("TRACEDECAY_PRODUCT_VERSION"));
         assert_eq!(parsed["name"], "tracedecay");
         assert_eq!(parsed["label"], "TraceDecay");
         assert_eq!(parsed["api"], "plugin_api.py");
@@ -279,10 +282,10 @@ mod tests {
         let css = wrapper_style_css();
         assert!(css.starts_with(WRAPPER_CSS));
         for child in [
-            crate::dashboard::assets::HOLOGRAPHIC_CSS,
-            crate::dashboard::assets::LCM_CSS,
-            crate::dashboard::assets::GRAPH_CSS,
-            crate::dashboard::assets::SAVINGS_CSS,
+            assets::HOLOGRAPHIC_CSS,
+            assets::LCM_CSS,
+            assets::GRAPH_CSS,
+            assets::SAVINGS_CSS,
         ] {
             assert!(css.contains(child));
         }

@@ -10,18 +10,10 @@ use super::backend::{
 use super::config::AutomationConfig;
 use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::dashboard::{
-    memory_curate::{
-        CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
-        run_user_memory_curate,
-    },
-    run_memory_curate,
-};
-use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::memory::user::{open_user_memory_db, user_memory_db_path};
-use crate::sessions::user_sessions_db_path;
-use crate::tracedecay::TraceDecay;
+
+const DEFAULT_MAX_CLUSTERS: usize = 12;
+const DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryCuratorAutomationOptions {
@@ -55,99 +47,39 @@ pub struct MemoryCuratorAutomationRun {
     pub backend_response: Option<AgentTaskResponse>,
 }
 
+pub struct MemoryCurationRequest {
+    pub apply: bool,
+    pub llm: bool,
+    pub llm_ops: Option<Value>,
+    pub max_clusters: usize,
+    pub min_confidence: f64,
+}
+
+pub trait MemoryCuratorStore: Send + Sync {
+    fn dashboard_root(&self) -> std::path::PathBuf;
+    fn sessions_db_path(&self) -> std::path::PathBuf;
+    fn curate<'a>(
+        &'a self,
+        request: MemoryCurationRequest,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send + 'a>>;
+    fn refresh_digest<'a>(
+        &'a self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
 pub async fn run_memory_curator_with_backend(
-    cg: &TraceDecay,
+    store: &dyn MemoryCuratorStore,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
 ) -> Result<MemoryCuratorAutomationRun> {
     let mut autonomous_config = config.clone();
     autonomous_config.auto_apply_memory_ops = true;
-    run_memory_curator_for_store(
-        MemoryCuratorStore::Project(cg),
-        &autonomous_config,
-        backend,
-        options,
-    )
-    .await
+    run_memory_curator_for_store(store, &autonomous_config, backend, options).await
 }
 
-/// Runs autonomous curation against profile-level user memory.
-pub async fn run_user_memory_curator_with_backend(
-    profile_root: &std::path::Path,
-    config: &AutomationConfig,
-    backend: &dyn AgentTaskBackend,
-    options: MemoryCuratorAutomationOptions,
-) -> Result<MemoryCuratorAutomationRun> {
-    let db = open_user_memory_db(profile_root).await?;
-    let mut autonomous_config = config.clone();
-    autonomous_config.auto_apply_memory_ops = true;
-    run_memory_curator_for_store(
-        MemoryCuratorStore::User {
-            profile_root,
-            db: &db,
-        },
-        &autonomous_config,
-        backend,
-        options,
-    )
-    .await
-}
-
-enum MemoryCuratorStore<'a> {
-    Project(&'a TraceDecay),
-    User {
-        profile_root: &'a std::path::Path,
-        db: &'a Database,
-    },
-}
-
-impl MemoryCuratorStore<'_> {
-    fn dashboard_root(&self) -> std::path::PathBuf {
-        match self {
-            Self::Project(cg) => cg.store_layout().dashboard_root.clone(),
-            Self::User { profile_root, .. } => super::runner::user_automation_root(profile_root),
-        }
-    }
-
-    fn sessions_db_path(&self) -> std::path::PathBuf {
-        match self {
-            Self::Project(cg) => cg.store_layout().sessions_db_path.clone(),
-            Self::User { profile_root, .. } => user_sessions_db_path(profile_root),
-        }
-    }
-
-    async fn curate(&self, options: &MemoryCurateOptions) -> Result<Value> {
-        match self {
-            Self::Project(cg) => run_memory_curate(cg, options).await,
-            Self::User { profile_root, db } => {
-                run_user_memory_curate(
-                    db,
-                    &user_memory_db_path(profile_root),
-                    profile_root,
-                    &super::runner::user_automation_root(profile_root),
-                    options,
-                )
-                .await
-            }
-        }
-    }
-
-    async fn refresh_digest(&self) {
-        if let Self::Project(cg) = self
-            && let Ok(project_db) = cg.open_project_store_db().await
-        {
-            crate::automation::memory_digest::refresh_memory_digest_after_memory_change(
-                project_db.conn(),
-                &cg.store_layout().project_root,
-            )
-            .await;
-        }
-    }
-}
-
-async fn run_memory_curator_for_store(
-    store: MemoryCuratorStore<'_>,
+pub async fn run_memory_curator_for_store(
+    store: &dyn MemoryCuratorStore,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: MemoryCuratorAutomationOptions,
@@ -172,7 +104,7 @@ async fn run_memory_curator_for_store(
     };
 
     let review_report = store
-        .curate(&MemoryCurateOptions {
+        .curate(MemoryCurationRequest {
             apply: false,
             llm: true,
             llm_ops: None,
@@ -222,7 +154,7 @@ async fn run_memory_curator_for_store(
         .await?;
 
     let dry_run_report = match store
-        .curate(&MemoryCurateOptions {
+        .curate(MemoryCurationRequest {
             apply: false,
             llm: false,
             llm_ops: Some(proposed_ops.clone()),
@@ -253,7 +185,7 @@ async fn run_memory_curator_for_store(
         .unwrap_or(false);
     let validated_report = if should_apply {
         let mut applied_report = match store
-            .curate(&MemoryCurateOptions {
+            .curate(MemoryCurationRequest {
                 apply: true,
                 llm: false,
                 llm_ops: Some(proposed_ops.clone()),
@@ -449,11 +381,11 @@ fn annotate_memory_curation_report(report: &mut Value, apply_policy: Value) {
 }
 
 fn default_max_clusters() -> usize {
-    CURATION_DEFAULT_MAX_CLUSTERS
+    DEFAULT_MAX_CLUSTERS
 }
 
 fn default_min_confidence() -> f64 {
-    CURATION_DEFAULT_MIN_CONFIDENCE
+    DEFAULT_MIN_CONFIDENCE
 }
 
 #[cfg(test)]

@@ -236,8 +236,7 @@ fn push_f64(target: &mut Vec<u8>, value: f64) {
     target.extend_from_slice(&normalized.to_bits().to_be_bytes());
 }
 
-#[cfg(test)]
-pub(in crate::consolidate) async fn count_rows(path: &Path, table: &str) -> Result<u64> {
+pub async fn count_rows(path: &Path, table: &str) -> Result<u64> {
     let snapshots = crate::sqlite_read_snapshot::SnapshotSet::capture(&[path.to_path_buf()])
         .await
         .map_err(|error| db_error("read_snapshot", error))?;

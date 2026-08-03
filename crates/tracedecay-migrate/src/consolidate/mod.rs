@@ -5,12 +5,16 @@
 //! and cutting the repository marker over only after the new shard and global
 //! registry have verified successfully.
 
-mod evidence;
-mod files;
+#[doc(hidden)]
+pub mod evidence;
+#[doc(hidden)]
+pub mod files;
 mod finalize;
 mod preflight;
-mod prepare;
-mod sqlite;
+#[doc(hidden)]
+pub mod prepare;
+#[doc(hidden)]
+pub mod sqlite;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -24,12 +28,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use evidence::{GraphStoreEvidence, InputReadEvidence, capture_input_evidence};
-#[cfg(test)]
-use files::sqlite_sidecar;
+#[doc(hidden)]
+pub use files::{
+    copy_file_atomic, copy_file_exact, copy_sqlite_family_exact, file_digest, relative_file_map,
+    sqlite_sidecar,
+};
 use files::{
-    copy_file_atomic, copy_file_exact, copy_sqlite_family_exact, excluded_source_artifact,
-    file_digest, is_coordination_lock, is_reference_artifact, is_runtime_lock, is_sqlite_database,
-    is_sqlite_sidecar, relative_file_map, tree_stats,
+    excluded_source_artifact, is_coordination_lock, is_reference_artifact, is_runtime_lock,
+    is_sqlite_database, is_sqlite_sidecar, tree_stats,
 };
 use finalize::{cut_over_markers, register_destination, verify_destination};
 use preflight::{acquire_store_locks, ensure_profile_offline, preflight_disk_space};
@@ -42,7 +48,8 @@ use crate::storage::{
     self, EnrollmentMarker, PrivateStoreIo, StorageMode, StoreKind, StoreLayout, StoreManifest,
 };
 
-const LEDGER_SCHEMA_VERSION: u32 = 2;
+#[doc(hidden)]
+pub const LEDGER_SCHEMA_VERSION: u32 = 2;
 const BACKUP_DIR: &str = "migration-backups";
 const LEDGER_DIR: &str = "migration-inventory";
 const PRESERVED_DIR: &str = "consolidation-preserved";
@@ -122,8 +129,9 @@ pub struct ConsolidationReport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct ConsolidationLedger {
-    schema_version: u32,
+#[doc(hidden)]
+pub struct ConsolidationLedger {
+    pub schema_version: u32,
     migration_id: String,
     confirmation_token: String,
     input_fingerprint: String,
@@ -139,7 +147,7 @@ struct ConsolidationLedger {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct ManifestRetirementReport {
+pub struct ManifestRetirementReport {
     pub retired: Vec<PathBuf>,
     pub retired_registry_projects: usize,
     pub warnings: Vec<String>,
@@ -159,14 +167,15 @@ struct ManifestRetirementPlan {
     action: ManifestRetirementAction,
 }
 
-struct ResolvedPlan {
-    report: ConsolidationReport,
+#[doc(hidden)]
+pub struct ResolvedPlan {
+    pub report: ConsolidationReport,
     input_fingerprint: String,
-    source_layout: StoreLayout,
-    target_layout: StoreLayout,
+    pub source_layout: StoreLayout,
+    pub target_layout: StoreLayout,
     source_meta: BranchMeta,
     target_meta: BranchMeta,
-    evidence: Arc<InputReadEvidence>,
+    pub evidence: Arc<InputReadEvidence>,
     scratch_root: MigrationScratchRoot,
 }
 
@@ -221,7 +230,8 @@ pub async fn apply_with_registry<R: RegistryRuntime>(
     .await
 }
 
-async fn apply_with_stop<R: RegistryRuntime>(
+#[doc(hidden)]
+pub async fn apply_with_stop<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
     stop_after: Option<ConsolidationState>,
@@ -239,19 +249,21 @@ async fn apply_with_stop<R: RegistryRuntime>(
     .await
 }
 
-#[cfg(test)]
-async fn apply_with_prepare_stop(
+#[doc(hidden)]
+pub async fn apply_with_prepare_stop<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
     prepare_stop: prepare::PrepareStop,
+    daemon_reachable: bool,
+    registry: &R,
 ) -> Result<ConsolidationReport> {
     apply_with_faults(
         options,
         confirmation_token,
         None,
         Some(prepare_stop),
-        false,
-        &NoRegistry,
+        daemon_reachable,
+        registry,
     )
     .await
 }
@@ -389,7 +401,8 @@ fn maybe_stop(state: &ConsolidationState, stop_after: Option<&ConsolidationState
     Ok(())
 }
 
-async fn resolve_plan(options: &ConsolidationOptions) -> Result<ResolvedPlan> {
+#[doc(hidden)]
+pub async fn resolve_plan(options: &ConsolidationOptions) -> Result<ResolvedPlan> {
     resolve_plan_inner(options, false, None).await
 }
 
@@ -572,7 +585,8 @@ async fn resolve_plan_inner(
     })
 }
 
-fn layout_for_id(
+#[doc(hidden)]
+pub fn layout_for_id(
     project_root: &Path,
     profile_root: &Path,
     project_id: &str,
@@ -901,7 +915,7 @@ async fn collision_summary(
     })
 }
 
-pub(crate) fn destination_project_id(git_common_dir: &Path, source: &str, target: &str) -> String {
+pub fn destination_project_id(git_common_dir: &Path, source: &str, target: &str) -> String {
     let mut ids = [source, target];
     ids.sort_unstable();
     let mut hash = Sha256::new();
@@ -1077,7 +1091,8 @@ fn validate_ledger_inventory(ledger: &ConsolidationLedger, resolved: &ResolvedPl
     Ok(())
 }
 
-fn load_ledger(path: &Path) -> Result<Option<ConsolidationLedger>> {
+#[doc(hidden)]
+pub fn load_ledger(path: &Path) -> Result<Option<ConsolidationLedger>> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -1091,14 +1106,15 @@ fn load_ledger(path: &Path) -> Result<Option<ConsolidationLedger>> {
     })
 }
 
-fn save_ledger(path: &Path, ledger: &ConsolidationLedger) -> Result<()> {
+#[doc(hidden)]
+pub fn save_ledger(path: &Path, ledger: &ConsolidationLedger) -> Result<()> {
     let bytes =
         serde_json::to_vec_pretty(ledger).map_err(|error| config_error(error.to_string()))?;
     let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     PrivateStoreIo::write_file_atomically(path, &temp, &bytes).map_err(io_error)
 }
 
-pub(crate) async fn retire_applied_input_manifests<R: RegistryRuntime>(
+pub async fn retire_applied_input_manifests_with_registry<R: RegistryRuntime>(
     profile_root: &Path,
     registry: &R,
 ) -> ManifestRetirementReport {
@@ -1690,7 +1706,8 @@ fn graph_db_paths(layout: &StoreLayout, meta: &BranchMeta) -> Result<Vec<PathBuf
     graph_db_paths_for_root(&layout.data_root, meta)
 }
 
-fn input_database_paths(resolved: &ResolvedPlan) -> Result<Vec<PathBuf>> {
+#[doc(hidden)]
+pub fn input_database_paths(resolved: &ResolvedPlan) -> Result<Vec<PathBuf>> {
     database_paths_for_layouts(
         &resolved.source_layout,
         &resolved.source_meta,
@@ -1766,7 +1783,8 @@ fn confined_branch_graph_path(root: &Path, db_file: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
+#[doc(hidden)]
+pub fn same_path(left: &Path, right: &Path) -> bool {
     canonical_or_original(left) == canonical_or_original(right)
 }
 
@@ -1823,6 +1841,3 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 fn io_error(error: io::Error) -> TraceDecayError {
     config_error(error.to_string())
 }
-
-#[cfg(test)]
-mod tests;

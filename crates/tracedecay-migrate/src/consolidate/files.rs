@@ -9,7 +9,7 @@ use super::{config_error, io_error};
 use crate::errors::Result;
 use crate::storage;
 
-pub(super) fn relative_file_map(root: &Path) -> Result<BTreeMap<PathBuf, PathBuf>> {
+pub fn relative_file_map(root: &Path) -> Result<BTreeMap<PathBuf, PathBuf>> {
     let mut files = BTreeMap::new();
     collect_files(root, root, &mut files)?;
     Ok(files)
@@ -56,7 +56,7 @@ pub(super) fn tree_stats(root: &Path) -> Result<(usize, u64)> {
     Ok((files.len(), bytes))
 }
 
-pub(super) fn copy_file_exact(source: &Path, target: &Path) -> Result<()> {
+pub fn copy_file_exact(source: &Path, target: &Path) -> Result<()> {
     if target.exists() {
         if file_digest(source)? == file_digest(target)? {
             sync_file_and_parent(target)?;
@@ -80,7 +80,7 @@ pub(super) fn copy_file_exact(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
+pub fn copy_file_atomic(source: &Path, target: &Path) -> Result<()> {
     let parent = target
         .parent()
         .ok_or_else(|| config_error("artifact target has no parent"))?;
@@ -154,7 +154,7 @@ pub(super) fn sync_parent_directory(_parent: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn copy_sqlite_family_exact(source: &Path, target: &Path) -> Result<()> {
+pub fn copy_sqlite_family_exact(source: &Path, target: &Path) -> Result<()> {
     copy_file_exact(source, target)?;
     for suffix in ["-wal", "-shm"] {
         let source_sidecar = sqlite_sidecar(source, suffix);
@@ -165,7 +165,7 @@ pub(super) fn copy_sqlite_family_exact(source: &Path, target: &Path) -> Result<(
     Ok(())
 }
 
-pub(super) fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
+pub fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut value = path.as_os_str().to_os_string();
     value.push(suffix);
     PathBuf::from(value)
@@ -224,7 +224,7 @@ pub(super) fn is_reference_artifact(relative: &Path) -> bool {
     relative.starts_with("lcm-payloads") || relative.starts_with("response-handles")
 }
 
-pub(super) fn file_digest(path: &Path) -> Result<[u8; 32]> {
+pub fn file_digest(path: &Path) -> Result<[u8; 32]> {
     let mut file = File::open(path).map_err(io_error)?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();

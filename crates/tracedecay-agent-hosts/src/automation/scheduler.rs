@@ -9,7 +9,6 @@ use super::config::{
 };
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationRunStatus, AutomationTrigger};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
 
 const DEFAULT_FAILURE_COOLDOWN_SECS: u64 = 300;
 const DEFAULT_STALE_LOCK_SECS: u64 = 6 * 60 * 60;
@@ -149,11 +148,8 @@ impl SessionActivity {
 /// so it is cheap and race-safe to call from every scheduler tick; concurrent
 /// ingest writers only ever move the value forward.
 pub async fn load_session_activity(sessions_db_path: &Path) -> SessionActivity {
-    let Some(db) = GlobalDb::open_read_only_at(sessions_db_path).await else {
-        return SessionActivity::none();
-    };
     SessionActivity {
-        last_activity_secs: db.latest_session_activity_secs().await,
+        last_activity_secs: crate::ports::latest_session_activity(sessions_db_path).await,
     }
 }
 

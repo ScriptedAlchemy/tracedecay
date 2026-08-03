@@ -161,6 +161,11 @@ fn user_state(
         automation_writer: super::direct_dashboard_automation_writer(),
         automation_executor: None,
         skill_analytics_sync: None,
+        profile_root_resolver: {
+            let profile_root = profile_root.to_path_buf();
+            Arc::new(move || Ok(profile_root.clone()))
+        },
+        managed_skill_exporter: Arc::new(|_, _| Box::pin(async { Vec::new() })),
         project_registry: None,
         project_state_builder: None,
     }

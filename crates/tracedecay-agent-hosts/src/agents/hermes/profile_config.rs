@@ -4,16 +4,100 @@
 //! accepts profile text and returns deterministic edits so the kernel remains
 //! root-free and reusable.
 
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
+
+use crate::agents::backup_config_file;
+use crate::errors::{Result, TraceDecayError};
+
 /// Parses the removed `plugins.tracedecay.project_root` setting solely as
 /// provenance for one-time data migration and transcript import.
 ///
 /// This is the single source of truth for the pin (the same
 /// `plugins.<name>` block bundled Hermes plugins use): install writes it,
 /// reinstalls preserve it, and the generated Python resolves it at runtime.
-pub fn read_config_pinned_project_root(config: &str) -> Option<String> {
+pub fn parse_config_pinned_project_root(config: &str) -> Option<String> {
     let lines: Vec<&str> = config.lines().collect();
     let (plugins_start, plugins_end) = find_top_level_section_in(&lines, "plugins")?;
     read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tracedecay")
+}
+
+pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(config_path).ok()?;
+    parse_config_pinned_project_root(&config)
+}
+
+pub fn enable_plugin(config_path: &Path) -> Result<bool> {
+    let existing = std::fs::read_to_string(config_path).unwrap_or_default();
+    let updated = enable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
+        message: format!(
+            "{message} in {}.\nFix the config by hand, then re-run: tracedecay install --agent hermes",
+            config_path.display()
+        ),
+    })?;
+    if updated != existing {
+        write_config_file(config_path, &updated)?;
+    }
+    Ok(true)
+}
+
+pub fn disable_plugin(config_path: &Path) -> Result<()> {
+    let Ok(existing) = std::fs::read_to_string(config_path) else {
+        return Ok(());
+    };
+    let updated = disable_plugin_config(&existing).map_err(|message| TraceDecayError::Config {
+        message: format!(
+            "{message} in {}; leaving Hermes plugin files in place",
+            config_path.display()
+        ),
+    })?;
+    if updated != existing {
+        write_config_file(config_path, &updated)?;
+    }
+    Ok(())
+}
+
+fn write_config_file(path: &Path, contents: &str) -> Result<()> {
+    let current = match std::fs::read_to_string(path) {
+        Ok(current) => Some(current),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("failed to read {}: {error}", path.display()),
+            });
+        }
+    };
+    if current.as_deref() == Some(contents) {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to create {}: {error}", parent.display()),
+        })?;
+    }
+    let backup = backup_config_file(path)?;
+    let new_path = PathBuf::from(format!("{}.new", path.display()));
+    if let Err(error) = std::fs::write(&new_path, contents) {
+        std::fs::remove_file(&new_path).ok();
+        return Err(TraceDecayError::Config {
+            message: format!("failed to write {}: {error}", new_path.display()),
+        });
+    }
+    if let Err(error) = std::fs::rename(&new_path, path) {
+        std::fs::remove_file(&new_path).ok();
+        let backup_hint = backup
+            .as_ref()
+            .map(|path| format!(" Backup is at {}.", path.display()))
+            .unwrap_or_default();
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "failed to replace {} with {}: {error}.{backup_hint}",
+                path.display(),
+                new_path.display()
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn read_pinned_project_root_from_block(
@@ -694,7 +778,7 @@ mod tests {
     #[test]
     fn read_project_pin_decodes_yaml_scalars() {
         assert_eq!(
-            read_config_pinned_project_root(
+            parse_config_pinned_project_root(
                 "plugins:\n  tracedecay:\n    project_root: '/repo/it''s-ok'\n",
             )
             .as_deref(),

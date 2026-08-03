@@ -2,19 +2,71 @@
 
 pub mod consolidate {
     pub use tracedecay_migrate::consolidate::*;
+
+    #[cfg(test)]
+    use crate::branch_meta::{self, BranchEntry, BranchMeta};
+    #[cfg(test)]
+    use crate::global_db::{GlobalDb, StoreInstanceUpsert};
+    #[cfg(test)]
+    use crate::storage::{self, EnrollmentMarker, StorageMode, StoreLayout};
+
+    /// Root-owned daemon and registry composition for the legacy public API.
+    pub async fn plan(
+        options: &ConsolidationOptions,
+    ) -> crate::errors::Result<ConsolidationReport> {
+        tracedecay_migrate::consolidate::plan_with_daemon_status(
+            options,
+            crate::daemon::daemon_reachable(),
+        )
+        .await
+    }
+
+    /// Root-owned daemon and registry composition for the legacy public API.
+    pub async fn apply(
+        options: &ConsolidationOptions,
+        confirmation_token: &str,
+    ) -> crate::errors::Result<ConsolidationReport> {
+        tracedecay_migrate::consolidate::apply_with_registry(
+            options,
+            confirmation_token,
+            crate::daemon::daemon_reachable(),
+            &super::hermes::RootRegistry,
+        )
+        .await
+    }
+
+    /// Root-owned registry composition for the post-update health pass.
+    pub async fn retire_applied_input_manifests(
+        profile_root: &std::path::Path,
+    ) -> ManifestRetirementReport {
+        tracedecay_migrate::consolidate::retire_applied_input_manifests_with_registry(
+            profile_root,
+            &super::hermes::RootRegistry,
+        )
+        .await
+    }
+
+    #[cfg(test)]
+    mod tests;
 }
 
 pub mod hermes {
     pub use tracedecay_migrate::hermes::*;
 
+    #[cfg(test)]
+    use std::fs;
     use std::path::{Path, PathBuf};
 
     use libsql::Connection;
 
+    #[cfg(test)]
+    use crate::db::Database;
     use crate::global_db::{
         CodeProjectRecord, GlobalDb, GraphScopeUpsert, ProjectAliasRecord, ProjectRegistryContext,
         StoreArtifactUpsert, StoreInstanceUpsert,
     };
+    #[cfg(test)]
+    use crate::memory::store::MemoryStore;
     use tracedecay_migrate::registry_adapter::{
         self, GraphScopeUpsert as MigrateGraphScopeUpsert,
         ProjectAliasRecord as MigrateProjectAliasRecord,
@@ -23,9 +75,9 @@ pub mod hermes {
         StoreInstanceUpsert as MigrateStoreInstanceUpsert,
     };
 
-    struct RootRegistry;
+    pub(super) struct RootRegistry;
 
-    struct RootHermesStateImporter;
+    pub(super) struct RootHermesStateImporter;
 
     impl registry_adapter::RegistryRuntime for RootRegistry {
         type Database = GlobalDb;
@@ -229,10 +281,28 @@ pub mod hermes {
             aliases: context.aliases.into_iter().map(project_alias).collect(),
         }
     }
+
+    #[cfg(test)]
+    mod tests;
 }
 
 pub mod inventory {
     pub use tracedecay_migrate::inventory::*;
+
+    /// Root-owned global-accounting composition for the legacy public API.
+    pub async fn build_inventory(
+        options: MigrationInventoryOptions,
+    ) -> crate::errors::Result<MigrationInventory> {
+        tracedecay_migrate::inventory::build_inventory_with_global_db(
+            options,
+            crate::global_db::global_db_path(),
+            crate::global_db::global_db_path_is_overridden(),
+            crate::global_db::global_accounting_mode()
+                .as_str()
+                .to_string(),
+        )
+        .await
+    }
 }
 
 pub mod manifest {
@@ -240,5 +310,42 @@ pub mod manifest {
 }
 
 pub mod registry {
-    pub use tracedecay_migrate::registry::*;
+    use std::path::{Path, PathBuf};
+
+    pub use tracedecay_migrate::registry::{
+        RegistryProjectPlan, RegistryReconstructionApplyReport, RegistryReconstructionDiffReport,
+        RegistryReconstructionPlan, RegistryReconstructionReport, RegistryReconstructionStatus,
+        StaleRootScope, apply_registry_reconstruction_report,
+        apply_single_registry_reconstruction_report, diff_registry_reconstruction_report,
+        reconstruct_registry_from_store_manifest, scan_profile_store_manifests,
+    };
+
+    /// Root-record adapter retained for the existing public migration API.
+    pub fn code_project_root_exists(project: &crate::global_db::CodeProjectRecord) -> bool {
+        Path::new(&project.canonical_root).exists() || Path::new(&project.display_root).exists()
+    }
+
+    /// Root-record adapter retained for the existing public migration API.
+    pub fn stale_code_projects<'a>(
+        projects: &'a [crate::global_db::CodeProjectRecord],
+        prefixes: &[PathBuf],
+        scope: StaleRootScope,
+    ) -> Vec<&'a crate::global_db::CodeProjectRecord> {
+        projects
+            .iter()
+            .filter(|project| {
+                let canonical_root = Path::new(&project.canonical_root);
+                prefixes.is_empty()
+                    || prefixes
+                        .iter()
+                        .any(|prefix| canonical_root.starts_with(prefix))
+            })
+            .filter(|project| match scope {
+                StaleRootScope::CanonicalRootMissing => {
+                    !Path::new(&project.canonical_root).exists()
+                }
+                StaleRootScope::AllRootsMissing => !code_project_root_exists(project),
+            })
+            .collect()
+    }
 }

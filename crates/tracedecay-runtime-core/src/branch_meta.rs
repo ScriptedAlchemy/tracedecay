@@ -335,6 +335,7 @@ pub fn update_synced_timestamp_with_lock(
     update_synced_timestamp_with_lock_and(tracedecay_dir, branch, acquire_branch_lock, || {});
 }
 
+#[cfg(test)]
 fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
     update_synced_timestamp_with_lock_and(
         tracedecay_dir,

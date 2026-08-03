@@ -15,9 +15,14 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::serve::DEGRADED_SERVE_STDERR_MARKER;
-
 use super::DoctorCounters;
+
+const LEGACY_DEGRADED_SERVE_STDERR_MARKER: &str =
+    "[tracedecay] serve: staying alive in degraded MCP mode";
+
+fn degraded_serve_stderr_marker() -> &'static str {
+    crate::ports::degraded_serve_stderr_marker().unwrap_or(LEGACY_DEGRADED_SERVE_STDERR_MARKER)
+}
 
 /// How many of the newest Cursor log sessions to scan. Each session directory
 /// corresponds to one Cursor launch; older sessions describe long-fixed runs.
@@ -95,7 +100,7 @@ pub(crate) fn scan_cursor_mcp_logs(logs_root: &Path) -> CursorMcpLogFindings {
                     findings.connection_failures += 1;
                     affected = true;
                 }
-                if line.contains(DEGRADED_SERVE_STDERR_MARKER) && !stale_ambiguity {
+                if line.contains(degraded_serve_stderr_marker()) && !stale_ambiguity {
                     findings.degraded_mode_notices += 1;
                     affected = true;
                 }
@@ -115,7 +120,7 @@ fn stale_degraded_ambiguity(contents: &str) -> bool {
     let ambiguity = &contents[ambiguity_start..];
     let mut paths = Vec::new();
     for line in ambiguity.lines().skip(1) {
-        if line.contains(DEGRADED_SERVE_STDERR_MARKER) {
+        if line.contains(degraded_serve_stderr_marker()) {
             break;
         }
         let trimmed = line.trim();
@@ -295,7 +300,7 @@ mod tests {
     }
 
     /// The scanner must match the exact marker older `serve` versions emitted;
-    /// [`DEGRADED_SERVE_STDERR_MARKER`] retains that legacy log contract.
+    /// `degraded_serve_stderr_marker` retains that legacy log contract.
     #[test]
     fn scan_detects_degraded_mode_notice() {
         let logs = TempDir::new().unwrap();
@@ -304,8 +309,8 @@ mod tests {
             "20260702T030000",
             "mcp-server-plugin-tracedecay-tracedecay.log",
             &format!(
-                "2026-07-02 03:00:00.000 [warning] {DEGRADED_SERVE_STDERR_MARKER} — MCP \
-                 handshake will complete\n"
+                "2026-07-02 03:00:00.000 [warning] {} — MCP handshake will complete\n",
+                degraded_serve_stderr_marker(),
             ),
         );
 
@@ -329,9 +334,10 @@ mod tests {
                  projects found — pass -p <path> to select one:\n\
                    {}\n\
                    {}\n\
-                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
+                 {} — MCP handshake will complete\n",
                 repo.display(),
-                stale_worktree.display()
+                stale_worktree.display(),
+                degraded_serve_stderr_marker(),
             ),
         );
 
@@ -357,9 +363,10 @@ mod tests {
                  projects found — pass -p <path> to select one:\n\
                    {}\n\
                    {}\n\
-                 {DEGRADED_SERVE_STDERR_MARKER} — MCP handshake will complete\n",
+                 {} — MCP handshake will complete\n",
                 repo.display(),
-                worktree.display()
+                worktree.display(),
+                degraded_serve_stderr_marker(),
             ),
         );
 

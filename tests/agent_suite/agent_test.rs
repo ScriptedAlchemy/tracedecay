@@ -751,11 +751,19 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
     // Hosts that render their own rule text, plus the shared renderer that
     // copilot/gemini/opencode/kimi/vibe delegate to.
     for (name, source) in [
-        ("claude", include_str!("../../src/agents/claude.rs")),
-        ("kiro", include_str!("../../src/agents/kiro.rs")),
+        (
+            "claude",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/claude.rs"),
+        ),
+        (
+            "kiro",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/kiro.rs"),
+        ),
         (
             "prompt_rules",
-            include_str!("../../src/agents/prompt_rules.rs"),
+            include_str!(
+                "../../crates/tracedecay-agent-hosts/src/agents/prompt_rules.rs"
+            ),
         ),
     ] {
         assert!(
@@ -769,11 +777,26 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
         );
     }
     for (name, source) in [
-        ("copilot", include_str!("../../src/agents/copilot.rs")),
-        ("gemini", include_str!("../../src/agents/gemini.rs")),
-        ("kimi", include_str!("../../src/agents/kimi.rs")),
-        ("opencode", include_str!("../../src/agents/opencode.rs")),
-        ("vibe", include_str!("../../src/agents/vibe.rs")),
+        (
+            "copilot",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/copilot.rs"),
+        ),
+        (
+            "gemini",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/gemini.rs"),
+        ),
+        (
+            "kimi",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/kimi.rs"),
+        ),
+        (
+            "opencode",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/opencode.rs"),
+        ),
+        (
+            "vibe",
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/vibe.rs"),
+        ),
     ] {
         assert!(
             !source.contains(".tracedecay/tracedecay.db"),
@@ -1214,15 +1237,18 @@ fn test_hermes_user_install_writes_single_plugin() {
 
 #[test]
 fn test_hermes_generated_plugin_templates_live_outside_installer() {
-    let installer_source = include_str!("../../src/agents/hermes.rs");
+    let installer_source =
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes.rs");
     // The template module plus its embedded asset payloads: the large Python
     // bodies live in src/agents/hermes/templates/ files pulled in via
     // include_str!, not as Rust string literals.
     let template_sources = [
-        include_str!("../../src/agents/hermes/templates.rs"),
-        include_str!("../../src/agents/hermes/templates/plugin_init.py"),
-        include_str!("../../src/agents/hermes/templates/cli.py"),
-        include_str!("../../src/agents/hermes/templates/skill.md"),
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates.rs"),
+        include_str!(
+            "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
+        ),
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/cli.py"),
+        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/skill.md"),
     ];
 
     for marker in [
@@ -1265,7 +1291,10 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
         "unexpected provenance header: {header}"
     );
     assert!(
-        body == include_str!("../../src/agents/hermes/templates/plugin_init.py"),
+        body
+            == include_str!(
+                "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
+            ),
         "generated __init__.py body must be a verbatim copy of templates/plugin_init.py"
     );
 

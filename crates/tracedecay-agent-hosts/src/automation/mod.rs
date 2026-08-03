@@ -1,4 +1,7 @@
 pub mod agent_targets;
+pub(crate) mod apply_policy;
+pub mod backend;
+pub mod config;
 mod artifact_feedback;
 mod artifact_generated_evals;
 mod artifact_optimizer;
@@ -11,11 +14,6 @@ pub mod host_receipts;
 mod job_webhook;
 pub mod jobs;
 pub mod lifecycle;
-<<<<<<<< HEAD:src/automation/mod.rs
-pub(crate) use tracedecay_automation::managed_skill_model;
-pub(crate) use tracedecay_automation::managed_skill_validation;
-========
->>>>>>>> 8038533d1 (refactor(agent-hosts): split agent host implementations):crates/tracedecay-agent-hosts/src/automation/mod.rs
 pub mod managed_skills;
 pub mod memory_curator;
 pub mod memory_digest;
@@ -30,10 +28,10 @@ pub mod skill_usage;
 pub mod skill_writer;
 pub mod staged_notice;
 
-pub use tracedecay_automation::{
-    apply_policy, artifact_policy, backend, config, managed_skill_format, managed_skill_model,
-    managed_skill_validation, skill_frontmatter, text,
+pub(crate) use tracedecay_automation::{
+    artifact_policy, managed_skill_model, managed_skill_validation,
 };
+pub use tracedecay_automation::{skill_frontmatter, text};
 
 /// Build a [`TraceDecayError::Config`] from any message-like value.
 ///

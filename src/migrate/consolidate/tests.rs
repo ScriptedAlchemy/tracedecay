@@ -36,10 +36,25 @@ async fn test_open_read_only(path: &Path) -> (Database, bool) {
 
 struct Fixture {
     _temp: TempDir,
+    _holder_scan_lock: std::sync::MutexGuard<'static, ()>,
+    previous_holder_scan: Option<std::ffi::OsString>,
     project: PathBuf,
     profile: PathBuf,
     source_id: String,
     target_id: String,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        unsafe {
+            match self.previous_holder_scan.take() {
+                Some(previous) => {
+                    std::env::set_var("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", previous)
+                }
+                None => std::env::remove_var("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN"),
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +327,8 @@ async fn legacy_single_db_retry_after_destination_publish_is_deterministic() {
         &options,
         &planned.confirmation_token,
         prepare::PrepareStop::Publish,
+        false,
+        &crate::migrate::hermes::RootRegistry,
     )
     .await
     .unwrap_err();
@@ -489,6 +506,8 @@ async fn interrupted_apply_retries_without_duplicates_and_cuts_over_last() {
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DatabasesMerged),
+        false,
+        &crate::migrate::hermes::RootRegistry,
     )
     .await
     .unwrap_err();
@@ -809,9 +828,15 @@ async fn destination_preparation_restarts_after_every_publish_boundary() {
         let options = fixture.options();
         let report = plan(&options).await.unwrap();
 
-        let error = apply_with_prepare_stop(&options, &report.confirmation_token, stop)
-            .await
-            .unwrap_err();
+        let error = apply_with_prepare_stop(
+            &options,
+            &report.confirmation_token,
+            stop,
+            false,
+            &crate::migrate::hermes::RootRegistry,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("synthetic interruption"),
             "{stop:?}: {error}"
@@ -843,9 +868,15 @@ async fn consolidation_restarts_after_every_durable_state() {
         let options = fixture.options();
         let report = plan(&options).await.unwrap();
 
-        let error = apply_with_stop(&options, &report.confirmation_token, Some(stop.clone()))
-            .await
-            .unwrap_err();
+        let error = apply_with_stop(
+            &options,
+            &report.confirmation_token,
+            Some(stop.clone()),
+            false,
+            &crate::migrate::hermes::RootRegistry,
+        )
+        .await
+        .unwrap_err();
         assert!(
             error.to_string().contains("synthetic interruption"),
             "{stop:?}: {error}"
@@ -881,6 +912,8 @@ async fn version_one_premerge_ledger_migrates_before_resume() {
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DestinationReady),
+        false,
+        &crate::migrate::hermes::RootRegistry,
     )
     .await
     .unwrap_err();
@@ -913,6 +946,8 @@ async fn version_one_postmerge_ledger_fails_closed() {
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DatabasesMerged),
+        false,
+        &crate::migrate::hermes::RootRegistry,
     )
     .await
     .unwrap_err();
@@ -958,6 +993,8 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DatabasesMerged),
+        false,
+        &crate::migrate::hermes::RootRegistry,
     )
     .await
     .unwrap_err();
@@ -1011,6 +1048,8 @@ async fn verification_checks_session_bounds_and_immutable_message_payloads() {
         &options,
         &report.confirmation_token,
         Some(ConsolidationState::DatabasesMerged),
+        false,
+        &crate::migrate::hermes::RootRegistry,
     )
     .await
     .unwrap_err();
@@ -1668,9 +1707,13 @@ async fn indexed_message_family_materialization_handles_deep_and_wide_graph() {
     }
     execute_sql(&source.sessions_db_path, &family_sql).await;
     execute_sql(&target.sessions_db_path, &family_sql).await;
-    sqlite::plan_session_offsets(&target.sessions_db_path, &source.sessions_db_path)
-        .await
-        .unwrap();
+    sqlite::plan_session_offsets(
+        &target.sessions_db_path,
+        &source.sessions_db_path,
+        &crate::migrate::hermes::RootRegistry,
+    )
+    .await
+    .unwrap();
 
     let target_db = GlobalDb::open_at_without_structured_backfill(&target.sessions_db_path)
         .await
@@ -2567,6 +2610,11 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
 }
 
 async fn fixture() -> Fixture {
+    let holder_scan_lock = crate::config::lock_user_data_dir_test_env();
+    let previous_holder_scan = std::env::var_os("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN");
+    unsafe {
+        std::env::set_var("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", "1");
+    }
     let temp = TempDir::new().unwrap();
     let project = temp.path().join("repo");
     let profile = temp.path().join("profile");
@@ -2632,6 +2680,8 @@ async fn fixture() -> Fixture {
     storage::write_repository_identity_marker(&project, &target_id).unwrap();
     Fixture {
         _temp: temp,
+        _holder_scan_lock: holder_scan_lock,
+        previous_holder_scan,
         project,
         profile,
         source_id,

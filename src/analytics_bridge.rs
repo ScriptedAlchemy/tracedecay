@@ -366,10 +366,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
         })
         .await
         .map_err(cli_error)?;
-    let event_rows: Vec<Value> = events
-        .iter()
-        .map(crate::dashboard::analytics_api::durable_analytics_event_row)
-        .collect();
+    let event_rows: Vec<Value> = events.iter().map(durable_analytics_event_row).collect();
 
     let store_root = project_root.and_then(|root| {
         crate::storage::resolve_layout_for_current_profile(root)
@@ -548,4 +545,18 @@ mod tests {
         assert_eq!(global.session_message_count().await.unwrap(), 0);
         assert_eq!(diagnostics_message_count(&global, None, true).await, 1);
     }
+}
+fn durable_analytics_event_row(event: &crate::global_db::AnalyticsEventRecord) -> Value {
+    json!({
+        "provider": &event.provider,
+        "timestamp": event.timestamp,
+        "event_kind": &event.event_kind,
+        "hook_name": &event.hook_name,
+        "tool_name": &event.tool_name,
+        "tool_category": &event.tool_category,
+        "skill_name": &event.skill_name,
+        "hint_category": &event.hint_category,
+        "outcome": &event.outcome,
+        "metadata_json": &event.metadata_json,
+    })
 }

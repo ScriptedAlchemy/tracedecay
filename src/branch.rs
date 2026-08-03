@@ -7,7 +7,16 @@ pub use admin::{
     prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
 };
 pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
-pub use tracedecay_runtime_core::branch::*;
+pub use tracedecay_runtime_core::branch::{
+    BranchAddOutcome, BranchTrackingPreparation, GcReport, PreparedBranchTracking, current_branch,
+    detect_default_branch, finalize_prepared_branch_tracking, find_nearest_tracked_ancestor,
+    gc_dead_branch_stores, is_branch_ref_present, local_branch_exists, resolve_branch_db_path,
+    rollback_prepared_branch_tracking, sanitize_branch_name,
+};
+pub(crate) use tracedecay_runtime_core::branch::{
+    BRANCH_LOCK_RETRY_ATTEMPTS, BRANCH_LOCK_RETRY_INTERVAL, now_unix_secs, parse_unix_secs,
+    try_acquire_branch_add_lock_raw,
+};
 
 pub(crate) fn try_acquire_branch_add_lock(
     tracedecay_dir: &std::path::Path,

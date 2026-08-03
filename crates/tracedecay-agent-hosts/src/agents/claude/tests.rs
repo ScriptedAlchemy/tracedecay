@@ -1,10 +1,12 @@
 use super::*;
 use serde_json::json;
 
+fn plugin_source_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
+}
+
 fn plugin_subdir_names(rel: &str) -> Vec<String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("plugin")
-        .join(rel);
+    let root = plugin_source_root().join(rel);
     let mut names: Vec<String> = std::fs::read_dir(&root)
         .expect("plugin source dir should be readable")
         .flatten()
@@ -68,7 +70,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
     assert_eq!(skills.len(), 15, "expected 15 shared skill dirs");
     // Every file under plugin/skills/ (SKILL.md *and* any support files) is
     // deployed — the recursive embed leaves nothing on disk unwired.
-    let skills_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/skills");
+    let skills_root = plugin_source_root().join("skills");
     for relative in plugin_skill_tree_files(&skills_root) {
         let expected = format!("skills/{relative}");
         assert!(
@@ -93,7 +95,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
     // Every agent on disk under plugin/agents is deployed — dir-walk rather
     // than hardcode, so a future agent added to the shared source tree but
     // not wired into Claude's deploy set is caught here.
-    let agents_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/agents");
+    let agents_root = plugin_source_root().join("agents");
     for entry in std::fs::read_dir(&agents_root).expect("plugin/agents readable") {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         let expected = format!("agents/{name}");
@@ -104,7 +106,7 @@ fn claude_embedded_file_list_covers_the_whole_source_bundle() {
     }
 
     // Every command in plugin/commands is deployed.
-    let commands_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin/commands");
+    let commands_root = plugin_source_root().join("commands");
     for entry in std::fs::read_dir(&commands_root).expect("plugin/commands readable") {
         let name = entry.unwrap().file_name().to_string_lossy().into_owned();
         let expected = format!("commands/{name}");
@@ -128,7 +130,7 @@ fn deploy_stamps_version_and_binary_path() {
     .unwrap();
     assert_eq!(
         plugin["version"].as_str().unwrap(),
-        env!("CARGO_PKG_VERSION")
+        env!("TRACEDECAY_PRODUCT_VERSION")
     );
 
     let hooks = std::fs::read_to_string(deploy_dir.join("hooks/hooks.json")).unwrap();

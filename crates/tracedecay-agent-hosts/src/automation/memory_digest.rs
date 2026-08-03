@@ -43,7 +43,6 @@ use crate::memory::hygiene::detect_secret_like;
 use crate::memory::store::MemoryStore;
 use crate::memory::types::{FactRecord, MemoryCategory};
 use crate::tracedecay::current_timestamp;
-use crate::user_config::UserConfig;
 
 pub const MEMORY_DIGEST_START: &str = "<!-- TRACEDECAY MEMORY DIGEST START -->";
 pub const MEMORY_DIGEST_END: &str = "<!-- TRACEDECAY MEMORY DIGEST END -->";
@@ -472,11 +471,17 @@ pub fn memory_digest_export_enabled(profile_root: &Path) -> bool {
 }
 
 fn load_global_automation_config(profile_root: &Path) -> AutomationConfig {
+    #[derive(Deserialize)]
+    struct ProfileConfig {
+        #[serde(default)]
+        automation: AutomationConfig,
+    }
+
     let path = profile_root.join("config.toml");
     let Ok(contents) = fs::read_to_string(&path) else {
         return AutomationConfig::default();
     };
-    let Ok(config) = toml::from_str::<UserConfig>(&contents) else {
+    let Ok(config) = toml::from_str::<ProfileConfig>(&contents) else {
         return AutomationConfig::default();
     };
     config.automation
@@ -827,7 +832,10 @@ pub fn export_memory_digest_to_recorded_targets(
 // ---------------------------------------------------------------------------
 
 fn project_key_for_root(project_root: &Path) -> String {
-    crate::global_db::GlobalDb::canonical_project_key(project_root)
+    std::fs::canonicalize(project_root)
+        .unwrap_or_else(|_| project_root.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn project_label_for_root(project_root: &Path) -> String {

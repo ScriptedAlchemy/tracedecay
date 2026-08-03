@@ -1,9 +1,10 @@
 use super::*;
 
-pub(super) struct InputReadEvidence {
+#[doc(hidden)]
+pub struct InputReadEvidence {
     pub(super) source_graph: GraphStoreEvidence,
     pub(super) target_graph: GraphStoreEvidence,
-    pub(super) sessions: crate::sqlite_read_snapshot::SnapshotSet,
+    pub sessions: crate::sqlite_read_snapshot::SnapshotSet,
     pub(super) session_fingerprints: BTreeMap<PathBuf, String>,
 }
 
@@ -11,7 +12,6 @@ pub(super) struct GraphStoreEvidence {
     pub(super) identities: sqlite::GraphLogicalIdentities,
     pub(super) fingerprints: BTreeMap<PathBuf, String>,
     generations: BTreeMap<PathBuf, crate::sqlite_read_snapshot::SourceGeneration>,
-    #[cfg(test)]
     peak_scratch_bytes: u64,
 }
 
@@ -68,13 +68,13 @@ impl InputReadEvidence {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) fn retained_database_count(&self) -> usize {
+    #[doc(hidden)]
+    pub fn retained_database_count(&self) -> usize {
         self.sessions.database_count()
     }
 
-    #[cfg(test)]
-    pub(super) fn peak_graph_scratch_bytes(&self) -> u64 {
+    #[doc(hidden)]
+    pub fn peak_graph_scratch_bytes(&self) -> u64 {
         self.source_graph
             .peak_scratch_bytes
             .max(self.target_graph.peak_scratch_bytes)
@@ -167,16 +167,12 @@ async fn capture_graph_evidence(
     let mut identities = sqlite::GraphLogicalIdentities::default();
     let mut fingerprints = BTreeMap::new();
     let mut generations = BTreeMap::new();
-    #[cfg(test)]
     let mut peak_scratch_bytes = 0_u64;
     for path in paths {
         let snapshot = crate::sqlite_read_snapshot::open_in(path, scratch_root)
             .await
             .map_err(io_error)?;
-        #[cfg(test)]
-        {
-            peak_scratch_bytes = peak_scratch_bytes.max(snapshot.copied_bytes());
-        }
+        peak_scratch_bytes = peak_scratch_bytes.max(snapshot.copied_bytes());
         sqlite::quick_check_connection(snapshot.connection(), path).await?;
         sqlite::extend_graph_identities(snapshot.connection(), &mut identities).await?;
         let fingerprint =
@@ -189,7 +185,6 @@ async fn capture_graph_evidence(
         identities,
         fingerprints,
         generations,
-        #[cfg(test)]
         peak_scratch_bytes,
     })
 }

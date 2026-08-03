@@ -396,6 +396,7 @@ fn derive_timestamp(provider: &str, record: &Value, carry: &mut TimestampCarry) 
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_rfc3339_timestamp)
+            .and_then(|secs| u64::try_from(secs).ok())
             .and_then(|secs| i64::try_from(secs).ok()),
         // Vibe: numeric `ts`/`timestamp`/`created_at`.
         "vibe" => record

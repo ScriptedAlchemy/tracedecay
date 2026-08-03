@@ -31,7 +31,7 @@
 
 use crate::errors::Result;
 
-/// Stamp the plugin manifest `version` field with the crate version, returning
+/// Stamp the plugin manifest `version` field with the product version, returning
 /// pretty-printed JSON with a trailing newline. Shared by every host installer
 /// (Claude/Cursor/Codex), which all render the same manifest round-trip.
 pub(crate) fn stamp_manifest_version(raw: &str) -> Result<String> {
@@ -47,7 +47,7 @@ pub(crate) fn stamp_manifest_version_with(
     mutate: impl FnOnce(&mut serde_json::Value),
 ) -> Result<String> {
     let mut manifest: serde_json::Value = serde_json::from_str(raw)?;
-    manifest["version"] = serde_json::json!(env!("CARGO_PKG_VERSION"));
+    manifest["version"] = serde_json::json!(env!("TRACEDECAY_PRODUCT_VERSION"));
     mutate(&mut manifest);
     Ok(format!("{}\n", serde_json::to_string_pretty(&manifest)?))
 }
@@ -104,7 +104,7 @@ macro_rules! plugin_file {
     ($relative:literal, $source:literal) => {
         PluginFile {
             relative: $relative,
-            contents: include_str!(concat!("../../../../plugin/", $source)),
+            contents: include_str!(concat!(env!("TRACEDECAY_REPOSITORY_ROOT"), "/plugin/", $source)),
         }
     };
 }
@@ -298,7 +298,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     fn plugin_source_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
     }
 
     /// No host deploys the same relative path twice.

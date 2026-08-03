@@ -25,6 +25,7 @@
 
 pub mod accounting;
 pub mod agents;
+pub use tracedecay_agent_hosts::cli_fallback_args_invocation_lit;
 pub(crate) use tracedecay_agent_hosts::analytics;
 pub mod analytics_bridge;
 pub mod ast_grep_search;
@@ -72,7 +73,6 @@ pub mod serde_util;
 pub mod serve;
 pub mod sessions;
 mod shell;
-mod sqlite_read_snapshot;
 pub mod storage;
 pub mod sync;
 pub mod text;

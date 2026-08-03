@@ -564,7 +564,7 @@ impl<'a> AgentRunFinalizer<'a> {
                     err.to_string(),
                 )
                 .await?;
-                Err(err)
+                Err(err.into())
             }
         }
     }

@@ -14,6 +14,125 @@ pub mod lcm {
     pub use crate::runtime::lcm::*;
 }
 
+pub mod workflow_index {
+    pub use crate::runtime::workflow_index::*;
+}
+
+pub mod codex_app_server {
+    pub use crate::runtime::codex_app_server::*;
+}
+
+pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
+
+pub fn user_sessions_db_path(profile_root: &std::path::Path) -> std::path::PathBuf {
+    profile_root.join(USER_SESSIONS_DB_FILENAME)
+}
+
+pub struct SessionQueryDb {
+    database: tracedecay_runtime_core::db::Database,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionToolUsageRow {
+    pub tool_names: String,
+    pub text: String,
+    pub metadata_json: String,
+}
+
+impl SessionQueryDb {
+    pub async fn open_read_only_at(path: &std::path::Path) -> Option<Self> {
+        if !path.is_file() {
+            return None;
+        }
+        let authority = tracedecay_runtime_core::db::DatabaseAuthority::for_runtime(
+            path,
+            "open session query database",
+        )
+        .ok()?;
+        let (database, _) =
+            tracedecay_runtime_core::db::Database::open_read_only(path, &authority)
+                .await
+                .ok()?;
+        Some(Self { database })
+    }
+
+    pub async fn lcm_grep(
+        &self,
+        request: runtime::lcm::LcmGrepRequest,
+    ) -> Result<runtime::lcm::LcmGrepOutcome, runtime::lcm::LcmError> {
+        runtime::lcm::query::grep(
+            self.database.conn(),
+            request,
+            runtime::lcm::LcmGrepFilters::default(),
+        )
+        .await
+    }
+
+    pub async fn lcm_recent_sessions(
+        &self,
+        provider: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<runtime::lcm::LcmRecentSession>, runtime::lcm::LcmError> {
+        runtime::lcm::query::recent_sessions(self.database.conn(), provider, limit).await
+    }
+
+    pub async fn lcm_session_providers(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<String>, runtime::lcm::LcmError> {
+        runtime::lcm::query::session_providers(self.database.conn(), session_id).await
+    }
+
+    pub async fn lcm_session_replay_slice(
+        &self,
+        request: &runtime::lcm::LcmSessionReplayRequest,
+    ) -> Result<runtime::lcm::LcmSessionReplaySlice, runtime::lcm::LcmError> {
+        runtime::lcm::query::session_replay_slice(self.database.conn(), request).await
+    }
+
+    pub async fn session_tool_usage_rows(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<SessionToolUsageRow>, String> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .database
+            .conn()
+            .query(
+                "SELECT COALESCE(tool_names, '') AS tool_names,
+                        COALESCE(text, '') AS text,
+                        COALESCE(metadata_json, '') AS metadata_json
+                 FROM session_messages
+                 ORDER BY timestamp, ordinal
+                 LIMIT ?1",
+                [i64::try_from(limit).unwrap_or(i64::MAX)],
+            )
+            .await
+            .map_err(|error| format!("failed to query session tool usage rows: {error}"))?;
+        let mut result = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read session tool usage rows: {error}"))?
+        {
+            result.push(SessionToolUsageRow {
+                tool_names: row.get::<String>(0).map_err(|error| {
+                    format!("failed to decode session tool usage tool_names: {error}")
+                })?,
+                text: row.get::<String>(1).map_err(|error| {
+                    format!("failed to decode session tool usage text: {error}")
+                })?,
+                metadata_json: row.get::<String>(2).map_err(|error| {
+                    format!("failed to decode session tool usage metadata_json: {error}")
+                })?,
+            });
+        }
+        Ok(result)
+    }
+}
+
 pub use provider::{ProviderScope, SessionProvider};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

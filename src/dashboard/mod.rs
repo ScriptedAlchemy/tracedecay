@@ -23,21 +23,20 @@
 
 pub(crate) mod assets;
 pub use tracedecay_dashboard_api::memory_curate;
-pub(crate) use tracedecay_dashboard_api::util;
 pub(crate) use tracedecay_dashboard_api::{
     AutomationSchedulerReconciler, DashboardAccountingStore, DashboardAccountingStoreHandle,
     DashboardAutomationExecutor, DashboardAutomationTask, DashboardAutomationWriter,
     DashboardFuture, DashboardManagedSkillExporter, DashboardPrAutotrackReader,
     DashboardProfileRootResolver, DashboardProjectContext, DashboardProjectList,
     DashboardProjectRegistry, DashboardProjectStateBuilder, DashboardSavingsDay,
-    DashboardSavingsTotal, DashboardState, DashboardTokenCount, direct_dashboard_automation_writer,
+    DashboardSavingsTotal, DashboardSkillAnalyticsSync, DashboardState, DashboardTokenCount,
+    direct_dashboard_automation_writer,
 };
 pub(crate) use tracedecay_dashboard_api::{
     analytics_api, automation_config_api, automation_fact_proposals_api, automation_jobs_api,
     automation_outcomes_api, automation_run_api, automation_scheduler_api, automation_skills_api,
-    code_diagnostics_api, code_diagnostics_broker, graph_api, graph_queries, graph_service,
-    lcm_api, lcm_queries, lcm_service, memory_analysis, memory_api, memory_queries, memory_service,
-    projects, savings_api, savings_pricing, settings_api, token_count,
+    code_diagnostics_api, code_diagnostics_broker, graph_api, lcm_api, memory_api, projects,
+    savings_api, settings_api, token_count,
 };
 
 use std::path::{Path, PathBuf};
@@ -481,6 +480,25 @@ fn dashboard_managed_skill_exporter() -> DashboardManagedSkillExporter {
     })
 }
 
+fn dashboard_skill_analytics_sync() -> DashboardSkillAnalyticsSync {
+    const IMPORT_LIMIT: usize = 10_000;
+
+    Arc::new(|profile_root, project_root| {
+        Box::pin(async move {
+            let global_db = crate::global_db::GlobalDb::open().await;
+            crate::automation::skill_usage::ingest_project_analytics_events(
+                &profile_root,
+                &project_root,
+                global_db.as_ref(),
+                IMPORT_LIMIT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        })
+    })
+}
+
 /// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
 /// defaults; override with `--port`).
 pub use tracedecay_dashboard_api::DEFAULT_PORT;
@@ -643,7 +661,7 @@ async fn build_state_inner(
         } else {
             "stable"
         },
-        pr_autotrack_reader: Some(Arc::new(|store_root| {
+        pr_autotrack_reader: Some(Arc::new(|store_root: PathBuf| {
             #[cfg(unix)]
             {
                 crate::daemon::pr_autotrack::managed_summary(&store_root)
@@ -668,7 +686,7 @@ async fn build_state_inner(
         storage_mode,
         store_root,
         config_path,
-        dashboard_root,
+        dashboard_root: dashboard_root.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),

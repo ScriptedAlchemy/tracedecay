@@ -9,7 +9,7 @@ use super::*;
 use crate::branch_meta::BranchEntry;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PrepareStop {
+pub enum PrepareStop {
     TargetCopy,
     SourceBranch(usize),
     BranchMetaWrite,

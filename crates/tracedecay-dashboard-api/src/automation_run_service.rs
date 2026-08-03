@@ -537,7 +537,10 @@ async fn push_dashboard_automation_activity_result(
 }
 
 fn automation_record_mutates_store(record: &Value) -> bool {
-    record
+    let Some(report) = record.get("validation_report") else {
+        return false;
+    };
+    report
         .pointer("/automation_apply_policy/mutates_store")
         .or_else(|| report.pointer("/session_fact_apply_policy/mutates_store"))
         .and_then(Value::as_bool)

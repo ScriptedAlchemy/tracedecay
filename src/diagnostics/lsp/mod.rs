@@ -3,7 +3,6 @@
 pub use tracedecay_lsp::{LspError, activity, adapters, broker, settings};
 
 pub mod client {
-    pub(crate) use tracedecay_lsp::client::file_uri_from_path_text;
     pub use tracedecay_lsp::client::{
         LspDocument, LspRefreshTimeouts, StdioLspClient, collect_document_diagnostics,
         collect_document_diagnostics_with_timeouts,

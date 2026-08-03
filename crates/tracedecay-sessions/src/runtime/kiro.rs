@@ -719,6 +719,7 @@ fn parse_timestamp_secs(value: &Value) -> Option<i64> {
     value
         .as_str()
         .and_then(parse_rfc3339_timestamp)
+        .and_then(|secs| u64::try_from(secs).ok())
         .map(|secs| secs as i64)
 }
 

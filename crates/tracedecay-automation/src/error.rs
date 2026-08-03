@@ -15,7 +15,7 @@ impl AutomationError {
 
 impl fmt::Display for AutomationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.message)
+        write!(formatter, "config error: {}", self.message)
     }
 }
 

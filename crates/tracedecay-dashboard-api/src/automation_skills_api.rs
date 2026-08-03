@@ -22,7 +22,6 @@ use crate::automation::skill_usage::{
 use crate::tracedecay::current_timestamp;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
-const SKILL_ANALYTICS_IMPORT_LIMIT: usize = 10_000;
 
 #[derive(Debug, Deserialize)]
 pub struct ManagedSkillDraftRequest {

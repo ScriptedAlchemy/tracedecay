@@ -9,8 +9,7 @@ pub use tracedecay_sessions::runtime::transcript_backfill::{
     write_structured_backfill_cursor_for_test,
 };
 pub(crate) use tracedecay_sessions::runtime::transcript_backfill::{
-    BackfillStats, StructuredBackfillStats, StructuredBackfillStore, backfill_structured_rows,
-    backfill_transcript_facts,
+    StructuredBackfillStore, backfill_structured_rows, backfill_transcript_facts,
 };
 
 impl StructuredBackfillStore for crate::global_db::GlobalDb {

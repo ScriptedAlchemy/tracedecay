@@ -165,29 +165,10 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
     let Some(project_path) = project_path else {
         return;
     };
-    // Materialize the always-applied memory rule from this project's fact
-    // store so install/update-plugin leaves fresh memory in place instead of
-    // waiting for the first sessionStart hook. Fail-open, no-op when the
-    // project has no initialized store.
-    crate::hooks::memory_inject::regenerate_cursor_memory_rule(project_path).await;
-    let Some(branch_name) = crate::branch::current_branch(project_path) else {
-        return;
-    };
-    match crate::tracedecay::TraceDecay::add_branch_tracking(project_path, &branch_name).await {
-        Ok(crate::branch::BranchAddOutcome::Added) => {
-            eprintln!(
-                "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"
-            );
-        }
-        Ok(
-            crate::branch::BranchAddOutcome::AlreadyTracked
-            | crate::branch::BranchAddOutcome::Deferred
-            | crate::branch::BranchAddOutcome::NotIndexed,
-        ) => {}
-        Err(err) => {
-            eprintln!(
-                "\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tracedecay indexing: {err}"
-            );
+    match crate::ports::cursor_post_install(project_path.to_path_buf()) {
+        Ok(task) => task.await,
+        Err(error) => {
+            eprintln!("\x1b[33mwarning:\x1b[0m could not finish Cursor post-install work: {error}");
         }
     }
 }
@@ -202,7 +183,8 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
 /// `mcp.json`, and `hooks/hooks.json` entries are rendered through helpers at
 /// install time to inject the package version and the absolute tracedecay
 /// binary path.
-fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
+#[doc(hidden)]
+pub fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
     crate::agents::plugin_bundle::cursor_files()
 }
 
@@ -683,7 +665,10 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         ));
     }
     if let Some(message) =
-        super::cursor_diagnostics::plugin_version_staleness(&manifest, env!("CARGO_PKG_VERSION"))
+        super::cursor_diagnostics::plugin_version_staleness(
+            &manifest,
+            env!("TRACEDECAY_PRODUCT_VERSION"),
+        )
     {
         dc.warn(&message);
     }
@@ -794,44 +779,27 @@ fn doctor_check_plugin_hooks(dc: &mut DoctorCounters, hooks_path: &Path) {
 }
 
 /// Flags a stalled Cursor transcript ingest. The per-turn hooks cap how much
-/// transcript tail they read ([`crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES`]),
+/// transcript tail they read,
 /// so a backlog above that cap will never drain on its own — exactly the
 /// "session recall is silently missing recent turns" failure users hit.
 fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
-    let db_path = crate::sessions::cursor::project_session_db_path(project_path);
-    if !db_path.exists() {
-        return;
-    }
-    // `healthcheck` is a sync trait method but runs inside the multi-thread
-    // tokio runtime, so the bounded DB read runs via block_in_place.
-    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+    let Ok(Some(health)) = crate::ports::cursor_session_health(project_path) else {
         return;
     };
-    let health = tokio::task::block_in_place(|| {
-        handle.block_on(async {
-            let db = crate::sessions::cursor::open_project_session_db(project_path).await?;
-            let placeholder_paths = db.literal_workspace_placeholder_transcript_paths(10).await;
-            if !placeholder_paths.is_empty() {
-                dc.warn(&format!(
-                    "Cursor transcript ingest has {} path(s) with a literal workspace placeholder; \
-                     Cursor did not expand `${{workspaceFolder}}`, so session recall will miss those transcripts",
-                    placeholder_paths.len(),
-                ));
-                for path in &placeholder_paths {
-                    dc.info(&format!("  - {path}"));
-                }
-            }
-            Some(db.session_ingest_health_for_provider(Some("cursor")).await)
-        })
-    });
-    let Some(health) = health else {
+    if !health.literal_workspace_placeholder_paths.is_empty() {
         dc.warn(&format!(
-            "could not open session store {} to check transcript ingest",
-            db_path.display()
+            "Cursor transcript ingest has {} path(s) with a literal workspace placeholder; \
+             Cursor did not expand `${{workspaceFolder}}`, so session recall will miss those transcripts",
+            health.literal_workspace_placeholder_paths.len(),
         ));
+        for path in &health.literal_workspace_placeholder_paths {
+            dc.info(&format!("  - {path}"));
+        }
+    }
+    let Ok(catch_up_cap) = crate::ports::cursor_catch_up_ingest_max_bytes() else {
         return;
     };
-    if health.max_transcript_pending_bytes > crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES {
+    if health.max_transcript_pending_bytes > catch_up_cap {
         dc.warn(&format!(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
@@ -841,7 +809,7 @@ fn doctor_check_session_ingest(dc: &mut DoctorCounters, project_path: &Path) {
             health.max_transcript_pending_bytes,
             health.pending_bytes,
             health.pending_transcripts,
-            crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+            catch_up_cap,
             project_path.display(),
         ));
     } else {
@@ -882,7 +850,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn plugin_source_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugin")
     }
 
     /// Directory names directly under `plugin/skills/` on disk.
@@ -1095,164 +1063,6 @@ mod tests {
                 "Cursor deploy set is missing agent {expected}"
             );
         }
-    }
-
-    /// Every `tracedecay_*` token mentioned anywhere in the embedded plugin
-    /// bundle (skills, rules, agents, commands, README).
-    fn embedded_plugin_tool_mentions() -> std::collections::BTreeSet<String> {
-        let mut mentions = std::collections::BTreeSet::new();
-        for (_, contents) in embedded_plugin_files() {
-            let bytes = contents.as_bytes();
-            let mut search_from = 0;
-            while let Some(found) = contents[search_from..].find("tracedecay_") {
-                let start = search_from + found;
-                let mut end = start + "tracedecay_".len();
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_lowercase()
-                        || bytes[end].is_ascii_digit()
-                        || bytes[end] == b'_')
-                {
-                    end += 1;
-                }
-                let token = contents[start..end].trim_end_matches('_');
-                if token.len() > "tracedecay_".len() {
-                    mentions.insert(token.to_string());
-                }
-                search_from = end;
-            }
-        }
-        mentions
-    }
-
-    /// The full registered tool-name set, independent of host capabilities
-    /// (`tracedecay_ast_grep_rewrite` is filtered from `get_tool_definitions`
-    /// when the external `ast-grep` binary is absent, but it is still a real
-    /// tool the bundle legitimately references).
-    fn registered_tool_names() -> std::collections::BTreeSet<String> {
-        let mut names: std::collections::BTreeSet<String> =
-            crate::mcp::tools::get_tool_definitions()
-                .into_iter()
-                .map(|definition| definition.name)
-                .collect();
-        names.insert("tracedecay_ast_grep_rewrite".to_string());
-        names
-    }
-
-    /// Guards against the plugin steering agents toward tools that do not
-    /// exist: every `tracedecay_*` name mentioned in the bundle must be a
-    /// registered MCP tool (or an explicitly allow-listed non-tool marker).
-    #[test]
-    fn plugin_tool_mentions_resolve_to_registered_tools() {
-        // `tracedecay_metrics` is the savings-report line prefix in tool
-        // output, not a tool name.
-        const NON_TOOL_MENTIONS: &[&str] = &["tracedecay_metrics"];
-        let known = registered_tool_names();
-        let unknown: Vec<String> = embedded_plugin_tool_mentions()
-            .into_iter()
-            .filter(|mention| {
-                !known.contains(mention) && !NON_TOOL_MENTIONS.contains(&mention.as_str())
-            })
-            .collect();
-        assert!(
-            unknown.is_empty(),
-            "cursor-plugin mentions tool names missing from get_tool_definitions(): {unknown:?}"
-        );
-    }
-
-    /// Guards against shipping tools no skill/rule/command ever points an
-    /// agent at (the audit found whole tool families with zero usage because
-    /// nothing in the bundle referenced them). New tools must either be
-    /// referenced somewhere under cursor-plugin/ or consciously allow-listed
-    /// here with a reason.
-    #[test]
-    fn registered_tools_are_referenced_by_the_plugin_bundle() {
-        // Currently every registered tool is referenced by the bundle. Add a
-        // name here only with a written reason for shipping it unsteered.
-        const TOOLS_WITHOUT_PLUGIN_REFERENCE: &[&str] = &[];
-        let mentions = embedded_plugin_tool_mentions();
-        let missing: Vec<String> = registered_tool_names()
-            .into_iter()
-            .filter(|name| {
-                !mentions.contains(name) && !TOOLS_WITHOUT_PLUGIN_REFERENCE.contains(&name.as_str())
-            })
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "tools registered in get_tool_definitions() but referenced nowhere under \
-             cursor-plugin/ (reference them in a skill or allow-list them): {missing:?}"
-        );
-    }
-
-    /// The skill index injected into Cursor `sessionStart` context must match
-    /// the *model-invocable* skills shipped in the bundle — slash dispatchers
-    /// (`disable-model-invocation: true`) are explicit-invoke-only and would
-    /// be noise in steering context.
-    #[test]
-    fn session_context_skill_index_matches_bundle_skills() {
-        let mut bundled: Vec<String> = embedded_plugin_files()
-            .into_iter()
-            .filter_map(|(relative, contents)| {
-                let name = relative
-                    .strip_prefix("skills/")
-                    .and_then(|rest| rest.strip_suffix("/SKILL.md"))?;
-                (!contents.contains("disable-model-invocation: true")).then(|| name.to_string())
-            })
-            .collect();
-        bundled.sort();
-        let mut listed: Vec<String> = crate::hooks::CURSOR_PLUGIN_SKILLS
-            .iter()
-            .map(|skill| (*skill).to_string())
-            .collect();
-        listed.sort();
-        assert_eq!(
-            bundled, listed,
-            "hooks::CURSOR_PLUGIN_SKILLS must list exactly the model-invocable bundled skills"
-        );
-    }
-
-    /// The Auto-review allowlist documented in the plugin README must stay in
-    /// lockstep with the tools' `readOnlyHint` annotations: every read-only
-    /// tool is listed (so it skips the classifier) and no mutating tool is.
-    #[test]
-    fn readme_mcp_allowlist_matches_read_only_tools() {
-        let files = embedded_plugin_files();
-        let readme = files
-            .iter()
-            .find(|&&(relative, _)| relative == "README.md")
-            .map(|&(_, contents)| contents)
-            .expect("plugin README must be embedded");
-
-        let mut listed: Vec<String> = readme
-            .lines()
-            .filter_map(|line| {
-                let entry = line.trim().trim_end_matches(',').trim_matches('"');
-                entry
-                    .strip_prefix("tracedecay:")
-                    .filter(|tool| tool.starts_with("tracedecay_"))
-                    .map(str::to_string)
-            })
-            .collect();
-        listed.sort();
-        listed.dedup();
-
-        let mut read_only: Vec<String> = crate::mcp::tools::get_tool_definitions()
-            .into_iter()
-            .filter(|definition| {
-                definition
-                    .annotations
-                    .as_ref()
-                    .and_then(|annotations| annotations.get("readOnlyHint"))
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false)
-            })
-            .map(|definition| definition.name)
-            .collect();
-        read_only.sort();
-
-        assert_eq!(
-            listed, read_only,
-            "the README mcpAllowlist snippet must list exactly the readOnlyHint=true tools"
-        );
     }
 
     #[test]

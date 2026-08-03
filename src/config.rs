@@ -40,16 +40,6 @@ pub async fn discover_project_root_with_identity(
 }
 
 #[cfg(test)]
-static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-pub fn lock_user_data_dir_test_env() -> std::sync::MutexGuard<'static, ()> {
-    USER_DATA_DIR_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-#[cfg(test)]
 pub struct PinnedUserDataDir {
     _lock: std::sync::MutexGuard<'static, ()>,
     _root: tempfile::TempDir,

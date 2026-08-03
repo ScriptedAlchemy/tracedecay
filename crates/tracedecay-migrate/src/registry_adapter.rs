@@ -62,6 +62,7 @@ pub struct StoreArtifactUpsert {
     pub updated_at: Option<i64>,
 }
 
+#[allow(async_fn_in_trait)]
 pub trait RegistryDatabase {
     fn conn(&self) -> &Connection;
 
@@ -96,6 +97,7 @@ pub trait RegistryDatabase {
     async fn checkpoint(&self);
 }
 
+#[allow(async_fn_in_trait)]
 pub trait RegistryRuntime {
     type Database: RegistryDatabase;
 

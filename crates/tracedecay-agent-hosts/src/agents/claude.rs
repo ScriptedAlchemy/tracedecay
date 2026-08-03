@@ -1330,10 +1330,10 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
     // plugin.json version check.
     let plugin_manifest = load_json_file(&deploy_dir.join(".claude-plugin/plugin.json"));
     match plugin_manifest.get("version").and_then(|v| v.as_str()) {
-        Some(env!("CARGO_PKG_VERSION")) => dc.pass("Deployed plugin version matches tracedecay"),
+        Some(env!("TRACEDECAY_PRODUCT_VERSION")) => dc.pass("Deployed plugin version matches tracedecay"),
         Some(version) => dc.warn(&format!(
             "Deployed plugin version {version} does not match tracedecay {} — run `tracedecay update-plugin`",
-            env!("CARGO_PKG_VERSION")
+            env!("TRACEDECAY_PRODUCT_VERSION")
         )),
         None => dc.warn("Deployed plugin.json does not contain a version"),
     }
