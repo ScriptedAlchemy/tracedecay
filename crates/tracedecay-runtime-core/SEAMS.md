@@ -198,10 +198,6 @@ kernel. Nothing sets it, so this test does not run anywhere right now:
 
 It should be re-homed into the crate that owns the missing type.
 
-(A second flag, `tracedecay_memory_application_tests`, gated
-`store/memory/memory_cutover_test.rs`; that file went away with the
-legacy-memory cutover removal, and the flag with it.)
-
 ### 7. Visibility promotion is now the kernel's public surface
 
 439 `pub(crate)` items in the moved files were promoted to `pub` so the root
