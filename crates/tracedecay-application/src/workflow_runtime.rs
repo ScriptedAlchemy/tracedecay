@@ -11,10 +11,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::configuration::WorktreePlacementModeV1;
 use tracedecay_domain::{
-    AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkLeaseFenceV1,
-    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition,
-    WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId, canonical_sha256,
+    AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkArtifactRefV1,
+    WorkAttemptIdentityV1, WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1,
+    WorkLeaseFenceV1, WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinition,
+    WorkflowDefinitionId, WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId,
+    canonical_sha256,
 };
 
 use crate::context::CancellationContext;
@@ -40,6 +41,7 @@ pub struct WorkflowExecutionFence {
 pub struct WorkflowFanOutInput {
     pub identity: String,
     pub input_digest: ManifestDigest,
+    pub input_artifacts: Vec<WorkArtifactRefV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -261,6 +263,23 @@ pub fn prepare_workflow_fan_out(
             return Err(WorkflowFanOutRuntimeError::DuplicateChildIdentity(
                 input.identity.clone(),
             ));
+        }
+        let artifact_ids = input
+            .input_artifacts
+            .iter()
+            .map(WorkArtifactRefV1::artifact_id)
+            .collect::<BTreeSet<_>>();
+        if artifact_ids.len() != input.input_artifacts.len()
+            || (!input.input_artifacts.is_empty()
+                && canonical_sha256(&(
+                    "tracedecay.application.workflow-input-artifacts",
+                    &input.identity,
+                    &input.input_artifacts,
+                ))
+                .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?
+                    != input.input_digest)
+        {
+            return Err(WorkflowFanOutRuntimeError::InvalidPlan);
         }
     }
 

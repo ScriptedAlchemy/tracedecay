@@ -428,6 +428,7 @@ mod tests {
             id::<WorkflowOperationRef>("operation.work.execute-provider"),
             requested_route.clone(),
             WorkProviderBackendV1::CodexAppServer,
+            Vec::new(),
             "gpt-test".to_owned(),
             digest('c'),
             id::<ProjectId>("project.work.dispatch"),

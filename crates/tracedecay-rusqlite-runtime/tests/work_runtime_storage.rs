@@ -102,6 +102,7 @@ fn execution_envelope(
         id::<WorkflowOperationRef>("operation.work.execute-provider"),
         requested_route(),
         WorkProviderBackendV1::CodexAppServer,
+        Vec::new(),
         "gpt-test".to_owned(),
         digest('c'),
         authority.project_id().clone(),

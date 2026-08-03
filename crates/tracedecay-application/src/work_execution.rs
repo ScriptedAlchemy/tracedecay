@@ -758,6 +758,7 @@ mod tests {
             id::<WorkflowOperationRef>("operation.work.execute-provider"),
             route,
             WorkProviderBackendV1::CodexAppServer,
+            Vec::new(),
             "gpt-test".to_owned(),
             digest('c'),
             id::<ProjectId>("project.work.execution"),

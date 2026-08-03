@@ -535,6 +535,7 @@ async fn expiring_registries_reaps_running_work_executions() {
         )
         .expect("provider route"),
         tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
+        Vec::new(),
         "codex-work-expire".to_owned(),
         configuration_digest,
         authority.project_id().clone(),

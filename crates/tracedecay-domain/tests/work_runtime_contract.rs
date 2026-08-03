@@ -74,6 +74,7 @@ fn execution(
         id::<WorkflowOperationRef>("operation.work.execute-provider"),
         requested_route(),
         WorkProviderBackendV1::CodexAppServer,
+        Vec::new(),
         "gpt-test".to_owned(),
         digest('c'),
         id::<ProjectId>("project.work.runtime"),

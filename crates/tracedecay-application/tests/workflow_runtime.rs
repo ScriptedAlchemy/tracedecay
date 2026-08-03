@@ -4,10 +4,11 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
-    AttemptId, CommitId, ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros,
-    WorkEffectStateV1, WorkExecutionBudgetV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition,
-    WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStep,
+    AttemptId, CommitId, ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros, WorkArtifactId,
+    WorkArtifactRefV1, WorkEffectStateV1, WorkExecutionBudgetV1, WorkFenceEpochV1,
+    WorkLeaseFenceV1, WorkLeaseId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkflowDefinition, WorkflowFanOut, WorkflowOperationRef, WorkflowOutputName, WorkflowStep,
+    WorkflowStepId, canonical_sha256, work_artifact_payload_digest,
 };
 
 fn id<T>(value: &str) -> T
@@ -81,6 +82,7 @@ fn request(inputs: &[&str], max_width: u32, max_parallel: u32) -> WorkflowFanOut
             .map(|(index, identity)| WorkflowFanOutInput {
                 identity: (*identity).to_owned(),
                 input_digest: digest(char::from(b'1' + u8::try_from(index).unwrap())),
+                input_artifacts: Vec::new(),
             })
             .collect(),
     }
@@ -103,6 +105,33 @@ fn planner_separates_fan_out_width_from_parallelism() {
         plan.children
             .iter()
             .all(|child| child.task_id.as_str().starts_with("workflow-child:"))
+    );
+}
+
+#[test]
+fn planner_pins_hydratable_input_artifacts() {
+    let artifact = WorkArtifactRefV1::new(
+        id::<WorkArtifactId>("artifact.workflow.input"),
+        work_artifact_payload_digest(b"reviewed input").unwrap(),
+        14,
+    )
+    .unwrap();
+    let mut hydrated = request(&["input"], 1, 1);
+    hydrated.inputs[0].input_artifacts = vec![artifact.clone()];
+    hydrated.inputs[0].input_digest = canonical_sha256(&(
+        "tracedecay.application.workflow-input-artifacts",
+        "input",
+        &[artifact.clone()],
+    ))
+    .unwrap();
+
+    let plan = prepare_workflow_fan_out(&hydrated).unwrap();
+    assert_eq!(plan.children[0].input.input_artifacts, vec![artifact]);
+
+    hydrated.inputs[0].input_digest = digest('9');
+    assert_eq!(
+        prepare_workflow_fan_out(&hydrated).unwrap_err(),
+        WorkflowFanOutRuntimeError::InvalidPlan
     );
 }
 

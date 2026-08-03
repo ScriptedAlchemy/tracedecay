@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::{
-    WorkProviderExecutionError, WorkProviderExecutionPort, WorkProviderRun,
-    WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
+    WorkAttemptPersistencePort, WorkProviderExecutionError, WorkProviderExecutionPort,
+    WorkProviderRun, WorkProviderSettlementV1, WorkStorageError, WorkStoragePort,
 };
 use tracedecay_domain::{
     ManifestDigest, ProviderId, UtcMicros, WorkAttemptV1, WorkAuthority, WorkProjection,
@@ -49,7 +49,7 @@ pub(crate) struct NativeWorkProviderV1<S> {
 
 impl<S> NativeWorkProviderV1<S>
 where
-    S: WorkStoragePort + Clone,
+    S: WorkAttemptPersistencePort + WorkStoragePort + Clone,
 {
     pub(crate) const fn new(
         storage: S,
@@ -116,20 +116,54 @@ where
         Ok(projection)
     }
 
-    fn prompt(&self, projection: &WorkProjection, attempt: &WorkAttemptV1) -> String {
-        format!(
+    fn prompt(
+        &self,
+        projection: &WorkProjection,
+        attempt: &WorkAttemptV1,
+    ) -> Result<String, WorkProviderExecutionError> {
+        let mut prompt = format!(
             "Execute the admitted TraceDecay Work operation {}.\nTask: {}\nTitle: {}\n\
              Work only in the admitted current directory and return a concise completion report.",
             attempt.execution().operation().as_str(),
             projection.task_id().as_str(),
             projection.title()
-        )
+        );
+        let mut hydrated_bytes = 0_u64;
+        for artifact in attempt.execution().input_artifacts() {
+            hydrated_bytes = hydrated_bytes
+                .checked_add(artifact.byte_length())
+                .ok_or_else(|| {
+                    WorkProviderExecutionError::Rejected(
+                        "Work input artifact budget overflowed".to_owned(),
+                    )
+                })?;
+            if hydrated_bytes > attempt.execution().budget().max_protocol_bytes() {
+                return Err(WorkProviderExecutionError::Rejected(
+                    "Work input artifacts exceed the admitted protocol budget".to_owned(),
+                ));
+            }
+            let payload = self.storage.artifact_payload(artifact).map_err(|_| {
+                WorkProviderExecutionError::Unavailable(
+                    "registered Work input artifact is unavailable".to_owned(),
+                )
+            })?;
+            let content = std::str::from_utf8(&payload).map_err(|_| {
+                WorkProviderExecutionError::Rejected(
+                    "registered Work input artifact is not UTF-8".to_owned(),
+                )
+            })?;
+            prompt.push_str("\n\nInput artifact ");
+            prompt.push_str(artifact.digest().as_str());
+            prompt.push_str(":\n");
+            prompt.push_str(content);
+        }
+        Ok(prompt)
     }
 }
 
 impl<S> WorkProviderExecutionPort for NativeWorkProviderV1<S>
 where
-    S: WorkStoragePort + Clone + Send + Sync + 'static,
+    S: WorkAttemptPersistencePort + WorkStoragePort + Clone + Send + Sync + 'static,
 {
     type Run = NativeWorkRunV1;
 
@@ -148,7 +182,7 @@ where
         self.validate_execution(attempt)?;
         let projection = self.projection(attempt)?;
         let execution = attempt.execution();
-        let prompt = self.prompt(&projection, attempt);
+        let prompt = self.prompt(&projection, attempt)?;
         let timeout =
             remaining_timeout(execution.deadline(), self.config.codex_app_server.timeout)?;
         if execution.backend() != WorkProviderBackendV1::CodexAppServer {

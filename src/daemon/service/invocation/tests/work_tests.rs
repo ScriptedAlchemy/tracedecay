@@ -522,9 +522,7 @@ for line in sys.stdin:
     assert!(matches!(
         registered,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcome::RegisterDefinition(ApplicationOutcome::Effect(
-                _
-            )),
+            outcome: WorkflowApplicationOutcome::RegisterDefinition(ApplicationOutcome::Effect(_)),
             ..
         }
     ));
@@ -541,9 +539,7 @@ for line in sys.stdin:
     assert!(matches!(
         activated,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcome::ActivateDefinition(ApplicationOutcome::Effect(
-                _
-            )),
+            outcome: WorkflowApplicationOutcome::ActivateDefinition(ApplicationOutcome::Effect(_)),
             ..
         }
     ));
@@ -594,6 +590,7 @@ for line in sys.stdin:
         inputs: vec![tracedecay_application::WorkflowFanOutInput {
             identity: "alpha".to_owned(),
             input_digest: digest('1'),
+            input_artifacts: Vec::new(),
         }],
     };
     let first = invoke!(
@@ -906,6 +903,7 @@ for line in sys.stdin:
         .push(tracedecay_application::WorkflowFanOutInput {
             identity: "provider-failure-pending".to_owned(),
             input_digest: digest('2'),
+            input_artifacts: Vec::new(),
         });
     let failed_plan =
         tracedecay_application::prepare_workflow_fan_out(&failed_fan_out).expect("failed plan");

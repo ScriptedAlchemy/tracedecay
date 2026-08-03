@@ -319,6 +319,7 @@ impl Harness {
             id::<WorkflowOperationRef>("operation.work.attempt_start"),
             NativeWorkProviderV1::<WorkSqliteStorage>::codex_app_server_route().unwrap(),
             WorkProviderBackendV1::CodexAppServer,
+            Vec::new(),
             "codex-work-fixture".to_owned(),
             digest('c'),
             self.authority.project_id().clone(),

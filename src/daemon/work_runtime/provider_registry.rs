@@ -25,7 +25,9 @@ impl<S> WorkProviderRegistry<S> {
     #[cfg(all(test, unix))]
     pub(crate) fn is_ready(&self) -> bool
     where
-        S: tracedecay_application::WorkStoragePort + Clone,
+        S: tracedecay_application::WorkAttemptPersistencePort
+            + tracedecay_application::WorkStoragePort
+            + Clone,
     {
         self.providers.iter().any(NativeWorkProviderV1::is_ready)
     }
@@ -51,7 +53,12 @@ impl WorkProviderRun for RegisteredWorkRun {
 
 impl<S> WorkProviderExecutionPort for WorkProviderRegistry<S>
 where
-    S: tracedecay_application::WorkStoragePort + Clone + Send + Sync + 'static,
+    S: tracedecay_application::WorkAttemptPersistencePort
+        + tracedecay_application::WorkStoragePort
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     type Run = RegisteredWorkRun;
 

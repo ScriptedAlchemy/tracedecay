@@ -298,6 +298,7 @@ pub struct WorkExecutionEnvelopeV1 {
     operation: WorkflowOperationRef,
     route: WorkProviderRouteV1,
     backend: WorkProviderBackendV1,
+    input_artifacts: Vec<WorkArtifactRefV1>,
     model: String,
     configuration_digest: ManifestDigest,
     project_id: ProjectId,
@@ -320,6 +321,7 @@ impl WorkExecutionEnvelopeV1 {
         operation: WorkflowOperationRef,
         route: WorkProviderRouteV1,
         backend: WorkProviderBackendV1,
+        input_artifacts: Vec<WorkArtifactRefV1>,
         model: String,
         configuration_digest: ManifestDigest,
         project_id: ProjectId,
@@ -340,8 +342,16 @@ impl WorkExecutionEnvelopeV1 {
             || deadline.0 <= 0
             || cancellation_generation == 0
             || route.provider_id() != backend.provider_id()
+            || input_artifacts.len() > MAX_WORK_ATTEMPT_ARTIFACTS
         {
             return Err(WorkRuntimeContractError::InvalidExecutionEnvelope);
+        }
+        let artifact_ids = input_artifacts
+            .iter()
+            .map(WorkArtifactRefV1::artifact_id)
+            .collect::<BTreeSet<_>>();
+        if artifact_ids.len() != input_artifacts.len() {
+            return Err(WorkRuntimeContractError::DuplicateArtifact);
         }
         Ok(Self {
             attempt_identity,
@@ -349,6 +359,7 @@ impl WorkExecutionEnvelopeV1 {
             operation,
             route,
             backend,
+            input_artifacts,
             model,
             configuration_digest,
             project_id,
@@ -382,6 +393,10 @@ impl WorkExecutionEnvelopeV1 {
 
     pub const fn backend(&self) -> WorkProviderBackendV1 {
         self.backend
+    }
+
+    pub fn input_artifacts(&self) -> &[WorkArtifactRefV1] {
+        &self.input_artifacts
     }
 
     pub fn model(&self) -> &str {
@@ -483,6 +498,7 @@ impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
             operation: WorkflowOperationRef,
             route: WorkProviderRouteV1,
             backend: WorkProviderBackendV1,
+            input_artifacts: Vec<WorkArtifactRefV1>,
             model: String,
             configuration_digest: ManifestDigest,
             project_id: ProjectId,
@@ -504,6 +520,7 @@ impl<'de> Deserialize<'de> for WorkExecutionEnvelopeV1 {
             wire.operation,
             wire.route,
             wire.backend,
+            wire.input_artifacts,
             wire.model,
             wire.configuration_digest,
             wire.project_id,

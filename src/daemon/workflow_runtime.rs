@@ -617,6 +617,7 @@ async fn admit_child(
         operation.clone(),
         request.provider.route.clone(),
         request.provider.backend,
+        child.input.input_artifacts.clone(),
         request.provider.model.clone(),
         request.provider.configuration_digest.clone(),
         context.scope().project_id.clone(),
