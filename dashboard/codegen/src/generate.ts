@@ -19,6 +19,8 @@
  * monomorphizes it for the export catalog.
  */
 
+import { isDeepStrictEqual } from "node:util";
+
 export interface JsonSchema {
   $id?: string;
   $ref?: string;
@@ -66,6 +68,47 @@ function collectDefs(bundle: JsonSchema): Array<[string, JsonSchema]> {
 function refName(ref: string): string {
   const parts = ref.split("/");
   return parts[parts.length - 1] as string;
+}
+
+function isMonomorphizedEnvelope(
+  candidate: JsonSchema,
+  canonical: JsonSchema,
+): boolean {
+  if (!candidate.properties || !canonical.properties) return false;
+  const { payload: candidatePayload, ...candidateProperties } = candidate.properties;
+  const { payload: canonicalPayload, ...canonicalProperties } = canonical.properties;
+  if (
+    candidatePayload === undefined ||
+    canonicalPayload === undefined ||
+    isDeepStrictEqual(candidatePayload, canonicalPayload)
+  ) {
+    return false;
+  }
+  return isDeepStrictEqual(
+    { ...candidate, properties: candidateProperties },
+    { ...canonical, properties: canonicalProperties },
+  );
+}
+
+function localDefinitionRefs(schema: JsonSchema, refs = new Set<string>()): Set<string> {
+  if (
+    schema.$ref?.startsWith("#/$defs/") ||
+    schema.$ref?.startsWith("#/definitions/")
+  ) {
+    refs.add(refName(schema.$ref));
+  }
+  for (const value of Object.values(schema)) {
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item && typeof item === "object") {
+          localDefinitionRefs(item as JsonSchema, refs);
+        }
+      }
+    } else if (value && typeof value === "object") {
+      localDefinitionRefs(value as JsonSchema, refs);
+    }
+  }
+  return refs;
 }
 
 function quote(value: string): string {
@@ -320,11 +363,27 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   }
   const schemaRevision = revisions[0] as string | number;
 
-  const envelope = defs.find(([name]) => name === "DashboardEnvelopeV1")?.[1];
+  const omittedNames = new Set(["DashboardPayloadMarkerV1"]);
+  const envelopeIndex = defs.findIndex(([name]) => name === "DashboardEnvelopeV1");
+  const envelope = defs[envelopeIndex]?.[1];
   if (envelope?.properties) {
-    envelope["x-generic"] = "TPayload";
-    envelope.properties.payload = { "x-generic-ref": "TPayload" };
-    envelope.properties.schema_revision = { const: schemaRevision };
+    for (const [name, schema] of defs) {
+      if (name !== "DashboardEnvelopeV1" && isMonomorphizedEnvelope(schema, envelope)) {
+        omittedNames.add(name);
+      }
+    }
+    defs[envelopeIndex] = [
+      "DashboardEnvelopeV1",
+      {
+        ...envelope,
+        "x-generic": "TPayload",
+        properties: {
+          ...envelope.properties,
+          payload: { "x-generic-ref": "TPayload" },
+          schema_revision: { const: schemaRevision },
+        },
+      },
+    ];
   }
 
   const blocks: string[] = [];
@@ -345,11 +404,12 @@ export function generateContracts(bundles: JsonSchema[]): GeneratedContracts {
   blocks.push(`export const WIRE_SCHEMA_REVISION = ${literal(schemaRevision)} as const;`);
 
   for (const [name, schema] of defs) {
-    if (
-      name === "DashboardPayloadMarkerV1" ||
-      (name.startsWith("DashboardEnvelopeV1") && name !== "DashboardEnvelopeV1")
-    ) {
-      continue;
+    if (omittedNames.has(name)) continue;
+    const omittedRef = [...localDefinitionRefs(schema)].find((ref) => omittedNames.has(ref));
+    if (omittedRef) {
+      throw new Error(
+        `${name} references omitted generated definition ${omittedRef}`,
+      );
     }
     blocks.push(emitNamedDef(name, schema));
   }

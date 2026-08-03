@@ -251,7 +251,7 @@ export function ThreadChain({
 
 /** Durable causal rows attached to the selected provider-qualified session.
  * Missing edited-file metadata remains unknown; empty durable commit/span
- * queries are true zero-findings. Delivery stays a named shared dependency. */
+ * queries are true zero-findings. */
 function ChainTerminus({
   thread,
   relations,

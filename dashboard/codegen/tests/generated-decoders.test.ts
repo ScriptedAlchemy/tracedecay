@@ -1,6 +1,5 @@
-// Decoder tests for the canonical hand-maintained wire boundary
-// (src/contracts/generated.ts), verifying it decodes the read_model.rs
-// envelope shape and keeps the closed unions honest.
+// Decoder tests for the generated public contract boundary, verifying it
+// decodes the read_model.rs envelope shape and keeps closed unions honest.
 import { describe, it, expect } from "vitest";
 import { z } from "zod";
 import {
@@ -11,7 +10,7 @@ import {
   WIRE_SCHEMA_REVISION,
   assertNever,
   type DashboardDomainStateV1,
-} from "../../src/contracts/generated.ts";
+} from "../../src/contracts/index.ts";
 
 const PayloadSchema = z.object({ ok: z.boolean() });
 
