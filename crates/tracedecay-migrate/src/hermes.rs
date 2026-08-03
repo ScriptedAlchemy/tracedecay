@@ -412,6 +412,69 @@ mod tests {
 
     static USER_DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Installs the host-owned Hermes profile-pin parser.
+    ///
+    /// In production the root binary wires
+    /// `tracedecay_sessions::host_ports::hermes_profile_pin` once during
+    /// startup. An unwired slot answers "no pin" for every `config.yaml`, so
+    /// these tests must install the same parser the root installs before they
+    /// drive the production migration entry points.
+    fn register_hermes_profile_pin_port() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            tracedecay_sessions::host_ports::hermes_profile_pin::register(
+                tracedecay_agent_hosts::agents::hermes::read_config_pinned_project_root,
+            );
+        });
+    }
+
+    async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigrationReport {
+        register_hermes_profile_pin_port();
+        super::migrate_legacy_hermes_stores(user_home).await
+    }
+
+    async fn migrate_legacy_hermes_stores_to(
+        user_home: &Path,
+        tracedecay_profile_root: &Path,
+    ) -> LegacyHermesMigrationReport {
+        register_hermes_profile_pin_port();
+        super::migrate_legacy_hermes_stores_to(user_home, tracedecay_profile_root).await
+    }
+
+    async fn migrate_legacy_hermes_stores_inner(
+        user_home: &Path,
+        tracedecay_profile_root: &Path,
+        hermes_homes: &[PathBuf],
+        fail_after_table: Option<&str>,
+    ) -> LegacyHermesMigrationReport {
+        register_hermes_profile_pin_port();
+        super::migrate_legacy_hermes_stores_inner(
+            user_home,
+            tracedecay_profile_root,
+            hermes_homes,
+            fail_after_table,
+        )
+        .await
+    }
+
+    async fn migrate_legacy_hermes_stores_with_lease(
+        user_home: &Path,
+        tracedecay_profile_root: &Path,
+        hermes_homes: &[PathBuf],
+        lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
+        fail_after_table: Option<&str>,
+    ) -> LegacyHermesMigrationReport {
+        register_hermes_profile_pin_port();
+        super::migrate_legacy_hermes_stores_with_lease(
+            user_home,
+            tracedecay_profile_root,
+            hermes_homes,
+            lifecycle,
+            fail_after_table,
+        )
+        .await
+    }
+
     struct PinnedMigrationEnvironment {
         _lock: std::sync::MutexGuard<'static, ()>,
         _root: tempfile::TempDir,
@@ -1682,7 +1745,7 @@ mod tests {
         .unwrap();
         seed_source(&source, &[("session", &legacy_project)]).await;
 
-        fs::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
             .profile_registry()
@@ -1752,7 +1815,7 @@ mod tests {
         .unwrap();
         seed_source(&source, &[("session", &legacy_alias)]).await;
 
-        fs::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
             .profile_registry()
@@ -1797,7 +1860,7 @@ mod tests {
             .await;
         drop(source_runtime);
 
-        fs::create_dir_all(&profile_root).unwrap();
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
         let registry = registered_profile_target(&profile_root).await;
         registry
             .profile_registry()
