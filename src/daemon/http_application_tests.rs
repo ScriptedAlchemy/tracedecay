@@ -456,3 +456,21 @@ async fn daemon_http_shutdown_marks_registry_inactive() {
 
     assert!(!registry.is_active());
 }
+
+#[tokio::test]
+async fn daemon_http_cancel_fences_admission_before_task_join() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let service = DaemonHttpApplicationService::bind(registry.clone(), AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let endpoint = service.endpoint();
+    let shutdown = service.shutdown_signal();
+
+    shutdown.cancel();
+    assert!(
+        !registry.is_active(),
+        "the shutdown signal must synchronously fence HTTP routing"
+    );
+    service.shutdown().await.expect("join HTTP service");
+    assert!(tokio::net::TcpStream::connect(endpoint).await.is_err());
+}
