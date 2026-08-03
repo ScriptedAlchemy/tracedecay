@@ -14,60 +14,6 @@ pub mod daemon {
         pub(crate) use crate::profile_identity::load_or_create;
     }
 
-    pub mod code_index_scheduler {
-        pub mod identity {
-            use std::path::Path;
-
-            use sha2::{Digest, Sha256};
-            use tracedecay_domain::{RepositoryId, WorktreeId};
-            use tracedecay_runtime_core::errors::{Result, TraceDecayError};
-
-            pub(crate) struct IndexingIdentityV1 {
-                repository_id: RepositoryId,
-                worktree_id: WorktreeId,
-            }
-
-            impl IndexingIdentityV1 {
-                pub(crate) fn resolve(project_root: &Path) -> Result<Self> {
-                    let common = tracedecay_runtime_core::worktree::git_common_dir(project_root)
-                        .unwrap_or_else(|| project_root.to_path_buf());
-                    let repository_id = RepositoryId::new(format!(
-                        "repository.daemon.{}",
-                        sha256_hex(common.to_string_lossy().as_bytes())
-                    ))
-                    .map_err(identity_error)?;
-                    let worktree_id = WorktreeId::new(format!(
-                        "worktree.daemon.{}",
-                        sha256_hex(project_root.to_string_lossy().as_bytes())
-                    ))
-                    .map_err(identity_error)?;
-                    Ok(Self {
-                        repository_id,
-                        worktree_id,
-                    })
-                }
-
-                pub(crate) fn repository_id(&self) -> &RepositoryId {
-                    &self.repository_id
-                }
-
-                pub(crate) fn worktree_id(&self) -> &WorktreeId {
-                    &self.worktree_id
-                }
-            }
-
-            fn sha256_hex(bytes: &[u8]) -> String {
-                hex::encode(Sha256::digest(bytes))
-            }
-
-            fn identity_error(error: impl std::fmt::Display) -> TraceDecayError {
-                TraceDecayError::Config {
-                    message: format!("code-index identity: {error}"),
-                }
-            }
-        }
-    }
-
     pub mod store_runtime {
         pub use tracedecay_runtime_core::store_runtime::*;
 

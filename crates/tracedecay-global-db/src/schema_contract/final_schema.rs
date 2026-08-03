@@ -18,7 +18,7 @@ pub fn final_registered_schema_contract() -> Result<StoreSchemaContractV2> {
 
 pub async fn install_final_registered_schema(connection: &Connection) -> Result<()> {
     super::super::ensure_registered_schema(connection).await?;
-    let transaction = connection.schema_migration_transaction().await?;
+    let transaction = connection.authorized_long_lease_transaction().await?;
     transaction
         .execute_schema_batch_step(
             "PRAGMA application_id = 1413763634;

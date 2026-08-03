@@ -46,26 +46,6 @@ async fn brokered_migration_inventory(
 
 pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::errors::Result<()> {
     match action {
-        MigrateAction::Consolidate {
-            project,
-            source_project_id,
-            target_project_id,
-            profile_root,
-            apply,
-            confirm_token,
-            json,
-        } => {
-            handle_migrate_consolidate(
-                project,
-                source_project_id,
-                target_project_id,
-                profile_root,
-                apply,
-                confirm_token,
-                json,
-            )
-            .await
-        }
         MigrateAction::Plan {
             roots,
             include_all_registered,
@@ -132,69 +112,6 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             confirm_token,
         } => handle_migrate_cleanup_sources(manifest, confirm_token),
     }
-}
-
-async fn handle_migrate_consolidate(
-    project: String,
-    source_project_id: String,
-    target_project_id: String,
-    profile_root: Option<String>,
-    apply: bool,
-    confirm_token: Option<String>,
-    json: bool,
-) -> tracedecay::errors::Result<()> {
-    let profile_root = profile_root.map_or_else(
-        || {
-            tracedecay::config::user_data_dir().ok_or_else(|| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "could not determine TraceDecay profile root".to_string(),
-                }
-            })
-        },
-        |value| Ok(PathBuf::from(value)),
-    )?;
-    let options = tracedecay::migrate::consolidate::ConsolidationOptions {
-        project_root: PathBuf::from(project),
-        profile_root,
-        source_project_id,
-        target_project_id,
-    };
-    let report = if apply {
-        let token = confirm_token.ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "--confirm-token is required with --apply".to_string(),
-        })?;
-        tracedecay::migrate::consolidate::apply(&options, &token).await?
-    } else {
-        tracedecay::migrate::consolidate::plan(&options).await?
-    };
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        println!("Migration: {}", report.migration_id);
-        println!("State: {:?}", report.state);
-        println!(
-            "Source: {} ({})",
-            report.source.project_id,
-            report.source.data_root.display()
-        );
-        println!(
-            "Target: {} ({})",
-            report.target.project_id,
-            report.target.data_root.display()
-        );
-        println!(
-            "Destination: {} ({})",
-            report.destination_project_id,
-            report.destination_data_root.display()
-        );
-        println!("Backups: {}", report.backup_root.display());
-        println!("Ledger: {}", report.ledger_path.display());
-        if report.dry_run {
-            println!("Confirmation token: {}", report.confirmation_token);
-            println!("No files changed.");
-        }
-    }
-    Ok(())
 }
 
 async fn handle_migrate_plan(
