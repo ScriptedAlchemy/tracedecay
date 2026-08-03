@@ -744,11 +744,12 @@ impl CodeIndexSchedulerRegistryV1 {
                                 error = %error,
                                 "code-index background reconcile task did not complete"
                             ),
-                            Ok(BackgroundCodeIndexReconcileV1::SchedulerBusy)
-                            | Ok(BackgroundCodeIndexReconcileV1::Completed {
-                                outcome: Ok(_),
-                                ..
-                            }) => {}
+                            Ok(
+                                BackgroundCodeIndexReconcileV1::SchedulerBusy
+                                | BackgroundCodeIndexReconcileV1::Completed {
+                                    outcome: Ok(_), ..
+                                },
+                            ) => {}
                         }
                     }
                     // No terminal outcome, so no receipt is owed. Give the

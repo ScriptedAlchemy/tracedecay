@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, RwLock};
 
-use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1,
-};
+#[cfg(test)]
+use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
+use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
 use super::{
     CodeIndexCadenceTelemetryV1, CodeIndexSchedulerRegistryV1,
