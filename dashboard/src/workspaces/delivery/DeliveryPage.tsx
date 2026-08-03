@@ -33,10 +33,10 @@ import { useProjectRegistry } from '../../data/query/projectRegistry.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
-  type DeliveryOverview,
-  DeliveryOverviewSchema,
+  type DeliveryOverviewV1,
+  DeliveryOverviewV1Schema,
   type ProjectRepoGroup,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 
 /**
  * Delivery — the daemon's git surface, read as a field rather than scrolled as
@@ -61,7 +61,7 @@ export function DeliveryPage() {
   const projects = useProjectRegistry();
   const overview = useQuery({
     queryKey: ['delivery', 'overview'],
-    queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewSchema),
+    queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewV1Schema),
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -126,7 +126,7 @@ function DeliveryBody_({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   overviewPending: boolean;
-  overview: EnvelopeResult<DeliveryOverview> | undefined;
+  overview: EnvelopeResult<DeliveryOverviewV1> | undefined;
 }) {
   // Keyed on identity: the payload is fetched once and does not churn, and the
   // field's clock only matters at recency-column boundaries.
@@ -220,7 +220,7 @@ function PipelineOverview({
   result,
 }: {
   pending: boolean;
-  result: EnvelopeResult<DeliveryOverview> | undefined;
+  result: EnvelopeResult<DeliveryOverviewV1> | undefined;
 }) {
   if (pending) {
     return <StateChip kind="loading" detail="reading delivery projections" />;

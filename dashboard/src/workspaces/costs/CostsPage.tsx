@@ -5,8 +5,8 @@ import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
-  SavingsOverviewPayloadSchema,
-} from '../../contracts/wire.ts';
+  SavingsOverviewPayloadV1Schema,
+} from '../../contracts/generated.ts';
 import { logFraction } from '../../viz/scale.ts';
 import {
   costPerTurn,
@@ -59,7 +59,7 @@ function SavingsLedger() {
   const overview = useLegacy(
     ['savings', 'overview'],
     `${BASE}/overview`,
-    SavingsOverviewPayloadSchema,
+    SavingsOverviewPayloadV1Schema,
   );
 
   return (

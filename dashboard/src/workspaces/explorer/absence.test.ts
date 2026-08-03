@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { absenceVerdict } from './absence.ts';
-import { ExplorerQueryRunSchema } from '../../contracts/wire.ts';
+import { ExplorerQueryRunV1Schema } from '../../contracts/generated.ts';
 
 /**
  * Coverage fields a source may report. Defaults describe a source that examined
@@ -44,7 +44,7 @@ function source(id: 'code_graph' | 'sessions' | 'knowledge', over: Record<string
 /** Parsed through the real schema, so a fixture that the contract would reject
  * cannot quietly prove anything here. */
 function run(sources: unknown[], finality: 'complete' | 'partial' = 'complete') {
-  return ExplorerQueryRunSchema.parse({
+  return ExplorerQueryRunV1Schema.parse({
     run_id: 'run-1',
     request: { query: 'missing', limit: 50, offset: 0 },
     request_revision: 'explorer-query-request-v1',

@@ -186,18 +186,14 @@ async fn derive_projection_with_alias_from_generation(
     observation: &DurableObservationV1,
     rebuild_generation: Option<&str>,
 ) -> ProjectionStoreResult<ObservationProjection> {
-    // Live derivation is disposition-aware: once an observation has converged
-    // to a durable output-collision skip, its deterministic output identity
-    // belongs to a different observation, so re-derivation must return that
-    // skip rather than the message it would otherwise produce. A rebuild
-    // (Some(generation)) re-derives from scratch by construction and ignores
-    // the live disposition.
-    if rebuild_generation.is_none()
-        && output_collision_disposed(conn, observation.observation_id().as_str()).await?
+    if let Some(reason) =
+        durable_projection_disposition(conn, observation.observation_id().as_str()).await?
+        && matches!(
+            reason,
+            ProjectionSkipReason::OutputCollision | ProjectionSkipReason::InvalidContract
+        )
     {
-        return Ok(ObservationProjection::Skipped(
-            ProjectionSkipReason::OutputCollision,
-        ));
+        return Ok(ObservationProjection::Skipped(reason));
     }
     let projection = derive_projection(observation)?;
     // Collapse Codex-style token/time goal ticks at projection time so every
@@ -972,13 +968,13 @@ async fn apply_provenance(
     Ok(())
 }
 
-/// True when this observation already carries a durable `output_collision`
-/// disposition: it must project as a skip everywhere (drain, audit, replay)
-/// because its output identity is owned by a different observation.
-pub async fn output_collision_disposed(
+/// Durable deterministic dispositions are projection input on every replay and
+/// rebuild. Consulting them before derivation prevents an unchanged invalid
+/// observation from repeating expensive hashing or parsing work.
+pub async fn durable_projection_disposition(
     conn: &impl QueryExecutor,
     observation_id: &str,
-) -> ProjectionStoreResult<bool> {
+) -> ProjectionStoreResult<Option<ProjectionSkipReason>> {
     let mut rows = conn
         .query(
             "SELECT reason FROM observation_projection_dispositions
@@ -994,7 +990,16 @@ pub async fn output_collision_disposed(
         .map(|row| row.get::<String>(0))
         .transpose()
         .map_err(|error| storage("read projection disposition", error))?;
-    Ok(reason.as_deref() == Some(ProjectionSkipReason::OutputCollision.as_str()))
+    reason
+        .map(|reason| {
+            ProjectionSkipReason::from_durable_str(&reason).ok_or_else(|| {
+                storage_message(
+                    "read projection disposition",
+                    "projection disposition has an unknown reason",
+                )
+            })
+        })
+        .transpose()
 }
 
 async fn verify_skip_disposition(
@@ -1034,7 +1039,7 @@ async fn verify_skip_disposition(
     }
 }
 
-async fn apply_skip_disposition(
+pub(super) async fn apply_skip_disposition(
     conn: &impl Executor,
     observation: &DurableObservationV1,
     reason: ProjectionSkipReason,

@@ -702,6 +702,9 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
             deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
             pagination: None,
             idempotency: IdempotencyContract::Required,
+            inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
+                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+            },
             authority_revalidation: RevalidationContract::required(vec![
                 RevalidationPoint::Authority,
                 RevalidationPoint::Scope,
@@ -764,6 +767,9 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
         deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
         pagination: None,
         idempotency: IdempotencyContract::Required,
+        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
+            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+        },
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,

@@ -31,8 +31,8 @@ import type {
   MetricCoverageV1,
   MetricEvidenceClassV1,
   MetricValueV1,
-} from '../contracts/wire.ts';
-import { assertNever } from '../contracts/wire.ts';
+} from '../contracts/generated.ts';
+import { assertNever } from '../contracts/generated.ts';
 import type { EvidenceQuality } from './EvidencePattern.tsx';
 
 /** One measurement, reduced to the strings a plate renders. */

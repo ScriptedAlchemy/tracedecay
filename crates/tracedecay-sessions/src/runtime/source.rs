@@ -160,14 +160,11 @@ pub struct ParsedTranscript {
 
 /// Durable identity for one transcript cursor.
 ///
-/// Physical paths preserve the V1 text key. Opaque keys let providers retain
-/// an injective identity when a native path cannot be represented as Unicode;
-/// their legacy path is kept solely for one-way cursor migration and health
-/// compatibility.
+/// Physical paths retain their native identity. Opaque keys let providers keep
+/// an injective identity when a native path cannot be represented as Unicode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TranscriptCursorKey {
     durable: DurableTranscriptCursorKey,
-    legacy_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,18 +177,16 @@ impl TranscriptCursorKey {
     pub fn for_path(path: &Path) -> Self {
         Self {
             durable: DurableTranscriptCursorKey::Path(path.to_path_buf()),
-            legacy_path: None,
         }
     }
 
-    pub fn opaque(key: impl Into<String>, legacy_path: &Path) -> Self {
+    pub fn opaque(key: impl Into<String>) -> Self {
         Self {
             durable: DurableTranscriptCursorKey::Opaque(key.into()),
-            legacy_path: Some(legacy_path.to_path_buf()),
         }
     }
 
-    /// Exact durable text used by opaque keys, or the V1 lossy path text.
+    /// Exact durable text used by opaque keys or Unicode-compatible paths.
     pub fn durable_text(&self) -> String {
         match &self.durable {
             DurableTranscriptCursorKey::Path(path) => path.to_string_lossy().into_owned(),
@@ -205,10 +200,6 @@ impl TranscriptCursorKey {
             DurableTranscriptCursorKey::Opaque(key) => PathBuf::from(key),
         }
     }
-
-    fn legacy_path(&self) -> Option<&Path> {
-        self.legacy_path.as_deref()
-    }
 }
 
 /// One typed cursor checkpoint for a transcript source.
@@ -221,12 +212,10 @@ pub struct TranscriptCursorCheckpoint {
     pub state: StoredCursor,
 }
 
-/// Loaded cursor state plus the compare-and-swap expectations needed to
-/// preserve opaque-key migration and the legacy health mirror.
+/// Loaded cursor state plus the compare-and-swap expectation for its key.
 pub struct LoadedTranscriptCursor {
     pub checkpoint: TranscriptCursorCheckpoint,
     durable_offset: ParseOffset,
-    legacy_offset: Option<ParseOffset>,
 }
 
 pub async fn load_transcript_cursor<S: TranscriptIngestStore>(
@@ -234,26 +223,16 @@ pub async fn load_transcript_cursor<S: TranscriptIngestStore>(
     key: TranscriptCursorKey,
 ) -> TranscriptIngestResult<LoadedTranscriptCursor> {
     let durable_offset = store.get_parse_offset(&key.store_path()).await?;
-    let legacy_offset = if let Some(legacy_path) = key.legacy_path() {
-        Some(store.get_parse_offset(legacy_path).await?)
-    } else {
-        None
-    };
-    // Opaque keys cannot safely inherit a lossy V1 path cursor: distinct
-    // native paths may share that alias. Replay once into the injective key,
-    // then keep mirroring the legacy cursor for health compatibility.
-    let effective = durable_offset;
     Ok(LoadedTranscriptCursor {
         checkpoint: TranscriptCursorCheckpoint {
             key,
             state: StoredCursor {
-                position: effective.byte_offset,
-                mtime: effective.mtime,
-                file_id: effective.file_id,
+                position: durable_offset.byte_offset,
+                mtime: durable_offset.mtime,
+                file_id: durable_offset.file_id,
             },
         },
         durable_offset,
-        legacy_offset,
     })
 }
 
@@ -405,7 +384,7 @@ async fn ingest_one<S: TranscriptIngestStore>(
     .await
 }
 
-/// Persist an already parsed transcript through the authoritative V1 batch and
+/// Persist an already parsed transcript through the authoritative batch and
 /// git-evidence transaction. Observation coordinators reuse this after their
 /// one-pass privacy parse and Claude fold.
 pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
@@ -426,11 +405,10 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     let cursor_key = loaded.checkpoint.key;
     let cursor_path = cursor_key.store_path();
     let durable_offset = loaded.durable_offset;
-    let legacy_offset = loaded.legacy_offset;
-    let is_backfill = loaded.checkpoint.state != expected_previous.state;
-    let next_offset = if is_backfill {
-        // Backfill/retry scans may start before V1. Upsert their deterministic
-        // rows idempotently while the V1 CAS remains pinned to its newer state.
+    let is_stale_replay = loaded.checkpoint.state != expected_previous.state;
+    let next_offset = if is_stale_replay {
+        // Stale/retry scans may start before the committed frontier. Upsert
+        // deterministic rows while the CAS remains pinned to its newer state.
         durable_offset
     } else {
         ParseOffset {
@@ -442,7 +420,6 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     if parsed.messages.is_empty() {
         let batch = TranscriptWriteBatch::advance_offset(cursor_path, durable_offset, next_offset)?;
         store.persist_transcript_batch(batch).await?;
-        mirror_legacy_cursor(store, &cursor_key, legacy_offset, next_offset).await?;
         return Ok(TranscriptIngestStats::default());
     }
     protect_parsed_transcript_structural_ids(&mut parsed)?;
@@ -529,7 +506,6 @@ pub async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     store
         .persist_transcript_batch_with_git_evidence(batch, &commit_records, &span_observations)
         .await?;
-    mirror_legacy_cursor(store, &cursor_key, legacy_offset, next_offset).await?;
     // Live-activity tap: this is the one chokepoint every provider's transcript
     // ingest funnels through, so it is where "an agent said something in this
     // project" becomes observable. Published only after the durable batch
@@ -628,27 +604,6 @@ fn session_metadata_rollup_items_match(key: &str, left: &Value, right: &Value) -
         },
         _ => left == right,
     }
-}
-
-async fn mirror_legacy_cursor<S: TranscriptIngestStore>(
-    store: &S,
-    cursor_key: &TranscriptCursorKey,
-    legacy_offset: Option<ParseOffset>,
-    next_offset: ParseOffset,
-) -> TranscriptIngestResult<()> {
-    let (Some(legacy_path), Some(legacy_offset)) = (cursor_key.legacy_path(), legacy_offset) else {
-        return Ok(());
-    };
-    if legacy_offset == next_offset {
-        return Ok(());
-    }
-    let batch = TranscriptWriteBatch::advance_offset(
-        legacy_path.to_path_buf(),
-        legacy_offset,
-        next_offset,
-    )?;
-    store.persist_transcript_batch(batch).await?;
-    Ok(())
 }
 
 mod discovery;

@@ -39,7 +39,7 @@
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 
 const DAY_SECONDS = 86_400;
 

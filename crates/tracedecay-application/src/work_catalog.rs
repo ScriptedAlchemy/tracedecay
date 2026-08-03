@@ -300,6 +300,13 @@ fn work_manifest(
         } else {
             IdempotencyContract::Required
         },
+        inverse: if read_only {
+            tracedecay_tool_catalog::InverseContract::NotApplicable
+        } else {
+            tracedecay_tool_catalog::InverseContract::Unavailable {
+                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+            }
+        },
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,

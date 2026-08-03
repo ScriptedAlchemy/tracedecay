@@ -18,19 +18,19 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   assertNever,
   type DashboardDoctorRemediationDescriptorV1,
-  type DoctorEvidenceState,
-  type DoctorFindingsPayload,
-  type DoctorOwningSurface,
-  type DoctorRemediationApplyRequest,
-  type DoctorRemediationOperation,
-  type DoctorRemediationPayload,
-  type DoctorRemediationPreviewRequest,
-  type DoctorRemediationTarget,
-  type DoctorReportEntry,
-  type DoctorReportCoverage,
+  type DoctorEvidenceStateV1,
+  type DoctorFindingsPayloadV1,
+  type DoctorOwningSurfaceV1,
+  type DoctorRemediationApplyRequestV1,
+  type DoctorRemediationOperationV1,
+  type DoctorRemediationPayloadV1,
+  type DoctorRemediationPreviewRequestV1,
+  type DoctorRemediationTargetV1,
+  type DoctorReportEntryV1,
+  type DoctorReportCoverageV1,
   type ResolvedScope,
-  type WireLegalActionRef,
-} from '../../contracts/wire.ts';
+  type DashboardLegalActionRefV1,
+} from '../../contracts/generated.ts';
 import {
   applyDoctorRemediation,
   doctorFindingsQueryKey,
@@ -68,9 +68,9 @@ import {
 } from './doctorModel.ts';
 
 type SelectedRemediation = {
-  entry: DoctorReportEntry;
+  entry: DoctorReportEntryV1;
   descriptor: DashboardDoctorRemediationDescriptorV1;
-  target: DoctorRemediationTarget;
+  target: DoctorRemediationTargetV1;
   actions: RemediationActionAvailability;
   idempotencyKey: string;
 };
@@ -123,12 +123,12 @@ export function DoctorInspector() {
   };
 
   const preview = useMutation({
-    mutationFn: (request: DoctorRemediationPreviewRequest) =>
+    mutationFn: (request: DoctorRemediationPreviewRequestV1) =>
       previewDoctorRemediation(scope, request),
     onSuccess: rememberOperation,
   });
   const apply = useMutation({
-    mutationFn: (request: DoctorRemediationApplyRequest) => applyDoctorRemediation(scope, request),
+    mutationFn: (request: DoctorRemediationApplyRequestV1) => applyDoctorRemediation(scope, request),
     onSuccess: (result) => {
       rememberOperation(result);
       setConfirmed(false);
@@ -270,18 +270,18 @@ function DoctorFindings({
   onInspect,
   onPreview,
 }: {
-  result: EnvelopeResult<DoctorFindingsPayload> | undefined;
+  result: EnvelopeResult<DoctorFindingsPayloadV1> | undefined;
   pending: boolean;
   refreshing: boolean;
   previewing: boolean;
   writability: ScopeWritability;
   onRefresh: () => void;
   onInspect: (
-    entry: DoctorReportEntry,
+    entry: DoctorReportEntryV1,
     descriptor: DashboardDoctorRemediationDescriptorV1,
-    legalActions: WireLegalActionRef[],
+    legalActions: DashboardLegalActionRefV1[],
   ) => void;
-  onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
+  onPreview: (request: { operation: string; target: DoctorRemediationTargetV1 }) => void;
 }) {
   const read = envelopeReadState(pending, result, {
     loading: 'requesting canonical Doctor findings',
@@ -340,7 +340,7 @@ function DoctorFindings({
 function DoctorReportCoverageGaps({
   coverage,
 }: {
-  coverage: DoctorReportCoverage | null;
+  coverage: DoctorReportCoverageV1 | null;
 }) {
   const unavailable =
     coverage?.families.filter(
@@ -415,13 +415,13 @@ function FindingCard({
   onPreview,
   onInspect,
 }: {
-  entry: DoctorReportEntry;
+  entry: DoctorReportEntryV1;
   descriptor: DashboardDoctorRemediationDescriptorV1 | undefined;
-  target: DoctorRemediationTarget | null;
+  target: DoctorRemediationTargetV1 | null;
   actions: RemediationActionAvailability;
   previewing: boolean;
   writability: ScopeWritability;
-  onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
+  onPreview: (request: { operation: string; target: DoctorRemediationTargetV1 }) => void;
   onInspect: () => void;
 }) {
   const { finding } = entry;
@@ -490,7 +490,7 @@ function FindingCard({
 /** The lucide glyph for each evidence state, matching what `StateChip` draws
  * for the domain state that evidence state maps to — so a Doctor finding and
  * the chip beside it never disagree about what `stale` looks like. */
-const EVIDENCE_ICON: Record<DoctorEvidenceState, LucideIcon> = {
+const EVIDENCE_ICON: Record<DoctorEvidenceStateV1, LucideIcon> = {
   unsupported: CircleSlash,
   absent: HelpCircle,
   stale: Clock,
@@ -514,7 +514,7 @@ const EVIDENCE_ICON: Record<DoctorEvidenceState, LucideIcon> = {
  * is the rule the whole state taxonomy is built on. `axe-observatory.ts` scans
  * these badges against a populated Doctor fixture.
  */
-function EvidenceBadge({ state }: { state: DoctorEvidenceState }) {
+function EvidenceBadge({ state }: { state: DoctorEvidenceStateV1 }) {
   const evidence = doctorEvidencePresentation(state);
   const Icon = EVIDENCE_ICON[state];
   return (
@@ -541,7 +541,7 @@ function RemediationAvailabilityNote({
 }: {
   authorized: boolean;
   dispatchable: boolean;
-  surface: DoctorOwningSurface;
+  surface: DoctorOwningSurfaceV1;
 }) {
   if (!authorized) {
     return (
@@ -799,7 +799,7 @@ function AuthorityScope({
   );
 }
 
-function FindingEvidence({ entry }: { entry: DoctorReportEntry }) {
+function FindingEvidence({ entry }: { entry: DoctorReportEntryV1 }) {
   return (
     <div>
       <p className="text-2xs font-medium uppercase tracking-wide text-text-muted">
@@ -847,14 +847,14 @@ function RemediationResult({ result }: { result: DoctorWriteResult | undefined }
  * no operation rather than needing a separate path to say the same thing. */
 function operationFromResult(
   result: DoctorWriteResult | undefined,
-): DoctorRemediationOperation | null {
+): DoctorRemediationOperationV1 | null {
   if (result?.outcome !== 'envelope') return null;
   const { payload } = result.envelope;
   return payload.status === 'operation' ? payload.operation : null;
 }
 
 function operationPhaseState(
-  phase: DoctorRemediationOperation['phase'],
+  phase: DoctorRemediationOperationV1['phase'],
 ): DomainStateKind {
   switch (phase) {
     case 'previewed':

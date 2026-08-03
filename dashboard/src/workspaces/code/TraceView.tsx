@@ -55,9 +55,9 @@ import { useTraceNeighborhood } from './traceNeighborhood.ts';
  * The symbol a Code surface is currently centred on.
  *
  * Not a wire shape. The three things that can set a focus hold three different
- * amounts: the search list and the hub field hold a whole `GraphNode` off the
+ * amounts: the search list and the hub field hold a whole `GraphNodeV1` off the
  * graph routes, while a click inside the trace field holds only what the
- * simulation carries — id, kind, name, file and line. A `GraphNode` satisfies
+ * simulation carries — id, kind, name, file and line. A `GraphNodeV1` satisfies
  * this, so the richer sources pass straight through; the trace field states
  * what it actually knows instead of padding the rest of the wire shape with
  * nulls it never received.

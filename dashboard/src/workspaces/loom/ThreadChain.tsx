@@ -7,12 +7,12 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import {
-  LcmSessionPayloadSchema,
-  type LoomBranchSpan,
-  type LoomCommit,
-  type LoomEditedFile,
-  type LoomSourceStatus,
-} from '../../contracts/wire.ts';
+  LcmSessionPayloadV1Schema,
+  type LoomBranchSpanV1,
+  type LoomCommitV1,
+  type LoomEditedFileV1,
+  type LoomSourceStatusV1,
+} from '../../contracts/generated.ts';
 
 /**
  * The selected thread's chain: prompt → turns → tools.
@@ -27,11 +27,11 @@ import {
  * present — no elapsed times or gaps are inferred from ordinal positions.
  */
 export interface ThreadRelations {
-  commits: readonly LoomCommit[];
-  editedFiles: readonly LoomEditedFile[];
-  branchSpans: readonly LoomBranchSpan[];
-  commitStatus: LoomSourceStatus | null;
-  branchStatus: LoomSourceStatus | null;
+  commits: readonly LoomCommitV1[];
+  editedFiles: readonly LoomEditedFileV1[];
+  branchSpans: readonly LoomBranchSpanV1[];
+  commitStatus: LoomSourceStatusV1 | null;
+  branchStatus: LoomSourceStatusV1 | null;
 }
 
 export function ThreadChain({
@@ -44,7 +44,7 @@ export function ThreadChain({
   const chain = useLegacy(
     ['loom', 'chain', thread?.id ?? 'none'],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.sessionId ?? '')}?limit=200`,
-    LcmSessionPayloadSchema,
+    LcmSessionPayloadV1Schema,
     { enabled: thread != null },
   );
 
@@ -251,7 +251,7 @@ export function ThreadChain({
 
 /** Durable causal rows attached to the selected provider-qualified session.
  * Missing edited-file metadata remains unknown; empty durable commit/span
- * queries are true zero-findings. Delivery stays a named shared dependency. */
+ * queries are true zero-findings. */
 function ChainTerminus({
   thread,
   relations,

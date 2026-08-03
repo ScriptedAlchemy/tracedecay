@@ -9,7 +9,7 @@ use tracedecay_domain::{
 use tracedecay_store::observation::{CursorAdvanceOutcome, ObservationCursorAdvance};
 use tracedecay_store::{
     ObservationPersistOutcome, ObservationProjectionStore, ObservationStore, ObservationStoreError,
-    ParseOffset, ProjectionPersistOutcome, StoreShardScopeV1,
+    ParseOffset, ProjectionPersistOutcome, ProjectionStoreError, StoreShardScopeV1,
     build_scope_resolution_authorization_v1,
 };
 
@@ -929,13 +929,24 @@ impl<'a> HostAdmissionFacade<'a> {
             else {
                 break;
             };
-            match store
-                .project_observation(&observation_id)
-                .await
-                .map_err(|error| {
+            let projected = match store.project_observation(&observation_id).await {
+                Ok(projected) => projected,
+                Err(ProjectionStoreError::RetryDeferred { .. }) => break,
+                Err(error @ ProjectionStoreError::Contract(_)) => {
+                    tracing::warn!(
+                        %error,
+                        observation = observation_id.as_str(),
+                        "deterministic projection contract rejection committed"
+                    );
+                    outcome.skipped = outcome.skipped.saturating_add(1);
+                    continue;
+                }
+                Err(error) => {
                     tracing::warn!(%error, "projection store operation failed during host drain");
-                    projection_store_unavailable()
-                })? {
+                    return Err(projection_error_outcome(&error));
+                }
+            };
+            match projected {
                 ProjectionPersistOutcome::Projected(projected) => {
                     outcome.projected = outcome.projected.saturating_add(1);
                     outcome.projected_outputs = outcome.projected_outputs.saturating_add(
@@ -1149,6 +1160,35 @@ const fn projection_store_unavailable() -> HostAdmissionOutcome {
         true,
         Some("projection_store_unavailable"),
     )
+}
+
+const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmissionOutcome {
+    match error {
+        ProjectionStoreError::Storage { .. } => {
+            HostAdmissionOutcome::retained_unavailable("projection_storage_retry_scheduled")
+        }
+        ProjectionStoreError::RetryDeferred { .. } => {
+            HostAdmissionOutcome::retained_backpressured("projection_retry_deferred")
+        }
+        ProjectionStoreError::SequenceOverflow(_)
+        | ProjectionStoreError::Gap { .. }
+        | ProjectionStoreError::NotQueued
+        | ProjectionStoreError::ObservationNotFound
+        | ProjectionStoreError::InvalidRebuildFrontier { .. }
+        | ProjectionStoreError::ProvenanceCollision
+        | ProjectionStoreError::Anchor(_) => {
+            HostAdmissionOutcome::degraded("projection_state_invalid")
+        }
+        ProjectionStoreError::UnsupportedProvider(_) => {
+            HostAdmissionOutcome::degraded("projection_provider_unsupported")
+        }
+        ProjectionStoreError::OutputCollision { .. } => {
+            HostAdmissionOutcome::degraded("projection_output_collision")
+        }
+        ProjectionStoreError::Contract(_) => {
+            HostAdmissionOutcome::degraded("projection_contract_rejected")
+        }
+    }
 }
 
 fn host_scope(scope: &ObservationScopeV1) -> HostAdmissionScope {

@@ -1,18 +1,18 @@
 import { useQuery } from '@tanstack/react-query';
 import {
   assertNever,
-  StorageTelemetryPayloadSchema,
-  type DoctorReportEntry,
-  type StorageFindingKindStatus,
-  type StorageFindingsPayload,
-  type StorageTelemetryPayload,
-  type StorageTelemetryRead,
-  type StoreTelemetryEntry,
-  type TableGrowthDimension,
-  type TableGrowthThreshold,
-  type WireCoverage,
-  type WireEnvelope,
-} from '../../contracts/wire.ts';
+  StorageTelemetryPayloadV1Schema,
+  type DoctorReportEntryV1,
+  type StorageFindingKindStatusV1,
+  type StorageFindingsPayloadV1,
+  type StorageTelemetryPayloadV1,
+  type StorageTelemetryReadV1,
+  type StoreTelemetryEntryV1,
+  type TableGrowthDimensionV1,
+  type TableGrowthThresholdV1,
+  type DashboardCoverageV1,
+  type DashboardEnvelopeV1,
+} from '../../contracts/generated.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
@@ -46,7 +46,7 @@ export function ObservatoryPage() {
   const telemetry = useQuery({
     queryKey: ['storage', 'telemetry', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope(scopedUrl(scope, '/api/storage/telemetry'), StorageTelemetryPayloadSchema),
+      fetchEnvelope(scopedUrl(scope, '/api/storage/telemetry'), StorageTelemetryPayloadV1Schema),
     refetchInterval: 30_000,
   });
   // Shared with the nav rail's Doctor dot, through the module that owns the
@@ -104,7 +104,7 @@ function TelemetryReadModel({
   refreshing,
   onRefresh,
 }: {
-  envelope: WireEnvelope<StorageTelemetryPayload>;
+  envelope: DashboardEnvelopeV1<StorageTelemetryPayloadV1>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -142,7 +142,7 @@ function FindingsReadModel({
   refreshing,
   onRefresh,
 }: {
-  envelope: WireEnvelope<StorageFindingsPayload>;
+  envelope: DashboardEnvelopeV1<StorageFindingsPayloadV1>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -167,7 +167,7 @@ function FindingsReadModel({
   );
 }
 
-function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatus[] }) {
+function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatusV1[] }) {
   return (
     <ul
       className="mx-4 mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"
@@ -208,7 +208,7 @@ function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatu
  * carry per-store detail; this is the only place that says how much of the
  * fleet the per-table view actually covers, so a run where four of five stores
  * never produced a comparison cannot read as a complete picture. */
-function TableGrowthFleetCoverage({ coverage }: { coverage: WireCoverage }) {
+function TableGrowthFleetCoverage({ coverage }: { coverage: DashboardCoverageV1 }) {
   const complete = coverage.completeness === 'complete';
   return (
     <section
@@ -249,8 +249,8 @@ function StoreCard({
   entry,
   tableGrowthThreshold,
 }: {
-  entry: StoreTelemetryEntry;
-  tableGrowthThreshold: TableGrowthThreshold;
+  entry: StoreTelemetryEntryV1;
+  tableGrowthThreshold: TableGrowthThresholdV1;
 }) {
   // `observed` is a full page-level sample. `observed_bytes` is a real total
   // size with no page sample behind it, so free pages are UNKNOWN rather than
@@ -314,8 +314,8 @@ function TableGrowthPanel({
   threshold,
   store,
 }: {
-  growth: TableGrowthDimension;
-  threshold: TableGrowthThreshold;
+  growth: TableGrowthDimensionV1;
+  threshold: TableGrowthThresholdV1;
   store: string;
 }) {
   const presentation = tableGrowthPresentation(growth);
@@ -416,7 +416,7 @@ function TableGrowthPanel({
 /** `/api/storage/findings` is the storage-family projection of the admitted
  * canonical Doctor report. The browser preserves its typed subclass, evidence,
  * coverage, and owner-operation reference without recomputing health. */
-function StorageFindingCard({ entry }: { entry: DoctorReportEntry }) {
+function StorageFindingCard({ entry }: { entry: DoctorReportEntryV1 }) {
   const { finding, storage_kind: storageKind } = entry;
   const presentation = doctorEvidencePresentation(finding.state);
   return (
@@ -520,7 +520,7 @@ function ReadModelNotes({ notes }: { notes: string[] }) {
   );
 }
 
-function readKindToState(kind: StorageTelemetryRead['kind']): DomainStateKind {
+function readKindToState(kind: StorageTelemetryReadV1['kind']): DomainStateKind {
   switch (kind) {
     case 'observed':
       return 'ready';
@@ -539,7 +539,7 @@ function readKindToState(kind: StorageTelemetryRead['kind']): DomainStateKind {
   }
 }
 
-function readUnavailableMessage(read: StorageTelemetryRead): string {
+function readUnavailableMessage(read: StorageTelemetryReadV1): string {
   switch (read.kind) {
     case 'observed':
     case 'observed_bytes':

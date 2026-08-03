@@ -15,7 +15,7 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import type { MetricValueV1 } from '../contracts/wire.ts';
+import type { MetricValueV1 } from '../contracts/generated.ts';
 import { fetchEnvelope } from '../data/query/envelope.ts';
 import type { WireSchema } from '../data/query/wireSchema.ts';
 import { scopeKey, scopedUrl, useScope } from '../data/scope/store.ts';

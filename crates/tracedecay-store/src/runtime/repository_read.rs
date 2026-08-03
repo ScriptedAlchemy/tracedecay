@@ -137,7 +137,7 @@ fn observation_read_matches_shard(
         }
         ObservationReadOperationV1::Observation { .. }
         | ObservationReadOperationV1::Replay { .. }
-        | ObservationReadOperationV1::NextQueuedProjection
+        | ObservationReadOperationV1::NextQueuedProjection { .. }
         | ObservationReadOperationV1::ProjectionCheckpoint
         | ObservationReadOperationV1::ProjectionRebuildProgress => matches!(
             &shard.scope,
@@ -412,7 +412,9 @@ pub enum ObservationReadOperationV1 {
         after_sequence: u64,
         limit: u16,
     },
-    NextQueuedProjection,
+    NextQueuedProjection {
+        now_micros: i64,
+    },
     ProjectionCheckpoint,
     ProjectionRebuildProgress,
 }

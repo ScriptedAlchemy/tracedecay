@@ -8,6 +8,9 @@ include = ["/src/**"]
 
 [dependencies]
 fst = { version = "=0.4.7", default-features = false, features = ["levenshtein"] }
+grafeo-adapters = { version = "=0.5.42", default-features = false, features = ["algos"] }
+grafeo-common = { version = "=0.5.42", default-features = false }
+grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg"] }
 hex = "0.4"
 hmac = "0.13.0"
 roaring = { version = "=0.11.4", default-features = false }

@@ -19,7 +19,7 @@ import { resolveFixture } from '../stories/fixtures/data.ts';
  * Cloned rather than constructed, for the same reason `storageFindings` is:
  * `DashboardEnvelopeV1` carries scope, version, time, watermark, coverage,
  * freshness, authorization and legal actions, and an envelope missing one of
- * them fails `EnvelopeSchema` and arrives as `unsupported_schema`. Every
+ * them fails `DashboardEnvelopeV1Schema` and arrives as `unsupported_schema`. Every
  * scenario built on it would then render the same schema notice, scan clean,
  * and prove nothing about the state it named.
  */

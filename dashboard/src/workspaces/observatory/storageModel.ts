@@ -1,17 +1,17 @@
 import { assertNever } from '../../contracts/generated.ts';
 import { splitSignedBytes } from '../../ui/format.ts';
 import type {
-  DoctorStorageFindingKind,
-  StorageFindingKindStatus,
-  StorageFindingSourceState,
-  StoreBudgetDimension,
-  StoreGrowthDimension,
-  TableGrowthDimension,
-  TableGrowthOmission,
-  WireLegalActionRef,
-} from '../../contracts/wire.ts';
+  DoctorStorageFindingKindV1,
+  StorageFindingKindStatusV1,
+  StorageFindingSourceStateV1,
+  StoreBudgetDimensionV1,
+  StoreGrowthDimensionV1,
+  TableGrowthDimensionV1,
+  TableGrowthOmissionV1,
+  DashboardLegalActionRefV1,
+} from '../../contracts/generated.ts';
 
-const FINDING_LABELS: Record<DoctorStorageFindingKind, string> = {
+const FINDING_LABELS: Record<DoctorStorageFindingKindV1, string> = {
   over_budget_store: 'Over-budget stores',
   orphan_store: 'Orphan stores',
   stale_branch_dbs: 'Stale branch databases',
@@ -20,18 +20,18 @@ const FINDING_LABELS: Record<DoctorStorageFindingKind, string> = {
   table_growth: 'Table growth',
 };
 
-export function storageFindingLabel(kind: DoctorStorageFindingKind): string {
+export function storageFindingLabel(kind: DoctorStorageFindingKindV1): string {
   return FINDING_LABELS[kind];
 }
 
-const SOURCE_STATE_LABELS: Record<StorageFindingSourceState, string> = {
+const SOURCE_STATE_LABELS: Record<StorageFindingSourceStateV1, string> = {
   real: 'Observed',
   unset: 'Unset',
   partial: 'Partial',
   unsupported: 'Unsupported',
 };
 
-export function storageSourcePresentation(status: StorageFindingKindStatus): {
+export function storageSourcePresentation(status: StorageFindingKindStatusV1): {
   label: string;
   tokenClass: string;
   dotClass: string;
@@ -55,7 +55,7 @@ export function storageSourcePresentation(status: StorageFindingKindStatus): {
   }
 }
 
-export function refreshOperation(actions: WireLegalActionRef[]): string | undefined {
+export function refreshOperation(actions: DashboardLegalActionRefV1[]): string | undefined {
   return actions.find((action) => action.kind === 'refresh')?.operation;
 }
 
@@ -99,7 +99,7 @@ export function dimensionDotClass(tone: DimensionTone): string {
   return DIMENSION_DOT[tone];
 }
 
-export function budgetPresentation(budget: StoreBudgetDimension): DimensionPresentation {
+export function budgetPresentation(budget: StoreBudgetDimensionV1): DimensionPresentation {
   switch (budget.state) {
     case 'evaluated': {
       const { evaluation } = budget;
@@ -146,7 +146,7 @@ export function budgetPresentation(budget: StoreBudgetDimension): DimensionPrese
   }
 }
 
-export function growthPresentation(growth: StoreGrowthDimension): DimensionPresentation {
+export function growthPresentation(growth: StoreGrowthDimensionV1): DimensionPresentation {
   switch (growth.state) {
     case 'baseline':
       return {
@@ -182,7 +182,7 @@ export function growthPresentation(growth: StoreGrowthDimension): DimensionPrese
   }
 }
 
-export function tableGrowthPresentation(growth: TableGrowthDimension): DimensionPresentation {
+export function tableGrowthPresentation(growth: TableGrowthDimensionV1): DimensionPresentation {
   switch (growth.state) {
     case 'observed':
       return {
@@ -236,7 +236,7 @@ export function tableGrowthPresentation(growth: TableGrowthDimension): Dimension
 }
 
 export interface TableGrowthOmissionPresentation {
-  kind: TableGrowthOmission['kind'];
+  kind: TableGrowthOmissionV1['kind'];
   table: string;
   /** The headline figure this omission actually has: a measured delta for a
    * compared table, or the current size for one with nothing to compare to. */
@@ -250,7 +250,7 @@ export interface TableGrowthOmissionPresentation {
  * are formatted here rather than baked into a server sentence; the server's own
  * `reason` is still rendered verbatim beside the panel. */
 export function tableGrowthOmissionPresentation(
-  omission: TableGrowthOmission,
+  omission: TableGrowthOmissionV1,
 ): TableGrowthOmissionPresentation {
   switch (omission.kind) {
     case 'below_threshold':

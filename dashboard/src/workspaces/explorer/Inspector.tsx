@@ -7,7 +7,7 @@ import { StateChip } from '../../ui/StateChip';
 import { Highlight, MetaLabel } from '../../ui/search/Highlight.tsx';
 import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
-import type { ExplorerReadContextV1, ExplorerSessionSizeV1 } from '../../contracts/wire.ts';
+import type { ExplorerReadContextV1, ExplorerSessionSizeV1 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { useExplorerSessionContext } from './controller.ts';
 import { LANE_BY_ID, LANE_ICON } from './laneChrome.ts';
