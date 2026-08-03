@@ -91,6 +91,8 @@ pub trait RegistryDatabase {
 
     async fn upsert_store_artifact(&self, upsert: StoreArtifactUpsert) -> bool;
 
+    async fn ensure_token_count_cache(&self) -> bool;
+
     async fn checkpoint(&self);
 }
 

@@ -10,6 +10,7 @@ pub async fn build_inventory_with_global_db(
     options: MigrationInventoryOptions,
     discovered_global_db_path: Option<std::path::PathBuf>,
     global_db_path_is_overridden: bool,
+    accounting_mode: String,
 ) -> Result<MigrationInventory> {
     let profile_root = options
         .global_db_path
@@ -26,11 +27,20 @@ pub async fn build_inventory_with_global_db(
         &profile_root,
         "migration inventory",
     )?;
-    build_inventory_in_scope(options).await
+    build_inventory_in_scope(
+        options,
+        discovered_global_db_path,
+        global_db_path_is_overridden,
+        accounting_mode,
+    )
+    .await
 }
 
 async fn build_inventory_in_scope(
     options: MigrationInventoryOptions,
+    discovered_global_db_path: Option<std::path::PathBuf>,
+    global_db_path_is_overridden: bool,
+    accounting_mode: String,
 ) -> Result<MigrationInventory> {
     let mut stores = Vec::new();
     let mut skipped = Vec::new();
@@ -63,6 +73,7 @@ async fn build_inventory_in_scope(
             sqlite::inspect_global_db(
                 &path,
                 explicit_global_db_path || global_db_path_is_overridden,
+                accounting_mode,
             )
             .await,
         ),

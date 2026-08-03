@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::artifacts::{dir_size, file_size, record_branch_db_artifacts, record_optional_artifact};
-use super::model::{
+use super::sqlite::sqlite_quick_check;
+use super::{
     RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };
-use super::sqlite::sqlite_quick_check;
 use crate::config::{self, TRACEDECAY_DIR, db_filename};
 use crate::errors::Result;
 use crate::storage::{BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_FILENAME};

@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::model::{SkippedPath, StoreArtifact, StoreStatus};
 use super::sqlite::sqlite_quick_check;
+use super::{SkippedPath, StoreArtifact, StoreStatus};
 
 pub(super) fn record_optional_artifact(
     data_dir: &Path,

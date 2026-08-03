@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::artifacts::file_size;
-use super::model::{
-    RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
-};
 use super::project::{canonicalize_lossy, inspect_data_dir_candidate};
 use super::sqlite::sqlite_quick_check;
+use super::{
+    RegistryStatus, SkippedPath, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
+};
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
 

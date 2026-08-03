@@ -188,8 +188,11 @@ impl Drop for MigrationScratchRoot {
     }
 }
 
-pub async fn plan(options: &ConsolidationOptions) -> Result<ConsolidationReport> {
-    ensure_profile_offline(options)?;
+pub async fn plan_with_daemon_status(
+    options: &ConsolidationOptions,
+    daemon_reachable: bool,
+) -> Result<ConsolidationReport> {
+    ensure_profile_offline(options, daemon_reachable)?;
     let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
         &options.profile_root,
         "profile shard consolidation plan",
@@ -205,18 +208,35 @@ pub async fn plan(options: &ConsolidationOptions) -> Result<ConsolidationReport>
 pub async fn apply_with_registry<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
+    daemon_reachable: bool,
     registry: &R,
 ) -> Result<ConsolidationReport> {
-    apply_with_stop(options, confirmation_token, None, registry).await
+    apply_with_stop(
+        options,
+        confirmation_token,
+        None,
+        daemon_reachable,
+        registry,
+    )
+    .await
 }
 
 async fn apply_with_stop<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
     stop_after: Option<ConsolidationState>,
+    daemon_reachable: bool,
     registry: &R,
 ) -> Result<ConsolidationReport> {
-    apply_with_faults(options, confirmation_token, stop_after, None, registry).await
+    apply_with_faults(
+        options,
+        confirmation_token,
+        stop_after,
+        None,
+        daemon_reachable,
+        registry,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -225,7 +245,15 @@ async fn apply_with_prepare_stop(
     confirmation_token: &str,
     prepare_stop: prepare::PrepareStop,
 ) -> Result<ConsolidationReport> {
-    apply_with_faults(options, confirmation_token, None, Some(prepare_stop)).await
+    apply_with_faults(
+        options,
+        confirmation_token,
+        None,
+        Some(prepare_stop),
+        false,
+        &NoRegistry,
+    )
+    .await
 }
 
 async fn apply_with_faults<R: RegistryRuntime>(
@@ -233,9 +261,10 @@ async fn apply_with_faults<R: RegistryRuntime>(
     confirmation_token: &str,
     stop_after: Option<ConsolidationState>,
     prepare_stop: Option<prepare::PrepareStop>,
+    daemon_reachable: bool,
     registry: &R,
 ) -> Result<ConsolidationReport> {
-    ensure_profile_offline(options)?;
+    ensure_profile_offline(options, daemon_reachable)?;
     let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
         &options.profile_root,
         "profile shard consolidation",
@@ -308,7 +337,7 @@ async fn apply_with_faults<R: RegistryRuntime>(
     }
 
     if ledger.state == ConsolidationState::DestinationReady {
-        merge_databases(&resolved, &mut ledger).await?;
+        merge_databases(&resolved, &mut ledger, registry).await?;
         ledger.state = ConsolidationState::DatabasesMerged;
         save_ledger(&ledger_path, &ledger)?;
         maybe_stop(&ledger.state, stop_after.as_ref())?;
@@ -1545,7 +1574,11 @@ fn backup_store(layout: &StoreLayout, backup_root: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn merge_databases(resolved: &ResolvedPlan, ledger: &mut ConsolidationLedger) -> Result<()> {
+async fn merge_databases<R: RegistryRuntime>(
+    resolved: &ResolvedPlan,
+    ledger: &mut ConsolidationLedger,
+    registry: &R,
+) -> Result<()> {
     let destination = &resolved.report.destination_data_root;
     let meta = load_required_branch_meta(&layout_for_id(
         &resolved.report.project_root,
@@ -1571,7 +1604,7 @@ async fn merge_databases(resolved: &ResolvedPlan, ledger: &mut ConsolidationLedg
     let target_sessions = destination.join(storage::SESSIONS_DB_FILENAME);
     if ledger.session_offsets.is_none() {
         ledger.session_offsets =
-            Some(sqlite::plan_session_offsets(&target_sessions, &source_sessions).await?);
+            Some(sqlite::plan_session_offsets(&target_sessions, &source_sessions, registry).await?);
         save_ledger(&resolved.report.ledger_path, ledger)?;
     }
     let target_input = input_root.join("target-sessions.db");
@@ -1588,6 +1621,7 @@ async fn merge_databases(resolved: &ResolvedPlan, ledger: &mut ConsolidationLedg
         &target_input,
         &resolved.report.source.project_id,
         offsets,
+        registry,
     )
     .await?;
     Ok(())

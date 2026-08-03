@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::GlobalDb;
 use crate::memory::store::MemoryStore;
+use crate::registry_adapter::{RegistryDatabase, RegistryRuntime};
 
 mod inspect;
 mod verify;
@@ -334,31 +334,34 @@ async fn merge_one_graph_tx(conn: &Connection, offset: &GraphMergeOffsets) -> Re
     Ok(())
 }
 
-pub(super) async fn plan_session_offsets(
+pub(super) async fn plan_session_offsets<R: RegistryRuntime>(
     target: &Path,
     source: &Path,
+    registry: &R,
 ) -> Result<SessionMergeOffsets> {
-    normalize_sessions(target).await?;
-    normalize_sessions(source).await?;
-    reject_session_registry_rows(source).await?;
+    normalize_sessions(target, registry).await?;
+    normalize_sessions(source, registry).await?;
+    reject_session_registry_rows(source, registry).await?;
     Ok(SessionMergeOffsets {
-        raw: db_table_max(target, "lcm_raw_messages", "store_id").await?,
-        span: db_table_max(target, "session_git_spans", "span_id").await?,
-        savings: db_table_max(target, "savings_ledger", "id").await?,
-        analytics: db_table_max(target, "analytics_events", "id").await?,
+        raw: db_table_max(target, "lcm_raw_messages", "store_id", registry).await?,
+        span: db_table_max(target, "session_git_spans", "span_id", registry).await?,
+        savings: db_table_max(target, "savings_ledger", "id", registry).await?,
+        analytics: db_table_max(target, "analytics_events", "id", registry).await?,
     })
 }
 
-pub(super) async fn merge_sessions(
+pub(super) async fn merge_sessions<R: RegistryRuntime>(
     target_path: &Path,
     source_path: &Path,
     target_input_path: &Path,
     source_project_id: &str,
     offsets: &SessionMergeOffsets,
+    registry: &R,
 ) -> Result<()> {
-    normalize_sessions(target_path).await?;
-    normalize_sessions(source_path).await?;
-    let target = GlobalDb::open_at(target_path)
+    normalize_sessions(target_path, registry).await?;
+    normalize_sessions(source_path, registry).await?;
+    let target = registry
+        .open_at(target_path)
         .await
         .ok_or_else(|| db_message("merge_sessions", "could not open target sessions DB"))?;
     attach_as(target.conn(), source_path, "source").await?;
@@ -411,28 +414,27 @@ pub(super) async fn merge_sessions(
         .execute("DETACH DATABASE target_input", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
-    crate::sessions::lcm::schema::rebuild_raw_fts(target.conn())
+    tracedecay_sessions::lcm::schema::rebuild_raw_fts(target.conn())
         .await
         .ok_or_else(|| db_message("merge_sessions", "could not rebuild raw-message FTS"))?;
     target.checkpoint().await;
-    target.close();
     Ok(())
 }
 
-async fn normalize_sessions(path: &Path) -> Result<()> {
-    let db = GlobalDb::open_at(path).await.ok_or_else(|| {
+async fn normalize_sessions<R: RegistryRuntime>(path: &Path, registry: &R) -> Result<()> {
+    let db = registry.open_at(path).await.ok_or_else(|| {
         db_message(
             "normalize_sessions",
             format!("could not open '{}'", path.display()),
         )
     })?;
-    crate::sessions::lcm::schema::ensure_lcm_schema(db.conn())
+    tracedecay_sessions::lcm::schema::ensure_lcm_schema(db.conn())
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema(db.conn())
+    tracedecay_sessions::git_correlation::ensure_git_correlation_schema(db.conn())
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
-    crate::sessions::workflow_index::ensure_workflow_index_schema(db.conn())
+    tracedecay_sessions::workflow_index::ensure_workflow_index_schema(db.conn())
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
     db.conn()
@@ -453,12 +455,12 @@ async fn normalize_sessions(path: &Path) -> Result<()> {
         ));
     }
     db.checkpoint().await;
-    db.close();
     Ok(())
 }
 
-async fn reject_session_registry_rows(path: &Path) -> Result<()> {
-    let db = GlobalDb::open_read_only_at(path)
+async fn reject_session_registry_rows<R: RegistryRuntime>(path: &Path, registry: &R) -> Result<()> {
+    let db = registry
+        .open_read_only_at(path)
         .await
         .ok_or_else(|| db_message("merge_sessions", "could not inspect source sessions DB"))?;
     for table in [
@@ -477,7 +479,6 @@ async fn reject_session_registry_rows(path: &Path) -> Result<()> {
             ));
         }
     }
-    db.close();
     Ok(())
 }
 
@@ -1097,12 +1098,17 @@ async fn table_max(conn: &Connection, table: &str, column: &str) -> Result<i64> 
     .await
 }
 
-async fn db_table_max(path: &Path, table: &str, column: &str) -> Result<i64> {
-    let db = GlobalDb::open_read_only_at(path)
+async fn db_table_max<R: RegistryRuntime>(
+    path: &Path,
+    table: &str,
+    column: &str,
+    registry: &R,
+) -> Result<i64> {
+    let db = registry
+        .open_read_only_at(path)
         .await
         .ok_or_else(|| db_message("table_max", format!("could not open '{}'", path.display())))?;
     let value = table_max(db.conn(), table, column).await?;
-    db.close();
     Ok(value)
 }
 

@@ -16,9 +16,12 @@ impl Drop for StoreLocks {
     }
 }
 
-pub(super) fn ensure_profile_offline(options: &ConsolidationOptions) -> Result<()> {
+pub(super) fn ensure_profile_offline(
+    options: &ConsolidationOptions,
+    daemon_reachable: bool,
+) -> Result<()> {
     if crate::config::user_data_dir().is_some_and(|root| same_path(&root, &options.profile_root))
-        && crate::daemon::daemon_reachable()
+        && daemon_reachable
     {
         return Err(config_error(
             "profile shard consolidation is offline-only, including its dry-run; stop the TraceDecay daemon and all MCP/CLI writers, then retry",

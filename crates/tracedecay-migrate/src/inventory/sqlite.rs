@@ -2,10 +2,13 @@ use std::path::{Path, PathBuf};
 
 use libsql::{Builder, OpenFlags};
 
-use super::model::GlobalDbInventory;
-use crate::global_db;
+use super::GlobalDbInventory;
 
-pub(super) async fn inspect_global_db(path: &Path, path_overridden: bool) -> GlobalDbInventory {
+pub(super) async fn inspect_global_db(
+    path: &Path,
+    path_overridden: bool,
+    accounting_mode: String,
+) -> GlobalDbInventory {
     let exists = path.is_file();
     let mut project_count = 0;
     let mut session_count = 0;
@@ -58,7 +61,7 @@ pub(super) async fn inspect_global_db(path: &Path, path_overridden: bool) -> Glo
         path: path.to_path_buf(),
         exists,
         path_overridden,
-        accounting_mode: global_db::global_accounting_mode().as_str().to_string(),
+        accounting_mode,
         legacy_home_fallback: false,
         project_count,
         session_count,
