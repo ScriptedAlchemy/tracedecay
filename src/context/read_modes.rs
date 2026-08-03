@@ -13,99 +13,16 @@
 //! Each function returns the rendered body as a `String`. Token-counting and
 //! cache I/O happen one layer up, in the MCP handler.
 
-use serde_json::{Value, json};
-
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::{Node, NodeKind};
+use serde_json::{Value, json};
+
+pub use tracedecay_usecases::context::read_modes::{
+    LineRange, ReadMode, estimate_tokens, render_full, render_lines,
+};
 
 const MAX_CONTEXT_SYMBOLS: usize = 12;
-
-/// Mode selector for `tracedecay_read`. Parsed from the JSON `mode` argument.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReadMode {
-    Full,
-    Lines,
-    Map,
-    Signatures,
-}
-
-impl ReadMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Full => "full",
-            Self::Lines => "lines",
-            Self::Map => "map",
-            Self::Signatures => "signatures",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "full" => Some(Self::Full),
-            "lines" => Some(Self::Lines),
-            "map" => Some(Self::Map),
-            "signatures" => Some(Self::Signatures),
-            _ => None,
-        }
-    }
-}
-
-/// Inclusive 1-based line range parsed from `"A-B"` (or just `"A"` for a
-/// single line). Out-of-range values are clamped at render time.
-#[derive(Debug, Clone, Copy)]
-pub struct LineRange {
-    pub start: u32,
-    pub end: u32,
-}
-
-impl LineRange {
-    pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
-        if let Some((a, b)) = s.split_once('-') {
-            let start: u32 = a.trim().parse().ok()?;
-            let end: u32 = b.trim().parse().ok()?;
-            if start == 0 || end < start {
-                return None;
-            }
-            Some(Self { start, end })
-        } else {
-            let line: u32 = s.parse().ok()?;
-            if line == 0 {
-                return None;
-            }
-            Some(Self {
-                start: line,
-                end: line,
-            })
-        }
-    }
-}
-
-/// Renders the `full` mode body — entire file content as UTF-8 text.
-pub fn render_full(source: &str) -> String {
-    source.to_string()
-}
-
-/// Approximates the token count of a UTF-8 string. Uses the ~4-chars-per-token
-/// rule of thumb that holds for English source code; it is not exact, but
-/// good enough for the metric tracedecay reports back to the caller.
-pub fn estimate_tokens(s: &str) -> u32 {
-    let chars = s.chars().count();
-    chars.div_ceil(4).min(u32::MAX as usize) as u32
-}
-
-/// Renders the `lines` mode body — slices `range.start..=range.end` (1-based,
-/// inclusive). Out-of-range lines are silently clamped.
-pub fn render_lines(source: &str, range: LineRange) -> String {
-    let lines: Vec<&str> = source.lines().collect();
-    let start = (range.start.saturating_sub(1)) as usize;
-    let end = (range.end as usize).min(lines.len());
-    if start >= lines.len() || start >= end {
-        return String::new();
-    }
-    lines[start..end].join("\n")
-}
 
 /// Renders the `map` mode body — JSON list of every top-level symbol in the
 /// file, sourced from the graph. No source bytes are touched.
@@ -298,63 +215,6 @@ mod tests {
             updated_at: 8,
             parent_id: Some("parent-1".to_string()),
         }
-    }
-
-    #[test]
-    fn parse_mode_known_values() {
-        assert_eq!(ReadMode::parse("full"), Some(ReadMode::Full));
-        assert_eq!(ReadMode::parse("lines"), Some(ReadMode::Lines));
-        assert_eq!(ReadMode::parse("map"), Some(ReadMode::Map));
-        assert_eq!(ReadMode::parse("signatures"), Some(ReadMode::Signatures));
-        assert_eq!(ReadMode::parse("nope"), None);
-    }
-
-    #[test]
-    fn parse_line_range_pair() {
-        let r = LineRange::parse("3-5").unwrap();
-        assert_eq!(r.start, 3);
-        assert_eq!(r.end, 5);
-    }
-
-    #[test]
-    fn parse_line_range_single() {
-        let r = LineRange::parse("7").unwrap();
-        assert_eq!(r.start, 7);
-        assert_eq!(r.end, 7);
-    }
-
-    #[test]
-    fn parse_line_range_invalid() {
-        assert!(LineRange::parse("0").is_none());
-        assert!(LineRange::parse("5-3").is_none());
-        assert!(LineRange::parse("a-b").is_none());
-    }
-
-    #[test]
-    fn render_lines_clamps_out_of_range() {
-        let src = "alpha\nbeta\ngamma\n";
-        let r = LineRange { start: 2, end: 99 };
-        assert_eq!(render_lines(src, r), "beta\ngamma");
-    }
-
-    #[test]
-    fn render_lines_single_line() {
-        let src = "alpha\nbeta\ngamma\n";
-        let r = LineRange { start: 2, end: 2 };
-        assert_eq!(render_lines(src, r), "beta");
-    }
-
-    #[test]
-    fn render_lines_empty_when_past_end() {
-        let src = "alpha\nbeta\n";
-        let r = LineRange { start: 5, end: 8 };
-        assert_eq!(render_lines(src, r), "");
-    }
-
-    #[test]
-    fn render_full_returns_input() {
-        let src = "hello\nworld\n";
-        assert_eq!(render_full(src), src);
     }
 
     #[test]

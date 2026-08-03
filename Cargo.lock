@@ -4906,6 +4906,7 @@ dependencies = [
  "tracedecay-lsp",
  "tracedecay-migrate",
  "tracedecay-runtime-core",
+ "tracedecay-usecases",
  "tracing",
  "tree-sitter",
  "tree-sitter-language",
@@ -4993,6 +4994,17 @@ version = "0.1.0"
 dependencies = [
  "amari-holographic",
  "bincode",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "tracedecay-usecases"
+version = "0.0.67"
+dependencies = [
+ "hex",
+ "libsql",
+ "serde",
  "serde_json",
  "sha2",
 ]
