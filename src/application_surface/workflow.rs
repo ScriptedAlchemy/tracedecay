@@ -2,11 +2,9 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_application::WorkflowFanOutRequestV1;
+use tracedecay_application::WorkflowFanOutRequest;
 
-use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
-use crate::daemon_client::DaemonInvocationExecutor;
-use crate::daemon_contract::{WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1};
+use crate::daemon_contract::{WorkflowApplicationInvocation, WorkflowApplicationOutcome};
 
 pub(super) fn router_with_executor(
     executor: Arc<dyn DaemonInvocationExecutor>,
@@ -134,17 +132,17 @@ async fn invoke_operation(
             .await
         }
         WorkflowOperation::ExecuteFanOut => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowFanOutRequestV1>(body) else {
+            let Ok(decoded) = serde_json::from_value::<WorkflowFanOutRequest>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
             };
             let invocation = crate::daemon_contract::DaemonInvocationRequest::workflow_application(
                 request_id.as_str(),
-                WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(decoded)),
+                WorkflowApplicationInvocation::ExecuteFanOut(Box::new(decoded)),
                 crate::daemon_client::invocation_now_micros(),
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
-            invoke_registered_http::<tracedecay_domain::WorkflowRunProjectionV1, _>(
+            invoke_registered_http::<tracedecay_domain::WorkflowRunProjection, _>(
                 executor,
                 operation,
                 request_id,
@@ -154,7 +152,7 @@ async fn invoke_operation(
                     crate::daemon_contract::DaemonInvocationOutcome::WorkflowApplication {
                         scope,
                         outcome:
-                            WorkflowApplicationOutcomeV1::ExecuteFanOut(
+                            WorkflowApplicationOutcome::ExecuteFanOut(
                                 tracedecay_application::ApplicationOutcome::Effect(outcome),
                             ),
                     } => Some((

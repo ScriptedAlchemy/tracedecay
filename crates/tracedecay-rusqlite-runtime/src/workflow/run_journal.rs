@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use tracedecay_application::{
-    WorkflowRunAppendOutcomeV1, WorkflowRunAppendRequestV1, WorkflowRunStorageError,
+    WorkflowRunAppendOutcome, WorkflowRunAppendRequest, WorkflowRunStorageError,
     WorkflowRunStoragePort,
 };
-use tracedecay_domain::{ManifestDigest, RunId, WorkflowRunProjectionV1, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, RunId, WorkflowRunProjection, canonical_sha256};
 
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, MigrationSqlTransaction,
@@ -51,7 +51,7 @@ fn digest<T: serde::Serialize>(value: &T) -> Result<ManifestDigest, WorkflowRunS
 fn row_projection(
     rows: &MigrationSqlRows,
     payload_index: usize,
-) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError> {
+) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
     let row = rows.rows.first().ok_or(WorkflowRunStorageError::NotFound)?;
     decode(sql_text(&row.values, payload_index).ok_or(WorkflowRunStorageError::InvalidHistory)?)
 }
@@ -60,7 +60,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
     fn projection(
         &self,
         run_id: &RunId,
-    ) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError> {
+    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let rows = self
             .storage
             .handle
@@ -79,8 +79,8 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
 
     fn append(
         &self,
-        request: &WorkflowRunAppendRequestV1,
-    ) -> Result<WorkflowRunAppendOutcomeV1, WorkflowRunStorageError> {
+        request: &WorkflowRunAppendRequest,
+    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
         let transaction = self.storage.handle.begin_immediate().map_err(unavailable)?;
         let event_payload = encode(&request.event)?;
         let event_digest = digest(&request.event)?;
@@ -116,7 +116,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             )?;
             let projection = row_projection(&head, 0)?;
             let _ = transaction.rollback();
-            return Ok(WorkflowRunAppendOutcomeV1::Replayed(projection));
+            return Ok(WorkflowRunAppendOutcome::Replayed(projection));
         }
 
         let head = query(
@@ -139,7 +139,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                     let _ = transaction.rollback();
                     return Err(WorkflowRunStorageError::VersionConflict);
                 }
-                let current: WorkflowRunProjectionV1 = decode(
+                let current: WorkflowRunProjection = decode(
                     sql_text(&row.values, 1).ok_or(WorkflowRunStorageError::InvalidHistory)?,
                 )?;
                 current
@@ -151,7 +151,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                     let _ = transaction.rollback();
                     return Err(WorkflowRunStorageError::VersionConflict);
                 }
-                WorkflowRunProjectionV1::rebuild(std::slice::from_ref(&request.event))
+                WorkflowRunProjection::rebuild(std::slice::from_ref(&request.event))
                     .map_err(|_| WorkflowRunStorageError::InvalidHistory)?
             }
         };
@@ -200,6 +200,6 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             )?)
             .map_err(unavailable)?;
         transaction.commit().map_err(unavailable)?;
-        Ok(WorkflowRunAppendOutcomeV1::Appended(projection))
+        Ok(WorkflowRunAppendOutcome::Appended(projection))
     }
 }

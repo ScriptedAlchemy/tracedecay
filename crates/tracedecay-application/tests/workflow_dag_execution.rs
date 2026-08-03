@@ -2,21 +2,21 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
-    WorkflowAdmissionSnapshotV1, WorkflowRunAppendOutcomeV1, WorkflowRunAppendRequestV1,
+    WorkflowAdmissionSnapshot, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
     WorkflowRunService, WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
-    WorkflowStepEventContextsV1, WorkflowStepExecutionError, WorkflowStepExecutionOutcomeV1,
-    WorkflowStepExecutionPort, WorkflowStepExecutionRequestV1, WorkflowStepExecutionResultV1,
+    WorkflowStepEventContexts, WorkflowStepExecutionError, WorkflowStepExecutionOutcome,
+    WorkflowStepExecutionPort, WorkflowStepExecutionRequest, WorkflowStepExecutionResult,
     WorkflowStepExecutionService, work_executable_catalog_digest,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, ProjectId, ProviderId, RunId, TaskId, UtcMicros, WorkArtifactId,
     WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1,
-    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowOperationRef, WorkflowOutputArtifactV1, WorkflowOutputName, WorkflowOutputReferenceV1,
-    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
-    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepEffectOutcomeV1,
-    WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1, WorkflowStepV1,
+    WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition,
+    WorkflowOperationRef, WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
+    WorkflowRunEvent, WorkflowRunProjection, WorkflowRunStatus, WorkflowStepEffectOutcome,
+    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput, WorkflowStep,
 };
 
 fn id<T>(value: &str) -> T
@@ -31,8 +31,8 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
 }
 
-fn context(command: &str, input: char, occurred_at: i64) -> WorkflowRunEventContextV1 {
-    WorkflowRunEventContextV1 {
+fn context(command: &str, input: char, occurred_at: i64) -> WorkflowRunEventContext {
+    WorkflowRunEventContext {
         command_id: id::<WorkCommandId>(command),
         input_digest: digest(input),
         occurred_at: UtcMicros(occurred_at),
@@ -43,8 +43,8 @@ fn artifact(name: &str, digest_byte: char, byte_length: u64) -> WorkArtifactRefV
     WorkArtifactRefV1::new(id::<WorkArtifactId>(name), digest(digest_byte), byte_length).unwrap()
 }
 
-fn placement(run_id: &RunId, step_id: &str) -> WorkflowPlacementReceiptV1 {
-    WorkflowPlacementReceiptV1::new(
+fn placement(run_id: &RunId, step_id: &str) -> WorkflowPlacementReceipt {
+    WorkflowPlacementReceipt::new(
         run_id.clone(),
         id::<WorkflowStepId>(step_id),
         WorkProviderRouteV1::new(
@@ -62,13 +62,13 @@ fn placement(run_id: &RunId, step_id: &str) -> WorkflowPlacementReceiptV1 {
     .unwrap()
 }
 
-fn definition() -> WorkflowDefinitionV1 {
-    WorkflowDefinitionV1::new(
+fn definition() -> WorkflowDefinition {
+    WorkflowDefinition::new(
         id::<WorkflowDefinitionId>("workflow.definition.dag"),
         1,
         id::<ProjectId>("project.workflow.dag"),
         vec![
-            WorkflowStepV1 {
+            WorkflowStep {
                 step_id: id::<WorkflowStepId>("prepare"),
                 operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
                 predecessors: BTreeSet::new(),
@@ -76,11 +76,11 @@ fn definition() -> WorkflowDefinitionV1 {
                 outputs: vec![id::<WorkflowOutputName>("context")],
                 fan_out: None,
             },
-            WorkflowStepV1 {
+            WorkflowStep {
                 step_id: id::<WorkflowStepId>("review"),
                 operation: id::<WorkflowOperationRef>("operation.work.attempt_start"),
                 predecessors: BTreeSet::from([id::<WorkflowStepId>("prepare")]),
-                inputs: vec![WorkflowOutputReferenceV1 {
+                inputs: vec![WorkflowOutputReference {
                     producer_step_id: id::<WorkflowStepId>("prepare"),
                     output_name: id::<WorkflowOutputName>("context"),
                 }],
@@ -97,26 +97,26 @@ fn definition() -> WorkflowDefinitionV1 {
 
 #[derive(Clone, Default)]
 struct MemoryRunStorage {
-    events: Arc<Mutex<BTreeMap<RunId, Vec<WorkflowRunEventV1>>>>,
+    events: Arc<Mutex<BTreeMap<RunId, Vec<WorkflowRunEvent>>>>,
 }
 
 impl WorkflowRunStoragePort for MemoryRunStorage {
     fn projection(
         &self,
         run_id: &RunId,
-    ) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError> {
+    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError> {
         let events = self.events.lock().unwrap();
         let history = events
             .get(run_id)
             .ok_or(WorkflowRunStorageError::NotFound)?;
-        WorkflowRunProjectionV1::rebuild(history)
+        WorkflowRunProjection::rebuild(history)
             .map_err(|_| WorkflowRunStorageError::InvalidHistory)
     }
 
     fn append(
         &self,
-        request: &WorkflowRunAppendRequestV1,
-    ) -> Result<WorkflowRunAppendOutcomeV1, WorkflowRunStorageError> {
+        request: &WorkflowRunAppendRequest,
+    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError> {
         let mut events = self.events.lock().unwrap();
         let history = events.entry(request.event.run_id().clone()).or_default();
         if let Some(existing) = history
@@ -124,19 +124,19 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
             .find(|event| event.command_id() == request.event.command_id())
         {
             if existing == &request.event {
-                return WorkflowRunProjectionV1::rebuild(history)
-                    .map(WorkflowRunAppendOutcomeV1::Replayed)
+                return WorkflowRunProjection::rebuild(history)
+                    .map(WorkflowRunAppendOutcome::Replayed)
                     .map_err(|_| WorkflowRunStorageError::InvalidHistory);
             }
             return Err(WorkflowRunStorageError::IdempotencyConflict);
         }
-        let current = history.last().map(WorkflowRunEventV1::sequence);
+        let current = history.last().map(WorkflowRunEvent::sequence);
         if current != request.expected_sequence {
             return Err(WorkflowRunStorageError::VersionConflict);
         }
         history.push(request.event.clone());
-        WorkflowRunProjectionV1::rebuild(history)
-            .map(WorkflowRunAppendOutcomeV1::Appended)
+        WorkflowRunProjection::rebuild(history)
+            .map(WorkflowRunAppendOutcome::Appended)
             .map_err(|_| WorkflowRunStorageError::InvalidHistory)
     }
 }
@@ -145,7 +145,7 @@ impl WorkflowRunStoragePort for MemoryRunStorage {
 struct RecordingExecutor {
     prepared: WorkArtifactRefV1,
     report: WorkArtifactRefV1,
-    requests: Arc<Mutex<Vec<WorkflowStepExecutionRequestV1>>>,
+    requests: Arc<Mutex<Vec<WorkflowStepExecutionRequest>>>,
 }
 
 struct MalformedExecutor;
@@ -153,15 +153,15 @@ struct MalformedExecutor;
 impl WorkflowStepExecutionPort for MalformedExecutor {
     fn execute(
         &self,
-        request: &WorkflowStepExecutionRequestV1,
-    ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError> {
-        Ok(WorkflowStepExecutionResultV1 {
+        request: &WorkflowStepExecutionRequest,
+    ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError> {
+        Ok(WorkflowStepExecutionResult {
             outputs: Vec::new(),
-            effect_receipt: WorkflowStepEffectReceiptV1::new(
+            effect_receipt: WorkflowStepEffectReceipt::new(
                 request.run_id.clone(),
                 request.step_id.clone(),
                 request.placement.placement_digest().clone(),
-                WorkflowStepEffectOutcomeV1::Completed,
+                WorkflowStepEffectOutcome::Completed,
                 digest('9'),
                 &[],
             )
@@ -173,17 +173,17 @@ impl WorkflowStepExecutionPort for MalformedExecutor {
 impl WorkflowStepExecutionPort for RecordingExecutor {
     fn execute(
         &self,
-        request: &WorkflowStepExecutionRequestV1,
-    ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError> {
+        request: &WorkflowStepExecutionRequest,
+    ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError> {
         self.requests.lock().unwrap().push(request.clone());
         let (output_name, artifact) = if request.step_id.as_str() == "prepare" {
             ("context", self.prepared.clone())
         } else {
             ("report", self.report.clone())
         };
-        let output = WorkflowStepOutputV1::new(
+        let output = WorkflowStepOutput::new(
             id::<WorkflowOutputName>(output_name),
-            vec![WorkflowOutputArtifactV1::new(
+            vec![WorkflowOutputArtifact::new(
                 WorkAttemptIdentityV1::new(
                     id::<TaskId>(&format!("task.workflow.{}", request.step_id.as_str())),
                     request.run_id.clone(),
@@ -195,12 +195,12 @@ impl WorkflowStepExecutionPort for RecordingExecutor {
         )
         .unwrap();
         let outputs = vec![output];
-        Ok(WorkflowStepExecutionResultV1 {
-            effect_receipt: WorkflowStepEffectReceiptV1::new(
+        Ok(WorkflowStepExecutionResult {
+            effect_receipt: WorkflowStepEffectReceipt::new(
                 request.run_id.clone(),
                 request.step_id.clone(),
                 request.placement.placement_digest().clone(),
-                WorkflowStepEffectOutcomeV1::Completed,
+                WorkflowStepEffectOutcome::Completed,
                 digest('9'),
                 &outputs,
             )
@@ -219,7 +219,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
         .admit(
             run_id.clone(),
             definition,
-            WorkflowAdmissionSnapshotV1 {
+            WorkflowAdmissionSnapshot {
                 policy_digest: digest('a'),
                 configuration_digest: digest('b'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
@@ -249,7 +249,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
             1,
             &id::<WorkflowStepId>("prepare"),
             placement(&run_id, "prepare"),
-            WorkflowStepEventContextsV1 {
+            WorkflowStepEventContexts {
                 started: context("command.workflow.dag.prepare.start", '2', 2),
                 completed: context("command.workflow.dag.prepare.complete", '3', 3),
                 failed: context("command.workflow.dag.prepare.fail", '4', 3),
@@ -258,7 +258,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
         .unwrap();
     assert!(matches!(
         prepared_state,
-        WorkflowStepExecutionOutcomeV1::Succeeded(_)
+        WorkflowStepExecutionOutcome::Succeeded(_)
     ));
     let final_state = execution
         .execute_ready_step(
@@ -266,17 +266,17 @@ fn dag_passes_exact_artifact_refs_between_steps() {
             3,
             &id::<WorkflowStepId>("review"),
             placement(&run_id, "review"),
-            WorkflowStepEventContextsV1 {
+            WorkflowStepEventContexts {
                 started: context("command.workflow.dag.review.start", '5', 4),
                 completed: context("command.workflow.dag.review.complete", '6', 5),
                 failed: context("command.workflow.dag.review.fail", '7', 5),
             },
         )
         .unwrap();
-    let WorkflowStepExecutionOutcomeV1::Succeeded(final_state) = final_state else {
+    let WorkflowStepExecutionOutcome::Succeeded(final_state) = final_state else {
         panic!("review step failed");
     };
-    assert_eq!(final_state.status(), WorkflowRunStatusV1::Completed);
+    assert_eq!(final_state.status(), WorkflowRunStatus::Completed);
     let requests = requests.lock().unwrap();
     assert!(requests[0].inputs.is_empty());
     assert_eq!(requests[1].inputs.len(), 1);
@@ -287,7 +287,7 @@ fn dag_passes_exact_artifact_refs_between_steps() {
 fn admission_rejects_stale_policy_configuration_and_catalog() {
     for (snapshot, expected) in [
         (
-            WorkflowAdmissionSnapshotV1 {
+            WorkflowAdmissionSnapshot {
                 policy_digest: digest('9'),
                 configuration_digest: digest('b'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
@@ -297,7 +297,7 @@ fn admission_rejects_stale_policy_configuration_and_catalog() {
             WorkflowRunServiceError::PolicyDigestMismatch,
         ),
         (
-            WorkflowAdmissionSnapshotV1 {
+            WorkflowAdmissionSnapshot {
                 policy_digest: digest('a'),
                 configuration_digest: digest('9'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
@@ -307,7 +307,7 @@ fn admission_rejects_stale_policy_configuration_and_catalog() {
             WorkflowRunServiceError::ConfigurationDigestMismatch,
         ),
         (
-            WorkflowAdmissionSnapshotV1 {
+            WorkflowAdmissionSnapshot {
                 policy_digest: digest('a'),
                 configuration_digest: digest('b'),
                 catalog_digest: digest('9'),
@@ -342,7 +342,7 @@ fn failed_step_journals_successful_artifact_evidence() {
         .admit(
             run_id.clone(),
             definition(),
-            WorkflowAdmissionSnapshotV1 {
+            WorkflowAdmissionSnapshot {
                 policy_digest: digest('a'),
                 configuration_digest: digest('b'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
@@ -356,7 +356,7 @@ fn failed_step_journals_successful_artifact_evidence() {
         .apply(
             &run_id,
             admitted.sequence(),
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id: id::<WorkflowStepId>("prepare"),
                 placement: placement(&run_id, "prepare"),
             },
@@ -364,9 +364,9 @@ fn failed_step_journals_successful_artifact_evidence() {
         )
         .unwrap();
     let outputs = vec![
-        WorkflowStepOutputV1::new(
+        WorkflowStepOutput::new(
             id::<WorkflowOutputName>("context"),
-            vec![WorkflowOutputArtifactV1::new(
+            vec![WorkflowOutputArtifact::new(
                 WorkAttemptIdentityV1::new(
                     id::<TaskId>("task.workflow.partial"),
                     run_id.clone(),
@@ -378,7 +378,7 @@ fn failed_step_journals_successful_artifact_evidence() {
         )
         .unwrap(),
     ];
-    let receipt = WorkflowStepEffectReceiptV1::new(
+    let receipt = WorkflowStepEffectReceipt::new(
         run_id.clone(),
         id::<WorkflowStepId>("prepare"),
         started
@@ -388,7 +388,7 @@ fn failed_step_journals_successful_artifact_evidence() {
             .unwrap()
             .placement_digest()
             .clone(),
-        WorkflowStepEffectOutcomeV1::Failed,
+        WorkflowStepEffectOutcome::Failed,
         digest('9'),
         &outputs,
     )
@@ -397,7 +397,7 @@ fn failed_step_journals_successful_artifact_evidence() {
         .apply(
             &run_id,
             started.sequence(),
-            WorkflowRunCommandV1::FailStep {
+            WorkflowRunCommand::FailStep {
                 step_id: id::<WorkflowStepId>("prepare"),
                 outputs: outputs.clone(),
                 effect_receipt: receipt,
@@ -415,7 +415,7 @@ fn failed_step_journals_successful_artifact_evidence() {
             .collect::<Vec<_>>(),
         outputs
     );
-    assert_eq!(failed.status(), WorkflowRunStatusV1::Failed);
+    assert_eq!(failed.status(), WorkflowRunStatus::Failed);
 }
 
 #[test]
@@ -426,7 +426,7 @@ fn malformed_provider_outputs_restart_as_failed_not_running() {
         .admit(
             run_id.clone(),
             definition(),
-            WorkflowAdmissionSnapshotV1 {
+            WorkflowAdmissionSnapshot {
                 policy_digest: digest('a'),
                 configuration_digest: digest('b'),
                 catalog_digest: work_executable_catalog_digest().unwrap(),
@@ -442,15 +442,15 @@ fn malformed_provider_outputs_restart_as_failed_not_running() {
             admitted.sequence(),
             &id::<WorkflowStepId>("prepare"),
             placement(&run_id, "prepare"),
-            WorkflowStepEventContextsV1 {
+            WorkflowStepEventContexts {
                 started: context("command.workflow.malformed.start", '2', 2),
                 completed: context("command.workflow.malformed.complete", '3', 3),
                 failed: context("command.workflow.malformed.fail", '4', 3),
             },
         )
         .unwrap();
-    assert!(matches!(outcome, WorkflowStepExecutionOutcomeV1::Failed(_)));
+    assert!(matches!(outcome, WorkflowStepExecutionOutcome::Failed(_)));
 
     let restarted = WorkflowRunStoragePort::projection(&storage, &run_id).unwrap();
-    assert_eq!(restarted.status(), WorkflowRunStatusV1::Failed);
+    assert_eq!(restarted.status(), WorkflowRunStatus::Failed);
 }

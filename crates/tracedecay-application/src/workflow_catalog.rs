@@ -11,11 +11,11 @@ use tracedecay_tool_catalog::{
     UseCaseId,
 };
 
-use crate::WorkflowFanOutRequestV1;
+use crate::WorkflowFanOutRequest;
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
-pub const WORKFLOW_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 5] = [
+pub const WORKFLOW_APPLICATION_OPERATION_IDS: [(&str, &str, &str); 5] = [
     (
         "register_definition",
         "capability.workflow.register_definition",
@@ -46,11 +46,11 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 5] = [
 pub fn workflow_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
     ExecutableBindingRegistryV1::new(
-        WORKFLOW_APPLICATION_OPERATION_IDS_V1
+        WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
             .map(|(operation, _, _)| {
                 if *operation == "execute_fan_out" {
-                    available::<WorkflowFanOutRequestV1, tracedecay_domain::WorkflowRunProjectionV1>(
+                    available::<WorkflowFanOutRequest, tracedecay_domain::WorkflowRunProjection>(
                         operation,
                         "/application/workflow/execute-fan-out",
                     )

@@ -4,10 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef,
-    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
-    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError,
-    WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepInputV1, WorkflowStepOutputV1,
+    ManifestDigest, RunId, WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
+    WorkflowRunEvent, WorkflowRunProjection, WorkflowRunStateError,
+    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepInput, WorkflowStepOutput,
     canonical_sha256,
 };
 
@@ -27,20 +27,20 @@ pub enum WorkflowRunStorageError {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowRunAppendRequestV1 {
+pub struct WorkflowRunAppendRequest {
     pub expected_sequence: Option<u64>,
-    pub event: WorkflowRunEventV1,
+    pub event: WorkflowRunEvent,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "outcome", content = "projection")]
-pub enum WorkflowRunAppendOutcomeV1 {
-    Appended(WorkflowRunProjectionV1),
-    Replayed(WorkflowRunProjectionV1),
+pub enum WorkflowRunAppendOutcome {
+    Appended(WorkflowRunProjection),
+    Replayed(WorkflowRunProjection),
 }
 
-impl WorkflowRunAppendOutcomeV1 {
-    pub fn into_projection(self) -> WorkflowRunProjectionV1 {
+impl WorkflowRunAppendOutcome {
+    pub fn into_projection(self) -> WorkflowRunProjection {
         match self {
             Self::Appended(projection) | Self::Replayed(projection) => projection,
         }
@@ -51,12 +51,12 @@ pub trait WorkflowRunStoragePort: Send + Sync {
     fn projection(
         &self,
         run_id: &RunId,
-    ) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError>;
+    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError>;
 
     fn append(
         &self,
-        request: &WorkflowRunAppendRequestV1,
-    ) -> Result<WorkflowRunAppendOutcomeV1, WorkflowRunStorageError>;
+        request: &WorkflowRunAppendRequest,
+    ) -> Result<WorkflowRunAppendOutcome, WorkflowRunStorageError>;
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub struct WorkflowRunService<P> {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowAdmissionSnapshotV1 {
+pub struct WorkflowAdmissionSnapshot {
     pub policy_digest: ManifestDigest,
     pub configuration_digest: ManifestDigest,
     pub catalog_digest: ManifestDigest,
@@ -98,10 +98,10 @@ where
     pub fn admit(
         &self,
         run_id: RunId,
-        definition: WorkflowDefinitionV1,
-        admission: WorkflowAdmissionSnapshotV1,
-        context: WorkflowRunEventContextV1,
-    ) -> Result<WorkflowRunProjectionV1, WorkflowRunServiceError> {
+        definition: WorkflowDefinition,
+        admission: WorkflowAdmissionSnapshot,
+        context: WorkflowRunEventContext,
+    ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
         if definition.pinned_policy_digest() != &admission.policy_digest {
             return Err(WorkflowRunServiceError::PolicyDigestMismatch);
         }
@@ -111,7 +111,7 @@ where
         if definition.pinned_catalog_digest() != &admission.catalog_digest {
             return Err(WorkflowRunServiceError::CatalogDigestMismatch);
         }
-        let event = WorkflowRunEventV1::admitted(
+        let event = WorkflowRunEvent::admitted(
             run_id,
             definition,
             admission.topology_digest,
@@ -120,7 +120,7 @@ where
         )?;
         Ok(self
             .storage
-            .append(&WorkflowRunAppendRequestV1 {
+            .append(&WorkflowRunAppendRequest {
                 expected_sequence: None,
                 event,
             })?
@@ -131,9 +131,9 @@ where
         &self,
         run_id: &RunId,
         expected_sequence: u64,
-        command: WorkflowRunCommandV1,
-        context: WorkflowRunEventContextV1,
-    ) -> Result<WorkflowRunProjectionV1, WorkflowRunServiceError> {
+        command: WorkflowRunCommand,
+        context: WorkflowRunEventContext,
+    ) -> Result<WorkflowRunProjection, WorkflowRunServiceError> {
         let projection = self.storage.projection(run_id)?;
         if projection.sequence() != expected_sequence {
             return Err(WorkflowRunStorageError::VersionConflict.into());
@@ -141,7 +141,7 @@ where
         let event = projection.next_event(command, context)?;
         Ok(self
             .storage
-            .append(&WorkflowRunAppendRequestV1 {
+            .append(&WorkflowRunAppendRequest {
                 expected_sequence: Some(expected_sequence),
                 event,
             })?
@@ -151,45 +151,45 @@ where
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowStepEventContextsV1 {
-    pub started: WorkflowRunEventContextV1,
-    pub completed: WorkflowRunEventContextV1,
-    pub failed: WorkflowRunEventContextV1,
+pub struct WorkflowStepEventContexts {
+    pub started: WorkflowRunEventContext,
+    pub completed: WorkflowRunEventContext,
+    pub failed: WorkflowRunEventContext,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowStepExecutionRequestV1 {
+pub struct WorkflowStepExecutionRequest {
     pub run_id: RunId,
     pub definition_id: WorkflowDefinitionId,
     pub definition_version: u64,
     pub step_id: WorkflowStepId,
     pub operation: WorkflowOperationRef,
-    pub inputs: Vec<WorkflowStepInputV1>,
-    pub placement: WorkflowPlacementReceiptV1,
+    pub inputs: Vec<WorkflowStepInput>,
+    pub placement: WorkflowPlacementReceipt,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowStepExecutionResultV1 {
-    pub outputs: Vec<WorkflowStepOutputV1>,
-    pub effect_receipt: WorkflowStepEffectReceiptV1,
+pub struct WorkflowStepExecutionResult {
+    pub outputs: Vec<WorkflowStepOutput>,
+    pub effect_receipt: WorkflowStepEffectReceipt,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum WorkflowStepExecutionError {
     #[error("workflow step execution failed")]
     Failed {
-        effect_receipt: Box<WorkflowStepEffectReceiptV1>,
+        effect_receipt: Box<WorkflowStepEffectReceipt>,
     },
     #[error("workflow step execution authority is unavailable")]
     Unavailable {
-        effect_receipt: Box<WorkflowStepEffectReceiptV1>,
+        effect_receipt: Box<WorkflowStepEffectReceipt>,
     },
 }
 
 impl WorkflowStepExecutionError {
-    pub fn into_effect_receipt(self) -> WorkflowStepEffectReceiptV1 {
+    pub fn into_effect_receipt(self) -> WorkflowStepEffectReceipt {
         match self {
             Self::Failed { effect_receipt } | Self::Unavailable { effect_receipt } => {
                 *effect_receipt
@@ -201,15 +201,15 @@ impl WorkflowStepExecutionError {
 pub trait WorkflowStepExecutionPort: Send + Sync {
     fn execute(
         &self,
-        request: &WorkflowStepExecutionRequestV1,
-    ) -> Result<WorkflowStepExecutionResultV1, WorkflowStepExecutionError>;
+        request: &WorkflowStepExecutionRequest,
+    ) -> Result<WorkflowStepExecutionResult, WorkflowStepExecutionError>;
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "outcome", content = "projection")]
-pub enum WorkflowStepExecutionOutcomeV1 {
-    Succeeded(WorkflowRunProjectionV1),
-    Failed(WorkflowRunProjectionV1),
+pub enum WorkflowStepExecutionOutcome {
+    Succeeded(WorkflowRunProjection),
+    Failed(WorkflowRunProjection),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -241,9 +241,9 @@ where
         run_id: &RunId,
         expected_sequence: u64,
         step_id: &WorkflowStepId,
-        placement: WorkflowPlacementReceiptV1,
-        contexts: WorkflowStepEventContextsV1,
-    ) -> Result<WorkflowStepExecutionOutcomeV1, WorkflowStepExecutionServiceError> {
+        placement: WorkflowPlacementReceipt,
+        contexts: WorkflowStepEventContexts,
+    ) -> Result<WorkflowStepExecutionOutcome, WorkflowStepExecutionServiceError> {
         let projection = self.storage.projection(run_id)?;
         if projection.sequence() != expected_sequence {
             return Err(WorkflowRunStorageError::VersionConflict.into());
@@ -257,7 +257,7 @@ where
             .ok_or(WorkflowStepExecutionServiceError::StepNotFound)?;
         let inputs = projection.resolved_inputs(step_id)?;
         let started_event = projection.next_event(
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id: step_id.clone(),
                 placement: placement.clone(),
             },
@@ -265,12 +265,12 @@ where
         )?;
         let started = self
             .storage
-            .append(&WorkflowRunAppendRequestV1 {
+            .append(&WorkflowRunAppendRequest {
                 expected_sequence: Some(expected_sequence),
                 event: started_event,
             })?
             .into_projection();
-        let request = WorkflowStepExecutionRequestV1 {
+        let request = WorkflowStepExecutionRequest {
             run_id: run_id.clone(),
             definition_id: started.definition().definition_id().clone(),
             definition_version: started.definition().definition_version(),
@@ -292,16 +292,16 @@ where
             }
         };
         match started.next_event(
-            WorkflowRunCommandV1::CompleteStep {
+            WorkflowRunCommand::CompleteStep {
                 step_id: step_id.clone(),
                 outputs: result.outputs.clone(),
                 effect_receipt: result.effect_receipt.clone(),
             },
             contexts.completed,
         ) {
-            Ok(event) => Ok(WorkflowStepExecutionOutcomeV1::Succeeded(
+            Ok(event) => Ok(WorkflowStepExecutionOutcome::Succeeded(
                 self.storage
-                    .append(&WorkflowRunAppendRequestV1 {
+                    .append(&WorkflowRunAppendRequest {
                         expected_sequence: Some(started.sequence()),
                         event,
                     })?
@@ -328,14 +328,14 @@ where
 
     fn fail_started_step(
         &self,
-        started: &WorkflowRunProjectionV1,
+        started: &WorkflowRunProjection,
         step_id: &WorkflowStepId,
-        outputs: Vec<WorkflowStepOutputV1>,
-        effect_receipt: WorkflowStepEffectReceiptV1,
-        context: WorkflowRunEventContextV1,
-    ) -> Result<WorkflowStepExecutionOutcomeV1, WorkflowStepExecutionServiceError> {
+        outputs: Vec<WorkflowStepOutput>,
+        effect_receipt: WorkflowStepEffectReceipt,
+        context: WorkflowRunEventContext,
+    ) -> Result<WorkflowStepExecutionOutcome, WorkflowStepExecutionServiceError> {
         let failed = match started.next_event(
-            WorkflowRunCommandV1::FailStep {
+            WorkflowRunCommand::FailStep {
                 step_id: step_id.clone(),
                 outputs: outputs.clone(),
                 effect_receipt: effect_receipt.clone(),
@@ -347,7 +347,7 @@ where
                 WorkflowRunStateError::InvalidStepOutputs
                 | WorkflowRunStateError::InvalidEffectReceipt,
             ) => started.next_event(
-                WorkflowRunCommandV1::FailStep {
+                WorkflowRunCommand::FailStep {
                     step_id: step_id.clone(),
                     outputs: Vec::new(),
                     effect_receipt: protocol_failure_receipt(
@@ -361,9 +361,9 @@ where
             )?,
             Err(error) => return Err(error.into()),
         };
-        Ok(WorkflowStepExecutionOutcomeV1::Failed(
+        Ok(WorkflowStepExecutionOutcome::Failed(
             self.storage
-                .append(&WorkflowRunAppendRequestV1 {
+                .append(&WorkflowRunAppendRequest {
                     expected_sequence: Some(started.sequence()),
                     event: failed,
                 })?
@@ -373,11 +373,11 @@ where
 }
 
 fn protocol_failure_receipt(
-    started: &WorkflowRunProjectionV1,
+    started: &WorkflowRunProjection,
     step_id: &WorkflowStepId,
-    observed_receipt: &WorkflowStepEffectReceiptV1,
-    observed_outputs: &[WorkflowStepOutputV1],
-) -> Result<WorkflowStepEffectReceiptV1, WorkflowStepExecutionServiceError> {
+    observed_receipt: &WorkflowStepEffectReceipt,
+    observed_outputs: &[WorkflowStepOutput],
+) -> Result<WorkflowStepEffectReceipt, WorkflowStepExecutionServiceError> {
     let placement_digest = started
         .step(step_id)
         .and_then(|step| step.placement_receipt())
@@ -389,11 +389,11 @@ fn protocol_failure_receipt(
         observed_outputs,
     ))
     .map_err(|_| WorkflowRunStateError::InvalidEffectReceipt)?;
-    WorkflowStepEffectReceiptV1::new(
+    WorkflowStepEffectReceipt::new(
         started.run_id().clone(),
         step_id.clone(),
         placement_digest,
-        tracedecay_domain::WorkflowStepEffectOutcomeV1::Failed,
+        tracedecay_domain::WorkflowStepEffectOutcome::Failed,
         effect_digest,
         &[],
     )
