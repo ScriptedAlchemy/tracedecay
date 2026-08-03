@@ -4,14 +4,16 @@ use rusqlite::Connection;
 use tracedecay_rusqlite_runtime::graph::{
     CodeShardPhysicalLocatorFactory, GraphFileMutationV1, GraphFileReplacementV1,
     GraphMutationExecutor, GraphMutationPayloadV1, GraphPhysicalAttachmentFactory,
-    fixtures::{capture_graph_parity_fixture_v1, install_graph_fixture_schema_v1},
+    fixtures::{
+        capture_graph_parity_fixture_v1 as capture_graph_fixture, install_graph_fixture_schema_v1,
+    },
 };
 use tracedecay_store::GraphNodeV1;
 
 use crate::cutover_support::fixture;
 
 #[test]
-fn graph_attachment_preserves_mutable_and_snapshot_parity_without_write_escalation() {
+fn graph_attachment_preserves_mutable_and_snapshot_consistency_without_write_escalation() {
     let fixture = fixture().s7;
     let root = tempfile::tempdir().expect("create S7 graph root");
     let canonical_root = root.path().canonicalize().expect("canonicalize S7 root");
@@ -54,11 +56,11 @@ fn graph_attachment_preserves_mutable_and_snapshot_parity_without_write_escalati
     assert!(immutable_parts.mutation_executor().is_none());
 
     let worktree_snapshot =
-        capture_graph_parity_fixture_v1(&Connection::open(&worktree_path).expect("open worktree"))
-            .expect("capture worktree graph parity");
+        capture_graph_fixture(&Connection::open(&worktree_path).expect("open worktree"))
+            .expect("capture worktree graph fixture");
     let immutable_snapshot =
-        capture_graph_parity_fixture_v1(&Connection::open(&snapshot_path).expect("open snapshot"))
-            .expect("capture immutable graph parity");
+        capture_graph_fixture(&Connection::open(&snapshot_path).expect("open snapshot"))
+            .expect("capture immutable graph fixture");
     assert_eq!(worktree_snapshot, immutable_snapshot);
     assert_eq!(worktree_snapshot.nodes.len(), 1);
     assert_eq!(worktree_snapshot.files.len(), 1);
@@ -86,7 +88,7 @@ fn commit_graph_fixture(connection: &mut Connection) {
             start_column: 0,
             end_column: 1,
             signature: Some("fn cutover_graph()".to_owned()),
-            docstring: Some("S7 graph attachment parity".to_owned()),
+            docstring: Some("S7 graph attachment consistency".to_owned()),
             visibility: "public".to_owned(),
             is_async: false,
             branches: 0,

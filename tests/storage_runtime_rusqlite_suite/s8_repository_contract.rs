@@ -5,8 +5,8 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMicros};
 use tracedecay_rusqlite_runtime::repository::{
-    PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1, PreCutoverRepositoryAttachmentBundle,
-    RepositoryPhysicalAttachmentFactory,
+    PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1 as REPOSITORY_ATTACHMENT_FIXTURES,
+    PreCutoverRepositoryAttachmentBundle, RepositoryPhysicalAttachmentFactory,
 };
 use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1,
@@ -111,7 +111,7 @@ fn profile_project_and_session_fixture_matches_the_public_attachment_catalog() {
         .into_iter()
         .map(|family| (family.family.clone(), family))
         .collect::<BTreeMap<_, _>>();
-    let observed = PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1
+    let observed = REPOSITORY_ATTACHMENT_FIXTURES
         .iter()
         .map(|family| (family.family.to_owned(), family))
         .collect::<BTreeMap<_, _>>();
@@ -126,8 +126,8 @@ fn profile_project_and_session_fixture_matches_the_public_attachment_catalog() {
     // (for example the diagnostic supersession routes) without changing which
     // families exist. Ordered vector equality against the fixture would freeze
     // that inventory, so the per-route coverage assertion lives in
-    // `tests/storage_runtime_s8_cutover.rs::s8_parity_inventory_covers_every_declared_route`,
-    // which checks the declared routes are a subset of the published inventory.
+    // The route-inventory test checks declared routes are a subset of the
+    // published inventory.
     for name in expected.into_keys() {
         let observed = observed
             .get(&name)

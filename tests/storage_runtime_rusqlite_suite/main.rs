@@ -1,13 +1,10 @@
-//! In-process SQLite storage-runtime cutover coverage (S5–S10).
-//!
-//! These cases exercise the bundled/private SQLite engine in-process and stay
-//! separate from the subprocess parity suite so process-isolation behavior is
-//! covered independently.
+//! Direct bundled-SQLite storage-runtime coverage (S5–S10).
 
 mod cutover_support;
 
+mod engine_contract;
 mod s10_serialization;
 mod s5_reader;
 mod s6_operations;
 mod s7_graph_attachment;
-mod s8_repository_parity;
+mod s8_repository_contract;

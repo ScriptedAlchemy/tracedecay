@@ -2,7 +2,10 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 use rusqlite::{Connection, Savepoint, Transaction};
 use serde::Deserialize;
@@ -188,21 +191,38 @@ impl ReaderQueryExecutor for CountExecutor {
 pub(crate) struct Probe {
     cancellation: RuntimeCancellationIdentityV1,
     deadline: RuntimeDeadlineV1,
+    interruption: Arc<AtomicU8>,
 }
 
 impl Probe {
     pub(crate) fn for_read(request: &RuntimeReadRequestV1) -> Self {
-        Self {
+        Self::controllable_for_read(request).0
+    }
+
+    pub(crate) fn controllable_for_read(request: &RuntimeReadRequestV1) -> (Self, Arc<AtomicU8>) {
+        let interruption = Arc::new(AtomicU8::new(0));
+        let probe = Self {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
-        }
+            interruption: Arc::clone(&interruption),
+        };
+        (probe, interruption)
     }
 
     pub(crate) fn for_submit(request: &RuntimeSubmitRequestV1) -> Arc<Self> {
-        Arc::new(Self {
+        Self::controllable_for_submit(request).0
+    }
+
+    pub(crate) fn controllable_for_submit(
+        request: &RuntimeSubmitRequestV1,
+    ) -> (Arc<Self>, Arc<AtomicU8>) {
+        let interruption = Arc::new(AtomicU8::new(0));
+        let probe = Arc::new(Self {
             cancellation: request.control().cancellation.clone(),
             deadline: request.control().deadline.clone(),
-        })
+            interruption: Arc::clone(&interruption),
+        });
+        (probe, interruption)
     }
 }
 
@@ -216,7 +236,11 @@ impl RuntimeRequestProbeV1 for Probe {
     }
 
     fn interruption(&self) -> Option<RuntimeInterruptionV1> {
-        None
+        match self.interruption.load(Ordering::Acquire) {
+            0 => None,
+            1 => Some(RuntimeInterruptionV1::Cancelled),
+            _ => Some(RuntimeInterruptionV1::DeadlineExceeded),
+        }
     }
 }
 
