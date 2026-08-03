@@ -1,11 +1,63 @@
 use serde::Deserialize;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 const REPOSITORY_SOURCE_ROOTS: &[&str] = &["src", "tests", "examples", "benches"];
+
+const ARCHITECTURE_NON_ROOT_MEMBERS: &[&str] = &[
+    "tracedecay-agent-hosts",
+    "tracedecay-automation",
+    "tracedecay-capture",
+    "tracedecay-code-extraction",
+    "tracedecay-code-index",
+    "tracedecay-dashboard-api",
+    "tracedecay-domain",
+    "tracedecay-jsonrpc",
+    "tracedecay-lsp",
+    "tracedecay-migrate",
+    "tracedecay-runtime-core",
+    "tracedecay-sessions",
+    "tracedecay-usecases",
+];
+
+const ARCHITECTURE_OMITTED_MEMBERS: &[&str] = &[
+    "tracedecay-api",
+    "tracedecay-application",
+    "tracedecay-global-db",
+    "tracedecay-host-integration",
+    "tracedecay-hooks",
+    "tracedecay-policy",
+    "tracedecay-query",
+    "tracedecay-sdk",
+    "tracedecay-search-eval",
+    "tracedecay-semantic",
+    "tracedecay-temporal-query",
+    "tracedecay-rusqlite-parity",
+    "tracedecay-rusqlite-runtime",
+    "tracedecay-sqlite-parity-protocol",
+    "tracedecay-store",
+    "tracedecay-tool-catalog",
+];
+
+const ARCHITECTURE_LAYERS: &[(&str, u8)] = &[
+    ("tracedecay", 5),
+    ("tracedecay-agent-hosts", 4),
+    ("tracedecay-dashboard-api", 4),
+    ("tracedecay-migrate", 3),
+    ("tracedecay-sessions", 3),
+    ("tracedecay-usecases", 3),
+    ("tracedecay-runtime-core", 2),
+    ("tracedecay-code-extraction", 1),
+    ("tracedecay-code-index", 1),
+    ("tracedecay-lsp", 1),
+    ("tracedecay-automation", 0),
+    ("tracedecay-capture", 0),
+    ("tracedecay-domain", 0),
+    ("tracedecay-jsonrpc", 0),
+];
 
 // This is a sample project indexed by context-evaluation tests. Its Rust files
 // are deliberately source input, not modules or targets of the tracedecay crate.
@@ -470,9 +522,20 @@ struct CargoMetadata {
 
 #[derive(Debug, Deserialize)]
 struct CargoPackage {
+    #[serde(default)]
+    name: String,
     id: String,
     manifest_path: PathBuf,
+    #[serde(default)]
+    dependencies: Vec<CargoDependency>,
     targets: Vec<CargoTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CargoDependency {
+    name: String,
+    #[serde(default)]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -564,6 +627,131 @@ fn parse_cargo_source_layout(
         target_roots,
         tracked_roots,
     })
+}
+
+fn cargo_architecture_contract(repository: &Path) -> Result<BTreeSet<String>, String> {
+    let output = Command::new("cargo")
+        .current_dir(repository)
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .output()
+        .map_err(|error| format!("cannot run cargo metadata: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    parse_architecture_contract(repository, &output.stdout)
+}
+
+fn parse_architecture_contract(
+    repository: &Path,
+    metadata_json: &[u8],
+) -> Result<BTreeSet<String>, String> {
+    let CargoMetadata {
+        packages,
+        workspace_members,
+    } = serde_json::from_slice(metadata_json)
+        .map_err(|error| format!("cannot parse cargo metadata: {error}"))?;
+    let packages_by_id: BTreeMap<&str, &CargoPackage> = packages
+        .iter()
+        .map(|package| (package.id.as_str(), package))
+        .collect();
+    let mut violations = BTreeSet::new();
+    let mut workspace_packages = Vec::new();
+
+    for member_id in &workspace_members {
+        match packages_by_id.get(member_id.as_str()) {
+            Some(package) => workspace_packages.push(*package),
+            None => {
+                violations.insert(format!(
+                    "workspace member id is missing from cargo metadata: {member_id}"
+                ));
+            }
+        }
+    }
+
+    let root_manifest = repository.join("Cargo.toml");
+    let root_package = workspace_packages
+        .iter()
+        .copied()
+        .find(|package| package.manifest_path == root_manifest);
+    let root_name = root_package.map_or("tracedecay", |package| package.name.as_str());
+    if root_package.is_none() {
+        violations.insert(format!(
+            "workspace root manifest is not a cargo metadata member: {}",
+            root_manifest.display()
+        ));
+    } else if root_name != "tracedecay" {
+        violations.insert(format!(
+            "workspace root package is named `{root_name}`, expected `tracedecay`"
+        ));
+    }
+
+    let actual_non_root: BTreeSet<&str> = workspace_packages
+        .iter()
+        .filter(|package| package.manifest_path != root_manifest)
+        .map(|package| package.name.as_str())
+        .collect();
+    let expected_non_root: BTreeSet<&str> = ARCHITECTURE_NON_ROOT_MEMBERS.iter().copied().collect();
+
+    for name in expected_non_root.difference(&actual_non_root) {
+        violations.insert(format!("missing expected workspace member: {name}"));
+    }
+    for name in actual_non_root.difference(&expected_non_root) {
+        violations.insert(format!("unexpected non-root workspace member: {name}"));
+    }
+    for omitted in ARCHITECTURE_OMITTED_MEMBERS {
+        if actual_non_root.contains(omitted) {
+            violations.insert(format!("omitted workspace member is present: {omitted}"));
+        }
+    }
+
+    let layers: BTreeMap<&str, u8> = ARCHITECTURE_LAYERS.iter().copied().collect();
+    for package in &workspace_packages {
+        let source_name = package.name.as_str();
+        let Some(&source_layer) = layers.get(source_name) else {
+            violations.insert(format!(
+                "workspace package has no architecture layer: {source_name}"
+            ));
+            continue;
+        };
+        let is_root = package.manifest_path == root_manifest;
+
+        for dependency in &package.dependencies {
+            let dependency_name = dependency.name.as_str();
+            let dependency_kind = dependency.kind.as_deref().unwrap_or("normal");
+            let is_production = !matches!(dependency.kind.as_deref(), Some("dev" | "build"));
+
+            if dependency_name.eq_ignore_ascii_case(root_name) && !is_root {
+                violations.insert(format!(
+                    "non-root package `{source_name}` depends directly on workspace root `{root_name}`"
+                ));
+            }
+            if dependency_name.to_ascii_lowercase().contains("rusqlite") {
+                violations.insert(format!(
+                    "package `{source_name}` has forbidden direct dependency `{dependency_name}` ({dependency_kind})"
+                ));
+            }
+            if ARCHITECTURE_OMITTED_MEMBERS.contains(&dependency_name) {
+                violations.insert(format!(
+                    "package `{source_name}` depends on omitted workspace crate `{dependency_name}`"
+                ));
+            }
+
+            let Some(&dependency_layer) = layers.get(dependency_name) else {
+                continue;
+            };
+            if is_production && dependency_layer > source_layer {
+                violations.insert(format!(
+                    "upward production edge: `{source_name}` (L{source_layer}) -> `{dependency_name}` (L{dependency_layer})"
+                ));
+            }
+        }
+    }
+
+    Ok(violations)
 }
 
 fn metadata_path_relative(
@@ -775,6 +963,22 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
         ]
         .into_iter()
         .collect()
+    );
+}
+
+#[test]
+fn workspace_architecture_contract() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let violations = cargo_architecture_contract(repository)
+        .expect("discover Cargo workspace architecture metadata");
+    assert!(
+        violations.is_empty(),
+        "workspace architecture contract violations (sorted):\n{}",
+        violations
+            .iter()
+            .map(|violation| format!("  - {violation}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }
 
