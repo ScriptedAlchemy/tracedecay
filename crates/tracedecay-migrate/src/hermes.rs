@@ -804,13 +804,7 @@ async fn resolve_target_layout<H: HermesStateImporter>(
         )?);
     }
 
-    let production_profile = crate::storage::default_profile_root()
-        .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
-    let layout = if production_profile {
-        crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(&target_project.root).await
-    } else {
-        crate::storage::resolve_layout(&target_project.root, tracedecay_profile_root)
-    }?;
+    let layout = crate::storage::resolve_layout(&target_project.root, tracedecay_profile_root)?;
     project_layout(layout)
 }
 
@@ -2270,7 +2264,7 @@ async fn copy_external_payload_files(
         let expected_hash: String = row
             .get(1)
             .map_err(|error| format!("invalid source payload hash: {error}"))?;
-        crate::sessions::lcm::payload::validate_payload_ref(&payload_ref)
+        tracedecay_sessions::lcm::payload::validate_payload_ref(&payload_ref)
             .map_err(|error| format!("unsafe source payload ref '{payload_ref}': {error}"))?;
         let source_file = source_dir.join(&payload_ref);
         let metadata = fs::symlink_metadata(&source_file).map_err(|error| {

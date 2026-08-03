@@ -10,6 +10,7 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 [dependencies]
 dirs = "6"
 fs2 = "0.4"
+gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1"] }
 hex = "0.4"
 libsql = "0.9.30"
 serde = { version = "1", features = ["derive"] }
