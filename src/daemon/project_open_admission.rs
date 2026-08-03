@@ -9,6 +9,7 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use super::store_shutdown::join_shutdown_tasks_until;
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -372,27 +373,29 @@ impl ProjectOpenTasks {
     }
 
     pub(super) async fn shutdown_until(&self, deadline: tokio::time::Instant) -> bool {
-        let mut entries = {
+        self.cancel();
+        let entries = {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
         }
         .into_values()
         .collect::<Vec<_>>();
-        self.cancel();
         for entry in &entries {
             entry.cancellation.cancel();
         }
-        let mut drained = true;
-        for entry in &mut entries {
-            if tokio::time::timeout_at(deadline, &mut entry.task)
-                .await
-                .is_err()
-            {
-                drained = false;
-                entry.task.abort();
-            }
-        }
-        drained
+        join_shutdown_tasks_until(
+            deadline,
+            entries.into_iter().enumerate().map(|(ordinal, entry)| {
+                let task_abort = entry.task.abort_handle();
+                (
+                    format!("project_open[{ordinal}]"),
+                    Some(task_abort),
+                    async move { entry.task.await.map_err(|_| ()) },
+                )
+            }),
+        )
+        .await
+        .is_clean()
     }
 
     #[cfg(test)]

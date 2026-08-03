@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 
-use super::StoreAdministration;
+use super::{DAEMON_TASK_ABORT_DEADLINE, StoreAdministration};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ShutdownTaskStatus {
@@ -64,18 +64,30 @@ where
     Tasks: IntoIterator<Item = (String, Option<tokio::task::AbortHandle>, Task)>,
     Task: Future<Output = std::result::Result<(), ()>> + Send + 'static,
 {
+    let now = tokio::time::Instant::now();
+    let cooperative_deadline =
+        if deadline.saturating_duration_since(now) > DAEMON_TASK_ABORT_DEADLINE {
+            deadline
+                .checked_sub(DAEMON_TASK_ABORT_DEADLINE)
+                .unwrap_or(deadline)
+        } else {
+            deadline
+        };
     let mut joins = tokio::task::JoinSet::new();
     let mut pending = HashMap::new();
     for (ordinal, (owner, owned_task_abort, task)) in tasks.into_iter().enumerate() {
-        let handle = joins.spawn(task);
-        pending.insert(handle.id(), (ordinal, owner, owned_task_abort));
+        let wrapper_abort = joins.spawn(task);
+        pending.insert(
+            wrapper_abort.id(),
+            (ordinal, owner, owned_task_abort, wrapper_abort),
+        );
     }
 
     let mut outcomes = Vec::new();
     while !joins.is_empty() {
-        match tokio::time::timeout_at(deadline, joins.join_next_with_id()).await {
+        match tokio::time::timeout_at(cooperative_deadline, joins.join_next_with_id()).await {
             Ok(Some(Ok((id, task_result)))) => {
-                if let Some((ordinal, owner, _)) = pending.remove(&id) {
+                if let Some((ordinal, owner, _, _)) = pending.remove(&id) {
                     outcomes.push((
                         ordinal,
                         ShutdownTaskOutcome {
@@ -90,7 +102,7 @@ where
                 }
             }
             Ok(Some(Err(error))) => {
-                if let Some((ordinal, owner, _)) = pending.remove(&error.id()) {
+                if let Some((ordinal, owner, _, _)) = pending.remove(&error.id()) {
                     outcomes.push((
                         ordinal,
                         ShutdownTaskOutcome {
@@ -102,13 +114,14 @@ where
             }
             Ok(None) => break,
             Err(_) => {
-                for (_, _, owned_task_abort) in pending.values() {
+                for (_, _, owned_task_abort, wrapper_abort) in pending.values() {
                     if let Some(owned_task_abort) = owned_task_abort {
                         owned_task_abort.abort();
+                    } else {
+                        wrapper_abort.abort();
                     }
                 }
-                joins.abort_all();
-                outcomes.extend(pending.drain().map(|(_, (ordinal, owner, _))| {
+                outcomes.extend(pending.drain().map(|(_, (ordinal, owner, _, _))| {
                     (
                         ordinal,
                         ShutdownTaskOutcome {
@@ -117,6 +130,12 @@ where
                         },
                     )
                 }));
+                while !joins.is_empty() {
+                    match tokio::time::timeout_at(deadline, joins.join_next()).await {
+                        Ok(Some(_)) => {}
+                        Ok(None) | Err(_) => break,
+                    }
+                }
                 break;
             }
         }

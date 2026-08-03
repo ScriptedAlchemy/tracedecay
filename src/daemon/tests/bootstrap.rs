@@ -1077,6 +1077,50 @@ async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
     assert_eq!(tasks.tracked_route_count().await, 0);
 }
 
+#[tokio::test(start_paused = true)]
+async fn project_open_shutdown_until_reserves_time_to_join_aborted_tasks() {
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let tasks = super::super::ProjectOpenTasks::default();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let task_dropped = Arc::clone(&dropped);
+    match tasks
+        .start_cancellable(
+            project_open_test_route("shutdown-until-backstop"),
+            move |_| async move {
+                let _dropped = Dropped(task_dropped);
+                std::future::pending::<crate::errors::Result<()>>().await
+            },
+        )
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+    }
+    tokio::task::yield_now().await;
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+
+    assert!(
+        !tasks.shutdown_until(deadline).await,
+        "noncooperative task must be reported as timed out"
+    );
+    assert!(
+        dropped.load(std::sync::atomic::Ordering::Acquire),
+        "shutdown must join the aborted task before returning"
+    );
+    assert!(
+        tokio::time::Instant::now() < deadline,
+        "abort join must use the reserved portion of the global deadline"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() {
     let tasks = super::super::ProjectOpenTasks::default();
