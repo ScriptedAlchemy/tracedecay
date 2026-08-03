@@ -33,10 +33,16 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0" }
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
+tracedecay-usecases = { path = "../tracedecay-usecases", version = "0.1.0" }
 tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
+# The legacy-Hermes migration reads the profile `config.yaml` project pin
+# through the `tracedecay_sessions::host_ports::hermes_profile_pin` port, which
+# the root binary wires to this crate's parser. Unit tests here drive the same
+# production paths, so they install the same parser instead of a lookalike.
+tracedecay-agent-hosts = { path = "../tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-global-db = { path = "../tracedecay-global-db", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.0", features = ["test-helpers"] }
 tracedecay-sessions = { path = "../tracedecay-sessions", version = "0.1.0", features = ["test-helpers"] }
