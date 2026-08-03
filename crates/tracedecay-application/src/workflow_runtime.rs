@@ -9,11 +9,12 @@ use std::fmt::{self, Display};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::configuration::WorktreePlacementModeV1;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
-    WorkAttemptV1, WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkLeaseFenceV1,
-    WorkProviderBackendV1, WorkProviderRouteV1, WorkTerminalEvidenceV1, WorkflowDefinitionId,
-    WorkflowDefinitionV1, WorkflowOperationRef, WorkflowStepId, canonical_sha256,
+    WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkLeaseFenceV1,
+    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1,
+    WorkflowOperationRef, WorkflowPlacementReceiptV1, WorkflowStepId, canonical_sha256,
 };
 
 use crate::context::CancellationContext;
@@ -48,6 +49,9 @@ pub struct WorkflowProviderAdmissionV1 {
     pub backend: WorkProviderBackendV1,
     pub model: String,
     pub configuration_digest: ManifestDigest,
+    pub topology_digest: ManifestDigest,
+    pub provider_registry_digest: ManifestDigest,
+    pub worktree_placement: WorktreePlacementModeV1,
     pub reference: Option<RefId>,
     pub commit: CommitId,
     pub deadline: UtcMicros,
@@ -55,6 +59,27 @@ pub struct WorkflowProviderAdmissionV1 {
     pub cancellation_generation: u64,
     pub budget: WorkExecutionBudgetV1,
     pub effect_state: WorkEffectStateV1,
+}
+
+impl WorkflowProviderAdmissionV1 {
+    pub fn placement(
+        &self,
+        run_id: RunId,
+        step_id: WorkflowStepId,
+    ) -> Result<WorkflowPlacementReceiptV1, WorkflowFanOutRuntimeError> {
+        WorkflowPlacementReceiptV1::new(
+            run_id,
+            step_id,
+            self.route.clone(),
+            self.backend,
+            self.model.clone(),
+            self.configuration_digest.clone(),
+            self.topology_digest.clone(),
+            self.provider_registry_digest.clone(),
+            self.worktree_placement.clone(),
+        )
+        .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -82,94 +107,6 @@ pub struct WorkflowFanOutRequestV1 {
     pub failure_policy: WorkflowFailurePolicyV1,
     pub provider: WorkflowProviderAdmissionV1,
     pub inputs: Vec<WorkflowFanOutInputV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowChildReceiptV1 {
-    pub observation_digest: ManifestDigest,
-    pub terminal_receipt_digest: ManifestDigest,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowChildRecordV1 {
-    pub task_id: TaskId,
-    pub attempt_identity: WorkAttemptIdentityV1,
-    pub lease: WorkLeaseFenceV1,
-    pub receipt: Option<WorkflowChildReceiptV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WorkflowFanOutCheckpointV1 {
-    pub plan_digest: ManifestDigest,
-    pub children: Vec<WorkflowChildRecordV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum WorkflowExecutionTruthV1 {
-    Completed {
-        checkpoint: WorkflowFanOutCheckpointV1,
-    },
-    Failed {
-        checkpoint: WorkflowFanOutCheckpointV1,
-    },
-    Cancelled {
-        checkpoint: WorkflowFanOutCheckpointV1,
-        cancellation: CancellationContext,
-    },
-}
-
-impl WorkflowExecutionTruthV1 {
-    pub const fn checkpoint(&self) -> &WorkflowFanOutCheckpointV1 {
-        match self {
-            Self::Completed { checkpoint }
-            | Self::Failed { checkpoint }
-            | Self::Cancelled { checkpoint, .. } => checkpoint,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkflowExecutionAdmissionV1 {
-    Execute,
-    Recover {
-        checkpoint: WorkflowFanOutCheckpointV1,
-    },
-    Replay(WorkflowExecutionTruthV1),
-    PlanConflict,
-    StaleLease,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkflowExecutionAuthorityError {
-    Conflict,
-    Unavailable(String),
-}
-
-pub trait WorkflowExecutionAuthorityPort: Send + Sync {
-    fn begin(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        plan_digest: &ManifestDigest,
-    ) -> Result<WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError>;
-
-    fn checkpoint(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        checkpoint: &WorkflowFanOutCheckpointV1,
-    ) -> Result<(), WorkflowExecutionAuthorityError>;
-
-    fn complete(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        truth: &WorkflowExecutionTruthV1,
-    ) -> Result<(), WorkflowExecutionAuthorityError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -212,6 +149,7 @@ pub enum WorkflowFanOutRuntimeError {
     PlanConflict,
     StaleFence,
     AuthorityUnavailable(String),
+    ResetRequired,
     ChildUnavailable(String),
 }
 
@@ -245,6 +183,9 @@ impl Display for WorkflowFanOutRuntimeError {
                     formatter,
                     "workflow execution authority unavailable: {message}"
                 )
+            }
+            Self::ResetRequired => {
+                formatter.write_str("workflow store is incompatible and requires reset")
             }
             Self::ChildUnavailable(message) => {
                 write!(formatter, "workflow child execution unavailable: {message}")
@@ -399,98 +340,6 @@ pub fn prepare_workflow_fan_out(
         plan_digest,
         children,
     })
-}
-
-pub fn validate_workflow_checkpoint(
-    plan: &WorkflowFanOutPlanV1,
-    checkpoint: &WorkflowFanOutCheckpointV1,
-) -> Result<(), WorkflowFanOutRuntimeError> {
-    if checkpoint.plan_digest != plan.plan_digest || checkpoint.children.len() > plan.children.len()
-    {
-        return Err(WorkflowFanOutRuntimeError::InvalidPlan);
-    }
-    let mut seen = BTreeSet::new();
-    let mut attempts = BTreeSet::new();
-    let mut leases = BTreeSet::new();
-    for record in &checkpoint.children {
-        let planned = plan
-            .children
-            .iter()
-            .find(|child| child.task_id == record.task_id)
-            .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
-        if record.attempt_identity != planned.attempt_identity
-            || record.task_id != *record.attempt_identity.task_id()
-            || !seen.insert(record.task_id.clone())
-            || !attempts.insert(record.attempt_identity.clone())
-            || !leases.insert(record.lease.lease_id().clone())
-        {
-            return Err(WorkflowFanOutRuntimeError::InvalidPlan);
-        }
-    }
-    Ok(())
-}
-
-pub fn workflow_checkpoint(
-    plan_digest: ManifestDigest,
-    mut children: Vec<WorkflowChildRecordV1>,
-) -> WorkflowFanOutCheckpointV1 {
-    children.sort_by(|left, right| left.task_id.cmp(&right.task_id));
-    WorkflowFanOutCheckpointV1 {
-        plan_digest,
-        children,
-    }
-}
-
-pub fn workflow_truth(
-    policy: WorkflowFailurePolicyV1,
-    checkpoint: WorkflowFanOutCheckpointV1,
-    attempts: &[WorkAttemptV1],
-) -> Result<WorkflowExecutionTruthV1, WorkflowFanOutRuntimeError> {
-    if attempts.len() != checkpoint.children.len() {
-        return Err(WorkflowFanOutRuntimeError::InvalidPlan);
-    }
-    let mut succeeded = BTreeSet::new();
-    let mut seen = BTreeSet::new();
-    for attempt in attempts {
-        if !seen.insert(attempt.identity().clone()) {
-            return Err(WorkflowFanOutRuntimeError::InvalidPlan);
-        }
-        let Some(record) = checkpoint
-            .children
-            .iter()
-            .find(|record| record.attempt_identity == *attempt.identity())
-        else {
-            return Err(WorkflowFanOutRuntimeError::InvalidPlan);
-        };
-        if record.task_id != *attempt.identity().task_id() || record.receipt.is_none() {
-            return Err(WorkflowFanOutRuntimeError::InvalidPlan);
-        }
-        match attempt.terminal() {
-            Some(WorkTerminalEvidenceV1::Succeeded { .. }) => {
-                succeeded.insert(attempt.identity().clone());
-            }
-            Some(
-                WorkTerminalEvidenceV1::Failed { .. }
-                | WorkTerminalEvidenceV1::TimedOut { .. }
-                | WorkTerminalEvidenceV1::Cancelled { .. },
-            ) => {}
-            None => return Err(WorkflowFanOutRuntimeError::InvalidPlan),
-        }
-    }
-    let successes = succeeded.len();
-    let complete = match policy {
-        WorkflowFailurePolicyV1::FailFast | WorkflowFailurePolicyV1::Collect => {
-            successes == checkpoint.children.len()
-        }
-        WorkflowFailurePolicyV1::RequireAtLeast {
-            successes: required,
-        } => usize::try_from(required).is_ok_and(|required| successes >= required),
-    };
-    if complete {
-        Ok(WorkflowExecutionTruthV1::Completed { checkpoint })
-    } else {
-        Ok(WorkflowExecutionTruthV1::Failed { checkpoint })
-    }
 }
 
 fn command_id(operation: &str, suffix: &str) -> Result<WorkCommandId, WorkflowFanOutRuntimeError> {

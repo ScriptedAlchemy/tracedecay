@@ -12,12 +12,9 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrantV1, TaskHandoffIssueRequestV1,
-    TaskHandoffRedeemRequestV1, TaskHandoffRedeemedV1, WorkflowActivationV1,
-    WorkflowDefinitionActivateRequestV1, WorkflowDefinitionRegisterRequestV1,
-    WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
+    ApplicationProblem, RequestId, RetryDirective, WorkflowFanOutRequestV1,
 };
-use tracedecay_domain::WorkflowDefinitionV1;
+use tracedecay_domain::WorkflowRunProjectionV1;
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
@@ -98,11 +95,7 @@ impl WorkflowOperation {
 
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
-            Self::RegisterDefinition => schema_name::<WorkflowDefinitionV1>(),
-            Self::ActivateDefinition => schema_name::<WorkflowActivationV1>(),
-            Self::ExecuteFanOut => schema_name::<WorkflowExecutionTruthV1>(),
-            Self::HandoffIssue => schema_name::<TaskHandoffGrantV1>(),
-            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemedV1>(),
+            Self::ExecuteFanOut => schema_name::<WorkflowRunProjectionV1>(),
         }
     }
 
