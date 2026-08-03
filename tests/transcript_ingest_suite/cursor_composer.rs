@@ -82,6 +82,66 @@ fn kv(key: &str, value: &serde_json::Value) -> (String, String) {
     (key.to_string(), value.to_string())
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn composer_unknown_project_membership_defers_persistence_and_offset() {
+    const CHILD_ENV: &str = "TRACEDECAY_COMPOSER_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let project = init_project(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let home = tmp.path().join("home");
+        let env = envelope("unknown-composer", &nested, &["b-user"]);
+        let bubble = serde_json::json!({"type": 1, "text": "defer this session"});
+        write_state_vscdb(
+            &home,
+            &[
+                kv("composerData:unknown-composer", &env),
+                kv("bubbleId:unknown-composer:b-user", &bubble),
+            ],
+        )
+        .await;
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let outcome = CursorComposerSource::with_home(&home)
+            .ingest_user(&db, &[project], CAP)
+            .await;
+        assert_eq!(outcome.sessions_upserted, 0);
+        assert!(outcome.owned_session_ids.is_empty());
+        assert!(db.get_session("cursor", "unknown-composer").await.is_none());
+        assert!(
+            db.get_parse_offset("cursor-composer:unknown-composer")
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    let fake_git = tmp.path().join("git-timeout");
+    std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("cursor_composer::composer_unknown_project_membership_defers_persistence_and_offset")
+        .arg("--exact")
+        .env(CHILD_ENV, "1")
+        .env("GIT", fake_git)
+        .env(
+            "GIT_DIR",
+            "/nonexistent/tracedecay-composer-timeout-git-dir",
+        )
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "child must defer unknown project membership"
+    );
+}
+
 /// Envelope + user bubble + a rich assistant bubble (text, thinking, tool call,
 /// token counts) + todos map to the expected provider-neutral rows.
 #[tokio::test]
