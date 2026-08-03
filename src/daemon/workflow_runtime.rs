@@ -15,7 +15,7 @@ use tracedecay_application::{
     prepare_workflow_fan_out,
 };
 use tracedecay_domain::{
-    ManifestDigest, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
+    ManifestDigest, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
     WorkAttemptStateV1, WorkAttemptV1, WorkCancellationRequestId, WorkCancellationRequestV1,
     WorkCommandId, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
     WorkRecoveryStateV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorkflowOutputArtifactV1,
@@ -242,13 +242,23 @@ pub(crate) async fn execute_canonical_workflow(
     }
 
     let outputs = completed_outputs(&request, &plan, &terminal_attempts)?;
-    let succeeded = terminal_attempts.len() == plan.children.len()
-        && terminal_attempts.iter().all(|attempt| {
+    let success_count = terminal_attempts
+        .iter()
+        .filter(|attempt| {
             matches!(
                 attempt.terminal(),
                 Some(WorkTerminalEvidenceV1::Succeeded { .. })
             )
-        });
+        })
+        .count();
+    let succeeded = match plan.failure_policy {
+        WorkflowFailurePolicyV1::FailFast | WorkflowFailurePolicyV1::Collect => {
+            terminal_attempts.len() == plan.children.len() && success_count == plan.children.len()
+        }
+        WorkflowFailurePolicyV1::RequireAtLeast {
+            successes: required,
+        } => usize::try_from(required).is_ok_and(|required| success_count >= required),
+    };
     let effect_digest = canonical_sha256(&(
         "tracedecay.daemon.workflow-step-effect.v1",
         &plan.plan_digest,
@@ -283,6 +293,7 @@ pub(crate) async fn execute_canonical_workflow(
     } else {
         WorkflowRunCommandV1::FailStep {
             step_id: request.step_id.clone(),
+            outputs,
             effect_receipt,
         }
     };

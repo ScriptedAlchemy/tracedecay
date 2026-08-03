@@ -14,8 +14,8 @@ use tracedecay_domain::{
     WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId, WorkProviderBackendV1,
     WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1,
     WorkflowOperationRef, WorkflowOutputArtifactV1, WorkflowOutputName, WorkflowOutputReferenceV1,
-    WorkflowPlacementReceiptV1, WorkflowRunEventContextV1, WorkflowRunEventV1,
-    WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepEffectOutcomeV1,
+    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
+    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStatusV1, WorkflowStepEffectOutcomeV1,
     WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1, WorkflowStepV1,
 };
 
@@ -101,20 +101,15 @@ struct MemoryRunStorage {
 }
 
 impl WorkflowRunStoragePort for MemoryRunStorage {
-    fn load(&self, run_id: &RunId) -> Result<Vec<WorkflowRunEventV1>, WorkflowRunStorageError> {
-        self.events
-            .lock()
-            .unwrap()
-            .get(run_id)
-            .cloned()
-            .ok_or(WorkflowRunStorageError::NotFound)
-    }
-
     fn projection(
         &self,
         run_id: &RunId,
     ) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError> {
-        WorkflowRunProjectionV1::rebuild(&self.load(run_id)?)
+        let events = self.events.lock().unwrap();
+        let history = events
+            .get(run_id)
+            .ok_or(WorkflowRunStorageError::NotFound)?;
+        WorkflowRunProjectionV1::rebuild(history)
             .map_err(|_| WorkflowRunStorageError::InvalidHistory)
     }
 
@@ -314,4 +309,89 @@ fn admission_rejects_stale_policy_configuration_and_catalog() {
         );
         assert!(storage.events.lock().unwrap().is_empty());
     }
+}
+
+#[test]
+fn failed_step_journals_successful_artifact_evidence() {
+    let storage = MemoryRunStorage::default();
+    let run_id = id::<RunId>("run.workflow.dag.partial-failure");
+    let service = WorkflowRunService::new(storage.clone());
+    let admitted = service
+        .admit(
+            run_id.clone(),
+            definition(),
+            WorkflowAdmissionSnapshotV1 {
+                policy_digest: digest('a'),
+                configuration_digest: digest('b'),
+                catalog_digest: work_executable_catalog_digest().unwrap(),
+                topology_digest: digest('c'),
+                provider_registry_digest: digest('8'),
+            },
+            context("command.workflow.partial.admit", '1', 1),
+        )
+        .unwrap();
+    let started = service
+        .apply(
+            &run_id,
+            admitted.sequence(),
+            WorkflowRunCommandV1::StartStep {
+                step_id: id::<WorkflowStepId>("prepare"),
+                placement: placement(&run_id, "prepare"),
+            },
+            context("command.workflow.partial.start", '2', 2),
+        )
+        .unwrap();
+    let outputs = vec![
+        WorkflowStepOutputV1::new(
+            id::<WorkflowOutputName>("context"),
+            vec![WorkflowOutputArtifactV1::new(
+                WorkAttemptIdentityV1::new(
+                    id::<TaskId>("task.workflow.partial"),
+                    run_id.clone(),
+                    id::<AttemptId>("attempt.workflow.partial"),
+                )
+                .unwrap(),
+                artifact("artifact.workflow.partial", 'd', 41),
+            )],
+        )
+        .unwrap(),
+    ];
+    let receipt = WorkflowStepEffectReceiptV1::new(
+        run_id.clone(),
+        id::<WorkflowStepId>("prepare"),
+        started
+            .step(&id::<WorkflowStepId>("prepare"))
+            .unwrap()
+            .placement_receipt()
+            .unwrap()
+            .placement_digest()
+            .clone(),
+        WorkflowStepEffectOutcomeV1::Failed,
+        digest('9'),
+        &outputs,
+    )
+    .unwrap();
+    let failed = service
+        .apply(
+            &run_id,
+            started.sequence(),
+            WorkflowRunCommandV1::FailStep {
+                step_id: id::<WorkflowStepId>("prepare"),
+                outputs: outputs.clone(),
+                effect_receipt: receipt,
+            },
+            context("command.workflow.partial.fail", '3', 3),
+        )
+        .unwrap();
+    assert_eq!(
+        failed
+            .step(&id::<WorkflowStepId>("prepare"))
+            .unwrap()
+            .outputs()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>(),
+        outputs
+    );
+    assert_eq!(failed.status(), WorkflowRunStatusV1::Failed);
 }
