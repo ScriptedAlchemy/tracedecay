@@ -5653,6 +5653,7 @@ dependencies = [
 name = "tracedecay-capture"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "hex",
  "serde_json",
  "sha2 0.11.0",
@@ -5877,6 +5878,7 @@ version = "0.1.0"
 dependencies = [
  "amari-holographic",
  "bincode",
+ "chrono",
  "dirs",
  "fs2",
  "fsys",

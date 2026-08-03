@@ -15,6 +15,5 @@ pub use parse::{
     parse_claude_record_v1, parse_normalized_observation_record_v1, parse_observation_record_v1,
 };
 pub use timestamp::{
-    civil_from_days, days_from_civil, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
-    parse_yyyy_mm_dd_utc_start,
+    parse_cursor_human_timestamp, parse_rfc3339_timestamp, parse_yyyy_mm_dd_utc_start,
 };
