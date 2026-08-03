@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::errors::Result;
+use crate::Result;
 
 use super::managed_skill_format::{frontmatter_string, source_key, state_key, target_key};
 use super::managed_skill_validation::{
@@ -321,7 +321,7 @@ pub struct ManagedSkillPendingUpdate {
 }
 
 impl ManagedSkillPendingUpdate {
-    pub(super) fn into_skill(self) -> ManagedSkill {
+    pub fn into_skill(self) -> ManagedSkill {
         ManagedSkill {
             metadata: self.metadata,
             body_markdown: self.body_markdown,
@@ -330,7 +330,7 @@ impl ManagedSkillPendingUpdate {
         }
     }
 
-    pub(super) fn normalize_timestamps(&mut self) {
+    pub fn normalize_timestamps(&mut self) {
         let mut skill = ManagedSkill {
             metadata: self.metadata.clone(),
             body_markdown: self.body_markdown.clone(),
@@ -565,15 +565,18 @@ impl ManagedSkill {
     }
 }
 
-pub(super) fn current_metadata_timestamp() -> i64 {
-    crate::tracedecay::current_timestamp()
+pub fn current_metadata_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::automation::skill_frontmatter::parse_skill_frontmatter;
+    use crate::skill_frontmatter::parse_skill_frontmatter;
 
     #[test]
     fn native_skill_markdown_round_trips_escaped_description() {

@@ -4931,8 +4931,10 @@ dependencies = [
 name = "tracedecay-automation"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -1,15 +1,5 @@
 //! Store-free LSP diagnostics support.
 
-pub mod activity;
-pub mod adapters;
-pub mod broker;
-pub mod client;
-pub mod settings;
+pub mod analyzer;
 
-#[derive(Debug, thiserror::Error)]
-pub enum LspError {
-    #[error("config error: {message}")]
-    Config { message: String },
-}
-
-pub type Result<T> = std::result::Result<T, LspError>;
+pub use analyzer::{LspError, Result, activity, adapters, broker, client, settings};

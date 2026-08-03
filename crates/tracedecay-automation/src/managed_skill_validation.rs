@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
-use super::config_error;
-use crate::errors::Result;
+use crate::{Result, error::config_error};
 
 use super::managed_skill_format::target_key;
 use super::managed_skill_model::{
@@ -16,7 +15,7 @@ const ALLOWED_SUPPORT_ROOTS: &[&str] = &["references", "templates", "scripts", "
 pub(crate) const MAX_NATIVE_SKILL_NAME_CHARS: usize = 64;
 pub(crate) const MAX_NATIVE_SKILL_DESCRIPTION_CHARS: usize = 1024;
 
-pub(crate) fn validate_skill_id(id: &str) -> Result<()> {
+pub fn validate_skill_id(id: &str) -> Result<()> {
     if id.is_empty()
         || id.starts_with('.')
         || id.contains("..")
@@ -265,7 +264,7 @@ fn validate_skill_targets(targets: &[SkillInstallTarget]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
+pub fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_skill_id(&skill.metadata.id)?;
     validate_frontmatter_scalar("title", &skill.metadata.title)?;
     validate_frontmatter_scalar("summary", &skill.metadata.summary)?;
@@ -279,7 +278,7 @@ pub(crate) fn validate_managed_skill(skill: &ManagedSkill) -> Result<()> {
     validate_managed_support_files(&skill.support_files)
 }
 
-pub(crate) fn validate_managed_pending_update(
+pub fn validate_managed_pending_update(
     id: &str,
     pending: &ManagedSkillPendingUpdate,
 ) -> Result<()> {
@@ -328,7 +327,7 @@ fn validate_checksum(field: &str, checksum: &str) -> Result<()> {
     }
 }
 
-pub(crate) fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> {
+pub fn validate_managed_skill_update(update: &ManagedSkillUpdate) -> Result<()> {
     if let Some(title) = &update.title {
         validate_frontmatter_scalar("title", title)?;
     }

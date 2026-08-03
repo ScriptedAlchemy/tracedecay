@@ -1,6 +1,9 @@
 //! Root-free automation parsing primitives.
 
 mod error;
+pub mod managed_skill_format;
+pub mod managed_skill_model;
+pub mod managed_skill_validation;
 pub mod skill_frontmatter;
 pub mod text;
 
