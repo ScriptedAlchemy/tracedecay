@@ -4,16 +4,14 @@ use tracedecay_application::{
     WorkflowRunAppendOutcomeV1, WorkflowRunAppendRequestV1, WorkflowRunStorageError,
     WorkflowRunStoragePort,
 };
-use tracedecay_domain::{
-    ManifestDigest, RunId, WorkflowRunEventV1, WorkflowRunProjectionV1, canonical_sha256,
-};
+use tracedecay_domain::{ManifestDigest, RunId, WorkflowRunProjectionV1, canonical_sha256};
 
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, MigrationSqlTransaction,
     MigrationSqlValue,
 };
 
-use super::{WorkflowSqliteAuthority, migration_integer, migration_text};
+use super::{WorkflowSqliteAuthority, sql_integer, sql_text};
 
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -55,55 +53,21 @@ fn row_projection(
     payload_index: usize,
 ) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError> {
     let row = rows.rows.first().ok_or(WorkflowRunStorageError::NotFound)?;
-    decode(
-        migration_text(&row.values, payload_index)
-            .ok_or(WorkflowRunStorageError::InvalidHistory)?,
-    )
+    decode(sql_text(&row.values, payload_index).ok_or(WorkflowRunStorageError::InvalidHistory)?)
 }
 
 impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
-    fn load(&self, run_id: &RunId) -> Result<Vec<WorkflowRunEventV1>, WorkflowRunStorageError> {
-        let rows = self
-            .handle
-            .query(
-                statement(
-                    "SELECT event_payload
-                     FROM workflow_run_events_v2
-                     WHERE run_id = ?1
-                     ORDER BY sequence",
-                    vec![MigrationSqlValue::Text(run_id.as_str().to_owned())],
-                )?,
-                READ_TIMEOUT,
-            )
-            .map_err(unavailable)?;
-        if rows.rows.is_empty() {
-            return Err(WorkflowRunStorageError::NotFound);
-        }
-        let history = rows
-            .rows
-            .iter()
-            .map(|row| {
-                decode(
-                    migration_text(&row.values, 0)
-                        .ok_or(WorkflowRunStorageError::InvalidHistory)?,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        WorkflowRunProjectionV1::rebuild(&history)
-            .map_err(|_| WorkflowRunStorageError::InvalidHistory)?;
-        Ok(history)
-    }
-
     fn projection(
         &self,
         run_id: &RunId,
     ) -> Result<WorkflowRunProjectionV1, WorkflowRunStorageError> {
         let rows = self
+            .storage
             .handle
             .query(
                 statement(
                     "SELECT projection_payload
-                     FROM workflow_run_heads_v2
+                     FROM workflow_run_heads
                      WHERE run_id = ?1",
                     vec![MigrationSqlValue::Text(run_id.as_str().to_owned())],
                 )?,
@@ -117,13 +81,13 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         &self,
         request: &WorkflowRunAppendRequestV1,
     ) -> Result<WorkflowRunAppendOutcomeV1, WorkflowRunStorageError> {
-        let transaction = self.handle.begin_immediate().map_err(unavailable)?;
+        let transaction = self.storage.handle.begin_immediate().map_err(unavailable)?;
         let event_payload = encode(&request.event)?;
         let event_digest = digest(&request.event)?;
         let replay = query(
             &transaction,
             "SELECT input_digest, event_digest
-             FROM workflow_run_events_v2
+             FROM workflow_run_events
              WHERE run_id = ?1 AND command_id = ?2",
             vec![
                 MigrationSqlValue::Text(request.event.run_id().as_str().to_owned()),
@@ -132,9 +96,9 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         )?;
         if let Some(row) = replay.rows.first() {
             let stored_input =
-                migration_text(&row.values, 0).ok_or(WorkflowRunStorageError::InvalidHistory)?;
+                sql_text(&row.values, 0).ok_or(WorkflowRunStorageError::InvalidHistory)?;
             let stored_event =
-                migration_text(&row.values, 1).ok_or(WorkflowRunStorageError::InvalidHistory)?;
+                sql_text(&row.values, 1).ok_or(WorkflowRunStorageError::InvalidHistory)?;
             if stored_input != request.event.input_digest().as_str()
                 || stored_event != event_digest.as_str()
             {
@@ -144,7 +108,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             let head = query(
                 &transaction,
                 "SELECT projection_payload
-                 FROM workflow_run_heads_v2
+                 FROM workflow_run_heads
                  WHERE run_id = ?1",
                 vec![MigrationSqlValue::Text(
                     request.event.run_id().as_str().to_owned(),
@@ -158,7 +122,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         let head = query(
             &transaction,
             "SELECT sequence, projection_payload
-             FROM workflow_run_heads_v2
+             FROM workflow_run_heads
              WHERE run_id = ?1",
             vec![MigrationSqlValue::Text(
                 request.event.run_id().as_str().to_owned(),
@@ -166,7 +130,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         )?;
         let projection = match head.rows.first() {
             Some(row) => {
-                let sequence = migration_integer(&row.values, 0)
+                let sequence = sql_integer(&row.values, 0)
                     .and_then(|value| u64::try_from(value).ok())
                     .ok_or(WorkflowRunStorageError::InvalidHistory)?;
                 if request.expected_sequence != Some(sequence)
@@ -176,8 +140,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
                     return Err(WorkflowRunStorageError::VersionConflict);
                 }
                 let current: WorkflowRunProjectionV1 = decode(
-                    migration_text(&row.values, 1)
-                        .ok_or(WorkflowRunStorageError::InvalidHistory)?,
+                    sql_text(&row.values, 1).ok_or(WorkflowRunStorageError::InvalidHistory)?,
                 )?;
                 current
                     .apply(&request.event)
@@ -196,7 +159,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
         let projection_digest = digest(&projection)?;
         transaction
             .execute(statement(
-                "INSERT INTO workflow_run_events_v2 (
+                "INSERT INTO workflow_run_events (
                      run_id, sequence, command_id, input_digest, occurred_at,
                      event_payload, event_digest
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -216,7 +179,7 @@ impl WorkflowRunStoragePort for WorkflowSqliteAuthority {
             .map_err(unavailable)?;
         transaction
             .execute(statement(
-                "INSERT INTO workflow_run_heads_v2 (
+                "INSERT INTO workflow_run_heads (
                      run_id, sequence, projection_payload, projection_digest, last_event_digest
                  ) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(run_id) DO UPDATE SET
