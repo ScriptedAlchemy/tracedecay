@@ -13,9 +13,8 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionId,
-    WorkflowDefinition, WorkflowOperationRef, WorkflowOutputName, WorkflowStepId, WorkflowStep,
-    WorktreeId,
+    UtcMicros, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId,
+    WorkflowOperationRef, WorkflowOutputName, WorkflowStep, WorkflowStepId, WorktreeId,
 };
 
 fn id<T>(value: &str) -> T
@@ -617,6 +616,29 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
             UtcMicros(10),
         )
         .unwrap();
+}
+
+#[test]
+fn handoff_wire_requests_redact_bearer_secrets_from_debug_output() {
+    let secret = "handoff-secret-0123456789abcdef0123456789".to_owned();
+    let issue = tracedecay_application::TaskHandoffIssueRequest {
+        issuer: id::<ActorId>("actor.workflow.source"),
+        scope: handoff_scope(),
+        secret: secret.clone(),
+        issued_at: UtcMicros(100),
+        expires_at: UtcMicros(200),
+    };
+    let redeem = tracedecay_application::TaskHandoffRedeemRequest {
+        secret: secret.clone(),
+        expected_scope: handoff_scope(),
+        redeemer: id::<ActorId>("actor.workflow.target"),
+        consumed_at: UtcMicros(150),
+    };
+
+    for debug in [format!("{issue:?}"), format!("{redeem:?}")] {
+        assert!(!debug.contains(&secret));
+        assert!(debug.contains("[REDACTED]"));
+    }
 }
 
 #[test]

@@ -593,6 +593,34 @@ for line in sys.stdin:
             input_artifacts: Vec::new(),
         }],
     };
+    let mut denied_fan_out = fan_out.clone();
+    denied_fan_out.definition = tracedecay_domain::WorkflowDefinition::new(
+        denied_fan_out.definition.definition_id().clone(),
+        denied_fan_out.definition.definition_version(),
+        denied_fan_out.definition.project_id().clone(),
+        denied_fan_out.definition.steps().to_vec(),
+        digest('0'),
+        denied_fan_out
+            .definition
+            .pinned_configuration_digest()
+            .clone(),
+        denied_fan_out.definition.pinned_catalog_digest().clone(),
+    )
+    .expect("policy-mismatched definition");
+    let denied = invoke!(
+        "request.workflow.execute-policy-denied",
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(denied_fan_out))
+    );
+    assert!(
+        matches!(
+            denied,
+            DaemonInvocationOutcome::ApplicationProblem {
+                problem: tracedecay_application::ApplicationProblem::InvalidRequest { .. }
+            }
+        ),
+        "a workflow whose policy pin differs from the admitted grant must be denied: {denied:?}"
+    );
+
     let first = invoke!(
         "request.workflow.execute",
         WorkflowApplicationInvocation::ExecuteFanOut(Box::new(fan_out.clone()))
