@@ -1,9 +1,9 @@
 use super::{
     AnalyticsAction, CommandFamily, Commands, DAEMON_CPU_THREADS_ENV,
     DEFAULT_MAX_DAEMON_CPU_THREADS, DaemonAction, HostBundleCliOptions, MAX_ASYNC_WORKER_THREADS,
-    MAX_BLOCKING_THREADS, PackageHookAction, PostUpdateMode, RAYON_NUM_THREADS_ENV,
-    ScoopPackageHookAction, SilentReinstallAction, StderrTracingDefault, async_worker_threads,
-    daemon_cpu_threads_from, is_daemon_run, is_extract_worker, is_local_install_command,
+    MAX_BLOCKING_THREADS, PackageHookAction, RAYON_NUM_THREADS_ENV, ScoopPackageHookAction,
+    SilentReinstallAction, StderrTracingDefault, async_worker_threads, daemon_cpu_threads_from,
+    is_daemon_run, is_extract_worker, is_local_install_command,
     should_skip_agent_install_maintenance, should_skip_startup_maintenance,
     silent_reinstall_action, stderr_tracing_default, validate_host_bundle_options,
 };
@@ -141,7 +141,6 @@ fn representative_commands_route_to_their_dispatch_family() {
             CommandFamily::Agent,
         ),
         (Commands::HookStop, CommandFamily::Hook),
-        (Commands::Dogfood, CommandFamily::Update),
         (
             Commands::PackageHook {
                 action: PackageHookAction::Scoop {
@@ -229,8 +228,6 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         no_heal: false,
         no_reinstall: false,
         lifecycle_lease_token: None,
-        strict: false,
-        mode: PostUpdateMode::Normal,
     }));
     assert!(should_skip_startup_maintenance(&Commands::PackageHook {
         action: PackageHookAction::Scoop {
@@ -313,8 +310,6 @@ fn agent_install_maintenance_is_selective() {
             no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
         }
     ));
     // Also skip for uninstall (about to remove configs) and doctor (a
