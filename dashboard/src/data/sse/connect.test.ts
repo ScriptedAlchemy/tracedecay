@@ -92,6 +92,16 @@ describe("dashboard SSE wire bridge", () => {
     connection.close();
   });
 
+  it("subscribes only to server-emitted code-index activity", () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    const connection = connectEvents("/api/events");
+    const source = FakeEventSource.instances[0]!;
+
+    expect(source.listeners.has("code_index")).toBe(false);
+    expect(source.listeners.has("code_index_activity")).toBe(true);
+    connection.close();
+  });
+
   it("projects accepted events to live pulses carrying their own scope identity", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     const connection = connectEvents("/api/events");
