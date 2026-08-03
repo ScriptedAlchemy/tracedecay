@@ -2,4 +2,6 @@
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
-"$repo_root/scripts/check-conventional-commits.sh" --message-file "$1"
+cd "$repo_root"
+
+npm run --silent lint:commit -- --edit "$1"
