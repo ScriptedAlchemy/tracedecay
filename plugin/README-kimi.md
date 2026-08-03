@@ -67,7 +67,7 @@ after the command replaces `$ARGUMENTS` in the command body.
 
 ## Local development
 
-For checkout dogfooding, stage the generated Kimi projection after edits:
+For local development, stage the generated Kimi projection after edits:
 
 ```bash
 tracedecay install --agent kimi

@@ -35,7 +35,7 @@ reference below are design research selected by agents, not user endorsements.
 The following rejected forms must not return: generic/clinical/simple UI;
 bottom-panel chrome that steals the interactive graph; a sparse circular
 single-project Brain whose geometry means nothing; a Brain that shows no live
-neurons during real dogfooding; bland vertical lists as the dominant
+neurons while agents are actively working; bland vertical lists as the dominant
 space-consuming treatment; embedded-browser visual QA; and any fake count,
 health state, activity, or backend capability.
 
@@ -415,7 +415,7 @@ measured, not hypothetical; align future dashboard slices with it.
    real degree ranges, and the ranked most-connected list against real paths.
    These carry to future surfaces as-is.
 
-6. **Real dogfood activity must be visible.** The user rejected a Brain with no
-   visible neurons while agents were active after dogfooding. Render real
+6. **Real agent activity must be visible.** The user rejected a Brain with no
+   visible neurons while agents were active. Render real
    activity strikes from the admitted wire source; when that source cannot
    provide finer scope, say so. Never synthesize decorative firing.

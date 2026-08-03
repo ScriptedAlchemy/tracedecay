@@ -6,6 +6,12 @@ Status: **Policy adopted as canonical.** This document ratifies it and records t
 root-level verification, the one decision that still needs a human, and the
 resolved open question.
 
+> **Historical triage record — not implementation authority.** The policy remains
+> the current authority for independently released public interfaces,
+> installed-agent artifacts, and external user-owned data. This record does not
+> authorize a V2 internal-store reader, converter, backfill, dual write, profile
+> census, staged cutover, or branch/worktree fact migration.
+
 This is the capstone for the four child artifacts. It does not restate them; it
 points at them and records what the root reviewer verified and decided.
 
@@ -16,7 +22,7 @@ points at them and records what the root reviewer verified and decided.
 | `docs/TRACEDECAY-COMPATIBILITY-AUDIT.md` | Fact inventory of every legacy surface, with file:line anchors and risk notes. | `t_3482e439` |
 | `docs/TREESITTERS-RENAME-CONSTRAINTS.md` | Deep dive on the one externally constrained name. | `t_4070b0b0` |
 | `docs/REBRAND-COMPATIBILITY-POLICY.md` | Normative policy: categories A–E, principles, a 37-row surface map, and a review checklist. | `t_da7151b6` |
-| `docs/REBRAND-COMPATIBILITY-FOLLOW-UP-CHECKLIST.md` | 15 ready-to-ticket follow-ups + 5 explicit non-goals, with a suggested order. | `t_a33b4ad3` |
+| `docs/REBRAND-COMPATIBILITY-FOLLOW-UP-CHECKLIST.md` | Retired ticket backlog; current review guardrails for released external compatibility surfaces. | `t_a33b4ad3` |
 
 ## Answer to the triage question
 
@@ -27,8 +33,8 @@ categories gives the one-line answer:
 
 | Triage question | Policy category | Surfaces | Summary |
 |---|---|---:|---|
-| Remains indefinitely | A — retained in place | 11 | Existing `.tracedecay/` + `~/.tracedecay/` data, `tracedecay.db`, branch metadata, discovery, counter endpoint, and all historical docs/changelog/benchmarks. No auto-migration, ever. |
-| Migrates automatically | B — installers/refreshers reconcile | 16 | Generated agent/plugin config keys, prompt/rule markers, plugin dirs, marketplace entries, Hermes config aliases, release-asset probing for explicit old versions, primary-doc wording. |
+| Remains indefinitely | A — retained in place | 11 | Release-evidenced external user data, discovery, counter endpoint, and historical docs/changelog/benchmarks. No automatic V2 internal-state conversion. |
+| Reconciles owned artifacts | B — installers/refreshers reconcile | 16 | Generated agent/plugin config keys, prompt/rule markers, plugin dirs, marketplace entries, released Hermes aliases, release-asset probing for explicit old versions, primary-doc wording. |
 | Warns (accepted as fallback) | C — accepted, new spelling wins | 8 | `TRACEDECAY_*` env fallbacks, `DISABLE_TRACEDECAY`, global-DB toggles, hook/extraction/pricing vars, plugin-path docs claim, Homebrew/Scoop package note. |
 | Never silently accepted | D — reject/fail | 1 | Legacy-only / pre-reset releases in automatic latest-version detection. |
 | Never renamed yet (upstream constraint) | E — externally owned | 1 | `tracedecay-large-treesitters` (+ `-medium`/`-lite`). Keep until upstream renames all three or a maintained fork is approved as a policy change. |
@@ -88,17 +94,13 @@ a worker and is not pure implementation work:
     divergence in tests. Truthy parsing stays the default for feature-toggle
     vars. Confirm or override before the W-04 card is implemented.
 
-Everything else in the follow-up checklist is implementation work, not an open
-decision, and is ready to be ticketed in the suggested order.
+The former follow-up ticket list is retired. New work must be scoped against
+current release evidence and the policy; source-only V2 shapes change in place.
 
-## Backlog pointer
+## Current review pointer
 
-The actionable backlog is `docs/REBRAND-COMPATIBILITY-FOLLOW-UP-CHECKLIST.md`:
-15 implementation items (W-01..W-04, M-01..M-04, D-01..D-03, T-01..T-04) and 5
-explicit non-goals (N-01..N-05). Suggested implementation order is in that file
-(§"Suggested implementation order"); the highest-leverage first slice is
-W-01 + W-02 + T-01 (shared warning infrastructure that most other Category C
-behavior depends on). N-03 (never rename/fork the treesitters) and N-01 (no
-auto-rename of `.tracedecay/` storage) are the two non-goals most likely to be
-accidentally violated by a future refactor and should be re-cited in any PR
-touching `src/config.rs`, `src/global.rs`, `src/branch_meta.rs`, or `Cargo.toml`.
+Use `docs/REBRAND-COMPATIBILITY-FOLLOW-UP-CHECKLIST.md` as a compact review
+guardrail, not a delivery queue. It preserves only externally released public
+compatibility, owned generated artifacts, truthful documentation, and explicit
+external user-data safety. It does not create a V2 store-conversion or
+branch/worktree fact-migration path.

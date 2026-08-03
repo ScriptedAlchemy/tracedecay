@@ -9,20 +9,22 @@ names for accepted operations; it does not add missing semantics.
 
 Earlier task-schema names, operation registries, fixture catalogs, packet
 gates, and milestone/file inventories are historical evidence, not
-prerequisites or features that PR17 must recreate. Published operations and
-persisted task/work records retain compatibility and migration obligations;
-all other retention is judged by the direct Work journey, lifecycle,
+prerequisites or features that PR17 must recreate. Only actually independently
+released public operations may retain protocol compatibility. Persisted
+task/work records use the fresh-store rule; all other retention is judged by
+the direct Work journey, lifecycle,
 platform, and regression behavior below.
 
 No Plan 24 Work contract is established on `origin/master` or in a published
 package/release. Pure source-only/internal request helpers take their final
-shape in place. Wire-visible Work request revisions retain negotiation until an
-authorized installed-client/host census proves absence. Work-item, graph, read,
-lease, evidence, journal, checkpoint, and receipt records are persisted and
-may exist in dogfood stores; backward readers and migration/recovery remain
-required until the registered-store census proves absence. Immutable work-item
-and graph versions below remain product history/CAS identities, not by
-themselves contract-version release evidence.
+shape in place, as do wire-visible V2 Work request revisions and branch-local
+V2 work-item, graph, read, lease, evidence, journal, checkpoint, and receipt
+records. Only their exact final persisted shape is accepted; any other
+database, store, spool, file, or projection returns typed `ResetRequired` and
+requires explicit reset or recreation. No storage reader, migration, backfill,
+dual write, or census path exists. Immutable work-item and graph versions below
+remain product history/CAS identities, not by themselves public protocol
+release evidence.
 
 ## Decision
 
