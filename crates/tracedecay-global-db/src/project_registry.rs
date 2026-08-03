@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use std::fmt::Write as _;
@@ -10,9 +10,8 @@ use tracedecay_runtime_core::db::engine::{
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
-    ProjectRegistryContext, ProjectStoreResolution, RegisteredGlobalDb,
-    RegisteredGlobalDbWriteTransaction, StoreArtifactRecord, StoreArtifactUpsert,
-    StoreInstanceRecord, StoreInstanceUpsert, global_db_operation_error,
+    ProjectRegistryContext, ProjectStoreResolution, RegisteredGlobalDb, StoreArtifactRecord,
+    StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert, global_db_operation_error,
     global_db_operation_message,
 };
 
@@ -166,27 +165,16 @@ pub fn ephemeral_root_rejection(project_root: &Path, profile_root: &Path) -> Opt
 pub(super) const NATIVE_PROJECT_PATH_ALIAS_PREFIX: &str = "tracedecay-project-path-v1";
 
 #[derive(Clone, Copy)]
-pub(super) enum LegacyPathAliasKind {
+pub(super) enum ProjectIdentityAliasKind {
     ProjectRoot,
     GitCommonDir,
 }
 
-impl LegacyPathAliasKind {
+impl ProjectIdentityAliasKind {
     pub(super) fn prefix(self) -> &'static str {
         match self {
             Self::ProjectRoot => "",
             Self::GitCommonDir => "git-common-dir:",
-        }
-    }
-
-    pub(super) fn owner_query(self) -> &'static str {
-        match self {
-            Self::ProjectRoot => {
-                "SELECT project_id FROM code_projects WHERE canonical_root = ?1 ORDER BY project_id"
-            }
-            Self::GitCommonDir => {
-                "SELECT project_id FROM code_projects WHERE git_common_dir = ?1 ORDER BY project_id"
-            }
         }
     }
 }
@@ -401,8 +389,6 @@ struct ProjectRegistryDatabase<'db>(&'db RegisteredGlobalDb);
 
 struct ProjectRegistryReadSnapshot(tracedecay_runtime_core::db::engine::ReadSnapshot);
 
-struct ProjectRegistryWriteTransaction<'db>(RegisteredGlobalDbWriteTransaction<'db>);
-
 impl<'db> ProjectRegistryDatabase<'db> {
     async fn read_snapshot(
         self,
@@ -412,17 +398,6 @@ impl<'db> ProjectRegistryDatabase<'db> {
             .read_snapshot()
             .await
             .map(ProjectRegistryReadSnapshot)
-            .map_err(|error| global_db_operation_error(operation, error))
-    }
-
-    async fn begin_write_transaction(
-        self,
-        operation: &'static str,
-    ) -> tracedecay_runtime_core::errors::Result<ProjectRegistryWriteTransaction<'db>> {
-        self.0
-            .begin_write_transaction()
-            .await
-            .map(ProjectRegistryWriteTransaction)
             .map_err(|error| global_db_operation_error(operation, error))
     }
 }
@@ -437,55 +412,6 @@ impl QueryExecutor for ProjectRegistryReadSnapshot {
         P: IntoParams,
     {
         QueryExecutor::query(&self.0, sql, params).await
-    }
-}
-
-impl QueryExecutor for ProjectRegistryWriteTransaction<'_> {
-    async fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
-    where
-        P: IntoParams,
-    {
-        QueryExecutor::query(&self.0, sql, params).await
-    }
-}
-
-impl Executor for ProjectRegistryWriteTransaction<'_> {
-    async fn execute<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        Executor::execute(&self.0, sql, params).await
-    }
-
-    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        Executor::execute_batch(&self.0, sql).await
-    }
-}
-
-impl ProjectRegistryWriteTransaction<'_> {
-    async fn commit(self, operation: &'static str) -> tracedecay_runtime_core::errors::Result<()> {
-        self.0
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(operation, error))
-    }
-
-    async fn rollback(
-        self,
-        operation: &'static str,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
-        self.0
-            .rollback()
-            .await
-            .map_err(|error| global_db_operation_error(operation, error))
     }
 }
 
@@ -600,22 +526,8 @@ async fn list_code_project_paths_from(
                 path
             }
             (None, None, None) => {
-                match legacy_code_project_path(
-                    db,
-                    &read,
-                    &project_id,
-                    &canonical_root,
-                    &display_root,
-                    last_seen_at,
-                )
-                .await?
-                {
-                    PathEvidenceVerdict::Accepted(path) => path,
-                    PathEvidenceVerdict::Rejected(detail) => {
-                        skip(&format!("legacy root evidence rejected: {detail}"));
-                        continue;
-                    }
-                }
+                skip("missing final primary root");
+                continue;
             }
             _ => {
                 skip("incomplete primary root");
@@ -651,114 +563,6 @@ async fn project_alias_is_current(
         .await
         .map(|row| row.is_some())
         .map_err(|error| global_db_operation_error(OPERATION, error))
-}
-
-/// Outcome of resolving a project's legacy (pre-primary-root) path evidence.
-///
-/// This only represents the row-local "this project's evidence doesn't
-/// support a path" case, which the caller skips and continues past. Genuine
-/// storage failures (query/transaction errors) are never wrapped here — they
-/// propagate as `Err`, so a real DB failure aborts the whole listing instead
-/// of silently degrading it, consistent with `project_alias_is_current`.
-enum PathEvidenceVerdict {
-    Accepted(PathBuf),
-    Rejected(String),
-}
-
-async fn legacy_code_project_path(
-    db: ProjectRegistryDatabase<'_>,
-    read: &impl QueryExecutor,
-    project_id: &str,
-    canonical_root: &str,
-    display_root: &str,
-    last_seen_at: i64,
-) -> tracedecay_runtime_core::errors::Result<PathEvidenceVerdict> {
-    const OPERATION: &str = "list native code project paths";
-    let mut rows = read
-        .query(
-            "SELECT alias_path, last_seen_at FROM project_aliases
-             WHERE project_id = ?1 ORDER BY alias_path",
-            tracedecay_runtime_core::db::engine::params![project_id],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    let mut candidates = BTreeMap::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?
-    {
-        let alias = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let alias_last_seen = row
-            .get::<i64>(1)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        if alias_last_seen != last_seen_at {
-            continue;
-        }
-        let path = match decode_native_project_path_alias(&alias) {
-            Ok(Some(path)) => path,
-            Ok(None) if Path::new(&alias).is_absolute() => PathBuf::from(&alias),
-            Ok(None) | Err(_) => continue,
-        };
-        let display_evidence = path.to_string_lossy();
-        if display_evidence != canonical_root && display_evidence != display_root {
-            continue;
-        }
-        let identity = format!(
-            "{}:{}",
-            native_project_path_platform(),
-            hex::encode(encode_native_project_path(&path))
-        );
-        candidates.insert(identity, path);
-    }
-    drop(rows);
-
-    let mut candidates = candidates.into_values();
-    let Some(path) = candidates.next() else {
-        return Ok(PathEvidenceVerdict::Rejected(format!(
-            "project '{project_id}' has no current lossless legacy root evidence"
-        )));
-    };
-    if candidates.next().is_some() {
-        return Ok(PathEvidenceVerdict::Rejected(format!(
-            "project '{project_id}' has ambiguous legacy current roots"
-        )));
-    }
-    let transaction = db.begin_write_transaction(OPERATION).await?;
-    let updated = transaction
-        .execute(
-            "UPDATE code_projects
-             SET primary_root_platform = ?1, primary_root_bytes = ?2,
-                 primary_root_last_seen_at = ?3
-             WHERE project_id = ?4 AND last_seen_at = ?3
-               AND primary_root_platform IS NULL AND primary_root_bytes IS NULL
-               AND primary_root_last_seen_at IS NULL",
-            tracedecay_runtime_core::db::engine::params![
-                native_project_path_platform(),
-                encode_native_project_path(&path),
-                last_seen_at,
-                project_id
-            ],
-        )
-        .await
-        .map_err(|error| global_db_operation_error(OPERATION, error))?;
-    if updated != 1 {
-        // The row changed concurrently (raced with another writer); treat as
-        // row-local evidence rejection rather than a hard storage failure —
-        // the write itself succeeded, it just no longer applies.
-        transaction
-            .rollback("rollback raced native code project path resolution")
-            .await?;
-        return Ok(PathEvidenceVerdict::Rejected(format!(
-            "project '{project_id}' changed while resolving its legacy root"
-        )));
-    }
-    transaction
-        .commit("commit native code project path resolution")
-        .await?;
-    Ok(PathEvidenceVerdict::Accepted(path))
 }
 
 pub(super) async fn list_registered_lossless_paths(
@@ -870,11 +674,63 @@ impl RegisteredGlobalDb {
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
         let current_root_alias = project_path_alias_key(&canonical_project_root);
-        let git_common_dir_text = git_common_dir.map(|path| path.to_string_lossy().into_owned());
+        let canonical_git_common_dir = git_common_dir.map(canonical_project_path);
+        let git_common_dir_text = canonical_git_common_dir
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let git_common_dir_alias =
+            super::repo_identity_aliases(canonical_git_common_dir.as_deref())
+                .into_iter()
+                .next();
         let transaction = self.begin_write_transaction().await.ok()?;
-        transaction
-            .execute(
-                "INSERT INTO code_projects
+
+        let mut existing_authorities = BTreeSet::new();
+        for alias in [
+            Some(current_root_alias.as_str()),
+            git_common_dir_alias.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut rows = transaction
+                .query(
+                    "SELECT project_id FROM project_aliases WHERE alias_path = ?1",
+                    params![alias],
+                )
+                .await
+                .ok()?;
+            if let Some(row) = rows.next().await.ok()? {
+                existing_authorities.insert(row.get::<String>(0).ok()?);
+            }
+        }
+        if let Some(git_common_dir_text) = git_common_dir_text.as_deref() {
+            let mut rows = transaction
+                .query(
+                    "SELECT project_id FROM code_projects WHERE git_common_dir = ?1",
+                    params![git_common_dir_text],
+                )
+                .await
+                .ok()?;
+            while let Some(row) = rows.next().await.ok()? {
+                existing_authorities.insert(row.get::<String>(0).ok()?);
+            }
+        }
+        if existing_authorities.len() > 1 {
+            eprintln!(
+                "warning: refusing to consolidate conflicting TraceDecay project authorities for '{}'; reset the profile",
+                canonical_project_root.display()
+            );
+            return None;
+        }
+        let authority_project_id = existing_authorities
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| project_id.to_string());
+
+        if authority_project_id == project_id {
+            transaction
+                .execute(
+                    "INSERT INTO code_projects
                  (project_id, canonical_root, display_root, primary_root_platform,
                   primary_root_bytes, primary_root_last_seen_at, git_common_dir,
                   git_remote_url, default_branch, created_at, last_seen_at)
@@ -889,21 +745,30 @@ impl RegisteredGlobalDb {
                     git_remote_url = excluded.git_remote_url,
                     default_branch = excluded.default_branch,
                     last_seen_at = excluded.last_seen_at",
-                params![
-                    project_id,
-                    canonical_root,
-                    native_project_path_platform(),
-                    encode_native_project_path(&canonical_project_root),
-                    now,
-                    git_common_dir_text,
-                    git_remote_url,
-                    default_branch
-                ],
-            )
-            .await
-            .ok()?;
+                    params![
+                        authority_project_id.as_str(),
+                        canonical_root,
+                        native_project_path_platform(),
+                        encode_native_project_path(&canonical_project_root),
+                        now,
+                        git_common_dir_text,
+                        git_remote_url,
+                        default_branch
+                    ],
+                )
+                .await
+                .ok()?;
+        } else {
+            transaction
+                .execute(
+                    "UPDATE code_projects SET last_seen_at = ?2 WHERE project_id = ?1",
+                    params![authority_project_id.as_str(), now],
+                )
+                .await
+                .ok()?;
+        }
         let mut aliases = vec![current_root_alias];
-        aliases.extend(super::repo_identity_aliases(git_common_dir));
+        aliases.extend(git_common_dir_alias);
         if let Some(alias) = super::git_remote_search_alias(git_remote_url) {
             aliases.push(alias);
         }
@@ -915,13 +780,13 @@ impl RegisteredGlobalDb {
                      ON CONFLICT(alias_path) DO UPDATE SET
                         project_id = excluded.project_id,
                         last_seen_at = excluded.last_seen_at",
-                    params![alias, project_id, now],
+                    params![alias, authority_project_id.as_str(), now],
                 )
                 .await
                 .ok()?;
         }
         transaction.commit().await.ok()?;
-        self.get_code_project(project_id).await
+        self.get_code_project(&authority_project_id).await
     }
 
     pub async fn upsert_project_alias(
@@ -1117,7 +982,7 @@ impl RegisteredGlobalDb {
         alias_path: &Path,
     ) -> Option<ProjectStoreResolution> {
         let project_id = self
-            .project_id_by_native_path_alias(alias_path, LegacyPathAliasKind::ProjectRoot)
+            .project_id_by_path_alias(alias_path, ProjectIdentityAliasKind::ProjectRoot)
             .await
             .ok()
             .flatten()?;
@@ -1351,17 +1216,7 @@ impl RegisteredGlobalDb {
             Ok(Some(store))
         }
 
-        let native_alias = project_path_alias_key(alias_path);
-        if let Some(store) = query(self, &native_alias, None).await? {
-            return Ok(Some(store));
-        }
-        let legacy_alias = canonical_project_path(alias_path)
-            .to_string_lossy()
-            .into_owned();
-        if native_alias == legacy_alias {
-            return Ok(None);
-        }
-        query(self, &legacy_alias, Some(&legacy_alias)).await
+        query(self, &project_path_alias_key(alias_path), None).await
     }
 
     /// Resolves the persisted store for a project by repository identity.
@@ -1407,7 +1262,7 @@ impl RegisteredGlobalDb {
         alias_path: &Path,
     ) -> tracedecay_runtime_core::errors::Result<Option<ProjectRegistryContext>> {
         let Some(project_id) = self
-            .project_id_by_native_path_alias(alias_path, LegacyPathAliasKind::ProjectRoot)
+            .project_id_by_path_alias(alias_path, ProjectIdentityAliasKind::ProjectRoot)
             .await?
         else {
             return Ok(None);
@@ -1439,17 +1294,17 @@ impl RegisteredGlobalDb {
                 Some(marker) => Some(marker.project_id),
                 None => {
                     if let Some(project_id) = self
-                        .project_id_by_native_path_alias(
+                        .project_id_by_path_alias(
                             project_root,
-                            LegacyPathAliasKind::ProjectRoot,
+                            ProjectIdentityAliasKind::ProjectRoot,
                         )
                         .await?
                     {
                         Some(project_id)
                     } else if let Some(git_common_dir) = git_common_dir {
-                        self.project_id_by_native_path_alias(
+                        self.project_id_by_path_alias(
                             git_common_dir,
-                            LegacyPathAliasKind::GitCommonDir,
+                            ProjectIdentityAliasKind::GitCommonDir,
                         )
                         .await?
                     } else {
@@ -1460,13 +1315,11 @@ impl RegisteredGlobalDb {
         )
     }
 
-    pub(super) async fn project_id_by_native_path_alias(
+    pub(super) async fn project_id_by_path_alias(
         &self,
         path: &Path,
-        kind: LegacyPathAliasKind,
+        kind: ProjectIdentityAliasKind,
     ) -> tracedecay_runtime_core::errors::Result<Option<String>> {
-        const OPERATION: &str = "resolve project identity alias";
-
         async fn project_id_by_alias_key(
             db: &RegisteredGlobalDb,
             alias: &str,
@@ -1495,76 +1348,8 @@ impl RegisteredGlobalDb {
                 .map_err(|error| global_db_operation_error(OPERATION, error))
         }
 
-        let native_path = project_path_alias_key(path);
-        let native_alias = format!("{}{native_path}", kind.prefix());
-        if let Some(project_id) = project_id_by_alias_key(self, &native_alias).await? {
-            return Ok(Some(project_id));
-        }
-
-        let legacy_path = canonical_project_path(path).to_string_lossy().into_owned();
-        if native_path == legacy_path {
-            return Ok(None);
-        }
-        let legacy_alias = format!("{}{legacy_path}", kind.prefix());
-        let Some(legacy_project_id) = project_id_by_alias_key(self, &legacy_alias).await? else {
-            return Ok(None);
-        };
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut rows = snapshot
-            .query(kind.owner_query(), params![legacy_path.as_str()])
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        else {
-            return Ok(None);
-        };
-        let owner = row
-            .get::<String>(0)
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        if owner != legacy_project_id
-            || rows
-                .next()
-                .await
-                .map_err(|error| global_db_operation_error(OPERATION, error))?
-                .is_some()
-        {
-            return Ok(None);
-        }
-        drop(rows);
-        drop(snapshot);
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .execute(
-                "INSERT INTO project_aliases (alias_path, project_id, last_seen_at)
-                 VALUES (?1, ?2, ?3)
-                 ON CONFLICT(alias_path) DO NOTHING",
-                params![
-                    native_alias.as_str(),
-                    legacy_project_id.as_str(),
-                    tracedecay_runtime_core::tracedecay::current_timestamp()
-                ],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let migrated_project_id = project_id_by_alias_key(self, &native_alias).await?;
-        Ok(
-            (migrated_project_id.as_deref() == Some(legacy_project_id.as_str()))
-                .then_some(legacy_project_id),
-        )
+        let alias = format!("{}{}", kind.prefix(), project_path_alias_key(path));
+        project_id_by_alias_key(self, &alias).await
     }
 
     pub async fn delete_code_projects(&self, project_ids: &[String]) -> usize {

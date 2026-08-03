@@ -39,24 +39,20 @@ pub(super) async fn open_project_for_handshake_with_health_mode(
             project_path,
             &open_options,
             registry_database.as_ref(),
-            true,
         )
         .await
         {
             Ok(layout) => (layout, false),
-            // A brand-new project has no enrollment marker, registry match, or
-            // legacy shard, so identity resolution fails closed. When the client
+            // A brand-new project has no enrollment marker or registry match,
+            // so identity resolution fails closed. When the client
             // explicitly asked to initialize (first-touch `tracedecay init`),
             // mint a fresh path-derived identity and let the missing-index
-            // fallback below bootstrap it. Existing-but-unresolvable stores
-            // raise their own identity-cutover errors instead of this one and
-            // still fail closed.
+            // fallback below bootstrap it.
             Err(err) if handshake.allow_init && is_unregistered_identity_error(&err) => (
                 crate::tracedecay::TraceDecay::resolve_first_touch_configuration_layout(
                     project_path,
                     &open_options,
                     registry_database.as_ref(),
-                    true,
                 )
                 .await?,
                 true,
@@ -168,10 +164,7 @@ pub(super) async fn open_project_for_handshake_with_health_mode(
 }
 
 /// Whether `err` is the specific fail-closed error raised when identity
-/// resolution finds no enrollment marker, registry match, or legacy shard for a
-/// project — i.e. a genuinely never-enrolled project. Conflicting or ambiguous
-/// *existing* stores raise distinct identity-cutover errors and are excluded, so
-/// first-touch bootstrap never masks a real conflict.
+/// resolution finds no enrollment marker or registry match for a project.
 fn is_unregistered_identity_error(err: &TraceDecayError) -> bool {
     matches!(
         err,

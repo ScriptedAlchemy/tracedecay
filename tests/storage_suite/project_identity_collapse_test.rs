@@ -17,6 +17,7 @@ use std::process::Command;
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
+use tracedecay::global_db::StoreInstanceUpsert;
 use tracedecay::project_registry::ReapEntryKind;
 use tracedecay::storage::{default_profile_project_id, repository_identity_path, resolve_layout};
 
@@ -216,6 +217,96 @@ async fn ephemeral_project_root_is_allowed_by_a_hermetic_profile() {
             .is_some(),
         "a throwaway profile must still accept throwaway project fixtures"
     );
+}
+
+#[tokio::test]
+async fn common_dir_aliases_mint_one_project_and_one_store_authority() {
+    let fixture = repo_with_worktrees();
+    let profile_root = fixture.main.parent().unwrap().join("profile");
+    let db = HostAdmissionTestRuntimeV1::profile(&profile_root)
+        .await
+        .unwrap();
+    let common_dir = fixture.main.join(".git").canonicalize().unwrap();
+
+    db.upsert_code_project(
+        "proj_primary",
+        &fixture.main,
+        Some(&common_dir),
+        None,
+        Some("main"),
+    )
+    .await
+    .unwrap();
+    db.upsert_store_instance(StoreInstanceUpsert {
+        store_id: "store:proj_primary:profile_sharded".to_string(),
+        project_id: "proj_primary".to_string(),
+        store_kind: "code_project".to_string(),
+        storage_mode: "profile_sharded".to_string(),
+        store_relpath: "projects/proj_primary".to_string(),
+        manifest_relpath: None,
+        last_verified_at: None,
+        last_write_at: None,
+    })
+    .await
+    .unwrap();
+
+    let linked = db
+        .upsert_code_project(
+            "proj_linked",
+            &fixture.attached,
+            Some(&common_dir),
+            None,
+            Some("feature"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(linked.project_id, "proj_primary");
+    assert!(db.get_code_project("proj_linked").await.is_none());
+    assert!(
+        db.upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_linked:profile_sharded".to_string(),
+            project_id: "proj_linked".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_linked".to_string(),
+            manifest_relpath: None,
+            last_verified_at: None,
+            last_write_at: None,
+        })
+        .await
+        .is_none()
+    );
+
+    let context = db
+        .project_registry_context_by_identity(&fixture.detached, Some(&common_dir))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.project.project_id, "proj_primary");
+    assert_eq!(context.stores.len(), 1);
+    assert_eq!(
+        context.stores[0].store.store_id,
+        "store:proj_primary:profile_sharded"
+    );
+
+    #[cfg(unix)]
+    {
+        let common_dir_alias = fixture.main.parent().unwrap().join("common-dir-alias");
+        std::os::unix::fs::symlink(&common_dir, &common_dir_alias).unwrap();
+        let aliased = db
+            .upsert_code_project(
+                "proj_symlink_alias",
+                &fixture.detached,
+                Some(&common_dir_alias),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(aliased.project_id, "proj_primary");
+        assert!(db.get_code_project("proj_symlink_alias").await.is_none());
+    }
 }
 
 #[tokio::test]

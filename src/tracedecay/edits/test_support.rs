@@ -63,7 +63,6 @@ pub(super) async fn fixture_graph(
         project_root,
         &open_options,
         profile_database.as_ref(),
-        true,
     )
     .await
     .unwrap();

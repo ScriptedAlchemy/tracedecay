@@ -5,7 +5,6 @@ use std::sync::{Arc, Weak};
 
 use serde_json::json;
 
-use crate::application::context::CancellationToken;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
@@ -1110,9 +1109,6 @@ impl StoreAdministration {
         operation().await
     }
 
-    /// Runs an operator-facing daemon-wide writer operation only when it can
-    /// acquire the administration lane immediately. Destructive commands must
-    /// report busy instead of silently queuing behind project warm-up.
     pub(super) async fn try_with_writer<Operation, OperationFuture, Output>(
         &self,
         operation: Operation,
@@ -1121,21 +1117,7 @@ impl StoreAdministration {
         Operation: FnOnce() -> OperationFuture,
         OperationFuture: Future<Output = Output>,
     {
-        self.try_with_writer_in(WriterScope::Daemon, operation)
-            .await
-    }
-
-    /// [`Self::try_with_writer`] scoped to one store.
-    pub(super) async fn try_with_writer_in<Operation, OperationFuture, Output>(
-        &self,
-        scope: WriterScope,
-        operation: Operation,
-    ) -> Option<Output>
-    where
-        Operation: FnOnce() -> OperationFuture,
-        OperationFuture: Future<Output = Output>,
-    {
-        let writer = self.gate.try_acquire(&scope)?;
+        let writer = self.gate.try_acquire(&WriterScope::Daemon)?;
         let output = operation().await;
         drop(writer);
         Some(output)
@@ -1509,53 +1491,6 @@ mod tests {
                 "retryable": true,
                 "detail": "another daemon writer is active",
             }))
-        );
-    }
-
-    #[tokio::test]
-    async fn destructive_writer_operation_fails_fast_while_lane_is_busy() {
-        let administration = StoreAdministration::default();
-        let _writer = administration.gate.acquire(&WriterScope::Daemon).await;
-
-        let outcome = administration
-            .try_with_writer(|| async { "unexpected admission" })
-            .await;
-
-        assert!(outcome.is_none());
-    }
-
-    /// The store-scoped lane must keep the same fail-closed answer for a
-    /// destructive command whose own store already has a writer, while leaving
-    /// a *different* store admissible.
-    #[tokio::test]
-    async fn destructive_writer_is_refused_only_on_the_busy_store() {
-        let administration = StoreAdministration::default();
-        let busy = PathBuf::from("/stores/busy");
-        let idle = PathBuf::from("/stores/idle");
-        let _writer = administration
-            .gate
-            .acquire(&WriterScope::store(&busy, StoreWriterClass::Content))
-            .await;
-
-        assert!(
-            administration
-                .try_with_writer_in(
-                    WriterScope::store(&busy, StoreWriterClass::Destructive),
-                    || async { "unexpected admission" },
-                )
-                .await
-                .is_none(),
-            "destructive administration must not select a store a writer owns"
-        );
-        assert!(
-            administration
-                .try_with_writer_in(
-                    WriterScope::store(&idle, StoreWriterClass::Destructive),
-                    || async { "admitted" },
-                )
-                .await
-                .is_some(),
-            "an unrelated store must stay admissible"
         );
     }
 
