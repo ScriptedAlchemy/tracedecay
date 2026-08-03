@@ -56,10 +56,13 @@ the maintained API can materially delete the existing bounded transport.
 
 ### 4. `croner`
 
-Replace the custom cron evaluator only if `croner` can preserve the accepted
-five-field numeric grammar, DOM/DOW OR semantics, Sunday `0/7`, UTC behavior,
-overflow errors, and restart scheduling. Keep `CronSchedule` as the product
-type. Delete custom bitsets, calendar conversion, parsing, and backward scan.
+Rejected after implementation and focused review. Preserving the shipped
+five-field numeric grammar, full-range DOM/DOW wildcard behavior, scalar-step
+semantics, Sunday `0/7`, UTC behavior, and the exact 367-day lookup bound
+required a second normalization/parser layer beside `croner`. The complete
+cutover produced no production-code deletion (`+168/-166`) and added `croner`,
+`strum`, and `strum_macros`; malformed full-range expressions also bypassed
+validation. Keep the existing scheduler and do not add `croner`.
 
 ### 5. `binrw`
 
