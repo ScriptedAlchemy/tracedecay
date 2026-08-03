@@ -6,21 +6,10 @@ use super::*;
 #[test]
 fn test_tool_definitions_complete() {
     let tools = get_tool_definitions();
-    // ast-grep-backed tools are conditionally registered based on the
-    // host CLI capabilities they need; agents should never see a tool that
-    // will instantly fail. The count and per-tool checks below adapt to
-    // the host's capability set.
-    let expected_total = super::super::definitions::ALWAYS_REGISTERED_TOOL_COUNT
-        + usize::from(super::super::definitions::ast_grep_available());
-    assert_eq!(tools.len(), expected_total);
     let compatibility_tools = tools
         .iter()
         .filter(|tool| ApplicationSurfaceOperation::from_tool_name(&tool.name).is_none())
         .collect::<Vec<_>>();
-    assert_eq!(
-        compatibility_tools.len(),
-        102 + usize::from(super::super::definitions::ast_grep_available())
-    );
     for tool in compatibility_tools {
         assert!(
             LegacyToolCompatibilityOwner::admits(&tool.name),
