@@ -12,10 +12,6 @@ use tracedecay::automation::run_ledger::{
 };
 use tracedecay::branch_meta::BranchMeta;
 use tracedecay::global_db::StoreInstanceUpsert;
-use tracedecay::migrate::inventory::MigrationInventory;
-use tracedecay::migrate::manifest::{
-    ArtifactState, MigrationArtifact, MigrationManifest, MigrationProtocol, save_manifest,
-};
 use tracedecay::storage::{
     EnrollmentMarker, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
     StoreKind, StoreManifest, default_profile_project_id, profile_sharded_data_root,
@@ -2074,106 +2070,6 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
     assert!(
         projects.is_empty(),
         "rejected ephemeral project must not enter the persistent registry"
-    );
-}
-
-#[test]
-fn migrate_cleanup_sources_removes_source_artifacts_but_preserves_enrollment_marker() {
-    let home = TempDir::new().unwrap();
-    let project = TempDir::new().unwrap();
-    let project_root = canonical_temp_path(project.path());
-    let data_dir = project_root.join(".tracedecay");
-    let source_graph = data_dir.join("tracedecay.db");
-    let profile_root = profile_root(home.path());
-    let target_root = profile_root.join("projects/proj_cli");
-    std::fs::create_dir_all(&data_dir).unwrap();
-    std::fs::create_dir_all(&target_root).unwrap();
-    std::fs::write(&source_graph, b"graph").unwrap();
-    std::fs::write(target_root.join("tracedecay.db"), b"graph").unwrap();
-    write_branch_meta(&target_root, &[], false);
-    let store_manifest = StoreManifest {
-        schema_version: STORE_MANIFEST_SCHEMA_VERSION,
-        project_id: Some("proj_cli".to_string()),
-        store_kind: StoreKind::CodeProject,
-        storage_mode: StorageMode::ProfileSharded,
-        project_root: project_root.clone(),
-        data_root: target_root.clone(),
-        graph_db_relpath: "tracedecay.db".into(),
-        sessions_db_relpath: "sessions.db".into(),
-        branch_meta_relpath: "branch-meta.json".into(),
-    };
-    std::fs::write(
-        target_root.join(STORE_MANIFEST_FILENAME),
-        serde_json::to_string_pretty(&store_manifest).unwrap(),
-    )
-    .unwrap();
-    write_enrollment_marker(
-        &project_root,
-        &EnrollmentMarker {
-            project_id: "proj_cli".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .unwrap();
-
-    let manifest_path = canonical_temp_path(home.path()).join("migration-manifest.json");
-    let protocol = MigrationProtocol::for_manifest(&manifest_path, "mig_cli_cleanup");
-    let mut manifest = MigrationManifest::new(
-        "mig_cli_cleanup",
-        "0.0.2",
-        1_800_000_000,
-        "confirm-mig_cli_cleanup",
-        protocol,
-        MigrationInventory {
-            stores: Vec::new(),
-            skipped: Vec::new(),
-            global_db: None,
-        },
-    );
-    manifest.source.project_root = Some(project_root.clone());
-    manifest.source.data_dir = Some(data_dir.clone());
-    manifest.destination.profile_root = Some(profile_root);
-    manifest.destination.project_id = Some("proj_cli".to_string());
-    let mut graph_artifact = MigrationArtifact::new(
-        "graph_db",
-        source_graph.clone(),
-        Some(target_root.join("tracedecay.db")),
-    );
-    graph_artifact.state = ArtifactState::Applied;
-    manifest.artifacts.push(graph_artifact);
-    let mut store_manifest_artifact = MigrationArtifact::new(
-        "store_manifest",
-        target_root.join(STORE_MANIFEST_FILENAME),
-        Some(target_root.join(STORE_MANIFEST_FILENAME)),
-    );
-    store_manifest_artifact.state = ArtifactState::Applied;
-    manifest.artifacts.push(store_manifest_artifact);
-    save_manifest(&manifest).unwrap();
-
-    let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-    command.args([
-        "migrate",
-        "cleanup-sources",
-        "--manifest",
-        manifest_path.to_str().unwrap(),
-        "--confirm-token",
-        "confirm-mig_cli_cleanup",
-    ]);
-    let output = run_with_timeout(command, cli_timeout());
-
-    assert!(
-        output.status.success(),
-        "cleanup-sources should succeed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        !source_graph.exists(),
-        "source graph artifact should be removed"
-    );
-    assert!(
-        read_enrollment_marker(&project_root).unwrap().is_some(),
-        "cleanup must preserve profile-sharded enrollment marker"
     );
 }
 

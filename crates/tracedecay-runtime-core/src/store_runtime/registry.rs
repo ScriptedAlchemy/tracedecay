@@ -143,30 +143,30 @@ impl tracedecay_rusqlite_runtime::RuntimeWriteAuthority for RuntimeDatabaseWrite
     }
 }
 
-impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
+impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
     for RuntimeDatabaseWriteAuthority
 {
     fn verify(
         &self,
-        intent: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent,
-    ) -> Result<(), tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError> {
+        intent: tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent,
+    ) -> Result<(), tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> {
         let intent = match intent {
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Validate => {
-                "validate registered migration SQL statement"
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::Validate => {
+                "validate registered exact SQL statement"
             }
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Execute => {
-                "execute registered migration SQL statement"
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::Execute => {
+                "execute registered exact SQL statement"
             }
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Query => {
-                "query registered migration SQL writer"
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::Query => {
+                "query registered exact SQL writer"
             }
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::ExecuteBatch => {
-                "execute registered migration SQL statement batch"
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::ExecuteBatch => {
+                "execute registered exact SQL statement batch"
             }
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Vacuum => {
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::Vacuum => {
                 if self.authority.role() != crate::db::DatabaseAuthorityRole::Maintenance {
                     return Err(
-                        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied(
+                        tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
                             "whole-database vacuum requires exclusive maintenance authority"
                                 .to_owned(),
                         ),
@@ -174,15 +174,15 @@ impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
                 }
                 "vacuum registered database under exclusive maintenance"
             }
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::BeginTransaction => {
-                "begin registered migration SQL transaction"
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::BeginTransaction => {
+                "begin registered exact SQL transaction"
             }
-            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Commit => {
-                "commit registered migration SQL transaction"
+            tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent::Commit => {
+                "commit registered exact SQL transaction"
             }
         };
         self.verify_database(intent)
-            .map_err(tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied)
+            .map_err(tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied)
     }
 }
 
@@ -371,21 +371,16 @@ impl StoreRuntimeHandle {
         Ok(receipt)
     }
 
-    fn migration_sql_handle_unchecked(
+    fn exact_sql_handle_unchecked(
         &self,
-    ) -> Result<
-        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
-        StoreRuntimeRegistryFailure,
-    > {
-        self.inner
-            .attachment
-            .migration_sql_handle()
-            .map_err(
-                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "attach migration SQL channel",
-                    message,
-                },
-            )
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, StoreRuntimeRegistryFailure>
+    {
+        self.inner.attachment.exact_sql_handle().map_err(|message| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "attach exact SQL channel",
+                message,
+            }
+        })
     }
 
     /// Returns a writerless channel for bounded health and telemetry reads.
@@ -394,12 +389,10 @@ impl StoreRuntimeHandle {
     /// the attachment's writer sender through `with_write_authority`.
     pub fn telemetry_read_handle(
         &self,
-    ) -> Result<
-        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
-        StoreRuntimeRegistryFailure,
-    > {
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, StoreRuntimeRegistryFailure>
+    {
         self.validate_opened_file_identity("authorize registered telemetry read")?;
-        let handle = self.migration_sql_handle_unchecked()?;
+        let handle = self.exact_sql_handle_unchecked()?;
         if handle.binding() != self.binding() {
             return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
                 expected: Box::new(self.binding().clone()),
@@ -415,24 +408,22 @@ impl StoreRuntimeHandle {
         Ok(handle.read_only_clone())
     }
 
-    pub fn authorized_migration_sql_handle(
+    pub fn authorized_exact_sql_handle(
         &self,
         authority: crate::db::DatabaseAuthority,
-    ) -> Result<
-        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
-        StoreRuntimeRegistryFailure,
-    > {
-        use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority;
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, StoreRuntimeRegistryFailure>
+    {
+        use tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority;
 
         authority
             .require_active_write_scope("authorize registered SQLite runtime")
             .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "authorize migration SQL channel",
+                operation: "authorize exact SQL channel",
                 message: error.to_string(),
             })?;
         if authority.canonical_database_path() != self.locator().path() {
             return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "authorize migration SQL channel",
+                operation: "authorize exact SQL channel",
                 message: format!(
                     "registered locator {} does not match database authority {}",
                     self.locator().path().display(),
@@ -441,7 +432,7 @@ impl StoreRuntimeHandle {
             });
         }
 
-        let handle = self.migration_sql_handle_unchecked()?;
+        let handle = self.exact_sql_handle_unchecked()?;
         if handle.binding() != self.binding() {
             return Err(StoreRuntimeRegistryFailure::RuntimeBindingMismatch {
                 expected: Box::new(self.binding().clone()),
@@ -456,7 +447,7 @@ impl StoreRuntimeHandle {
         }
 
         let opened_file_identity =
-            self.validate_opened_file_identity("authorize migration SQL channel")?;
+            self.validate_opened_file_identity("authorize exact SQL channel")?;
 
         let authority = RuntimeDatabaseWriteAuthority {
             canonical_path: authority.canonical_database_path().to_path_buf(),
@@ -464,9 +455,9 @@ impl StoreRuntimeHandle {
             opened_file_identity,
         };
         handle
-            .with_write_authority(Arc::new(authority) as Arc<dyn MigrationSqlWriteAuthority>)
+            .with_write_authority(Arc::new(authority) as Arc<dyn ExactSqlWriteAuthority>)
             .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "authorize migration SQL channel",
+                operation: "authorize exact SQL channel",
                 message: error.to_string(),
             })
     }

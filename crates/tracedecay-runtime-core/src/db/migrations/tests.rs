@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_rusqlite_runtime::migration_sql::{
-    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+use tracedecay_rusqlite_runtime::exact_sql::{
+    ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
 };
 
 use crate::db::engine::{Connection, TestConnection};
@@ -17,10 +17,10 @@ mod fts;
 
 struct AllowSchemaWrites;
 
-impl MigrationSqlWriteAuthority for AllowSchemaWrites {
-    fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
-        if intent == MigrationSqlWriteIntent::Vacuum {
-            Err(MigrationSqlError::AuthorityDenied(
+impl ExactSqlWriteAuthority for AllowSchemaWrites {
+    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
+        if intent == ExactSqlWriteIntent::Vacuum {
+            Err(ExactSqlError::AuthorityDenied(
                 "ordinary schema fixture cannot vacuum".to_owned(),
             ))
         } else {
