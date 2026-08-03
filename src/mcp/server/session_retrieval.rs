@@ -30,10 +30,10 @@ use crate::application::context::{
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionDataFreshness, SessionRequestBinding, SessionRetrievalConfiguration,
-    SessionRetrievalOutcome, SessionRetrievalScope, SessionRetrievalService,
-    SessionScopeAuthorizationRequest, SessionScopeAuthorizer, SessionTemporalExecutionError,
-    SessionTemporalQuery,
+    SessionDataFreshness, SessionFreshnessPolicy, SessionRequestBinding,
+    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
+    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
+    SessionTemporalExecutionError, SessionTemporalQuery,
 };
 use crate::daemon::session_temporal_refresh_scheduler::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
@@ -373,6 +373,10 @@ fn session_retrieval_worker_status(
     }
 }
 
+const fn requires_refresh_worker(freshness_policy: SessionFreshnessPolicy) -> bool {
+    matches!(freshness_policy, SessionFreshnessPolicy::RequireFresh)
+}
+
 pub(crate) struct DaemonSessionRetrievalService {
     database: Arc<RegisteredGlobalDb>,
     root: DaemonSessionRetrievalRoot,
@@ -567,7 +571,9 @@ impl DaemonSessionRetrievalService {
         &self,
         command: SessionRetrievalCommand,
     ) -> SessionRetrievalServiceOutcome {
-        if let Some(unavailable) = self.refresh_unavailable() {
+        if requires_refresh_worker(command.query().freshness_policy())
+            && let Some(unavailable) = self.refresh_unavailable()
+        {
             return SessionRetrievalServiceOutcome::Unavailable(unavailable);
         }
         // Count commands the service answers past the fast-path gate,
@@ -1678,6 +1684,16 @@ async fn registered_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stored_retrieval_does_not_require_refresh_worker() {
+        assert!(!requires_refresh_worker(
+            SessionFreshnessPolicy::AllowStored
+        ));
+        assert!(requires_refresh_worker(
+            SessionFreshnessPolicy::RequireFresh
+        ));
+    }
 
     fn typed<T>(value: &str) -> T
     where
