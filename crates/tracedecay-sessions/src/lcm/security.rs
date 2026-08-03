@@ -372,3 +372,65 @@ fn is_binaryish(content: &str) -> bool {
     }
     total >= 1024 && control * 10 > total
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_uri_externalization_obeys_payload_boundary() {
+        let below_minimum = format!("data:image/png;base64,{}", "A".repeat(255));
+        assert!(!contains_data_uri(&below_minimum));
+        assert!(!should_externalize(
+            "assistant",
+            Some("message"),
+            &below_minimum
+        ));
+
+        let minimum = format!("data:image/png;base64,{}", "A".repeat(256));
+        assert!(contains_data_uri(&minimum));
+        assert!(should_externalize("assistant", Some("message"), &minimum));
+        assert!(!contains_data_uri("data:text/plain,hello%20world"));
+
+        let escaped = format!("data:image\\/png;base64,{}", "A".repeat(300));
+        assert!(contains_data_uri(&escaped));
+    }
+
+    #[test]
+    fn long_base64_externalization_obeys_hermes_boundaries() {
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let run_4096 = alphabet.repeat(64);
+        assert_eq!(run_4096.len(), GENERIC_BASE64_MIN_CHARS);
+        assert!(has_long_base64_run(&run_4096));
+        assert!(should_externalize("assistant", Some("message"), &run_4096));
+
+        assert!(!has_long_base64_run(&run_4096[..4092]));
+        assert!(!has_long_base64_run(&format!("{run_4096}A")));
+        assert!(!has_long_base64_run(&"Q".repeat(8_192)));
+
+        let urlsafe = "abcdefgh0123-_".repeat(300);
+        assert!(has_long_base64_run(&urlsafe));
+    }
+
+    #[test]
+    fn whole_message_externalization_covers_binary_and_oversized_tool_payloads() {
+        let oversized_tool = "x".repeat(LARGE_TOOL_OUTPUT_CHARS + 1);
+        assert!(prefers_whole_message_externalization(
+            "tool",
+            Some("tool_result"),
+            &oversized_tool
+        ));
+        assert!(!prefers_whole_message_externalization(
+            "assistant",
+            Some("message"),
+            &"x".repeat(LARGE_TOOL_OUTPUT_CHARS + 1)
+        ));
+
+        let binaryish = "\0".repeat(BINARYISH_SAMPLE_CHARS);
+        assert!(prefers_whole_message_externalization(
+            "assistant",
+            Some("message"),
+            &binaryish
+        ));
+    }
+}

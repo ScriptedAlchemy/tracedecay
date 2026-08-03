@@ -32,7 +32,34 @@ pub mod workflow_state;
 
 pub use providers::{ProviderScope, SessionProvider};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-pub use tracedecay_sessions::{SessionMessageType, SessionSearchScope};
+pub use tracedecay_sessions::SessionMessageType;
+
+/// Scope filter for session-message full-text search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionSearchScope {
+    All,
+    ParentsOnly,
+    SubagentsOnly,
+}
+
+impl SessionSearchScope {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "all" => Some(Self::All),
+            "parents_only" => Some(Self::ParentsOnly),
+            "subagents_only" => Some(Self::SubagentsOnly),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ParentsOnly => "parents_only",
+            Self::SubagentsOnly => "subagents_only",
+        }
+    }
+}
 
 pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
