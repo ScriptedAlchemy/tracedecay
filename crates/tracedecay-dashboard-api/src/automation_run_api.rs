@@ -21,7 +21,7 @@ use tracedecay_agent_hosts::automation::config::{
 use tracedecay_agent_hosts::automation::run_ledger::{
     AutomationRunArtifact, AutomationRunArtifactKind, AutomationRunLedgerRecord,
     AutomationRunStatus, AutomationTrigger, append_run_record, find_run_record,
-    read_published_artifact_manifest, read_run_artifact_payload,
+    read_published_artifact_chain, read_run_artifact_payload,
 };
 use tracedecay_agent_hosts::ports::session_evidence::{LcmGrepSort, LcmScope};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
@@ -194,11 +194,11 @@ pub async fn artifact_list(
         Ok(Some(record)) => {
             let count = record.artifacts.len();
             let integrity =
-                read_published_artifact_manifest(&state.dashboard_root, &run_id, None).await;
+                read_published_artifact_chain(&state.dashboard_root, &run_id, None).await;
             let (integrity_status, integrity_verified) = match integrity {
                 Ok(Some(published)) if published == record.artifacts => ("verified", true),
-                Ok(Some(_)) => ("ledger_manifest_mismatch", false),
-                Ok(None) => ("manifest_unavailable", false),
+                Ok(Some(_)) => ("ledger_publication_mismatch", false),
+                Ok(None) => ("publication_unavailable", false),
                 Err(_) => ("verification_failed", false),
             };
             (
@@ -301,7 +301,6 @@ fn expected_artifact_chain_kinds() -> Vec<&'static str> {
         AutomationRunArtifactKind::ValidationGate.as_str(),
         AutomationRunArtifactKind::OptimizerDiagnosis.as_str(),
         AutomationRunArtifactKind::CodexHandoff.as_str(),
-        AutomationRunArtifactKind::Manifest.as_str(),
     ]
 }
 
