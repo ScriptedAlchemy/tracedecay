@@ -26,10 +26,10 @@
  */
 import { useQuery } from '@tanstack/react-query';
 import {
-  CodeIndexFreshnessPayloadSchema,
-  type CodeIndexFreshnessPayload,
+  CodeIndexFreshnessPayloadV1Schema,
+  type CodeIndexFreshnessPayloadV1,
   type CodeIndexWorktreeFreshnessV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { authorizationState } from '../../ui/EnvelopeTruth.tsx';
@@ -41,7 +41,7 @@ export function IndexFreshness() {
   const freshness = useQuery({
     queryKey: ['code-index', 'freshness', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadSchema),
+      fetchEnvelope(scopedUrl(scope, '/api/code-index/freshness'), CodeIndexFreshnessPayloadV1Schema),
     refetchInterval: 30_000,
   });
 
@@ -62,7 +62,7 @@ export function IndexFreshness() {
   );
 }
 
-function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnessPayload> }) {
+function FreshnessReading({ result }: { result: EnvelopeResult<CodeIndexFreshnessPayloadV1> }) {
   if (result.outcome === 'transport') {
     return (
       <div className="flex flex-col gap-1.5">

@@ -31,7 +31,7 @@ where
     Box::pin(future)
 }
 
-pub(super) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
+pub(crate) const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
     "tracedecay_admin_branch_add",
     "tracedecay_admin_cli",
     "tracedecay_admin_project",
