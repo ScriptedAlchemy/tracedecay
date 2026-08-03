@@ -8,7 +8,7 @@ is live. Hook V2 host admission constructs the retained external-source
 definition, binding, authorization, refresh, envelope, frontier, object, and
 evidence values and commits them through `SourceCaptureApplicationV1` to the
 canonical store. The earlier blanket characterization of this contract as
-having no production capture/authorization composition, adapter, or migration
+having no production capture/authorization composition, adapter, or conversion
 was wrong for that path. Broader provider acquisition and canonical-refetch
 composition remains dormant and is still a retained future seam rather than a
 delivered PR5/PR6 capability or PR8–PR14 work to rebuild.
@@ -57,13 +57,13 @@ consumer.
 - PR5 source positions and cursors are provider-safe opaque values; numeric and
   content-hash cursors cannot be compared under the wrong ordering rule.
 - Each later vertical PR adds the smallest final contract it consumes.
-  Pure source-only/internal request helpers change in place. Wire-visible
-  request revisions retain negotiation until an authorized
-  installed-client/host census proves absence. Once a domain value can be
-  written to a store, spool, file, journal, checkpoint, receipt, or persisted
-  projection, its old version remains readable or receives an explicit
-  migration until the registered-store/profile census proves absence; a
-  version suffix or test fixture alone is not publication evidence.
+  Pure source-only/internal request helpers change in place. Only an actually
+  independently released public wire/API revision may retain protocol
+  compatibility. Every persisted domain value accepts only the exact final V2
+  shape; any other store, spool, file, journal, checkpoint, receipt, or
+  projection returns typed `ResetRequired` and requires explicit reset or
+  recreation. There is no storage reader, migration, backfill, dual write, or
+  census path; a version suffix or test fixture alone is not release evidence.
 - Provider-exposed reasoning may be represented with visibility and retention;
   hidden reasoning is never inferred or reconstructed.
 
@@ -129,7 +129,7 @@ of this plan are evidence of these distinctions, not current declaration or
 scaffold requirements. An audit must locate the current domain owner and verify
 the callable behavior and regressions below before calling any old name missing.
 
-## Delivery, migration, and regression evidence
+## Delivery and regression evidence
 
 The owning product path preserves this dependency direction: domain identities,
 definition/binding validation, frontiers, and lineage feed Plan 02 persistence,
@@ -139,17 +139,14 @@ Plan 16 scope resolution, Plan 20 binding configuration mutation, Plan 23
 temporal interpretation, and Plan 27 acquisition, scheduling, packaging, and
 lifecycle.
 
-Where live persisted observations prove a predecessor exists, the additive
-migration seeds the first shipped source definition and maps those
-profile/project observations to bindings without changing observation or
-anchor identity. It hashes legacy native identity in the existing privacy
-domain, records `Unknown` coverage when an exact predecessor frontier cannot be
-proven, and returns the same receipt on rerun. Unreleased source-only/internal
-source-definition request helpers are finalized in place; wire-visible
-revisions remain negotiated until the authorized installed-client/host census.
-Any source definition, binding, cursor, frontier, journal, checkpoint, or
-receipt written by dogfood remains in this migration until the
-registered-store/profile census proves absence.
+The final source-definition and binding path admits current canonical
+observations only. Any persisted predecessor source definition, binding,
+cursor, frontier, journal, checkpoint, or receipt returns typed
+`ResetRequired` and requires explicit reset or recreation; it is never mapped,
+read, backfilled, or converted. Unreleased source-only/internal helpers and
+branch-local V2 wire-visible revisions finalize in place. An independently
+released public wire/API revision may retain a separate evidence-backed
+protocol compatibility surface.
 
 Direct regression evidence must prove canonical encoding and unknown-field
 handling; digest tamper, raw-identifier, ambiguous-scope, and invalid-capability

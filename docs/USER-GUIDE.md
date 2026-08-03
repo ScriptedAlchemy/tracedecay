@@ -321,7 +321,7 @@ mkdir -p ~/.cursor/plugins/local
 ln -s /path/to/tracedecay/cursor-plugin ~/.cursor/plugins/local/tracedecay
 ```
 
-Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; when dogfooding a checkout, run the installer from that checkout or ensure your shell PATH resolves the intended binary.
+Reload Cursor after installing or replacing the plugin. The plugin expects the `tracedecay` binary to be available on `PATH`; ensure your shell PATH resolves the intended installed binary.
 
 Codex global install is plugin-based for MCP, hooks, and skills. TraceDecay
 writes the plugin source bundle and marketplace entry; Codex CLI installs the
