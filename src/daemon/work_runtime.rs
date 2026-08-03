@@ -25,13 +25,14 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex_app_server::CodexAppServerSummaryConfig;
 
 mod codex_provider;
-mod native_cli;
+mod provider_registry;
 #[cfg(all(test, unix))]
 mod tests;
 
 #[cfg(test)]
 pub(crate) use codex_provider::CODEX_PROVIDER_ID;
 use codex_provider::{NativeWorkProviderConfigV1, NativeWorkProviderV1};
+use provider_registry::WorkProviderRegistry;
 
 /// Provider executions one daemon project runtime may run at once.
 const DEFAULT_WORK_EXECUTION_CAPACITY: usize = 4;
@@ -42,7 +43,7 @@ where
 {
     authority: WorkAuthority,
     storage: S,
-    queue: Arc<WorkExecutionQueueV1<NativeWorkProviderV1<S>>>,
+    queue: Arc<WorkExecutionQueueV1<WorkProviderRegistry<S>>>,
     execution: WorkExecutionService<S>,
     observation_db: Arc<RegisteredGlobalDb>,
     project_root: PathBuf,
@@ -94,7 +95,7 @@ where
             authority,
             storage: storage.clone(),
             queue: Arc::new(WorkExecutionQueueV1::new(
-                provider,
+                WorkProviderRegistry::with_provider(provider),
                 WorkDispatchBoundsV1::new(capacity),
             )),
             execution: WorkExecutionService::new(storage),
