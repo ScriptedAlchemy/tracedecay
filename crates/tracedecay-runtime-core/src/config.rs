@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::errors::{Result, TraceDecayError};
 
+#[cfg(test)]
+mod tests;
+
 /// Name of the configuration file stored inside the data directory.
 pub const CONFIG_FILENAME: &str = "config.json";
 

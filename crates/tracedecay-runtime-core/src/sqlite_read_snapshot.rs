@@ -23,7 +23,6 @@ pub struct SnapshotDatabase {
     path: PathBuf,
     _scratch: Option<Arc<ScratchDirectory>>,
     _authority: crate::db::DatabaseAuthority,
-    #[cfg(test)]
     copied_bytes: u64,
 }
 
@@ -53,7 +52,6 @@ impl SnapshotDatabase {
         }
     }
 
-    #[cfg(test)]
     pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
@@ -142,7 +140,6 @@ impl SnapshotSet {
         self.copied_bytes
     }
 
-    #[cfg(test)]
     pub fn database_count(&self) -> usize {
         self.databases.len()
     }
@@ -390,7 +387,6 @@ async fn finish_one(
         path: open_path,
         _scratch: scratch,
         _authority: prepared.authority,
-        #[cfg(test)]
         copied_bytes: prepared.copy_bytes,
     };
     snapshot.validate_source()?;
