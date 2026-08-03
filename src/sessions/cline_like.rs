@@ -329,7 +329,7 @@ fn metadata_project_location(
             }
             ProjectMembership::NoMatch => {}
             ProjectMembership::Unknown => return None,
-        };
+        }
     }
     matched
 }
