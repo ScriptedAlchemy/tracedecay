@@ -15,10 +15,11 @@ use crate::state::{
 use crate::traversal;
 use crate::vector;
 use crate::{
-    GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
-    GraphIdempotencyKey, GraphMutation, GraphProjectionId, GraphProperty, GraphPropertyName,
-    GraphPublication, GraphRelation, GraphRelationId, GraphWriteBatch, ProjectionReplacement,
-    TraversalRequest, TraversalResult, VectorSearchRequest, VectorSearchResult,
+    GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability, GraphEntity,
+    GraphEntityId, GraphIdempotencyKey, GraphMutation, GraphProjectionId, GraphProperty,
+    GraphPropertyName, GraphPublication, GraphRelation, GraphRelationId, GraphWriteBatch,
+    ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
+    VectorSearchResult,
 };
 
 #[derive(Clone)]
@@ -38,7 +39,7 @@ struct Inner {
 
 pub struct GraphSnapshot {
     database: Arc<GrafeoDB>,
-    state: Arc<StateCache>,
+    pub(crate) state: Arc<StateCache>,
 }
 
 impl std::fmt::Debug for GraphDb {
@@ -295,6 +296,21 @@ impl GraphDb {
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
         let cached = self.state_read_guard()?;
         traversal::traverse(database, &cached, request)
+    }
+
+    pub(crate) fn point_read_state(
+        &self,
+        cancellation: &dyn GraphCancellation,
+    ) -> Result<RwLockReadGuard<'_, StateCache>, GraphDbError> {
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let guard = self.read_guard()?;
+        guard.as_ref().ok_or(GraphDbError::Closed)?;
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        self.state_read_guard()
     }
 
     pub fn vector_search(
