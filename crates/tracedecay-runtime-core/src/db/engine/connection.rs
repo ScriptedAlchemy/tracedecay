@@ -38,7 +38,7 @@ pub(super) trait Runtime: Send + Sync {
     #[cfg(any(test, feature = "test-helpers"))]
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
     fn begin_immediate(&self) -> Result<RuntimeTransaction>;
-    fn begin_schema_migration_immediate(&self) -> Result<RuntimeTransaction>;
+    fn begin_authorized_long_lease_immediate(&self) -> Result<RuntimeTransaction>;
 }
 
 impl Runtime for MigrationSqlHandle {
@@ -103,8 +103,9 @@ impl Runtime for MigrationSqlHandle {
         self.begin_immediate().map_err(Into::into)
     }
 
-    fn begin_schema_migration_immediate(&self) -> Result<RuntimeTransaction> {
-        self.begin_schema_migration_immediate().map_err(Into::into)
+    fn begin_authorized_long_lease_immediate(&self) -> Result<RuntimeTransaction> {
+        self.begin_authorized_long_lease_immediate()
+            .map_err(Into::into)
     }
 }
 
@@ -145,10 +146,7 @@ impl ReadConnection {
     #[must_use]
     pub fn background(&self) -> Self {
         Self {
-            connection: Connection {
-                runtime: Arc::clone(&self.connection.runtime),
-                read_priority: OperationPriorityV1::Background,
-            },
+            connection: self.connection.background_reads(),
         }
     }
 }
@@ -164,6 +162,28 @@ impl Connection {
     pub fn read_only(&self) -> ReadConnection {
         ReadConnection {
             connection: self.clone(),
+        }
+    }
+
+    /// The same store and the same writer, with every read this handle issues
+    /// admitted as background work.
+    ///
+    /// Writes are unaffected: the returned handle shares this one's runtime, so
+    /// `execute`, `execute_batch`, and every transaction still reach the same
+    /// serialized writer. Only the reader-pool admission of non-transactional
+    /// `query`/`read_snapshot` calls changes, and those then admit against the
+    /// unreserved slice of the general lane.
+    ///
+    /// Background maintenance that runs on a *write* connection needs this:
+    /// [`Self::attach`] defaults to `Foreground`, so a bulk sweep driven from
+    /// the writer would otherwise contend for the same reserved lane slice as
+    /// interactive queries — and, because reader leases are bounded, be the
+    /// first thing to fail once it has saturated that lane itself.
+    #[must_use]
+    pub fn background_reads(&self) -> Self {
+        Self {
+            runtime: Arc::clone(&self.runtime),
+            read_priority: OperationPriorityV1::Background,
         }
     }
 
@@ -306,13 +326,17 @@ impl Connection {
         }
     }
 
-    /// Begins the authority-bound transaction used by schema migration.
+    /// Begins the authority-bound transaction whose lease renews on progress.
     ///
-    /// Only its explicit schema-step methods may bypass the ordinary
-    /// per-statement deadline. All other operations retain ordinary bounds.
-    pub async fn schema_migration_transaction(&self) -> Result<Transaction> {
+    /// Reserved for schema installation on a fresh or index-less store and for
+    /// full-index bulk replacement — writes that legitimately outlive one fixed
+    /// lease while continuously making progress. It steps no store forward from
+    /// an older shape. Only its explicit schema-step methods may bypass the
+    /// ordinary per-statement deadline; all other operations retain ordinary
+    /// bounds, and idleness, shutdown, and authority revocation still cancel.
+    pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
         let runtime = Arc::clone(&self.runtime);
-        tokio::task::spawn_blocking(move || runtime.begin_schema_migration_immediate())
+        tokio::task::spawn_blocking(move || runtime.begin_authorized_long_lease_immediate())
             .await
             .map_err(join_error)?
             .map(|transaction| Transaction::from_runtime(transaction, Arc::clone(&self.runtime)))
@@ -353,13 +377,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_migration_entrypoint_requires_attached_write_authority() {
+    async fn long_lease_entrypoint_requires_attached_write_authority() {
         let directory = tempfile::TempDir::new().unwrap();
         let plain =
             TestConnection::open_without_write_authority(&directory.path().join("plain.sqlite3"));
 
-        let error = match plain.schema_migration_transaction().await {
-            Ok(_) => panic!("schema migration must require attached authority"),
+        let error = match plain.authorized_long_lease_transaction().await {
+            Ok(_) => panic!("long-lease transaction must require attached authority"),
             Err(error) => error,
         };
 
@@ -373,7 +397,7 @@ mod tests {
             Arc::new(AllowWrites),
         );
         authorized
-            .schema_migration_transaction()
+            .authorized_long_lease_transaction()
             .await
             .unwrap()
             .rollback()

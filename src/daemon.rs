@@ -35,9 +35,7 @@ use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_bran
 use branch_admin::{StoreAdministration, parse_branch_admin_request, write_branch_admin_response};
 #[cfg(all(unix, test))]
 use memory_repair_scheduler::{
-    MemoryRepairPassDecision, MemoryRepairSchedulerHandle, MemoryRepairTickOutcome,
-    legacy_memory_cutover_should_retry, memory_repair_tick_outcome,
-    run_memory_repair_scheduler_tick,
+    MemoryRepairPassDecision, MemoryRepairSchedulerHandle, run_memory_repair_scheduler_tick,
 };
 #[cfg(all(unix, test))]
 use scheduler::{
@@ -302,8 +300,8 @@ use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, project_open_cancellation_checkpoint,
     project_open_cancellation_error, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
-    project_warming_error,
+    project_open_tasks, project_open_writer_busy_error, project_route_for_handshake,
+    project_server_capacity_error, project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
@@ -318,6 +316,7 @@ mod scheduler;
 mod service;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
+mod store_writer_gate;
 mod wire_io;
 pub(crate) mod work_runtime;
 pub(crate) mod workflow_runtime;

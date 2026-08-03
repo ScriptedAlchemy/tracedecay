@@ -182,7 +182,9 @@ fn scheduler(
 fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvidenceV1 {
     match outcome {
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence,
-        CodeIndexReconcileOutcomeV1::Noop(_) => panic!("expected a published generation"),
+        CodeIndexReconcileOutcomeV1::Noop(evidence) => {
+            panic!("expected a published generation, got noop {evidence:?}")
+        }
     }
 }
 
@@ -196,9 +198,15 @@ fn retention_generations(
         store_root.to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
     );
+    // Every seeded revision must carry content no earlier revision published.
+    // A store is seeded per scope while the fixture worktree is shared, so a
+    // per-call `0..count` sequence replayed the same bytes for the second scope
+    // and the scheduler correctly no-op'd instead of sealing a new generation.
+    static SEEDED_REVISION: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
     let mut generations = Vec::with_capacity(count);
     for revision in 0..count {
         if revision > 0 {
+            let revision = SEEDED_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             fixture.edit(
                 "src/lib.rs",
                 &format!("pub fn retained_revision() -> usize {{ {revision} }}\n"),
@@ -1363,7 +1371,13 @@ async fn existing_path_remount_rejects_foreign_project_identity() {
 
 #[test]
 fn empty_generation_restart_preserves_project_identity() {
-    let fixture = GitFixture::new(&[("README.md", "# fixture\n")]);
+    // A file with a compiled language descriptor (so the snapshot has something
+    // extractable and the reconcile reaches a publish) whose content yields no
+    // symbols, so the sealed generation is chunk-empty. `# fixture` used to be
+    // that file, but the markdown extractor now chunks headings, which made
+    // this fixture produce a non-empty generation and stopped exercising the
+    // empty-generation restore this test exists for.
+    let fixture = GitFixture::new(&[("README.md", "")]);
     let store = TempDir::new().expect("store root");
     let project_id = ProjectId::new("project.empty-restart").expect("valid project");
     let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
@@ -1831,7 +1845,29 @@ async fn mounted_bundled_query_worktree(
     fixture: &GitFixture,
     store: &TempDir,
 ) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
-    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    mounted_bundled_query_worktree_in(CodeIndexSchedulerRegistryV1::new(1), fixture, store).await
+}
+
+/// The same worktree as [`mounted_bundled_query_worktree`], mounted into a
+/// registry whose background-reconcile admission is bounded to one permit so a
+/// test can occupy it and hold the worker at its dequeue point.
+async fn mounted_bundled_query_worktree_with_one_permit(
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
+    mounted_bundled_query_worktree_in(
+        CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(1, 1),
+        fixture,
+        store,
+    )
+    .await
+}
+
+async fn mounted_bundled_query_worktree_in(
+    registry: CodeIndexSchedulerRegistryV1,
+    fixture: &GitFixture,
+    store: &TempDir,
+) -> (CodeIndexSchedulerRegistryV1, ResolvedScope) {
     registry
         .mount_worktree(
             test_project_id(),
@@ -1854,6 +1890,21 @@ async fn mounted_bundled_query_worktree(
         snapshot.reference.clone(),
     )
     .expect("resolved scope");
+    mount_bundled_query_authority(&registry, fixture.path(), &scope, &latest).await;
+    (registry, scope)
+}
+
+/// Mount the bundled query authority for one exact scope against an
+/// already-mounted worktree. The authority slot is keyed by the scope digest,
+/// so remounting under a different reference is exactly what a daemon does when
+/// it opens a project whose HEAD has moved since the retained generation was
+/// sealed.
+async fn mount_bundled_query_authority(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project_root: &Path,
+    scope: &ResolvedScope,
+    latest: &super::LatestCompleteCodeIndexV1,
+) {
     let (_, accepted, _) =
         crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
     let keyring = RetrievalCursorKeyringV1::new(
@@ -1875,10 +1926,22 @@ async fn mounted_bundled_query_worktree(
         .expect("query authority"),
     );
     registry
-        .mount_query_authority(fixture.path(), &scope, authority)
+        .mount_query_authority(project_root, scope, authority)
         .await
         .expect("mount bundled authority");
-    (registry, scope)
+}
+
+/// The same repository and worktree under a reference the admitted scope has
+/// already moved past — the shape every restored generation has after the
+/// ordinary commit/branch-then-restart cycle.
+fn moved_reference_scope(scope: &ResolvedScope) -> ResolvedScope {
+    ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        Some(RefId::new("refs/heads/moved-after-seal").expect("moved reference")),
+    )
+    .expect("moved scope")
 }
 
 /// The defect this covers: during any generation rebuild the ready gate
@@ -2086,6 +2149,221 @@ async fn search_fails_fast_when_no_complete_generation_exists() {
     }
 
     empty.shutdown().await;
+    registry.shutdown().await;
+}
+
+/// The live outage this covers: `serving_generation` is in-memory, so after a
+/// daemon restart it is reseeded from the *restored sealed* generation — which
+/// was sealed under whatever reference was current when it was published. The
+/// ordinary develop cycle (commit or switch branch, then restart) therefore
+/// leaves every restored generation carrying a reference the admitted scope has
+/// moved past, and the exact scope gate made all of them unservable. Serve-stale
+/// died with the process and search collapsed into `GenerationUnavailable` for
+/// the whole rebuild window, which on a large repository is tens of minutes.
+#[tokio::test]
+async fn search_serves_a_restored_generation_stale_across_a_moved_reference() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+
+    // Baseline under the sealed reference: the ready path, byte-for-byte.
+    let fresh = registry
+        .execute_query_search(&scope, bundled_search_request("main"))
+        .await
+        .expect("ready generation serves the fresh path");
+    assert!(!fresh.served_stale);
+    let fresh_generation = fresh.generation.clone();
+    let fresh_candidates = fresh.authorized.fallback.ordered_candidates.clone();
+    assert!(!fresh_candidates.is_empty(), "live main symbol is returned");
+
+    // The reference moves. Nothing else about the worktree changes, and the
+    // daemon mounts the authority for the *new* scope exactly as project open
+    // does.
+    let moved = moved_reference_scope(&scope);
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("retained generation");
+    mount_bundled_query_authority(&registry, fixture.path(), &moved, &latest).await;
+
+    assert!(
+        registry
+            .latest_complete_ready_for_scope(&moved)
+            .await
+            .is_none(),
+        "the ready gate must never report a moved-reference generation as current"
+    );
+    let serving = registry
+        .latest_complete_serving_for_scope(&moved)
+        .await
+        .expect("the retained generation stays servable across a reference move");
+    assert_eq!(
+        serving.generation.manifest().generation_id,
+        fresh_generation,
+        "the relaxed arm serves the generation that was actually retained"
+    );
+    // Attribution is generation-bound, not scope-bound: the served generation
+    // still names its own sealed reference, so the answer is attributed to the
+    // revision that produced it rather than to the scope that asked.
+    assert_ne!(
+        serving.generation.snapshot().reference,
+        moved.reference,
+        "the served generation keeps its own sealed reference"
+    );
+
+    let stale = registry
+        .execute_query_search(&moved, bundled_search_request("main"))
+        .await
+        .expect("search survives restart-after-a-reference-move instead of failing");
+    assert!(
+        stale.served_stale,
+        "a moved-reference answer must be reported stale, never as current"
+    );
+    assert_eq!(
+        stale.generation, fresh_generation,
+        "the stale answer names the complete generation that actually answered"
+    );
+    assert_eq!(
+        stale.authorized.fallback.ordered_candidates, fresh_candidates,
+        "serving stale changes only the coverage marker, not ranking identity"
+    );
+
+    // The grep/context/callers ladder survives the same move.
+    let ladder = registry
+        .latest_complete_fresh_for_scope(&moved)
+        .await
+        .expect("the callable-code ladder also serves through a moved reference");
+    assert_eq!(ladder.generation.manifest().generation_id, fresh_generation);
+
+    registry.shutdown().await;
+}
+
+/// The relaxed arm is relaxed on `reference` only. A different repository or a
+/// different worktree is a different identity and must stay unservable, or a
+/// stale answer would be mis-attributed rather than merely old.
+#[tokio::test]
+async fn serving_arms_still_refuse_a_different_worktree_identity() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_bundled_query_worktree(&fixture, &store).await;
+
+    let foreign = ResolvedScope::new(
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        WorktreeId::new("worktree.some-other-checkout").expect("worktree id"),
+        scope.reference.clone(),
+    )
+    .expect("foreign scope");
+    assert!(
+        registry
+            .latest_complete_serving_for_scope(&foreign)
+            .await
+            .is_none(),
+        "a different worktree identity never inherits a retained generation"
+    );
+    assert!(
+        registry
+            .latest_complete_fresh_for_scope(&foreign)
+            .await
+            .is_none(),
+        "the callable-code ladder refuses a different worktree identity too"
+    );
+
+    registry.shutdown().await;
+}
+
+/// The second half of the outage: search resolves its generation without ever
+/// running the freshness ladder, so when both arms came up empty nothing
+/// requested the reconcile that would remedy it — the typed failure repeated
+/// forever. Search must now ask for its own remedy, exactly once per due
+/// window, and must still never reconcile inline or park.
+// Holding the scheduler guard across the awaits is the scenario: it is how this
+// test occupies the window where neither arm can resolve. Released before
+// shutdown.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let (registry, scope) = mounted_bundled_query_worktree_with_one_permit(&fixture, &store).await;
+
+    // Occupy the single background-reconcile permit so the worker parks at its
+    // dequeue point and the pending wake stays observable for the whole test.
+    let admission = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("background reconcile admission");
+
+    let scheduler = {
+        let mounted = registry.mounted.lock().await;
+        Arc::clone(
+            &mounted
+                .get(&fixture.path().canonicalize().expect("canonical root"))
+                .expect("mounted worktree")
+                .scheduler,
+        )
+    };
+    // Nothing retained and the scheduler owned elsewhere: both arms come up
+    // empty, which is the exact None/None admission that used to be silent.
+    registry.clear_serving_generation_for_scope(&scope).await;
+    let held = scheduler
+        .lock()
+        .expect("hold the scheduler as a rebuild would");
+    registry.clear_pending_wake_for_scope(&scope).await;
+
+    match registry
+        .execute_query_search(&scope, bundled_search_request("main"))
+        .await
+    {
+        Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable) => {}
+        Err(other) => panic!("expected the typed fail-fast, got {other:?}"),
+        Ok(_) => panic!("absent generations must not be degraded into an answer"),
+    }
+    let stamped = registry
+        .pending_wake_micros_for_scope(&scope)
+        .await
+        .expect("mounted worktree");
+    assert_ne!(
+        stamped, 0,
+        "a search that resolved to nothing must request the rebuild that remedies it"
+    );
+
+    // Repeated failing searches inside the same due window must not storm the
+    // worker: the outstanding wake already is the remedy they would ask for.
+    for _ in 0..4 {
+        let _ = registry
+            .execute_query_search(&scope, bundled_search_request("main"))
+            .await;
+        assert!(
+            !registry.request_query_background_reconcile(&scope).await,
+            "an outstanding wake must debounce every further admission"
+        );
+        assert_eq!(
+            registry
+                .pending_wake_micros_for_scope(&scope)
+                .await
+                .expect("mounted worktree"),
+            stamped,
+            "the pending arrival must keep the first admission's instant"
+        );
+    }
+
+    // A fresh due window (the worker claimed the wake) admits exactly one more.
+    registry.clear_pending_wake_for_scope(&scope).await;
+    assert!(
+        registry.request_query_background_reconcile(&scope).await,
+        "a new due window admits one request"
+    );
+    assert!(
+        !registry.request_query_background_reconcile(&scope).await,
+        "and only one"
+    );
+
+    drop(held);
+    // Release the worker before shutdown: it is parked on this permit, and
+    // `shutdown` joins its task.
+    drop(admission);
     registry.shutdown().await;
 }
 
@@ -2634,6 +2912,12 @@ async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock()
         )
         .await
         .expect("mount worktree");
+    // Let the mount-time reconcile finish first. Until it does, the background
+    // worker owns the scheduler lock itself, and shutdown joining a worker that
+    // is *already* blocked acquiring that lock is a different wait than the one
+    // under test — this test is about shutdown never taking the lock on its own
+    // behalf.
+    wait_for_initial_generation(&registry, fixture.path()).await;
     let scheduler = registry
         .scheduler_handle(fixture.path())
         .await
@@ -3955,6 +4239,12 @@ async fn semantic_mcp_abstention_uses_freshest_sealed_generation() {
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     git(fixture.path(), &["commit", "-qam", "external"]);
+    // Query admission schedules the reconcile instead of running it inline, so
+    // the out-of-band commit lands on the background worker. The abstention
+    // still reports the freshest *sealed* generation; it just no longer forces
+    // the rebuild that seals it onto whichever request arrived first.
+    let _ = registry.semantic_mcp_abstention(fixture.path()).await;
+    wait_for_generation_change(&registry, fixture.path(), &initial).await;
     let refreshed = registry.semantic_mcp_abstention(fixture.path()).await;
     assert_ne!(refreshed.code_generation.as_deref(), Some(initial.as_str()));
     assert_eq!(
@@ -4271,15 +4561,19 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
     let cursor = first_page.next_cursor.clone().expect("continuation cursor");
     let original_generation = first_page.generation.clone();
 
-    let encoded = cursor
+    // The envelope prefix names the cursor wire revision and is bumped whenever
+    // that contract changes (it is `ccq2.` today). Take it from the cursor the
+    // production path just minted rather than pinning a literal here: this test
+    // is about expiry tampering, not about which revision is current.
+    let (prefix, encoded) = cursor
         .as_str()
-        .strip_prefix("ccq1.")
-        .expect("callable cursor prefix");
+        .split_once('.')
+        .expect("callable cursor revision prefix");
     let mut tampered: serde_json::Value =
         serde_json::from_slice(&hex::decode(encoded).expect("cursor hex")).expect("cursor JSON");
     tampered["payload"]["expires_at"] = serde_json::json!(0);
     let tampered = OpaqueCursor::new(format!(
-        "ccq1.{}",
+        "{prefix}.{}",
         hex::encode(serde_json::to_vec(&tampered).expect("tampered cursor JSON"))
     ))
     .expect("tampered cursor");
@@ -4317,14 +4611,16 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
         "mod a { pub fn shared() {} }\nmod b { pub fn shared() {} }\nmod c { pub fn shared() {} }\npub fn unrelated() {}\n",
     );
     git(fixture.path(), &["commit", "-qam", "refresh"]);
-    let refreshed = registry
+    // Serve-old-first: the freshness ladder answers from the retained
+    // generation and only *requests* the rebuild, so the new generation
+    // arrives from the background worker rather than from this call.
+    let _requested = registry
         .latest_complete_fresh(fixture.path())
         .await
-        .expect("refreshed generation");
-    assert_ne!(
-        refreshed.generation.manifest().generation_id,
-        original_generation
-    );
+        .expect("retained generation stays servable while the rebuild runs");
+    let refreshed =
+        wait_for_generation_change(&registry, fixture.path(), &original_generation).await;
+    assert_ne!(refreshed, original_generation);
 
     let continuation_request = ExactOccurrenceRequest::new(
         "shared",
@@ -4533,6 +4829,13 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
         Some(initial.clone()),
         "an out-of-band commit is not reflected until the freshness ladder runs"
     );
+
+    // Query admission runs the ladder's *checks* inline but never its rebuild:
+    // the reconcile is handed to the background worker so no request pays
+    // O(store) for it. The commit therefore lands a moment later, not on the
+    // first query, and the unpinned query then serves it.
+    let _ = registry.latest_complete_fresh(fixture.path()).await;
+    wait_for_generation_change(&registry, fixture.path(), &initial).await;
 
     // An unpinned query resolves the serving generation through the ladder.
     let operation =

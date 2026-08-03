@@ -225,10 +225,77 @@ timeout. Cold-open of a large store under load is the one sanctioned slow
 path, and it converges via freshness witnesses (skip redundant re-index)
 rather than by serving stale data.
 
+Per-group wraps are not enough on their own, because a group can simply have no
+wrap. `dispatch_deadline_horizon_micros` returns `None` for anything that is
+neither an application-surface operation nor a controlled read, so every graph,
+info, analysis, health, and session tool — `tracedecay_context` included —
+reached its handler carrying no deadline at all. A live Codex `context` call
+hung for **900 seconds** against a daemon grinding a failing semantic publish
+loop, and the client's own timeout, not the daemon, ended it.
+
+The bound is therefore universal and lives at the single dispatch choke point
+in `mcp::tools::handlers`, beneath the per-group wraps rather than beside them:
+the carried admission deadline when one is present and shorter, otherwise
+`TOOL_DISPATCH_CEILING`. A tool added tomorrow inherits it without opting in,
+and no handler can opt out. The ceiling also clamps a carried deadline longer
+than itself, so carrying a distant deadline is not an escape hatch. The few
+tools whose requested work *is* a long job (running a test suite, an admin
+index) carry `LONG_RUNNING_TOOL_DISPATCH_CEILING` instead — still bounded, and
+still far below the 900 seconds that motivated this.
+
+That ceiling is only the backstop. The hold it catches was real work on the
+request path: `latest_complete_fresh` ran the freshness ladder's *remedy*
+(`ensure_fresh_for_query`, a full O(store) reconcile and publish) inline on
+whichever request won the scheduler lock. Serve-old-first already protected the
+losers of that lock; the winner still paid. Query admission now runs the
+ladder's cheap checks inline and hands the rebuild to the background worker,
+answering from the retained generation exactly as the busy path always did. The
+git authority is still proven inline with an O(1) probe, so a vanished `.git`
+still fails closed rather than serving bytes under an identity nothing can
+confirm, and a cold open with nothing servable still reconciles inline — the one
+sanctioned slow path. The visible contract change is that an out-of-band commit
+lands on the next background pass instead of being forced onto the first query
+to notice it, which is what "serving never couples to indexing recency"
+requires.
+
+### 7. A request never parks on a store-sized hold
+
+Serve-old/await-new applies to *locks* as well as generations. Three holds
+violated it and are now closed:
+
+- **Writer administration was one daemon-wide mutex.** Its own comment conceded
+  that "a background refresh or a generation rebuild can hold this gate for
+  minutes", and a git-watch sync held it across a full `cg.sync()`. The first
+  request for an *unrelated* project parked behind it with no deadline. The gate
+  is now per store (`daemon/store_writer_gate.rs`) with three classes —
+  `Destructive` (branch-store GC, totally exclusive on its store), `Owner`
+  (project open, owner rekey, scheduler transitions) and `Content` (index sync,
+  background refresh) — under a daemon-wide `RwLock` that store-scoped writers
+  hold shared and all-store sweeps hold exclusively. Exclusivity is preserved
+  exactly: two writers of the same class on one store still contend, and
+  `Destructive` still excludes everything on its store, which is what lets
+  branch GC keep proving no holder before it unlinks a SQLite family. Request-
+  side waits (project open) additionally carry a deadline and answer with the
+  typed retryable `store_writer_busy` rather than queuing without bound.
+- **The lazy stale-sync ran inline.** Edit-shaped tools walked the whole tree
+  (`find_stale_files`) and reindexed the entire stale set on the request path.
+  The cooldown claim is unchanged; the work is now detached through the same
+  single-flighted lane read tools use, and the tool answers on the current
+  snapshot.
+- **Branch-drift reopen ran inline.** The request that noticed a checkout
+  performed the full DB open plus sealed restore, then awaited the daemon owner
+  reconcile — through the writer gate — inside a live `tools/call`; the
+  branch-tracking-added path was worse still, blocking every caller on the
+  reopen mutex. The reopen is now detached and single-flighted, the owner
+  reconcile runs behind the swap, and every caller (the one that noticed the
+  drift included) serves the last complete snapshot until the swap lands.
+
 ## Status map (2026-08-01)
 
 | Principle | State |
 |---|---|
+| 7 per-store writer gates + request-side gate deadline | merged |
+| 7 detached lazy stale-sync + detached branch-drift reopen | merged |
 | 1 validation/admission/attribution memoization + generation LRU | merged |
 | 1 snapshot hash indices (record port + relation BFS adjacency) | merged |
 | 2 redundancy comparison-budget pacing + shared shingle merge | merged |
@@ -238,6 +305,8 @@ rather than by serving stale data.
 | 4 idna/remote-normalization memoization | merged |
 | 5 paging/bounded heaps/batch IN | merged (20-finding wave) |
 | 6 carried-deadline central wrap (git, memory) | merged |
+| 6 universal dispatch ceiling (every tools/call group) | merged |
+| 6 query-admission reconcile moved off the request path | merged |
 | CI perf gate (self-index + 6-worker load, budget verdicts) | merged |
 
 First post-wave measurement (2026-08-01, release build, 96-core host): index
@@ -290,8 +359,9 @@ manifest digest, batch publication digests — is derived by the projector from
 domain values, never from the store's encoding, and
 `ProjectedChunkVectorV1::validate` re-derives `output_digest` from the hydrated
 floats on every load, so a mis-bound payload fails closed rather than serving.
-A pre-migration document is still readable and is migrated forward on open
-under the existing revision CAS, so a crash leaves the original blob intact.
+Stores are now born row-per-vector: the inline-payload forward migration that
+once rewrote a pre-migration document on open has been removed, so there is no
+in-place blob rewrite left on the open path.
 
 Measured A/B on identical code with only the encoding differing (2,000 chunks ×
 768 dimensions, debug build): peak process RSS 227MB inline versus 125MB
@@ -299,30 +369,104 @@ row-per-vector, for the *same* published generation digest. Above the ~66MB
 process floor that is 161MB versus 59MB — a 6MB float corpus was costing 155MB
 to persist.
 
-### What remains
+### The metadata split
 
-The state document is still **O(store) in metadata**, and that is now the
-binding constraint. Per-vector row metadata, the per-chunk projection receipts
-(`ProjectionBatchReceiptV1::receipts`), `plan.expected_chunk_ids`,
-`committed_chunk_effects`, and the batch's changed-chunk set all scale with the
-corpus and are all still rendered into one JSON value bound as a single SQL
-parameter. The runtime caps a request at 64MB (`MAX_REQUEST_BYTES`), so a
-whole-corpus commit fails outright past a corpus-size ceiling:
+The state document was still **O(store) in metadata** after the payload split,
+and that was the binding constraint. Per-vector row metadata, the per-chunk
+projection receipts, `plan.expected_chunk_ids`, `committed_chunk_effects`, the
+prepared batches, the tombstone map and the physical-byte bindings all scaled
+with the corpus and were all rendered into one JSON value bound as a single SQL
+parameter against the runtime's 64MB `MAX_REQUEST_BYTES`:
 
 | encoding | 2,000 chunks | 5,000 | 10,000 | 20,000 |
 |---|---|---|---|---|
 | inline floats | ok | `RequestLimitExceeded` | — | — |
 | row-per-vector | ok | ok | ok | `RequestLimitExceeded` |
+| externalized metadata | ok | ok | ok | ok |
 
-A 150K-chunk generation therefore still cannot be persisted at all. Two things
-close it, and they are independent:
+Every one of those collections now lives in `semantic_vector_state_slice_v1`,
+content-addressed by the SHA-256 of its encoded bytes, cut into bounded slices,
+and verified against that address before it is parsed. The document keeps
+generation-level identity only. Content addressing also makes publication free:
+a staged collection and the published one it becomes hash alike, so the swap
+writes no new slices.
 
-- Move per-vector row metadata and per-chunk receipts into their own tables,
-  leaving the state document with generation-level identity only. The serde
-  adapters that elide the float payload today are the pattern: serde elides,
-  and a separate context-carrying walk does the row I/O.
-- Use the incremental commit path production already has available.
-  `commit_batch` takes an `expected_checkpoint` and tracks `completed_batches`,
-  so bounded incremental commits are supported by the contract — production
-  simply performs exactly one whole-corpus commit. Splitting it bounds both the
-  document and the live float set per commit.
+`ExternalV1` serializes *transparently*, so a digest over a value containing one
+is byte-identical to a digest over the bare collection — the build-identity
+digest still hashes the full expected chunk list. Only the state-document
+adapters elide. `DerefMut` clears the address, so a stale address is not
+representable. Fresh stores are created at this shape; the forward-migration
+path for a pre-externalization document has since been removed along with the
+rest of the branch's migration machinery.
+
+### Incremental commits
+
+Production performed exactly one whole-corpus commit, so the entire float corpus
+stayed live until a single terminal write and a crash mid-run discarded every
+embedding. It now splits the request, commits each batch as it completes, and
+resumes from the durable checkpoint.
+
+Splitting is identity-preserving by construction. Boundaries land on multiples
+of the projector's encoder group size, so every group holds exactly the changes
+a whole-corpus pass would have given it; the tensor shape never changes, so
+vector bytes, every `output_digest`, and the generation manifest digest built
+from them are byte-identical. The plan is decided from the whole request before
+any batch runs, so the generation's watermark and expected membership stay the
+corpus's. Only execution lineage differs — one receipt per batch rather than one
+for the corpus — which generation identity deliberately ignores.
+
+Resume reads the staged checkpoint once, before any encoder work. The build
+identity is a digest of the plan, so reopening the same plan re-adopts the same
+staged build and skips the batches already durable rather than re-embedding
+them.
+
+Measured (768 dimensions, release build, 96-core host), where
+`widest state document` is the value that used to grow with the corpus until it
+hit the request limit:
+
+| chunks | commits | widest state document | peak RSS |
+|---:|---:|---:|---:|
+| 30,000 | 1 | 2,961 B | 0.68 GiB |
+| 30,000 | 8 | 2,961 B | 0.66 GiB |
+| 75,000 | 19 | 2,962 B | 1.54 GiB |
+
+The document is flat: the curve is per-batch, not per-corpus. The 30,000-chunk
+rows publish the *same* generation `sha256:90f0a889…ed28dea8` at one commit and
+at eight, which is the digest-equality proof that splitting moves no identity.
+
+### Closed: the whole-corpus publication transaction
+
+*Superseded.* At 150,000 chunks every batch committed and the publication then
+failed with `SQLite execute failed: interrupted` — not the document ceiling (the
+document is still ~3KB) but the publication transaction running past a runtime
+guard: `MIGRATION_SQL_EXECUTION_LIMIT` bounds one guarded execution at 30
+seconds, and the batch progress handler also trips on a repeated authority
+check.
+
+The dominant writer that pushed publication past that bound — the inline-vector
+payload migration, which rewrote the whole corpus inside the same guarded
+transaction — no longer exists: stores are born row-per-vector and the migration
+was removed with the rest of the branch's migration machinery. The guard itself
+(`MIGRATION_SQL_EXECUTION_LIMIT`) is unchanged, so a large enough single
+publication could still trip it; the two mitigations below were never landed and
+are recorded as options, not as pending work.
+
+Publication is where the remaining O(store) SQL lives: it seals and writes two
+collections built fresh at that moment — the concatenated per-chunk receipts and
+the physical-byte bindings — and runs reclamation over every payload address.
+Two things are worth trying, in order:
+
+- `physical_vector_bindings` is fully derived from the generation's vectors and
+  embedding key; `ensure_physical_reuse_index` already rebuilds the pool from
+  them at load. Eliding the map entirely removes a corpus-sized collection from
+  the publication write, at the cost of making the load-time binding check
+  tautological.
+- Reclamation is provably a no-op on a first publication, because content
+  addressing means the staged collections' addresses are exactly the published
+  ones. Skipping the sweep when the loaded reference set is a subset of the new
+  one avoids hundreds of statements that delete nothing. Measured alone it did
+  not lift the 150K ceiling, so it is a latency win rather than the fix.
+
+Reclamation's anti-join was rewritten from `NOT IN (SELECT …)` to `NOT EXISTS`
+against the scratch table's primary key, which is one index probe per row rather
+than a scan of the reference set per row.

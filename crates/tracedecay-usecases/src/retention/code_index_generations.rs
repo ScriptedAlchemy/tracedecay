@@ -18,6 +18,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::{DirectorySyncPolicy, atomic_write};
+// The census gates on the exact revision the publisher writes. A second copy of
+// that number here let the writer be versioned to 3 while retention still
+// demanded 1: every real sealed file was refused as "incompatible" and the store
+// became uncollectable.
+use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
@@ -50,7 +55,6 @@ const SCOPE_RETENTION_TRANSACTION_SCHEMA: &str =
     "tracedecay.code-index-scope-retention-transaction.v1";
 const MAX_SCOPE_TRANSACTION_BYTES: u64 = 4 * 1024 * 1024;
 
-const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 1;
 const MAX_GENERATION_METADATA_PREFIX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TRANSACTION_BYTES: u64 = 1024 * 1024;
 

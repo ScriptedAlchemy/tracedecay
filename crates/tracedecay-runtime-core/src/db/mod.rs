@@ -44,30 +44,25 @@ pub use access::{
 };
 pub use analytics::HealthFileAggregate;
 pub use connection::Database;
-#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
-pub use connection::TestDatabaseRuntimeMode;
 pub use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
     DatabaseWriteTransaction,
 };
+#[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
+pub use connection::{TestDatabaseRuntimeMode, TestDatabaseRuntimeScope};
 pub use external_source::install_external_source_schema;
 pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
+pub(crate) use memory_v2::MemoryV2LegacyPurgeReceipt;
 pub use memory_v2::{
-    CapturedMemoryV2Frontiers, MemoryV2ArchiveDatabase, MemoryV2BackfillBatchOutcome,
-    MemoryV2CutoverOutcome, MemoryV2CutoverReceipt, export_memory_v2_owner_archive,
-    import_memory_v2_owner_archive, list_memory_v2_archive_owners,
-    plan_memory_v2_owner_archive_import,
-};
-pub(crate) use memory_v2::{
-    MemoryV2FeedbackHistoryRepairBatchOutcome, MemoryV2FeedbackHistoryRepairProgress,
-    MemoryV2LegacyPurgeReceipt,
+    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
+    list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
 };
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
-    publish_anchor_derivative, publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
+    publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,
 };
 pub use search::DependencyImportUse;
 pub use sql::{

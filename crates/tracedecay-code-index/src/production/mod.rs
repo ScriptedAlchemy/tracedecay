@@ -181,6 +181,22 @@ impl CodeIndexGenerationScopeV1 {
         }
     }
 
+    /// Whether two scopes name the same physical checkout.
+    ///
+    /// Repository and worktree are identity: a generation sealed under either
+    /// of them differing belongs to another checkout and may never be adopted.
+    /// `reference` is not identity — it is the label HEAD happens to carry, and
+    /// it moves under a fixed worktree on every ordinary commit, branch switch,
+    /// or rebase. Treating it as identity made the active generation of the
+    /// branch you just left "incompatible", so the first reconcile after any
+    /// branch switch failed outright and the worktree stopped indexing until
+    /// the store was rebuilt. The reference the generation was sealed under is
+    /// still carried on its own snapshot, so attribution stays generation-bound.
+    #[must_use]
+    pub fn identifies_same_checkout(&self, other: &Self) -> bool {
+        self.repository == other.repository && self.worktree == other.worktree
+    }
+
     fn validate(&self) -> Result<(), CodeIndexPublicationStoreErrorV1> {
         self.repository
             .validate()
@@ -336,7 +352,14 @@ impl SharedPhysicalCodeArtifactPoolV1 {
     }
 }
 
-const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
+/// The sealed-generation envelope revision this build writes.
+///
+/// Every reader that gates on the sealed format — the publication store, the
+/// worker probe, and code-generation retention — must gate on this one value.
+/// A second copy of the number in another crate is a silent store-wide outage
+/// the moment the writer is versioned: retention refuses every file it is
+/// supposed to sweep, and the store grows without bound.
+pub const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -457,7 +480,7 @@ pub struct CodeIndexPublishedGenerationV1 {
     /// Amortized parser-backed exact admission. `admit_all` re-canonicalizes and
     /// re-hashes every chunk, which is pure waste on the serving path once the
     /// immutable chunk set has been admitted. Only success is cached.
-    admitted: OnceLock<Vec<ExtractionAdmittedCodeSearchChunkV1>>,
+    admitted: OnceLock<Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>>,
     /// Amortized test-attribution join. Query admission rebuilds this authority
     /// per call even when the generation is unchanged; the traversal and its
     /// evidence digest are a pure function of the immutable generation. Only
@@ -766,11 +789,16 @@ impl CodeIndexPublishedGenerationV1 {
     /// Return chunks re-admitted through their parser-backed exact authority.
     /// Downstream exact/phrase/BM25 projections must consume this value rather
     /// than raw chunks, preserving the non-demotable exact tier.
+    ///
+    /// The admitted sweep is memoized per sealed generation and handed out as
+    /// a shared reference. Returning an owned `Vec` here deep-copied ~150K
+    /// chunks (content included) on every memo hit, which put an O(store)
+    /// memcpy on every search's request path.
     pub fn admitted_chunks(
         &self,
-    ) -> Result<Vec<ExtractionAdmittedCodeSearchChunkV1>, ChunkingFailureV1> {
+    ) -> Result<Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>, ChunkingFailureV1> {
         if let Some(admitted) = self.admitted.get() {
-            return Ok(admitted.clone());
+            return Ok(Arc::clone(admitted));
         }
         let mut chunks = Vec::new();
         for file in &self.files {
@@ -780,7 +808,8 @@ impl CodeIndexPublishedGenerationV1 {
             );
         }
         chunks.sort_by(|left, right| left.chunk().id.cmp(&right.chunk().id));
-        let _ = self.admitted.set(chunks.clone());
+        let chunks = Arc::new(chunks);
+        let _ = self.admitted.set(Arc::clone(&chunks));
         Ok(chunks)
     }
 
@@ -1162,7 +1191,8 @@ where
         if let Some(active) = &active {
             active.validate()?;
             if active.manifest.project_id != self.config.project_id
-                || CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot) != *scope
+                || !CodeIndexGenerationScopeV1::for_snapshot(&active.snapshot)
+                    .identifies_same_checkout(scope)
                 || active.manifest.sanitizer_revision != self.config.sanitizer_revision
                 || active.manifest.chunker_revision != self.config.chunker_revision
                 || active.manifest.privacy_domain != self.config.privacy_domain

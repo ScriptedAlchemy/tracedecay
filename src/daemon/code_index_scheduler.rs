@@ -933,15 +933,21 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 /// Both are rebuilt only when a new generation is loaded.
 type GenerationServingCachesV1 = (
     CodeGenerationId,
-    Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+    Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+    Arc<Mutex<()>>,
 );
 
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<CodeIndexPublishedGenerationV1>,
-    query_owners: Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+    query_owners: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
     record_index: Arc<OnceLock<queries::GenerationRecordIndexV1>>,
+    /// Single-flight gate for the O(store) lane-owner build. Without it every
+    /// query that raced the activation warm rebuilt the full lexical/exact
+    /// projection inline — N concurrent cold queries did N store-sized builds,
+    /// each blowing its own dispatch deadline while the warm was still running.
+    query_owners_build_gate: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1055,7 +1061,7 @@ impl LatestCompleteCodeIndexV1 {
     pub fn exact(
         &self,
     ) -> Result<
-        Vec<ExtractionAdmittedCodeSearchChunkV1>,
+        Arc<Vec<ExtractionAdmittedCodeSearchChunkV1>>,
         crate::code_index::chunks::ChunkingFailureV1,
     > {
         self.generation.admitted_chunks()
@@ -1077,9 +1083,19 @@ impl LatestCompleteCodeIndexV1 {
     /// complete published generation.
     pub fn production_query_owners(
         &self,
-    ) -> Result<ProductionCodeIndexQueryOwnersV1, RetrievalPortError> {
+    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
         if let Some(owners) = self.query_owners.get() {
-            return Ok(owners.clone());
+            return Ok(Arc::clone(owners));
+        }
+        // Cold memo: exactly one caller builds; everyone else waits here and
+        // reads the memo the winner installed. The build is O(store), so
+        // duplicating it per racing query was the outage, not the wait.
+        let _build = self
+            .query_owners_build_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(owners) = self.query_owners.get() {
+            return Ok(Arc::clone(owners));
         }
         let generation_id = self.generation.manifest().generation_id.clone();
         let freshness = production_code_index_freshness(
@@ -1115,7 +1131,10 @@ impl LatestCompleteCodeIndexV1 {
             .generation
             .admitted_chunks()
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-        let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)?;
+        // One materializing copy per generation build; every query thereafter
+        // shares the Arc'd owners without touching the chunk set again.
+        let lexical_projection =
+            CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted.as_ref().clone())?;
         let authority = CentralExactAdmissionAuthorityV1::new(
             ExactAdmissionRuleRevision::new(
                 tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
@@ -1134,13 +1153,13 @@ impl LatestCompleteCodeIndexV1 {
             self.generation.edges(),
             self.generation.chunks().chunks(),
         )?);
-        let owners = ProductionCodeIndexQueryOwnersV1 {
+        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
             exact,
             lexical,
             graph,
-        };
-        let _ = self.query_owners.set(owners.clone());
-        Ok(self.query_owners.get().cloned().unwrap_or(owners))
+        });
+        let _ = self.query_owners.set(Arc::clone(&owners));
+        Ok(self.query_owners.get().map(Arc::clone).unwrap_or(owners))
     }
 }
 
@@ -1158,6 +1177,18 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     ProductionOpen(String),
     #[error("code-index privacy sanitizer failed: {0}")]
     Privacy(String),
+    /// Mount admission did not free a permit within its deadline. The store is
+    /// healthy and the decode is merely queued behind other worktrees, so this
+    /// is retryable — unlike every other variant here.
+    #[error("code-index mount admission is warming: no permit within {waited_ms}ms; retry")]
+    MountAdmissionWarming { waited_ms: u64 },
+}
+
+impl CodeIndexSchedulerErrorV1 {
+    /// Whether retrying the same mount against this daemon can succeed.
+    pub(super) fn is_retryable(&self) -> bool {
+        matches!(self, Self::MountAdmissionWarming { .. })
+    }
 }
 
 struct AtomicFlagReset(Arc<AtomicBool>);
@@ -1381,7 +1412,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.wake.notify_one();
     }
 
-    fn request_background_reconcile(&self) {
+    pub(super) fn request_background_reconcile(&self) {
         {
             let mut hints = self
                 .hints
@@ -1691,6 +1722,48 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
     }
 
+    /// Whether this worktree's git authority still resolves.
+    ///
+    /// The freshness ladder used to run inline at query admission, so a
+    /// vanished or unreadable `.git` surfaced as a `reconcile_now` error and the
+    /// query failed closed rather than serving retained bytes attributed to an
+    /// identity nothing could confirm. Now that the rebuild is backgrounded
+    /// (see [`Self::request_fresh_for_query_background`]) that error is no
+    /// longer reached on the request path, so the fail-closed gate needs its own
+    /// cheap probe. Opening the repository is the O(1) part of what reconcile
+    /// did: it proves the authority exists without walking, hashing, or
+    /// classifying anything.
+    pub(super) fn git_authority_available(&self) -> bool {
+        gix::open(&self.project_root).is_ok()
+    }
+
+    /// [`Self::ensure_fresh_for_query`] with the O(store) rebuild moved off the
+    /// request path.
+    ///
+    /// Runs the identical ladder — unverified restore, tier-1 git metadata,
+    /// tier-2 bounded staleness — but where `ensure_fresh_for_query` calls
+    /// `reconcile_now()` inline this only *requests* the background worker.
+    /// The ladder's checks are cheap (stat-level metadata); its remedy is not,
+    /// and a query must never pay for it. This mirrors what
+    /// [`Self::latest_complete_ready_for_query_with`] already does for the
+    /// latency-sensitive application paths.
+    ///
+    /// Returns whether a reconcile was actually requested. A quiet repository
+    /// must answer `false` and wake nothing: the ladder suppressing work is the
+    /// common case, and waking the worker on every read would turn each query
+    /// into a rebuild trigger — exactly the coupling this change removes.
+    pub(super) fn request_fresh_for_query_background(&mut self) -> bool {
+        if !self.verified_against_source
+            || identity::GitMetadataFingerprintV1::capture(&self.project_root)
+                .differs_from(&self.git_metadata)
+            || self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
+        {
+            self.request_background_reconcile();
+            return true;
+        }
+        false
+    }
+
     /// The exact identity this scheduler is currently bound to.
     pub fn identity(&self) -> &identity::IndexingIdentityV1 {
         &self.identity
@@ -1757,21 +1830,28 @@ impl CodeIndexWorktreeSchedulerV1 {
             .query_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (query_owners, record_index) = match cached.as_ref() {
-            Some((cached_id, owners, index)) if cached_id == &generation_id => {
-                (Arc::clone(owners), Arc::clone(index))
+        let (query_owners, record_index, query_owners_build_gate) = match cached.as_ref() {
+            Some((cached_id, owners, index, gate)) if cached_id == &generation_id => {
+                (Arc::clone(owners), Arc::clone(index), Arc::clone(gate))
             }
             _ => {
                 let owners = Arc::new(OnceLock::new());
                 let index = Arc::new(OnceLock::new());
-                *cached = Some((generation_id, Arc::clone(&owners), Arc::clone(&index)));
-                (owners, index)
+                let gate = Arc::new(Mutex::new(()));
+                *cached = Some((
+                    generation_id,
+                    Arc::clone(&owners),
+                    Arc::clone(&index),
+                    Arc::clone(&gate),
+                ));
+                (owners, index, gate)
             }
         };
         LatestCompleteCodeIndexV1 {
             generation,
             query_owners,
             record_index,
+            query_owners_build_gate,
         }
     }
 
@@ -1818,6 +1898,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                     generation,
                     query_owners: Arc::new(OnceLock::new()),
                     record_index: Arc::new(OnceLock::new()),
+                    query_owners_build_gate: Arc::new(Mutex::new(())),
                 })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())

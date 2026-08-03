@@ -39,42 +39,6 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.begin_pass();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
-            let migration_complete = database
-                .advance_projection_version_migration_until_cancelled(&state.cancelled)
-                .await;
-            if state.cancelled.load(Ordering::Acquire) {
-                return;
-            }
-            match migration_complete {
-                Ok(true) => {}
-                Ok(false) => {
-                    state.dirty.store(true, Ordering::Release);
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        database = %database.db_path().display(),
-                        error = %error,
-                        "background observation projection migration deferred"
-                    );
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    state.mark_recovering(
-                        SessionTemporalRefreshRetryClass::Storage.into(),
-                        SessionTemporalRefreshRetryClass::Storage,
-                    );
-                    state.dirty.store(true, Ordering::Release);
-                    tokio::select! {
-                        () = state.wait_for_cancellation() => return,
-                        () = state.wake.notified() => {}
-                        () = tokio::time::sleep(session_refresh_retry_delay(
-                            SessionTemporalRefreshRetryClass::Storage,
-                            retry_attempt,
-                        )) => {}
-                    }
-                    continue;
-                }
-            }
             let pass =
                 run_session_temporal_refresh_pass(&database, &state, projector.as_ref(), policy);
             tokio::pin!(pass);
