@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate, ContentDigest, EdgeAuthorityV1,
@@ -459,6 +460,17 @@ fn graph_projection_rejects_conflicting_symbol_bindings() {
         result,
         Err(RetrievalPortError::Contract(message))
             if message == "one symbol occurrence has conflicting graph candidate bindings"
+    ));
+}
+
+#[test]
+fn graph_lane_rejects_depth_above_the_callable_code_contract() {
+    let request = graph_request(8, MAX_CALLABLE_CODE_DEPTH + 1);
+
+    assert!(matches!(
+        request.validate(),
+        Err(RetrievalPortError::Contract(message))
+            if message == "graph traversal depth exceeds the callable code bound"
     ));
 }
 
