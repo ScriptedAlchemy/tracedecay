@@ -60,6 +60,7 @@ pub enum McpTerminalState {
     Completed,
     Cancelled,
     DeadlineExceeded,
+    Denied,
     Failed,
     Unavailable,
 }
@@ -130,6 +131,31 @@ impl McpDispatchContractV1 {
             .any(|states| states[0] == states[1])
         {
             return Err(McpDispatchCatalogError::DuplicateTerminalState {
+                tool_name: input.tool_name,
+            });
+        }
+        for required in [
+            McpTerminalState::Completed,
+            McpTerminalState::DeadlineExceeded,
+            McpTerminalState::Denied,
+            McpTerminalState::Failed,
+            McpTerminalState::Unavailable,
+        ] {
+            if input.terminal_states.binary_search(&required).is_err() {
+                return Err(McpDispatchCatalogError::IncompleteTerminalStates {
+                    tool_name: input.tool_name,
+                    missing: required,
+                });
+            }
+        }
+        let cancellable = matches!(input.cancellation, CancellationContract::Cooperative { .. });
+        if input
+            .terminal_states
+            .binary_search(&McpTerminalState::Cancelled)
+            .is_ok()
+            != cancellable
+        {
+            return Err(McpDispatchCatalogError::InvalidCancellationTerminal {
                 tool_name: input.tool_name,
             });
         }
@@ -256,6 +282,13 @@ pub enum McpDispatchCatalogError {
     MissingTerminalStates { tool_name: String },
     #[error("MCP dispatch tool '{tool_name}' repeats a terminal state")]
     DuplicateTerminalState { tool_name: String },
+    #[error("MCP dispatch tool '{tool_name}' omits terminal state {missing:?}")]
+    IncompleteTerminalStates {
+        tool_name: String,
+        missing: McpTerminalState,
+    },
+    #[error("MCP dispatch tool '{tool_name}' cancellation and terminal states disagree")]
+    InvalidCancellationTerminal { tool_name: String },
     #[error("MCP dispatch tool '{tool_name}' has an inverse inconsistent with its effect")]
     InvalidInverse { tool_name: String },
     #[error("MCP dispatch tool '{tool_name}' is declared more than once")]
@@ -281,7 +314,14 @@ mod tests {
                 CancellationPoint::BeforeAdmission,
             ])
             .unwrap(),
-            terminal_states: vec![McpTerminalState::Failed, McpTerminalState::Completed],
+            terminal_states: vec![
+                McpTerminalState::Completed,
+                McpTerminalState::Cancelled,
+                McpTerminalState::DeadlineExceeded,
+                McpTerminalState::Denied,
+                McpTerminalState::Failed,
+                McpTerminalState::Unavailable,
+            ],
             pagination: None,
             streaming: None,
         })
@@ -307,7 +347,13 @@ mod tests {
                 tool_name: "write".to_owned(),
             },
             cancellation: CancellationContract::NotCancellable,
-            terminal_states: vec![McpTerminalState::Completed],
+            terminal_states: vec![
+                McpTerminalState::Completed,
+                McpTerminalState::DeadlineExceeded,
+                McpTerminalState::Denied,
+                McpTerminalState::Failed,
+                McpTerminalState::Unavailable,
+            ],
             pagination: None,
             streaming: None,
         };

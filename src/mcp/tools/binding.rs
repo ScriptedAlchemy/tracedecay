@@ -417,13 +417,12 @@ fn build_mcp_dispatch_catalog()
         let mut terminal_states = vec![
             McpTerminalState::Completed,
             McpTerminalState::DeadlineExceeded,
+            McpTerminalState::Denied,
             McpTerminalState::Failed,
+            McpTerminalState::Unavailable,
         ];
         if tool_supports_live_cancellation(binding.name) {
             terminal_states.push(McpTerminalState::Cancelled);
-        }
-        if !available {
-            terminal_states.push(McpTerminalState::Unavailable);
         }
         let streaming = application_capability
             .map(tracedecay_tool_catalog::CapabilityManifestV1::streaming)
