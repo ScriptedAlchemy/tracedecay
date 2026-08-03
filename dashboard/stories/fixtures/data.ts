@@ -30,7 +30,7 @@ function pick<T>(arr: readonly T[], i: number): T {
   return arr[((i % arr.length) + arr.length) % arr.length]!;
 }
 
-/** DashboardEnvelopeV1 wrapper (see DashboardEnvelopeV1Schema in wire.ts). */
+/** DashboardEnvelopeV1 wrapper (see DashboardEnvelopeV1Schema in generated.ts). */
 function envelope<T>(
   payload: T,
   domainState = 'ready',
