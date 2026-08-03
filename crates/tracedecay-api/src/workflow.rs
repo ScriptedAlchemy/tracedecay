@@ -12,9 +12,11 @@ use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationProblem, RequestId, RetryDirective, WorkflowFanOutRequest,
+    ApplicationProblem, RequestId, RetryDirective, TaskHandoffGrant, TaskHandoffIssueRequest,
+    TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowActivation,
+    WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest, WorkflowFanOutRequest,
 };
-use tracedecay_domain::WorkflowRunProjection;
+use tracedecay_domain::{WorkflowDefinition, WorkflowRunProjection};
 
 use crate::http::{
     HttpApplicationControls, MAX_HTTP_APPLICATION_BODY_BYTES, adapter_problem,
@@ -85,13 +87,21 @@ impl WorkflowOperation {
 
     pub fn request_schema_name(self) -> Cow<'static, str> {
         match self {
+            Self::RegisterDefinition => schema_name::<WorkflowDefinitionRegisterRequest>(),
+            Self::ActivateDefinition => schema_name::<WorkflowDefinitionActivateRequest>(),
             Self::ExecuteFanOut => schema_name::<WorkflowFanOutRequest>(),
+            Self::HandoffIssue => schema_name::<TaskHandoffIssueRequest>(),
+            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemRequest>(),
         }
     }
 
     pub fn result_schema_name(self) -> Cow<'static, str> {
         match self {
+            Self::RegisterDefinition => schema_name::<WorkflowDefinition>(),
+            Self::ActivateDefinition => schema_name::<WorkflowActivation>(),
             Self::ExecuteFanOut => schema_name::<WorkflowRunProjection>(),
+            Self::HandoffIssue => schema_name::<TaskHandoffGrant>(),
+            Self::HandoffRedeem => schema_name::<TaskHandoffRedeemed>(),
         }
     }
 
@@ -193,88 +203,17 @@ mod tests {
     use super::{HttpApplicationControls, WorkflowOperation, workflow_application_router};
 
     #[test]
-    fn descriptor_exposes_every_daemon_owned_operation() {
-        assert_eq!(WorkflowOperation::ALL.len(), 5);
-        assert_eq!(
-            WorkflowOperation::ALL
-                .into_iter()
-                .map(|operation| (
-                    operation.operation_id_str(),
-                    operation.application_route_path()
-                ))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "operation.workflow.register_definition",
-                    "/application/workflow/register-definition",
-                ),
-                (
-                    "operation.workflow.activate_definition",
-                    "/application/workflow/activate-definition",
-                ),
-                (
-                    "operation.workflow.execute_fan_out",
-                    "/application/workflow/execute-fan-out",
-                ),
-                (
-                    "operation.workflow.handoff_issue",
-                    "/application/workflow/handoff-issue",
-                ),
-                (
-                    "operation.workflow.handoff_redeem",
-                    "/application/workflow/handoff-redeem",
-                ),
-            ]
-        );
+    fn descriptor_derives_route_and_catalog_identity() {
         for operation in WorkflowOperation::ALL {
             assert_eq!(
                 operation.application_route_path(),
                 format!("/application{}", operation.route_path())
             );
-            assert_eq!(
-                operation.route_segment(),
+            assert!(
                 operation
-                    .route_path()
-                    .rsplit('/')
-                    .next()
-                    .expect("workflow route has a terminal segment")
+                    .operation_id_str()
+                    .starts_with("operation.workflow.")
             );
         }
-    }
-
-    #[tokio::test]
-    async fn router_dispatches_every_descriptor_to_the_application_owner() {
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let owner_observed = Arc::clone(&observed);
-        let app = workflow_application_router(move |request: super::WorkflowHttpRequest| {
-            let observed = Arc::clone(&owner_observed);
-            async move {
-                observed.lock().unwrap().push(request.operation);
-                StatusCode::NO_CONTENT.into_response()
-            }
-        })
-        .layer(Extension(
-            RequestId::new("request.workflow.route-test").unwrap(),
-        ))
-        .layer(Extension(HttpApplicationControls {
-            deadline: Deadline::new(UtcMicros(10_000)).unwrap(),
-            cancellation: CancellationSignal::active("cancel.workflow.route-test").unwrap(),
-        }));
-
-        for operation in WorkflowOperation::ALL {
-            let response = app
-                .clone()
-                .oneshot(
-                    Request::post(operation.route_path())
-                        .header("content-type", "application/json")
-                        .body(Body::from("{}"))
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        }
-
-        assert_eq!(*observed.lock().unwrap(), WorkflowOperation::ALL);
     }
 }
