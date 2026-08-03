@@ -40,8 +40,7 @@ import {
  * linking prompts, reasoning, tools, subagents, code changes, branches,
  * commits, PRs, and outcomes". The daemon serves the first half of that
  * sentence. The temporal read now serves its persisted causal half with
- * provider-qualified rows; only Delivery-owned outcomes remain a named shared
- * dependency. The reasoning, in full, is in `weave.ts`:
+ * provider-qualified rows. The reasoning, in full, is in `weave.ts`:
  *
  *   - Threads are real. Every mark is one session at its real start time, as
  *     thick as its real message count, in its host's column.
