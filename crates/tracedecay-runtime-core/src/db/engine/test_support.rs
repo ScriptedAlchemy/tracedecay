@@ -5,9 +5,7 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    migration_sql::{
-        MigrationSqlError, MigrationSqlHandle, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
-    },
+    exact_sql::{ExactSqlError, ExactSqlHandle, ExactSqlWriteAuthority, ExactSqlWriteIntent},
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
 use tracedecay_store::{
@@ -37,14 +35,14 @@ impl TestConnection {
 
     pub fn open_with_write_authority(
         path: &Path,
-        authority: Arc<dyn MigrationSqlWriteAuthority>,
+        authority: Arc<dyn ExactSqlWriteAuthority>,
     ) -> Self {
         Self::open_inner(path, Some(authority))
     }
 
     // This test-only constructor turns fixture setup failures into immediate test failures.
     #[allow(clippy::expect_used)]
-    fn open_inner(path: &Path, authority: Option<Arc<dyn MigrationSqlWriteAuthority>>) -> Self {
+    fn open_inner(path: &Path, authority: Option<Arc<dyn ExactSqlWriteAuthority>>) -> Self {
         rusqlite::Connection::open(path).expect("create engine test database");
         let path = path
             .canonicalize()
@@ -80,8 +78,8 @@ impl TestConnection {
             NoReads,
         )
         .expect("start engine test readers");
-        let handle = MigrationSqlHandle::attach(&writer, &readers)
-            .expect("attach engine test migration SQL channel");
+        let handle = ExactSqlHandle::attach(&writer, &readers)
+            .expect("attach engine test exact SQL channel");
         let handle = match authority {
             Some(authority) => handle
                 .with_write_authority(authority)
@@ -132,8 +130,8 @@ impl Executor for TestConnection {
 
 struct AllowTestWrites;
 
-impl MigrationSqlWriteAuthority for AllowTestWrites {
-    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+impl ExactSqlWriteAuthority for AllowTestWrites {
+    fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
         Ok(())
     }
 }

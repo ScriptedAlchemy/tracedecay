@@ -1,8 +1,8 @@
-//! The authorizer every migration statement runs under.
+//! The authorizer every exact SQL statement runs under.
 //!
-//! [`with_migration_guard`] installs the hooks for one operation and removes
+//! [`with_exact_sql_guard`] installs the hooks for one operation and removes
 //! them again on every exit path, so no statement outside that operation ever
-//! inherits the relaxed migration authority.
+//! inherits the relaxed exact SQL authority.
 
 use std::{
     collections::BTreeSet,
@@ -20,8 +20,8 @@ use rusqlite::{
 };
 
 use super::{
-    MIGRATION_SQL_EXECUTION_LIMIT, MIGRATION_SQL_PROGRESS_INTERVAL_OPS, MigrationSqlError,
-    MigrationSqlWriteAuthority, MigrationSqlWriteIntent, sqlite_error,
+    EXACT_SQL_EXECUTION_LIMIT, EXACT_SQL_PROGRESS_INTERVAL_OPS, ExactSqlError,
+    ExactSqlWriteAuthority, ExactSqlWriteIntent, sqlite_error,
 };
 
 #[derive(Default)]
@@ -38,22 +38,22 @@ pub(super) enum AuthorizedDatabaseOperation {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn with_migration_guard<T, F>(
+pub(super) fn with_exact_sql_guard<T, F>(
     connection: &Connection,
     allow_savepoints: bool,
     allow_transactions: bool,
     shutdown_requested: Option<Arc<AtomicBool>>,
     execution_deadline: Option<Instant>,
     enforce_statement_limit: bool,
-    repeated_authority: Option<(Arc<dyn MigrationSqlWriteAuthority>, MigrationSqlWriteIntent)>,
+    repeated_authority: Option<(Arc<dyn ExactSqlWriteAuthority>, ExactSqlWriteIntent)>,
     canonical_authorizer: for<'a> fn(rusqlite::hooks::AuthContext<'a>) -> Authorization,
-    migration_writer: bool,
+    exact_sql_writer: bool,
     database_operation: Option<AuthorizedDatabaseOperation>,
     insert_tracker: Option<Arc<InsertTracker>>,
     operation: F,
-) -> Result<T, MigrationSqlError>
+) -> Result<T, ExactSqlError>
 where
-    F: FnOnce() -> Result<T, MigrationSqlError>,
+    F: FnOnce() -> Result<T, ExactSqlError>,
 {
     let denied = Arc::new(AtomicBool::new(false));
     let hook_denied = Arc::clone(&denied);
@@ -78,8 +78,8 @@ where
             {
                 hook_denied.store(true, Ordering::Release);
                 Authorization::Deny
-            } else if migration_writer {
-                authorize_migration_writer(context, authorized_database_operation.as_ref())
+            } else if exact_sql_writer {
+                authorize_exact_sql_writer(context, authorized_database_operation.as_ref())
             } else {
                 canonical_authorizer(context)
             }
@@ -105,7 +105,7 @@ where
         }
     }
     let deadline = if enforce_statement_limit {
-        let operation_deadline = Instant::now() + MIGRATION_SQL_EXECUTION_LIMIT;
+        let operation_deadline = Instant::now() + EXACT_SQL_EXECUTION_LIMIT;
         Some(
             execution_deadline
                 .map(|deadline| deadline.min(operation_deadline))
@@ -117,7 +117,7 @@ where
     let authority_failure = Arc::new(Mutex::new(None));
     let progress_authority_failure = Arc::clone(&authority_failure);
     if let Err(error) = connection.progress_handler(
-        MIGRATION_SQL_PROGRESS_INTERVAL_OPS,
+        EXACT_SQL_PROGRESS_INTERVAL_OPS,
         Some(move || {
             if shutdown_requested
                 .as_ref()
@@ -144,7 +144,7 @@ where
 
     let result = catch_unwind(AssertUnwindSafe(operation));
     let clear_progress =
-        connection.progress_handler(MIGRATION_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
+        connection.progress_handler(EXACT_SQL_PROGRESS_INTERVAL_OPS, None::<fn() -> bool>);
     let clear_update_hook = connection.update_hook(None::<fn(Action, &str, &str, i64)>);
     let restore_authorizer = connection.authorizer(Some(canonical_authorizer));
     let cleanup = clear_progress
@@ -170,13 +170,13 @@ where
     if let Some(error) = authority_error {
         Err(error)
     } else if denied.load(Ordering::Acquire) {
-        Err(MigrationSqlError::TransactionControlDenied)
+        Err(ExactSqlError::TransactionControlDenied)
     } else {
         result
     }
 }
 
-/// Authorizes the migration writer channel.
+/// Authorizes the exact SQL writer channel.
 ///
 /// This channel legitimately builds durable schema, so ordinary `CREATE
 /// TABLE` / `CREATE TRIGGER` is allowed. Temporary **tables and indexes** are
@@ -194,7 +194,7 @@ where
 /// fixed attachment lifecycle operations; caller-provided SQL cannot enable
 /// them. `load_extension`, unrecognized actions, and non-allowlisted pragmas
 /// remain denied unconditionally.
-fn authorize_migration_writer(
+fn authorize_exact_sql_writer(
     context: rusqlite::hooks::AuthContext<'_>,
     database_operation: Option<&AuthorizedDatabaseOperation>,
 ) -> Authorization {
@@ -254,7 +254,7 @@ fn authorize_migration_writer(
             pragma_name,
             pragma_value,
         }
-        if !is_allowed_migration_pragma(pragma_name, pragma_value)
+        if !is_allowed_exact_sql_pragma(pragma_name, pragma_value)
     ) {
         Authorization::Deny
     } else {
@@ -262,8 +262,8 @@ fn authorize_migration_writer(
     }
 }
 
-fn is_allowed_migration_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
-    is_migration_read_pragma(pragma_name, pragma_value)
+fn is_allowed_exact_sql_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
+    is_exact_sql_read_pragma(pragma_name, pragma_value)
         || (pragma_value.is_none() && pragma_name.eq_ignore_ascii_case("shrink_memory"))
         || pragma_value.is_some_and(|value| {
             (pragma_name.eq_ignore_ascii_case("auto_vacuum")
@@ -285,7 +285,7 @@ fn is_allowed_migration_pragma(pragma_name: &str, pragma_value: Option<&str>) ->
         })
 }
 
-fn is_migration_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
+fn is_exact_sql_read_pragma(pragma_name: &str, pragma_value: Option<&str>) -> bool {
     const ARGUMENT_SAFE: &[&str] = &[
         "foreign_key_check",
         "foreign_key_list",

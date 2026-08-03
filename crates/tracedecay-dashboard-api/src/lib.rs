@@ -298,8 +298,7 @@ pub struct DashboardState {
     /// Read-only telemetry handle attached to the retained active graph runtime.
     /// This remains distinct from project memory when those stores use
     /// different files.
-    pub graph_telemetry_handle:
-        Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    pub graph_telemetry_handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
     /// Display path of the active code-graph database.
     pub graph_db_path: String,
     /// Authoritative project-memory handle and process-local writer lane.

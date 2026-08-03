@@ -1194,7 +1194,7 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
         !destination_profile
             .join("migration-backups/mig_wal_family/.sqlite-snapshot-scratch")
             .exists(),
-        "migration SQLite snapshot scratch must not outlive retained snapshots"
+        "exact SQLite snapshot scratch must not outlive retained snapshots"
     );
 
     let target_root = destination_profile.join("projects/proj_123");
@@ -1265,7 +1265,7 @@ async fn apply_and_backup_preserve_wal_only_rows_for_graph_and_sessions_families
         !destination_profile
             .join("migration-backups/mig_wal_family/.sqlite-snapshot-scratch")
             .exists(),
-        "resumed migration SQLite snapshot scratch must be revoked"
+        "resumed exact SQLite snapshot scratch must be revoked"
     );
     assert!(
         manifest

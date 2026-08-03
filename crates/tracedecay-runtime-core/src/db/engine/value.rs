@@ -24,21 +24,21 @@ impl Value {
     }
 }
 
-impl From<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlValue> for Value {
-    fn from(value: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlValue) -> Self {
-        use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlValue;
+impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlValue> for Value {
+    fn from(value: tracedecay_rusqlite_runtime::exact_sql::ExactSqlValue) -> Self {
+        use tracedecay_rusqlite_runtime::exact_sql::ExactSqlValue;
 
         match value {
-            MigrationSqlValue::Null => Self::Null,
-            MigrationSqlValue::Integer(value) => Self::Integer(value),
-            MigrationSqlValue::Real(value) => Self::Real(value),
-            MigrationSqlValue::Text(value) => Self::Text(value),
-            MigrationSqlValue::Blob(value) => Self::Blob(value),
+            ExactSqlValue::Null => Self::Null,
+            ExactSqlValue::Integer(value) => Self::Integer(value),
+            ExactSqlValue::Real(value) => Self::Real(value),
+            ExactSqlValue::Text(value) => Self::Text(value),
+            ExactSqlValue::Blob(value) => Self::Blob(value),
         }
     }
 }
 
-impl From<Value> for tracedecay_rusqlite_runtime::migration_sql::MigrationSqlValue {
+impl From<Value> for tracedecay_rusqlite_runtime::exact_sql::ExactSqlValue {
     fn from(value: Value) -> Self {
         match value {
             Value::Null => Self::Null,

@@ -435,7 +435,7 @@ async fn apply_migration_manifest_in_scope(
     let backup_root = profile_root
         .join("migration-backups")
         .join(&manifest.migration_id);
-    let sqlite_snapshot_scratch = MigrationSqliteSnapshotScratch::new(&backup_root);
+    let sqlite_snapshot_scratch = SqliteSnapshotScratch::new(&backup_root);
     let original_backup_count = manifest.backup_artifacts.len();
     for index in 0..original_backup_count {
         apply_backup_artifact(
@@ -893,7 +893,7 @@ async fn copy_sqlite_snapshot(
     tracedecay_runtime_core::db::DatabaseAuthority::replace_file_atomically(
         &temporary,
         target,
-        "migration SQLite snapshot",
+        "exact SQLite snapshot",
     )
     .map_err(io::Error::other)?;
     sync_parent_directory(target)?;
@@ -914,11 +914,11 @@ fn migration_snapshot_temp_path(target: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-struct MigrationSqliteSnapshotScratch {
+struct SqliteSnapshotScratch {
     path: PathBuf,
 }
 
-impl MigrationSqliteSnapshotScratch {
+impl SqliteSnapshotScratch {
     fn new(backup_root: &Path) -> Self {
         Self {
             path: backup_root.join(".sqlite-snapshot-scratch"),
@@ -930,7 +930,7 @@ impl MigrationSqliteSnapshotScratch {
     }
 }
 
-impl Drop for MigrationSqliteSnapshotScratch {
+impl Drop for SqliteSnapshotScratch {
     fn drop(&mut self) {
         let cleanup_lock = self.path.join(".cleanup.lock");
         if cleanup_lock
@@ -1079,7 +1079,7 @@ fn apply_copy_artifact(
         return Err(invalid_manifest("migration artifact is not resumable"));
     }
     let copy_result = if let Some(snapshot) = snapshot.as_deref() {
-        copy_file_atomically(snapshot, &target_path, "migration SQLite target")
+        copy_file_atomically(snapshot, &target_path, "exact SQLite target")
     } else {
         PrivateStoreIo::copy_artifact(&source_path, &target_path).map(|_| ())
     };
@@ -1404,7 +1404,7 @@ async fn verify_sqlite_integrity(
     authority: &tracedecay_runtime_core::db::DatabaseAuthority,
 ) -> io::Result<()> {
     let _authority = authority
-        .hold_for(path, "verify migration SQLite snapshot")
+        .hold_for(path, "verify exact SQLite snapshot")
         .map_err(io::Error::other)?;
     let snapshot =
         tracedecay_runtime_core::sqlite_read_snapshot::open_in(path, scratch_root).await?;
