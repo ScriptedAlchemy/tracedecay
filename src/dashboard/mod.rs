@@ -88,7 +88,7 @@ impl DashboardAccountingStore for RootDashboardAccountingStore {
                     limit: 10_000,
                 })
                 .await
-                .map_err(|error| error.to_string())?;
+                .map_err(|error| error.clone())?;
             Ok(events
                 .into_iter()
                 .map(|event| {

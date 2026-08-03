@@ -22,7 +22,10 @@ use std::path::Path;
 use crate::errors::{Result, TraceDecayError};
 
 mod assets {
-    include!(concat!(env!("OUT_DIR"), "/hermes_dashboard_assets_generated.rs"));
+    include!(concat!(
+        env!("OUT_DIR"),
+        "/hermes_dashboard_assets_generated.rs"
+    ));
 }
 
 /// Manifest for the wrapper plugin (canonical source: `dashboard/hermes-wrapper/`).
@@ -91,19 +94,10 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
         &plugin_api(tracedecay_bin)?,
     )?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
-    super::write_text_file(
-        &dist_dir.join("holographic.js"),
-        assets::HOLOGRAPHIC_JS,
-    )?;
+    super::write_text_file(&dist_dir.join("holographic.js"), assets::HOLOGRAPHIC_JS)?;
     super::write_text_file(&dist_dir.join("lcm.js"), assets::LCM_JS)?;
-    super::write_text_file(
-        &dist_dir.join("graph.js"),
-        assets::GRAPH_JS,
-    )?;
-    super::write_text_file(
-        &dist_dir.join("savings.js"),
-        assets::SAVINGS_JS,
-    )?;
+    super::write_text_file(&dist_dir.join("graph.js"), assets::GRAPH_JS)?;
+    super::write_text_file(&dist_dir.join("savings.js"), assets::SAVINGS_JS)?;
     super::write_text_file(&dist_dir.join("style.css"), &wrapper_style_css())?;
 
     eprintln!(

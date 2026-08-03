@@ -49,7 +49,7 @@ impl Drop for Fixture {
         unsafe {
             match self.previous_holder_scan.take() {
                 Some(previous) => {
-                    std::env::set_var("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", previous)
+                    std::env::set_var("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN", previous);
                 }
                 None => std::env::remove_var("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN"),
             }
@@ -2609,6 +2609,7 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
     }
 }
 
+#[allow(clippy::await_holding_lock)]
 async fn fixture() -> Fixture {
     let holder_scan_lock = crate::config::lock_user_data_dir_test_env();
     let previous_holder_scan = std::env::var_os("TRACEDECAY_TEST_ALLOW_INCOMPLETE_HOLDER_SCAN");

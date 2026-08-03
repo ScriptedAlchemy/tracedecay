@@ -104,7 +104,11 @@ macro_rules! plugin_file {
     ($relative:literal, $source:literal) => {
         PluginFile {
             relative: $relative,
-            contents: include_str!(concat!(env!("TRACEDECAY_REPOSITORY_ROOT"), "/plugin/", $source)),
+            contents: include_str!(concat!(
+                env!("TRACEDECAY_REPOSITORY_ROOT"),
+                "/plugin/",
+                $source
+            )),
         }
     };
 }

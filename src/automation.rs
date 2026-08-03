@@ -2,9 +2,9 @@
 
 pub use tracedecay_agent_hosts::automation::{
     agent_targets, artifacts, backend, config, fact_proposals, hermes_skill_bridge, host_receipts,
-    jobs, lifecycle, managed_skills, memory_curator, memory_digest, outcomes, run_ledger, scheduler,
-    session_reflector, skill_frontmatter, skill_materialization, skill_targets, skill_writer,
-    staged_notice, text,
+    jobs, lifecycle, managed_skills, memory_curator, memory_digest, outcomes, run_ledger,
+    scheduler, session_reflector, skill_frontmatter, skill_materialization, skill_targets,
+    skill_writer, staged_notice, text,
 };
 
 pub mod runner {
@@ -71,7 +71,9 @@ pub mod skill_usage {
         let events = global_db
             .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
                 provider: None,
-                project_id: Some(crate::global_db::GlobalDb::canonical_project_key(project_root)),
+                project_id: Some(crate::global_db::GlobalDb::canonical_project_key(
+                    project_root,
+                )),
                 session_id: None,
                 event_kind: None,
                 since: None,
@@ -132,11 +134,7 @@ impl tracedecay_agent_hosts::automation::memory_curator::MemoryCuratorStore
         &'a self,
         request: tracedecay_agent_hosts::automation::memory_curator::MemoryCurationRequest,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = crate::errors::Result<serde_json::Value>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = crate::errors::Result<serde_json::Value>> + Send + 'a>,
     > {
         Box::pin(async move {
             let options = crate::dashboard::memory_curate::MemoryCurateOptions {
@@ -180,11 +178,7 @@ impl tracedecay_agent_hosts::automation::memory_curator::MemoryCuratorStore
         &'a self,
         request: tracedecay_agent_hosts::automation::memory_curator::MemoryCurationRequest,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = crate::errors::Result<serde_json::Value>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = crate::errors::Result<serde_json::Value>> + Send + 'a>,
     > {
         Box::pin(async move {
             let options = crate::dashboard::memory_curate::MemoryCurateOptions {
@@ -233,11 +227,7 @@ impl tracedecay_agent_hosts::automation::memory_curator::MemoryCuratorStore
         &'a self,
         request: tracedecay_agent_hosts::automation::memory_curator::MemoryCurationRequest,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = crate::errors::Result<serde_json::Value>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = crate::errors::Result<serde_json::Value>> + Send + 'a>,
     > {
         Box::pin(async move {
             let memory_db_path = crate::memory::user::user_memory_db_path(self.profile_root);

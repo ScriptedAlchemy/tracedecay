@@ -4,20 +4,18 @@
 //! profile adapter remains here because it owns filesystem backup/error policy.
 
 pub use tracedecay_agent_hosts::agents::{
-    AgentIntegration, AntigravityIntegration, ClaudeIntegration, ClineIntegration,
-    CodexIntegration, CopilotIntegration, CursorIntegration, DoctorCounters, GeminiIntegration,
-    HealthcheckContext, HermesIntegration, InstallContext, KiloIntegration, KimiIntegration,
-    KiroIntegration,
-    ManagedSkillExportReport, OpenCodeIntegration, RooCodeIntegration, UpdatePluginOutcome,
-    VibeIntegration, ZedIntegration, available_integrations,
-    backup_and_write_json, backup_config_file, copilot_cli_dir, detect_missing_installed_agents,
-    export_managed_skills_to_agent_hosts, export_managed_skills_to_agents, home_dir,
-    kiro_data_dir, load_json_file, load_json_file_strict,
-    load_jsonc_file, load_jsonc_file_strict, load_toml_file, offer_git_post_commit_hook,
-    parse_jsonc, pick_integrations_interactive, restore_config_backup, safe_write_json_file,
-    safe_write_text_file, vscode_data_dir,
-    vscode_insiders_data_dir, which_tracedecay, write_json_file, write_toml_file,
-    CLI_FALLBACK_PROMPT_RULES,
+    AgentIntegration, AntigravityIntegration, CLI_FALLBACK_PROMPT_RULES, ClaudeIntegration,
+    ClineIntegration, CodexIntegration, CopilotIntegration, CursorIntegration, DoctorCounters,
+    GeminiIntegration, HealthcheckContext, HermesIntegration, InstallContext, KiloIntegration,
+    KimiIntegration, KiroIntegration, ManagedSkillExportReport, OpenCodeIntegration,
+    RooCodeIntegration, UpdatePluginOutcome, VibeIntegration, ZedIntegration,
+    available_integrations, backup_and_write_json, backup_config_file, copilot_cli_dir,
+    detect_missing_installed_agents, export_managed_skills_to_agent_hosts,
+    export_managed_skills_to_agents, home_dir, kiro_data_dir, load_json_file,
+    load_json_file_strict, load_jsonc_file, load_jsonc_file_strict, load_toml_file,
+    offer_git_post_commit_hook, parse_jsonc, pick_integrations_interactive, restore_config_backup,
+    safe_write_json_file, safe_write_text_file, vscode_data_dir, vscode_insiders_data_dir,
+    which_tracedecay, write_json_file, write_toml_file,
 };
 pub use tracedecay_agent_hosts::agents::{
     antigravity, claude, cline, codex, copilot, cursor, gemini, kilo, kimi, kiro, opencode,
@@ -86,9 +84,12 @@ fn root_cursor_post_install(
         let Some(branch_name) = crate::branch::current_branch(&project_path) else {
             return;
         };
-        match crate::tracedecay::TraceDecay::add_branch_tracking(&project_path, &branch_name).await {
+        match crate::tracedecay::TraceDecay::add_branch_tracking(&project_path, &branch_name).await
+        {
             Ok(crate::branch::BranchAddOutcome::Added) => {
-                eprintln!("\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing");
+                eprintln!(
+                    "\x1b[32m✔\x1b[0m Tracked Cursor branch '{branch_name}' for tracedecay indexing"
+                );
             }
             Ok(
                 crate::branch::BranchAddOutcome::AlreadyTracked
@@ -96,7 +97,9 @@ fn root_cursor_post_install(
                 | crate::branch::BranchAddOutcome::NotIndexed,
             ) => {}
             Err(error) => {
-                eprintln!("\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tracedecay indexing: {error}");
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m could not track Cursor branch '{branch_name}' for tracedecay indexing: {error}"
+                );
             }
         }
     })
@@ -141,10 +144,10 @@ fn root_user_memory_curator<'a>(
     ))
 }
 
-fn root_project_analytics_events<'a>(
-    project_root: &'a std::path::Path,
+fn root_project_analytics_events(
+    project_root: &std::path::Path,
     limit: usize,
-) -> tracedecay_agent_hosts::ports::AnalyticsEventsFuture<'a> {
+) -> tracedecay_agent_hosts::ports::AnalyticsEventsFuture<'_> {
     Box::pin(async move {
         let Some(db) = crate::global_db::GlobalDb::open().await else {
             return Ok(Vec::new());
@@ -152,7 +155,9 @@ fn root_project_analytics_events<'a>(
         let events = db
             .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
                 provider: None,
-                project_id: Some(crate::global_db::GlobalDb::canonical_project_key(project_root)),
+                project_id: Some(crate::global_db::GlobalDb::canonical_project_key(
+                    project_root,
+                )),
                 session_id: None,
                 event_kind: None,
                 since: None,
@@ -160,33 +165,37 @@ fn root_project_analytics_events<'a>(
             })
             .await
             .map_err(|message| crate::errors::TraceDecayError::Config {
-                message: format!("failed to import project analytics into skill usage ledger: {message}"),
+                message: format!(
+                    "failed to import project analytics into skill usage ledger: {message}"
+                ),
             })?;
         Ok(events
             .into_iter()
-            .map(|event| tracedecay_agent_hosts::ports::AnalyticsEventRecord {
-                id: event.id,
-                provider: event.provider,
-                project_id: event.project_id,
-                session_id: event.session_id,
-                timestamp: event.timestamp,
-                event_kind: event.event_kind,
-                hook_name: event.hook_name,
-                tool_name: event.tool_name,
-                tool_category: event.tool_category,
-                skill_name: event.skill_name,
-                hint_category: event.hint_category,
-                hint_id: event.hint_id,
-                outcome: event.outcome,
-                metadata_json: event.metadata_json,
-            })
+            .map(
+                |event| tracedecay_agent_hosts::ports::AnalyticsEventRecord {
+                    id: event.id,
+                    provider: event.provider,
+                    project_id: event.project_id,
+                    session_id: event.session_id,
+                    timestamp: event.timestamp,
+                    event_kind: event.event_kind,
+                    hook_name: event.hook_name,
+                    tool_name: event.tool_name,
+                    tool_category: event.tool_category,
+                    skill_name: event.skill_name,
+                    hint_category: event.hint_category,
+                    hint_id: event.hint_id,
+                    outcome: event.outcome,
+                    metadata_json: event.metadata_json,
+                },
+            )
             .collect())
     })
 }
 
-fn root_latest_session_activity<'a>(
-    sessions_db_path: &'a std::path::Path,
-) -> tracedecay_agent_hosts::ports::SessionActivityFuture<'a> {
+fn root_latest_session_activity(
+    sessions_db_path: &std::path::Path,
+) -> tracedecay_agent_hosts::ports::SessionActivityFuture<'_> {
     Box::pin(async move {
         crate::global_db::GlobalDb::open_read_only_at(sessions_db_path)
             .await?
@@ -241,9 +250,7 @@ pub fn migrate_installed_agents(
 mod tests {
     fn embedded_plugin_tool_mentions() -> std::collections::BTreeSet<String> {
         let mut mentions = std::collections::BTreeSet::new();
-        for (_, contents) in
-            tracedecay_agent_hosts::agents::cursor::embedded_plugin_files()
-        {
+        for (_, contents) in tracedecay_agent_hosts::agents::cursor::embedded_plugin_files() {
             let bytes = contents.as_bytes();
             let mut search_from = 0;
             while let Some(found) = contents[search_from..].find("tracedecay_") {
@@ -318,8 +325,7 @@ mod tests {
                     let name = relative
                         .strip_prefix("skills/")
                         .and_then(|rest| rest.strip_suffix("/SKILL.md"))?;
-                    (!contents.contains("disable-model-invocation: true"))
-                        .then(|| name.to_string())
+                    (!contents.contains("disable-model-invocation: true")).then(|| name.to_string())
                 })
                 .collect();
         bundled.sort();

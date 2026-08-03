@@ -1,5 +1,8 @@
 //! Provider-neutral session parsing, correlation, and LCM contracts.
 
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::needless_borrow)]
+
 use serde::{Deserialize, Serialize};
 
 pub mod compatibility;
@@ -54,10 +57,9 @@ impl SessionQueryDb {
             "open session query database",
         )
         .ok()?;
-        let (database, _) =
-            tracedecay_runtime_core::db::Database::open_read_only(path, &authority)
-                .await
-                .ok()?;
+        let (database, _) = tracedecay_runtime_core::db::Database::open_read_only(path, &authority)
+            .await
+            .ok()?;
         Some(Self { database })
     }
 

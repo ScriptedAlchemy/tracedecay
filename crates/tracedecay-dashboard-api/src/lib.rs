@@ -2,6 +2,8 @@
 //!
 //! The root crate retains embedded assets plus CLI/daemon server composition.
 
+#![allow(clippy::collapsible_if)]
+
 pub mod analytics_api;
 pub mod automation_config_api;
 pub mod automation_fact_proposals_api;

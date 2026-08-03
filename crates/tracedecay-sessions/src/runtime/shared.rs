@@ -250,7 +250,8 @@ impl ProjectRootMatcher {
         path: &Path,
         identity_resolver: impl FnOnce(
             &Path,
-        ) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
+        )
+            -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
         discover_project_root: impl FnOnce(&Path) -> Option<PathBuf>,
     ) -> ProjectMembership {
         if paths_equal(path, &self.root) {
@@ -423,9 +424,7 @@ impl ProjectRootMatcherCache {
         &self,
         cwd: &Path,
         now: Instant,
-        identity_resolver: &impl Fn(
-            &Path,
-        ) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
+        identity_resolver: &impl Fn(&Path) -> tracedecay_runtime_core::worktree::GitRepoIdentityOutcome,
     ) -> Option<PathBuf> {
         loop {
             let resolution = self

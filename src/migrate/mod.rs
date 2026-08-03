@@ -239,7 +239,7 @@ pub mod hermes {
     }
 
     /// Root-owned compatibility seam for callers that select a temporary
-    /// TraceDecay profile while testing a legacy Hermes migration.
+    /// `TraceDecay` profile while testing a legacy Hermes migration.
     pub async fn migrate_legacy_hermes_stores_to(
         user_home: &Path,
         tracedecay_profile_root: &Path,

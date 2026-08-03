@@ -165,6 +165,7 @@ pub struct TokenCountCache {
     overlay: tokio::sync::Mutex<Option<OverlayCache>>,
 }
 
+#[allow(clippy::new_without_default)]
 impl TokenCountCache {
     pub fn new() -> Self {
         Self {

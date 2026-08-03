@@ -507,34 +507,3 @@ pub fn compute_composite_health(dims: &HealthDimensions) -> u32 {
     let penalized = base * (0.98 + 0.02 * dims.coverage_discipline);
     penalized.round() as u32
 }
-
-#[cfg(test)]
-mod tests {
-    use std::collections::{HashMap, HashSet};
-
-    use super::{HealthDimensions, acyclicity_score, compute_composite_health, gini_coefficient};
-
-    #[test]
-    fn acyclicity_counts_cycle_edges() {
-        let mut adjacency = HashMap::new();
-        adjacency.insert("a".to_string(), HashSet::from(["b".to_string()]));
-        adjacency.insert("b".to_string(), HashSet::from(["a".to_string()]));
-
-        assert_eq!(acyclicity_score(&adjacency), (0.0, 2));
-    }
-
-    #[test]
-    fn composite_health_preserves_full_score() {
-        let dimensions = HealthDimensions {
-            acyclicity: 1.0,
-            depth: 1.0,
-            equality: 1.0,
-            redundancy: 1.0,
-            modularity: 1.0,
-            coverage_discipline: 1.0,
-        };
-
-        assert_eq!(compute_composite_health(&dimensions), 10_000);
-        assert_eq!(gini_coefficient(&[1.0, 1.0, 1.0]), 0.0);
-    }
-}

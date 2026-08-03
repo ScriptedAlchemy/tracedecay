@@ -1,5 +1,7 @@
 //! Root-free runtime primitives shared by TraceDecay crates.
 
+#![allow(clippy::collapsible_if)]
+
 pub mod branch;
 pub mod branch_meta;
 pub mod config;

@@ -16,49 +16,46 @@ pub async fn run_backfill(
 }
 
 impl GitBackfillStore for crate::global_db::GlobalDb {
-    fn session_activity_rows(
-        &self,
-        limit: usize,
-    ) -> impl std::future::Future<Output = Result<Vec<SessionActivityRow>, String>> + Send {
-        async move { session_activity_rows(self.conn(), limit).await }
+    async fn session_activity_rows(&self, limit: usize) -> Result<Vec<SessionActivityRow>, String> {
+        session_activity_rows(self.conn(), limit).await
     }
 
-    fn session_activity_rows_since(
+    async fn session_activity_rows_since(
         &self,
         since_exclusive: i64,
         limit: usize,
-    ) -> impl std::future::Future<Output = Result<Vec<SessionActivityRow>, String>> + Send {
-        async move { session_activity_rows_since(self.conn(), since_exclusive, limit).await }
+    ) -> Result<Vec<SessionActivityRow>, String> {
+        session_activity_rows_since(self.conn(), since_exclusive, limit).await
     }
 
-    fn git_correlation_meta_get(
+    async fn git_correlation_meta_get(
         &self,
         key: &str,
-    ) -> impl std::future::Future<Output = Result<Option<i64>, GitCorrelationError>> + Send {
-        async move { read_meta_value(self.conn(), key).await }
+    ) -> Result<Option<i64>, GitCorrelationError> {
+        read_meta_value(self.conn(), key).await
     }
 
-    fn git_correlation_meta_set(
+    async fn git_correlation_meta_set(
         &self,
         key: &str,
         value: i64,
-    ) -> impl std::future::Future<Output = Result<(), GitCorrelationError>> + Send {
-        async move { write_meta_value(self.conn(), key, value).await }
+    ) -> Result<(), GitCorrelationError> {
+        write_meta_value(self.conn(), key, value).await
     }
 
-    fn git_record_span_observation(
+    async fn git_record_span_observation(
         &self,
         observation: &SpanObservation,
         merge_gap_secs: i64,
-    ) -> impl std::future::Future<Output = Result<i64, GitCorrelationError>> + Send {
-        async move { record_span_observation(self.conn(), observation, merge_gap_secs).await }
+    ) -> Result<i64, GitCorrelationError> {
+        record_span_observation(self.conn(), observation, merge_gap_secs).await
     }
 
-    fn git_upsert_commit_session(
+    async fn git_upsert_commit_session(
         &self,
         record: &CommitSessionRecord,
-    ) -> impl std::future::Future<Output = Result<bool, GitCorrelationError>> + Send {
-        async move { upsert_commit_session(self.conn(), record).await }
+    ) -> Result<bool, GitCorrelationError> {
+        upsert_commit_session(self.conn(), record).await
     }
 }
 

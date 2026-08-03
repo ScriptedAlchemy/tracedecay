@@ -95,14 +95,16 @@ pub fn validate_config(config: &AutomationConfig) -> Result<()> {
 pub async fn load_project_config(dashboard_root: &Path) -> Result<Option<AutomationConfigPatch>> {
     let path = project_config_path(dashboard_root);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!(
-                    "failed to parse automation config '{}': {error}",
-                    path.display()
-                ),
-            }
-        }),
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "failed to parse automation config '{}': {error}",
+                        path.display()
+                    ),
+                })
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(TraceDecayError::Config {
             message: format!(
@@ -268,11 +270,12 @@ fn validate_task_config(task: &str, config: &AutomationTaskConfig) -> Result<()>
     if matches!(config.stale_lock_secs, Some(0)) {
         return config_error(format!("{task} stale_lock_secs must be greater than zero"));
     }
-    let schedule = super::scheduler::parse_schedule(config.schedule.as_deref()).map_err(|error| {
-        TraceDecayError::Config {
-            message: format!("{task} schedule is invalid: {error}"),
-        }
-    })?;
+    let schedule =
+        super::scheduler::parse_schedule(config.schedule.as_deref()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("{task} schedule is invalid: {error}"),
+            }
+        })?;
     if schedule == super::scheduler::AutomationSchedule::ConfiguredInterval
         && config.interval_secs.is_none()
     {

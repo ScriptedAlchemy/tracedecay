@@ -32,9 +32,11 @@ pub async fn run_agent_task_with_retry(
         match backend.run_task(request) {
             Ok(response) => return Ok(response),
             Err(error) => {
-                let Some(backoff) =
-                    policy.retry_backoff_after_failure(attempt, start.elapsed(), &error.to_string())
-                else {
+                let Some(backoff) = policy.retry_backoff_after_failure(
+                    attempt,
+                    start.elapsed(),
+                    &error.to_string(),
+                ) else {
                     return Err(error);
                 };
                 if !backoff.is_zero() {

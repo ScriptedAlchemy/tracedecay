@@ -25,12 +25,7 @@ fn collect_files_relative(root: &Path) -> Vec<String> {
     files
 }
 
-fn append_plugin_files(
-    code: &mut String,
-    constant: &str,
-    source_root: &Path,
-    deploy_prefix: &str,
-) {
+fn append_plugin_files(code: &mut String, constant: &str, source_root: &Path, deploy_prefix: &str) {
     code.push_str(&format!("pub const {constant}: &[PluginFile] = &[\n"));
     for relative in collect_files_relative(source_root) {
         let deploy_path = format!("{deploy_prefix}/{relative}");
@@ -65,7 +60,9 @@ fn product_version(repository: &Path) -> String {
         }
         if in_package
             && let Some(value) = trimmed.strip_prefix("version = ")
-            && let Some(version) = value.strip_prefix('"').and_then(|value| value.strip_suffix('"'))
+            && let Some(version) = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
         {
             return version.to_string();
         }
@@ -227,8 +224,14 @@ fn main() {
     )
     .expect("write Hermes dashboard assets");
     println!("cargo::rerun-if-changed={}", plugin_root.display());
-    println!("cargo::rerun-if-changed={}", repository.join("dashboard").display());
-    println!("cargo::rerun-if-changed={}", repository.join("Cargo.toml").display());
+    println!(
+        "cargo::rerun-if-changed={}",
+        repository.join("dashboard").display()
+    );
+    println!(
+        "cargo::rerun-if-changed={}",
+        repository.join("Cargo.toml").display()
+    );
     println!(
         "cargo::rustc-env=TRACEDECAY_PRODUCT_VERSION={}",
         product_version(repository)

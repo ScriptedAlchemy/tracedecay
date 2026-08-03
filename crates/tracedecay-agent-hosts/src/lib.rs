@@ -4,6 +4,8 @@
 //! host behavior, configuration transforms, generated host assets, and
 //! automation policy while depending only on lower-layer crates.
 
+#![allow(clippy::collapsible_if)]
+
 pub mod agents;
 pub mod analytics;
 pub mod automation;

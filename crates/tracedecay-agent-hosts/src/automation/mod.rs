@@ -1,13 +1,13 @@
 pub mod agent_targets;
 pub(crate) mod apply_policy;
-pub mod backend;
-pub mod config;
 mod artifact_feedback;
 mod artifact_generated_evals;
 mod artifact_optimizer;
 mod artifact_payloads;
 mod artifact_refs;
 pub mod artifacts;
+pub mod backend;
+pub mod config;
 pub mod fact_proposals;
 pub mod hermes_skill_bridge;
 pub mod host_receipts;

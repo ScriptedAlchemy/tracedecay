@@ -50,18 +50,12 @@ impl WorkflowIngestStore for GlobalDb {
         self.conn.clone()
     }
 
-    fn workflow_upsert_run(
-        &self,
-        run: &WorkflowRun,
-    ) -> impl std::future::Future<Output = Result<(), WorkflowIndexError>> + Send {
-        async move { upsert_run(&self.conn, run).await }
+    async fn workflow_upsert_run(&self, run: &WorkflowRun) -> Result<(), WorkflowIndexError> {
+        upsert_run(&self.conn, run).await
     }
 
-    fn workflow_upsert_agent(
-        &self,
-        agent: &WorkflowAgent,
-    ) -> impl std::future::Future<Output = Result<(), WorkflowIndexError>> + Send {
-        async move { upsert_agent(&self.conn, agent).await }
+    async fn workflow_upsert_agent(&self, agent: &WorkflowAgent) -> Result<(), WorkflowIndexError> {
+        upsert_agent(&self.conn, agent).await
     }
 }
 

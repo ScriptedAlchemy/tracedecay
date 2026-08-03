@@ -3,11 +3,11 @@ use std::future::Future;
 use crate::global_db::{GlobalDb, ParseOffset};
 use tracedecay_sessions::{SessionMessageRecord, SessionRecord};
 
-pub use tracedecay_sessions::runtime::source::{
-    ChangedFile, JsonlLine, NewJsonl, ParsedTranscript, SessionDraft, TranscriptSource,
-    StoredCursor, ingest_source, read_changed_file, stream_new_jsonl,
-};
 pub(crate) use tracedecay_sessions::runtime::source::TranscriptIngestStore;
+pub use tracedecay_sessions::runtime::source::{
+    ChangedFile, JsonlLine, NewJsonl, ParsedTranscript, SessionDraft, StoredCursor,
+    TranscriptSource, ingest_source, read_changed_file, stream_new_jsonl,
+};
 
 impl TranscriptIngestStore for GlobalDb {
     fn load_cursor(&self, path: &str) -> impl Future<Output = StoredCursor> + Send {

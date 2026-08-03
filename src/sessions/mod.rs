@@ -244,18 +244,12 @@ impl tracedecay_sessions::runtime::ingest::SessionIngestStore for GlobalDb {
         self.conn()
     }
 
-    fn ingest_hermes_for_project(
-        &self,
-        project_root: &Path,
-    ) -> impl std::future::Future<Output = TranscriptIngestStats> + Send {
-        async move { hermes::ingest_for_project(self, project_root).await }
+    async fn ingest_hermes_for_project(&self, project_root: &Path) -> TranscriptIngestStats {
+        hermes::ingest_for_project(self, project_root).await
     }
 
-    fn ingest_hermes_for_user(
-        &self,
-        registered_roots: &[PathBuf],
-    ) -> impl std::future::Future<Output = TranscriptIngestStats> + Send {
-        async move { hermes::ingest_user_sessions(self, registered_roots).await }
+    async fn ingest_hermes_for_user(&self, registered_roots: &[PathBuf]) -> TranscriptIngestStats {
+        hermes::ingest_user_sessions(self, registered_roots).await
     }
 }
 

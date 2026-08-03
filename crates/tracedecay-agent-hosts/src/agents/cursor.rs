@@ -664,12 +664,10 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             manifest_path.display()
         ));
     }
-    if let Some(message) =
-        super::cursor_diagnostics::plugin_version_staleness(
-            &manifest,
-            env!("TRACEDECAY_PRODUCT_VERSION"),
-        )
-    {
+    if let Some(message) = super::cursor_diagnostics::plugin_version_staleness(
+        &manifest,
+        env!("TRACEDECAY_PRODUCT_VERSION"),
+    ) {
         dc.warn(&message);
     }
     doctor_check_plugin_mcp(dc, &plugin_dir.join("mcp.json"));

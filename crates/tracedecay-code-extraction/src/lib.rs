@@ -1,3 +1,5 @@
+#![allow(clippy::collapsible_if)]
+
 // Lite — always available (no cfg needed)
 mod astro_extractor;
 mod c_extractor;

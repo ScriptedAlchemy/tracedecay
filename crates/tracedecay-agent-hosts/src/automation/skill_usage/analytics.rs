@@ -6,8 +6,8 @@ use crate::errors::Result;
 use crate::ports::AnalyticsEventRecord;
 
 use super::{
-    SkillUsageAction, SkillUsageEvent, SkillUsageRecord, ledger_skill_id,
-    load_skill_usage_ledger, save_skill_usage_ledger,
+    SkillUsageAction, SkillUsageEvent, SkillUsageRecord, ledger_skill_id, load_skill_usage_ledger,
+    save_skill_usage_ledger,
 };
 
 pub async fn ingest_analytics_events(

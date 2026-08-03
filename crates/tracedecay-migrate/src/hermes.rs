@@ -479,6 +479,7 @@ struct ResolvedTargetLayout {
     project_id: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn migrate_candidate<R, F, H>(
     user_home: &Path,
     hermes_homes: &[PathBuf],
@@ -586,6 +587,7 @@ where
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn migrate_candidate_snapshot<R, F, H>(
     user_home: &Path,
     hermes_homes: &[PathBuf],

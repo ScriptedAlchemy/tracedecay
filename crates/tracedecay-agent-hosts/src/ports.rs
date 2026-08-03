@@ -12,16 +12,14 @@ use crate::errors::{Result, TraceDecayError};
 pub type CursorPostInstallFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 pub type UserMemoryCuratorFuture<'a> = Pin<
     Box<
-        dyn Future<
-                Output = Result<crate::automation::memory_curator::MemoryCuratorAutomationRun>,
-            > + Send
+        dyn Future<Output = Result<crate::automation::memory_curator::MemoryCuratorAutomationRun>>
+            + Send
             + 'a,
     >,
 >;
 pub type AnalyticsEventsFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Vec<AnalyticsEventRecord>>> + Send + 'a>>;
-pub type SessionActivityFuture<'a> =
-    Pin<Box<dyn Future<Output = Option<i64>> + Send + 'a>>;
+pub type SessionActivityFuture<'a> = Pin<Box<dyn Future<Output = Option<i64>> + Send + 'a>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyticsEventRecord {

@@ -33,10 +33,10 @@ use super::text::truncate_chars_for_prompt;
 use crate::analytics::{ToolUsageObservation, underused_tool_family_signals};
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::user::open_user_memory_db;
+use crate::sessions::SessionQueryDb;
 use crate::sessions::lcm::{
     LcmGrepRequest, LcmGrepSort, LcmScope, LcmSessionReplayRequest, LcmSessionReplaySlice,
 };
-use crate::sessions::SessionQueryDb;
 use crate::tracedecay::current_timestamp;
 
 pub use super::memory_curator::{
@@ -53,9 +53,7 @@ pub trait ProjectAutomationStore: Send + Sync {
     fn project_root(&self) -> &std::path::Path;
     fn open_project_memory_db<'a>(
         &'a self,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<crate::db::Database>> + Send + 'a>,
-    >;
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<crate::db::Database>> + Send + 'a>>;
 }
 
 /// Profile-level artifact, ledger, and lock root for projectless automation.
@@ -996,12 +994,8 @@ async fn build_skill_writer_evidence(
     };
     let existing_skills = list_managed_skills(&profile_root).await?;
     if let Some(project_root) = analytics_project_root {
-        ingest_project_analytics_events(
-            &profile_root,
-            project_root,
-            SKILL_ANALYTICS_IMPORT_LIMIT,
-        )
-        .await?;
+        ingest_project_analytics_events(&profile_root, project_root, SKILL_ANALYTICS_IMPORT_LIMIT)
+            .await?;
     }
     let skill_usage_summaries = summarize_skill_usage(&profile_root, &existing_skills).await?;
     let stale_recommendations = stale_skill_recommendations(

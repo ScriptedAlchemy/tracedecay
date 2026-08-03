@@ -761,9 +761,7 @@ fn generated_prompt_rules_do_not_hardcode_repo_local_graph_db() {
         ),
         (
             "prompt_rules",
-            include_str!(
-                "../../crates/tracedecay-agent-hosts/src/agents/prompt_rules.rs"
-            ),
+            include_str!("../../crates/tracedecay-agent-hosts/src/agents/prompt_rules.rs"),
         ),
     ] {
         assert!(
@@ -1237,8 +1235,7 @@ fn test_hermes_user_install_writes_single_plugin() {
 
 #[test]
 fn test_hermes_generated_plugin_templates_live_outside_installer() {
-    let installer_source =
-        include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes.rs");
+    let installer_source = include_str!("../../crates/tracedecay-agent-hosts/src/agents/hermes.rs");
     // The template module plus its embedded asset payloads: the large Python
     // bodies live in src/agents/hermes/templates/ files pulled in via
     // include_str!, not as Rust string literals.
@@ -1291,10 +1288,9 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
         "unexpected provenance header: {header}"
     );
     assert!(
-        body
-            == include_str!(
-                "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
-            ),
+        body == include_str!(
+            "../../crates/tracedecay-agent-hosts/src/agents/hermes/templates/plugin_init.py"
+        ),
         "generated __init__.py body must be a verbatim copy of templates/plugin_init.py"
     );
 
