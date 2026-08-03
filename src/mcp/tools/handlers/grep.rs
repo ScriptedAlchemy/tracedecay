@@ -236,6 +236,9 @@ fn scan_tree<F>(
 where
     F: Fn() -> bool,
 {
+    let allow_generated_dirs = overrides
+        .as_ref()
+        .is_some_and(|overrides| overrides.num_whitelists() > 0);
     let mut builder = WalkBuilder::new(project_root);
     builder
         .follow_links(false)
@@ -244,7 +247,7 @@ where
         .git_global(true)
         .git_exclude(true)
         .add_custom_ignore_filename(".gitignore")
-        .filter_entry(|entry| {
+        .filter_entry(move |entry| {
             if entry.depth() == 0 {
                 return true;
             }
@@ -253,6 +256,7 @@ where
                 return false;
             }
             !entry.file_type().is_some_and(|kind| kind.is_dir())
+                || allow_generated_dirs
                 || !crate::config::is_generated_dir_segment(&segment)
         });
     if let Some(overrides) = overrides {
