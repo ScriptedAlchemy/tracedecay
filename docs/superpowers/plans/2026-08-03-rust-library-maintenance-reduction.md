@@ -43,14 +43,16 @@ generic SSE framing and `serde_path_to_error` for typed payload diagnostics.
 Keep TraceDecay sequence, frontier, correlation, resume-gap, retry, terminal,
 and cancellation state machines. Delete manual SSE and blocking iterator code.
 
-### 3. `octocrab`
+### 3. `octocrab` — rejected
 
-Resume the recognized `v2-octocrab-cutover` worktree after reconciliation.
-Construct request-scoped clients only after permission and request
-authorization. Replace generic GitHub REST/GraphQL transport and pagination
-while retaining bounded bodies, redirect denial, ETag/304, rate-limit,
-checkpoint, cancellation, timeout, and opaque credential behavior. Remove
-`ureq` only after its final production caller disappears.
+Preflight found no deletion-positive cutover. Octocrab's convenience paths
+enable or assume redirect/retry/unbounded collection behavior that cannot own
+TraceDecay's fixed-route, bounded-body, authorization, ETag/304, rate-limit,
+checkpoint, cancellation, and nested pagination semantics. A safe integration
+would retain nearly all custom policy/state code, add a larger HTTP/Tower
+stack, and still could not remove `ureq` because non-GitHub production callers
+remain. Do not add Octocrab or a second GitHub transport. Reconsider only when
+the maintained API can materially delete the existing bounded transport.
 
 ### 4. `croner`
 
