@@ -7,5 +7,11 @@ export function callWorkflow<Request, Response>(
   request: Request,
   init?: RequestInit,
 ): Promise<WorkResult<Response>> {
-  return callApplication(route, request, route.path, init);
+  return callApplication(
+    route,
+    request,
+    route.path,
+    init,
+    'the Workflow runtime is unavailable',
+  );
 }

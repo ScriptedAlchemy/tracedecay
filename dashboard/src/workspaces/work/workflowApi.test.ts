@@ -82,10 +82,13 @@ describe('Workflow application bindings', () => {
     const fetch = vi.fn();
     vi.stubGlobal('fetch', fetch);
 
-    const result = await callWorkflow(WORKFLOW_ACTIVATE_DEFINITION_ROUTE, {
-      definition_id: 'workflow.dashboard',
-      expected_active_version: 1,
-    });
+    const result = await callWorkflow(
+      WORKFLOW_ACTIVATE_DEFINITION_ROUTE,
+      {
+        definition_id: 'workflow.dashboard',
+        expected_active_version: 1,
+      } as never,
+    );
 
     expect(result).toEqual({
       outcome: 'refused',
@@ -93,5 +96,24 @@ describe('Workflow application bindings', () => {
       detail: 'the request does not satisfy operation.workflow.activate_definition',
     });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('reports Workflow unavailability without relabelling it as Work', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(new Response(null, { status: 503 })),
+    );
+
+    const result = await callWorkflow(WORKFLOW_ACTIVATE_DEFINITION_ROUTE, {
+      definition_id: 'workflow.dashboard',
+      expected_active_version: 1,
+      replacement_version: 2,
+    });
+
+    expect(result).toEqual({
+      outcome: 'refused',
+      state: 'unavailable',
+      detail: 'the Workflow runtime is unavailable',
+    });
   });
 });

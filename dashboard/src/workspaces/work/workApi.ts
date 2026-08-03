@@ -66,7 +66,10 @@ export type WorkResult<T> =
  * the same thing to someone holding a stale `expected_version`: read again
  * before retrying.
  */
-export function workRefusal(status: number): { state: DomainStateKind; detail: string } {
+export function workRefusal(
+  status: number,
+  unavailableDetail = 'the Work runtime is unavailable',
+): { state: DomainStateKind; detail: string } {
   switch (status) {
     case 400:
       return { state: 'error', detail: 'the daemon rejected the request as invalid' };
@@ -88,7 +91,7 @@ export function workRefusal(status: number): { state: DomainStateKind; detail: s
     case 504:
       return { state: 'timed_out', detail: 'the daemon timed out' };
     case 503:
-      return { state: 'unavailable', detail: 'the Work runtime is unavailable' };
+      return { state: 'unavailable', detail: unavailableDetail };
     default:
       return { state: 'error', detail: `HTTP ${status}` };
   }
@@ -135,6 +138,7 @@ export async function callApplication<Request, Response>(
   request: Request,
   url: string,
   init?: RequestInit,
+  unavailableDetail = 'the application runtime is unavailable',
 ): Promise<WorkResult<Response>> {
   const encoded = route.request.safeParse(request);
   if (!encoded.success) {
@@ -158,7 +162,7 @@ export async function callApplication<Request, Response>(
   }
 
   if (!response.ok) {
-    const refusal = workRefusal(response.status);
+    const refusal = workRefusal(response.status, unavailableDetail);
     return { outcome: 'refused', state: refusal.state, detail: refusal.detail };
   }
 
@@ -206,7 +210,7 @@ export function callWork<Request, Response>(
   url: string,
   init?: RequestInit,
 ): Promise<WorkResult<Response>> {
-  return callApplication(route, request, url, init);
+  return callApplication(route, request, url, init, 'the Work runtime is unavailable');
 }
 
 /** Aliased so the `Response` type is not shadowed by the generic parameter. */
