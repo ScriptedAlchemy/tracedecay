@@ -103,6 +103,9 @@ fn capability(
         deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt)?,
         pagination: None::<PaginationContract>,
         idempotency: IdempotencyContract::Required,
+        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
+            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+        },
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,

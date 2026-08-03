@@ -546,12 +546,12 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
         );
         assert_eq!(record.accepted_count, 1);
         assert_eq!(record.rejected_count, 0);
-        assert_eq!(record.artifacts.len(), 7);
+        assert_eq!(record.artifacts.len(), 6);
 
         let artifact_url = format!("{base_url}/api/automation/runs/{run_id}/artifacts");
         let (status, listed) = get_json(&agent, &artifact_url);
         assert_eq!(status, 200, "artifact list failed: {listed}");
-        assert_eq!(listed["count"], 7);
+        assert_eq!(listed["count"], 6);
         assert_eq!(listed["artifact_chain"]["complete"], true);
         assert_eq!(
             listed["artifact_chain"]["present_kinds"],
@@ -561,8 +561,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
                 "generated_evals",
                 "validation_gate",
                 "optimizer_diagnosis",
-                "codex_handoff",
-                "manifest"
+                "codex_handoff"
             ])
         );
 
@@ -671,7 +670,7 @@ fn final_self_improvement_smoke_covers_autonomous_curation_and_skill_approval() 
                         && record["status"] == "succeeded"
                         && record["artifacts"]
                             .as_array()
-                            .is_some_and(|artifacts| artifacts.len() == 7))
+                            .is_some_and(|artifacts| artifacts.len() == 6))
                 ),
             "successful dashboard automation run should be visible in history: {runs}"
         );
@@ -816,8 +815,7 @@ fn automation_run_artifact_api_serves_verified_sidecar_payloads() {
                 "generated_evals",
                 "validation_gate",
                 "optimizer_diagnosis",
-                "codex_handoff",
-                "manifest"
+                "codex_handoff"
             ])
         );
         assert_eq!(

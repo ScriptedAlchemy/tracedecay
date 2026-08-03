@@ -124,6 +124,7 @@ use super::binding::{
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 #[cfg(test)]
 use dispatch_groups::dispatch_memory_operation;
+pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
     dispatch_edit_tools, dispatch_git_tools, dispatch_graph_tools, dispatch_health_tools,
@@ -131,15 +132,40 @@ use dispatch_groups::{
     dispatch_session_workflow_tools,
 };
 use retained_catalog::dispatch_profile_retained_application_tool;
-use tool_call_support::{
-    INTERNAL_DAEMON_TOOL_NAMES, boxed_send, rejected_tool_project_selector_present,
-};
+pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
+use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 
 /// Dispatches a tool call to the appropriate handler.
 ///
 /// Returns the tool result and touched file paths, or an error if the tool
 /// name is unknown or the handler fails. The optional `server_stats` value
 /// is included in `tracedecay_status` responses when provided.
+fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
+    if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
+        return Ok(());
+    }
+    let contract =
+        super::mcp_dispatch_contract(tool_name).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    if let tracedecay_tool_catalog::McpDispatchAvailability::Unavailable { reason, retryable } =
+        contract.availability()
+    {
+        return Err(TraceDecayError::project_route(
+            match reason {
+                tracedecay_tool_catalog::McpDispatchUnavailableReason::EffectJourneyUnverified => {
+                    "mcp_dispatch_effect_journey_unverified"
+                }
+            },
+            *retryable,
+            format!(
+                "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
@@ -275,6 +301,14 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             }
             match storage_scope {
                 "user" => {
+                    // User-scoped retained/LCM calls return before the root
+                    // dispatch guard below. Keep the canonical availability
+                    // decision ahead of every profile handler and store effect.
+                    if RetainedSurfaceOperation::from_name(tool_name).is_some()
+                        || tool_name == "tracedecay_message_search"
+                    {
+                        ensure_mcp_dispatch_available(tool_name)?;
+                    }
                     let profile_root = match options.profile_root {
                         Some(profile_root) => profile_root.to_path_buf(),
                         None => support::profile_root_for_global_db(
@@ -379,6 +413,10 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             options.application_invocation_executor.is_some(),
         );
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
+            // Application-surface tools return before the root guard below.
+            // Reject unavailable effects before parsing, routing, or invoking
+            // the canonical application handler.
+            ensure_mcp_dispatch_available(tool_name)?;
             return boxed_send(dispatch_application_surface_tools(
                 tool_name,
                 cg,
@@ -401,6 +439,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         {
             return Err(unknown_tool_error(tool_name));
         }
+        ensure_mcp_dispatch_available(tool_name)?;
         // The universal ceiling. Every dispatch group below runs inside this one
         // bound, so a group added later inherits it without opting in and no
         // handler can be reached unbounded. Per-group wraps (git, memory) stay:

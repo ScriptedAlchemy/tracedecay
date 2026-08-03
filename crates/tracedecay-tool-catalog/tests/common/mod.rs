@@ -71,6 +71,7 @@ pub fn read_manifest(
         deadline: DeadlineContract::new(1_000, DeadlineBehavior::ReturnOperationReceipt).unwrap(),
         pagination: Some(PaginationContract::new(10, 100, 60_000).unwrap()),
         idempotency: IdempotencyContract::NotRequired,
+        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,

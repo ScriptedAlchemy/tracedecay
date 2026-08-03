@@ -329,6 +329,23 @@ pub enum IdempotencyContract {
     Required,
 }
 
+/// Whether an effect has a shipped, catalog-addressable inverse.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum InverseContract {
+    NotApplicable,
+    Unavailable { reason: InverseUnavailableReason },
+    Capability { capability_id: CapabilityId },
+}
+
+/// Why an effect cannot advertise a callable inverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InverseUnavailableReason {
+    NoShippedInverse,
+    ExternalAuthority,
+}
+
 /// An authority or state boundary that is rechecked immediately before work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -539,6 +556,7 @@ pub struct CapabilityManifestInputV1 {
     pub deadline: DeadlineContract,
     pub pagination: Option<PaginationContract>,
     pub idempotency: IdempotencyContract,
+    pub inverse: InverseContract,
     pub authority_revalidation: RevalidationContract,
     pub reconciliation: ReconciliationContract,
     pub receipt: ReceiptContract,
@@ -569,6 +587,7 @@ pub struct CapabilityManifestV1 {
     deadline: DeadlineContract,
     pagination: Option<PaginationContract>,
     idempotency: IdempotencyContract,
+    inverse: InverseContract,
     authority_revalidation: RevalidationContract,
     reconciliation: ReconciliationContract,
     receipt: ReceiptContract,
@@ -605,6 +624,7 @@ impl CapabilityManifestV1 {
             deadline: input.deadline,
             pagination: input.pagination,
             idempotency: input.idempotency,
+            inverse: input.inverse,
             authority_revalidation: input.authority_revalidation,
             reconciliation: input.reconciliation,
             receipt: input.receipt,
@@ -682,6 +702,10 @@ impl CapabilityManifestV1 {
         self.idempotency
     }
 
+    pub fn inverse(&self) -> &InverseContract {
+        &self.inverse
+    }
+
     pub fn authority_revalidation(&self) -> &RevalidationContract {
         &self.authority_revalidation
     }
@@ -740,6 +764,13 @@ impl CapabilityManifestV1 {
             return Err(
                 self.invalid("effects require explicit scope and revalidating grant authority")
             );
+        }
+
+        if self.effect.is_read_only() && self.inverse != InverseContract::NotApplicable {
+            return Err(self.invalid("read-only capabilities cannot advertise an inverse"));
+        }
+        if self.effect.is_effect() && self.inverse == InverseContract::NotApplicable {
+            return Err(self.invalid("effects must declare inverse availability"));
         }
 
         let base_terminals = [

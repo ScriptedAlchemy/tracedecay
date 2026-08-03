@@ -16,11 +16,6 @@ use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension
 use super::ToolDefinition;
 use super::binding::registered_project_reader_tool_names;
 
-/// Tools registered on every host before optional external capabilities.
-/// Count-contract tests share this source of truth so branch rebases cannot
-/// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 169;
-
 mod admin;
 mod analysis;
 mod application;
@@ -345,7 +340,7 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     authorized_capabilities: &BTreeSet<CapabilityId>,
     available_scope: &BTreeSet<ScopeDimension>,
     registry_mode: ToolRegistryMode,
-) -> Result<Vec<ToolDefinition>, crate::application_surface::ApplicationSurfaceAdapterError> {
+) -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
     let catalog = crate::application_surface::application_surface_catalog_ref()?;
     let visible_operations = catalog
         .visible_bindings(
@@ -370,13 +365,15 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     if registry_mode == ToolRegistryMode::HostAvailable {
         retain_host_available_tool_definitions(&mut definitions);
     }
-    Ok(definitions
+    let mut definitions = definitions
         .into_iter()
         .filter(|definition| {
             !catalog_operations.contains(&definition.name)
                 || visible_operations.contains(&definition.name)
         })
-        .collect())
+        .collect::<Vec<_>>();
+    super::dispatch::attach_dispatch_metadata(&mut definitions)?;
+    Ok(definitions)
 }
 
 pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
@@ -385,7 +382,7 @@ pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
     authorized_capabilities: &BTreeSet<CapabilityId>,
     available_scope: &BTreeSet<ScopeDimension>,
     registry_mode: ToolRegistryMode,
-) -> Result<Vec<ToolDefinition>, crate::application_surface::ApplicationSurfaceAdapterError> {
+) -> Result<Vec<ToolDefinition>, super::dispatch::McpDispatchMetadataError> {
     let mut definitions = get_catalog_filtered_tool_definitions_with_budget(
         0,
         budget,
@@ -462,7 +459,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     definitions
 }
 
-fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
+pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
         def_grep(),
@@ -1026,6 +1023,45 @@ mod tests {
                 .iter()
                 .any(|definition| definition.name == "tracedecay_ast_grep_rewrite")
         );
+
+        let fingerprints = definitions
+            .iter()
+            .map(|definition| {
+                let dispatch = &definition.meta.as_ref().unwrap()["tracedecay/dispatch"];
+                assert_eq!(dispatch["version"], 1);
+                assert_eq!(
+                    definition.annotations.as_ref().unwrap()["readOnlyHint"],
+                    dispatch["read_only"]
+                );
+                assert!(dispatch["deadline"]["maximum_millis"].as_u64().unwrap() > 0);
+                dispatch["fingerprint"].as_str().unwrap()
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            fingerprints.len(),
+            1,
+            "one catalog snapshot must fingerprint every advertised contract"
+        );
+
+        let dashboard = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_dashboard")
+            .unwrap();
+        let dispatch = &dashboard.meta.as_ref().unwrap()["tracedecay/dispatch"];
+        assert_eq!(dispatch["effect"], "administrative");
+        assert_eq!(dispatch["availability"]["state"], "available");
+        assert_eq!(dispatch["idempotency"], "idempotent");
+        assert_eq!(dispatch["inverse"]["mode"], "same_tool");
+
+        let doctor = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_lcm_doctor")
+            .unwrap();
+        let dispatch = &doctor.meta.as_ref().unwrap()["tracedecay/dispatch"];
+        assert_eq!(dispatch["effect"], "administrative");
+        assert_eq!(dispatch["availability"]["state"], "unavailable");
+        assert!(dispatch.get("receipt").is_none());
+        assert!(dispatch.get("reconciliation").is_none());
     }
 
     #[test]
