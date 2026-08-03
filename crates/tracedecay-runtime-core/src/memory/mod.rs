@@ -9,4 +9,5 @@ pub mod trust;
 pub mod types;
 pub mod user;
 
-pub use tracedecay_runtime_core::memory::{encoding, similarity};
+pub mod encoding;
+pub mod similarity;

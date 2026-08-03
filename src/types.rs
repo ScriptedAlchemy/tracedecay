@@ -1,3 +1,3 @@
-//! Compatibility façade for graph contracts owned by `tracedecay-domain`.
+//! Compatibility façade for graph contracts.
 
-pub use tracedecay_domain::code_intelligence::*;
+pub use tracedecay_runtime_core::types::*;

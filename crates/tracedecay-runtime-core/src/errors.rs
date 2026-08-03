@@ -1,0 +1,144 @@
+// Rust guideline compliant 2025-10-17
+use thiserror::Error;
+
+/// Errors that can occur during code graph operations.
+#[derive(Error, Debug)]
+pub enum TraceDecayError {
+    #[error("file error: {message} (path: {path})")]
+    File { message: String, path: String },
+
+    #[error("parse error: {message} (path: {path}, line: {line:?})")]
+    Parse {
+        message: String,
+        path: String,
+        line: Option<u32>,
+    },
+
+    #[error("database error: {message} (operation: {operation})")]
+    Database { message: String, operation: String },
+
+    #[error("search error: {message} (query: {query})")]
+    Search { message: String, query: String },
+
+    #[error("config error: {message}")]
+    Config { message: String },
+
+    #[error("sync lock: {message}")]
+    SyncLock { message: String },
+
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("libsql error: {0}")]
+    Libsql(#[from] libsql::Error),
+
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+}
+
+/// Convenience alias for results using `TraceDecayError`.
+pub type Result<T> = std::result::Result<T, TraceDecayError>;
+
+impl From<tracedecay_lsp::LspError> for TraceDecayError {
+    fn from(value: tracedecay_lsp::LspError) -> Self {
+        match value {
+            tracedecay_lsp::LspError::Config { message } => Self::Config { message },
+        }
+    }
+}
+
+impl From<tracedecay_automation::AutomationError> for TraceDecayError {
+    fn from(value: tracedecay_automation::AutomationError) -> Self {
+        Self::Config {
+            message: value.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_error_display_includes_message_and_path() {
+        let err = TraceDecayError::File {
+            message: "not found".to_string(),
+            path: "/tmp/foo.rs".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("not found"), "message missing: {s}");
+        assert!(s.contains("/tmp/foo.rs"), "path missing: {s}");
+    }
+
+    #[test]
+    fn parse_error_display_includes_line() {
+        let err = TraceDecayError::Parse {
+            message: "unexpected token".to_string(),
+            path: "src/main.rs".to_string(),
+            line: Some(42),
+        };
+        let s = err.to_string();
+        assert!(s.contains("unexpected token"), "{s}");
+        assert!(s.contains("src/main.rs"), "{s}");
+        assert!(s.contains("42"), "{s}");
+    }
+
+    #[test]
+    fn parse_error_display_no_line() {
+        let err = TraceDecayError::Parse {
+            message: "eof".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: None,
+        };
+        let s = err.to_string();
+        assert!(s.contains("eof"), "{s}");
+    }
+
+    #[test]
+    fn database_error_display_includes_operation() {
+        let err = TraceDecayError::Database {
+            message: "constraint violated".to_string(),
+            operation: "INSERT".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("constraint violated"), "{s}");
+        assert!(s.contains("INSERT"), "{s}");
+    }
+
+    #[test]
+    fn search_error_display_includes_query() {
+        let err = TraceDecayError::Search {
+            message: "timeout".to_string(),
+            query: "fn main".to_string(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("timeout"), "{s}");
+        assert!(s.contains("fn main"), "{s}");
+    }
+
+    #[test]
+    fn config_error_display() {
+        let err = TraceDecayError::Config {
+            message: "bad value".to_string(),
+        };
+        assert!(err.to_string().contains("bad value"));
+    }
+
+    #[test]
+    fn sync_lock_error_display() {
+        let err = TraceDecayError::SyncLock {
+            message: "already running".to_string(),
+        };
+        assert!(err.to_string().contains("already running"));
+    }
+
+    #[test]
+    fn json_error_from_serde() {
+        let serde_err = serde_json::from_str::<serde_json::Value>("bad json");
+        let err: TraceDecayError = match serde_err {
+            Err(e) => e.into(),
+            Ok(_) => panic!("expected JSON parse error"),
+        };
+        assert!(err.to_string().contains("json error"));
+    }
+}

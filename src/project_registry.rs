@@ -281,28 +281,7 @@ fn project_kind(project: &CodeProjectRecord) -> String {
 /// given" — when `project_root` already *is* the primary checkout, isn't a
 /// git checkout at all, or the primary checkout no longer exists (a
 /// worktree-only project is legitimate and must keep registering itself).
-pub fn primary_checkout_root(
-    project_root: &Path,
-    git_common_dir: Option<&Path>,
-) -> Option<PathBuf> {
-    let common_dir = git_common_dir?;
-    // Only a plain, non-bare `<repo>/.git` common dir has a parent that is
-    // reliably the checkout root. Bare repos and submodule gitlinks (whose
-    // common dir lives under `.git/modules/...`) are left alone rather than
-    // risk deriving a bogus "primary" and redirecting registration there.
-    if common_dir.file_name().and_then(|name| name.to_str()) != Some(".git") {
-        return None;
-    }
-    let primary_root = common_dir.parent()?;
-    let canonical_project_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
-    if primary_root == canonical_project_root {
-        // `project_root` already is the primary checkout.
-        return None;
-    }
-    primary_root.is_dir().then(|| primary_root.to_path_buf())
-}
+pub use tracedecay_runtime_core::project_registry::primary_checkout_root;
 
 fn path_label(path: &str) -> String {
     Path::new(path)
