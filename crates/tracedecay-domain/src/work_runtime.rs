@@ -5,6 +5,7 @@ use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -596,6 +597,20 @@ impl WorkArtifactRefV1 {
     pub const fn byte_length(&self) -> u64 {
         self.byte_length
     }
+}
+
+pub fn work_artifact_payload_digest(
+    payload: &[u8],
+) -> Result<ManifestDigest, WorkRuntimeContractError> {
+    let digest = Sha256::digest(payload);
+    let mut encoded = String::with_capacity("sha256:".len() + digest.len() * 2);
+    encoded.push_str("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}")
+            .map_err(|_| WorkRuntimeContractError::InvalidArtifact)?;
+    }
+    ManifestDigest::new(encoded).map_err(|_| WorkRuntimeContractError::InvalidArtifact)
 }
 
 impl<'de> Deserialize<'de> for WorkArtifactRefV1 {

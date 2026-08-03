@@ -17,6 +17,7 @@ use tracedecay_domain::{
     WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationRequestV1,
     WorkCancellationStateV1, WorkExecutionEnvelopeV1, WorkLeaseFenceV1, WorkProjectionSnapshotV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, canonical_sha256,
+    work_artifact_payload_digest,
 };
 
 use crate::application::event_lane::{self, ActivityFamilyV1};
@@ -303,6 +304,24 @@ where
         Ok(attempt)
     }
 
+    async fn publish_artifact_payload(
+        &self,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+        artifact: WorkArtifactRefV1,
+        payload: &[u8],
+    ) -> Result<WorkAttemptV1, WorkExecutionError> {
+        let attempt = self.execution.publish_artifact_payload(
+            &self.authority,
+            identity,
+            lease,
+            artifact,
+            payload,
+        )?;
+        self.publish_activity("artifact").await;
+        Ok(attempt)
+    }
+
     /// Claims the queue settlement for an attempt and acknowledges it durably.
     ///
     /// The durable cancellation intent, not the settlement variant, decides a
@@ -353,7 +372,19 @@ where
             };
             match settlement {
                 WorkProviderSettlementV1::Completed { evidence } => {
-                    let digest = canonical_sha256(&evidence).map_err(|error| {
+                    let payload = evidence.as_bytes();
+                    let payload_length = u64::try_from(payload.len()).map_err(|_| {
+                        WorkProviderExecutionError::Rejected(
+                            "Codex Work artifact length overflowed".to_owned(),
+                        )
+                    })?;
+                    if payload_length > current.execution().budget().max_stdout_bytes() {
+                        return Err(WorkProviderExecutionError::Rejected(
+                            "Codex Work artifact exceeds the admitted output budget".to_owned(),
+                        )
+                        .into());
+                    }
+                    let digest = work_artifact_payload_digest(payload).map_err(|error| {
                         WorkProviderExecutionError::Rejected(format!(
                             "Codex Work artifact digest failed: {error}"
                         ))
@@ -361,13 +392,10 @@ where
                     let artifact = WorkArtifactRefV1::new(
                         artifact_id(identity.attempt_id())?,
                         digest.clone(),
-                        u64::try_from(evidence.len()).map_err(|_| {
-                            WorkProviderExecutionError::Rejected(
-                                "Codex Work artifact length overflowed".to_owned(),
-                            )
-                        })?,
+                        payload_length,
                     )?;
-                    self.publish_artifact(identity, lease, artifact).await?;
+                    self.publish_artifact_payload(identity, lease, artifact, payload)
+                        .await?;
                     self.publish_progress(identity, lease, WorkAttemptProgressV1::new(1, 1)?)
                         .await?;
                     WorkTerminalEvidenceV1::succeeded(digest, observed_at)?

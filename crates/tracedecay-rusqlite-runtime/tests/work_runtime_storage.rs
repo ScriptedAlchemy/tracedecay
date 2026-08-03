@@ -16,7 +16,7 @@ use tracedecay_domain::{
     WorkLeaseFenceV1, WorkLeaseId, WorkProjectionCoverageV1, WorkProjectionSequenceV1,
     WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
     WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1, WorkVersion,
-    WorkflowOperationRef, WorktreeId,
+    WorkflowOperationRef, WorktreeId, work_artifact_payload_digest,
 };
 use tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -297,19 +297,17 @@ fn application_execution_service_composes_with_sqlite_adapter() {
             WorkAttemptProgressV1::new(1, 2).unwrap(),
         )
         .unwrap();
+    let payload = b"durable workflow artifact payload";
+    let artifact = WorkArtifactRefV1::new(
+        id("artifact.work.runtime-store.application"),
+        work_artifact_payload_digest(payload).unwrap(),
+        u64::try_from(payload.len()).unwrap(),
+    )
+    .unwrap();
     service
-        .publish_artifact(
-            &owner,
-            &identity,
-            &lease(1),
-            WorkArtifactRefV1::new(
-                id("artifact.work.runtime-store.application"),
-                digest('7'),
-                32,
-            )
-            .unwrap(),
-        )
+        .publish_artifact_payload(&owner, &identity, &lease(1), artifact.clone(), payload)
         .unwrap();
+    assert_eq!(service.artifact_payload(&artifact).unwrap(), payload);
     let terminal = WorkTerminalEvidenceV1::succeeded(digest('8'), UtcMicros(50)).unwrap();
     let completed = service
         .terminalize(&owner, &identity, &lease(1), terminal.clone())

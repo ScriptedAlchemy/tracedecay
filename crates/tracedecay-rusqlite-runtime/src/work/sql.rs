@@ -73,6 +73,13 @@ pub(crate) fn migration_integer(values: &[MigrationSqlValue], index: usize) -> O
     }
 }
 
+pub(crate) fn migration_blob(values: &[MigrationSqlValue], index: usize) -> Option<&[u8]> {
+    match values.get(index)? {
+        MigrationSqlValue::Blob(value) => Some(value),
+        _ => None,
+    }
+}
+
 pub(crate) fn invalid_storage(message: &str) -> rusqlite::Error {
     rusqlite::Error::InvalidParameterName(message.to_owned())
 }

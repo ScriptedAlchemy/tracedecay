@@ -11,10 +11,11 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ManifestDigest, ProjectionGenerationId, TaskId, WORK_PROJECTION_STATE_VERSION_V1,
-    WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority, WorkCommandId,
-    WorkEvent, WorkProjection, WorkProjectionCoverageV1, WorkProjectionDeltaV1,
+    WorkArtifactRefV1, WorkAttemptIdentityV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCommandId, WorkEvent, WorkProjection, WorkProjectionCoverageV1, WorkProjectionDeltaV1,
     WorkProjectionResumeCursorV1, WorkProjectionSequenceRangeV1, WorkProjectionSequenceV1,
     WorkProjectionSnapshotV1, WorkProjectionStateV1, WorkVersion, canonical_sha256,
+    work_artifact_payload_digest,
 };
 
 use crate::migration_sql::{

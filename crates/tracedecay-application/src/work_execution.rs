@@ -147,6 +147,20 @@ pub trait WorkAttemptPersistencePort: Send + Sync {
         expected: &WorkAttemptV1,
         replacement: &WorkAttemptV1,
     ) -> Result<(), WorkExecutionPersistenceError>;
+
+    fn compare_and_swap_with_artifact_payload(
+        &self,
+        authority: &WorkAuthority,
+        expected: &WorkAttemptV1,
+        replacement: &WorkAttemptV1,
+        artifact: &WorkArtifactRefV1,
+        payload: &[u8],
+    ) -> Result<(), WorkExecutionPersistenceError>;
+
+    fn artifact_payload(
+        &self,
+        artifact: &WorkArtifactRefV1,
+    ) -> Result<Vec<u8>, WorkExecutionPersistenceError>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -383,6 +397,53 @@ where
             None,
             lease.clone(),
         )
+    }
+
+    pub fn publish_artifact_payload(
+        &self,
+        authority: &WorkAuthority,
+        identity: &WorkAttemptIdentityV1,
+        lease: &WorkLeaseFenceV1,
+        artifact: WorkArtifactRefV1,
+        payload: &[u8],
+    ) -> Result<WorkAttemptV1, WorkExecutionError> {
+        let current = self.load_with_fence(authority, identity, lease)?;
+        let mut artifacts = current.artifacts().to_vec();
+        let recovery = current.recovery().clone();
+        if !artifacts.contains(&artifact) {
+            artifacts.push(artifact.clone());
+        }
+        let replacement = WorkAttemptV1::new(
+            current.identity().clone(),
+            current.projection_binding().clone(),
+            current.execution().clone(),
+            lease.clone(),
+            WorkAttemptStateV1::Running,
+            current.progress(),
+            artifacts,
+            WorkCancellationStateV1::None,
+            recovery,
+            current.requested_route().clone(),
+            current.actual_route().cloned(),
+            None,
+        )?;
+        self.persistence.compare_and_swap_with_artifact_payload(
+            authority,
+            &current,
+            &replacement,
+            &artifact,
+            payload,
+        )?;
+        Ok(replacement)
+    }
+
+    pub fn artifact_payload(
+        &self,
+        artifact: &WorkArtifactRefV1,
+    ) -> Result<Vec<u8>, WorkExecutionError> {
+        self.persistence
+            .artifact_payload(artifact)
+            .map_err(Into::into)
     }
 
     /// Records the durable intent to cancel an attempt before any provider is
@@ -798,6 +859,26 @@ mod tests {
             }
             *stored = Some(replacement.clone());
             Ok(())
+        }
+
+        fn compare_and_swap_with_artifact_payload(
+            &self,
+            authority: &WorkAuthority,
+            expected: &WorkAttemptV1,
+            replacement: &WorkAttemptV1,
+            _artifact: &WorkArtifactRefV1,
+            _payload: &[u8],
+        ) -> Result<(), WorkExecutionPersistenceError> {
+            self.compare_and_swap(authority, expected, replacement)
+        }
+
+        fn artifact_payload(
+            &self,
+            _artifact: &WorkArtifactRefV1,
+        ) -> Result<Vec<u8>, WorkExecutionPersistenceError> {
+            Err(WorkExecutionPersistenceError::Unavailable(
+                "fake artifact payload is unavailable".to_owned(),
+            ))
         }
     }
 

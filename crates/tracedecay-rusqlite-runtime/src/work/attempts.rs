@@ -46,6 +46,7 @@ impl WorkSqliteStorage {
         input_digest: &ManifestDigest,
         expected: Option<&WorkAttemptV1>,
         attempt: &WorkAttemptV1,
+        artifact_payload: Option<(&WorkArtifactRefV1, &[u8])>,
     ) -> AttemptStoreResult<()> {
         if expected.is_none() && attempt.state() != WorkAttemptStateV1::Leased {
             return Err(AttemptStoreError::InvalidRequest);
@@ -60,6 +61,7 @@ impl WorkSqliteStorage {
             input_digest,
             expected,
             attempt,
+            artifact_payload,
         )
     }
 }
@@ -79,7 +81,7 @@ impl WorkAttemptPersistencePort for WorkSqliteStorage {
         attempt: &WorkAttemptV1,
     ) -> Result<(), WorkExecutionPersistenceError> {
         let (command_id, digest) = application_attempt_material(authority, None, attempt)?;
-        self.append_execution_attempt(authority, &command_id, &digest, None, attempt)
+        self.append_execution_attempt(authority, &command_id, &digest, None, attempt, None)
             .map_err(map_execution_persistence)
     }
 
@@ -91,8 +93,43 @@ impl WorkAttemptPersistencePort for WorkSqliteStorage {
     ) -> Result<(), WorkExecutionPersistenceError> {
         let (command_id, digest) =
             application_attempt_material(authority, Some(expected), replacement)?;
-        self.append_execution_attempt(authority, &command_id, &digest, Some(expected), replacement)
-            .map_err(map_execution_persistence)
+        self.append_execution_attempt(
+            authority,
+            &command_id,
+            &digest,
+            Some(expected),
+            replacement,
+            None,
+        )
+        .map_err(map_execution_persistence)
+    }
+
+    fn compare_and_swap_with_artifact_payload(
+        &self,
+        authority: &WorkAuthority,
+        expected: &WorkAttemptV1,
+        replacement: &WorkAttemptV1,
+        artifact: &WorkArtifactRefV1,
+        payload: &[u8],
+    ) -> Result<(), WorkExecutionPersistenceError> {
+        let (command_id, digest) =
+            application_attempt_material(authority, Some(expected), replacement)?;
+        self.append_execution_attempt(
+            authority,
+            &command_id,
+            &digest,
+            Some(expected),
+            replacement,
+            Some((artifact, payload)),
+        )
+        .map_err(map_execution_persistence)
+    }
+
+    fn artifact_payload(
+        &self,
+        artifact: &WorkArtifactRefV1,
+    ) -> Result<Vec<u8>, WorkExecutionPersistenceError> {
+        load_artifact_payload(&self.handle, artifact).map_err(map_execution_persistence)
     }
 }
 
@@ -218,6 +255,7 @@ pub(crate) fn append_registered_attempt(
     input_digest: &ManifestDigest,
     expected: Option<&WorkAttemptV1>,
     attempt: &WorkAttemptV1,
+    artifact_payload: Option<(&WorkArtifactRefV1, &[u8])>,
 ) -> AttemptStoreResult<()> {
     let transaction = handle
         .begin_immediate()
@@ -225,10 +263,18 @@ pub(crate) fn append_registered_attempt(
     if let Some((digest, _payload)) =
         load_registered_attempt_idempotency(&transaction, authority, command_id.as_str())?
     {
-        let result = if digest == input_digest.as_str() {
-            Ok(())
-        } else {
+        let result = if digest != input_digest.as_str() {
             Err(AttemptStoreError::Conflict)
+        } else if let Some((artifact, expected_payload)) = artifact_payload {
+            load_artifact_payload(&transaction, artifact).and_then(|stored| {
+                if stored == expected_payload {
+                    Ok(())
+                } else {
+                    Err(AttemptStoreError::Conflict)
+                }
+            })
+        } else {
+            Ok(())
         };
         let _ = transaction.rollback();
         return result;
@@ -275,6 +321,9 @@ pub(crate) fn append_registered_attempt(
         attempt,
         revision,
     )?;
+    if let Some((artifact, payload)) = artifact_payload {
+        persist_artifact_payload(&transaction, attempt, artifact, payload)?;
+    }
     persist_registered_attempt_artifacts(&transaction, authority, attempt, revision)?;
     persist_registered_terminal_evidence(&transaction, authority, attempt, revision)?;
     persist_registered_attempt_idempotency(
@@ -322,6 +371,90 @@ pub(crate) fn load_registered_attempt_idempotency(
         .ok_or(AttemptStoreError::Unavailable)?
         .to_owned();
     Ok(Some((digest, payload)))
+}
+
+fn load_artifact_payload(
+    source: &impl RegisteredWorkQuery,
+    artifact: &WorkArtifactRefV1,
+) -> AttemptStoreResult<Vec<u8>> {
+    let rows = registered_work_query(
+        source,
+        "SELECT byte_length, payload
+         FROM work_artifact_payloads
+         WHERE digest = ?1",
+        vec![MigrationSqlValue::Text(
+            artifact.digest().as_str().to_owned(),
+        )],
+    )
+    .map_err(|_| AttemptStoreError::Unavailable)?;
+    let row = rows.rows.first().ok_or(AttemptStoreError::Unavailable)?;
+    let byte_length = migration_integer(&row.values, 0)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or(AttemptStoreError::Unavailable)?;
+    let payload = migration_blob(&row.values, 1)
+        .ok_or(AttemptStoreError::Unavailable)?
+        .to_vec();
+    if byte_length != artifact.byte_length()
+        || usize::try_from(byte_length).ok() != Some(payload.len())
+        || work_artifact_payload_digest(&payload).ok().as_ref() != Some(artifact.digest())
+    {
+        return Err(AttemptStoreError::Unavailable);
+    }
+    Ok(payload)
+}
+
+fn persist_artifact_payload(
+    transaction: &MigrationSqlTransaction,
+    attempt: &WorkAttemptV1,
+    artifact: &WorkArtifactRefV1,
+    payload: &[u8],
+) -> AttemptStoreResult<()> {
+    if !attempt.artifacts().contains(artifact)
+        || usize::try_from(artifact.byte_length()).ok() != Some(payload.len())
+        || work_artifact_payload_digest(payload).ok().as_ref() != Some(artifact.digest())
+    {
+        return Err(AttemptStoreError::InvalidRequest);
+    }
+    let existing = registered_work_query(
+        transaction,
+        "SELECT byte_length, payload
+         FROM work_artifact_payloads
+         WHERE digest = ?1",
+        vec![MigrationSqlValue::Text(
+            artifact.digest().as_str().to_owned(),
+        )],
+    )
+    .map_err(|_| AttemptStoreError::Unavailable)?;
+    if let Some(row) = existing.rows.first() {
+        let stored_length = migration_integer(&row.values, 0)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or(AttemptStoreError::Unavailable)?;
+        let stored_payload =
+            migration_blob(&row.values, 1).ok_or(AttemptStoreError::Unavailable)?;
+        return if stored_length == artifact.byte_length() && stored_payload == payload {
+            Ok(())
+        } else {
+            Err(AttemptStoreError::Conflict)
+        };
+    }
+    transaction
+        .execute(
+            migration_statement(
+                "INSERT INTO work_artifact_payloads (digest, byte_length, payload)
+                 VALUES (?1, ?2, ?3)",
+                vec![
+                    MigrationSqlValue::Text(artifact.digest().as_str().to_owned()),
+                    MigrationSqlValue::Integer(
+                        i64::try_from(artifact.byte_length())
+                            .map_err(|_| AttemptStoreError::InvalidRequest)?,
+                    ),
+                    MigrationSqlValue::Blob(payload.to_vec()),
+                ],
+            )
+            .map_err(|_| AttemptStoreError::Unavailable)?,
+        )
+        .map(|_| ())
+        .map_err(|_| AttemptStoreError::Unavailable)
 }
 
 pub(crate) fn validate_registered_attempt_projection(
