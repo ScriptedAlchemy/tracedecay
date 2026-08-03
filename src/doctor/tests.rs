@@ -1582,27 +1582,6 @@ fn temporal_family_manifest(db_path: &Path) -> BTreeMap<String, (u64, Option<Sys
             );
         }
     }
-    let lock_root = db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".tracedecay-database-locks");
-    if let Ok(entries) = std::fs::read_dir(&lock_root) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
-            if (name.ends_with(".access.lock")
-                || name.ends_with(".writer.lock")
-                || name.ends_with(".writer.owner")
-                || name.ends_with(".bootstrap.lock"))
-                && let Ok(metadata) = std::fs::metadata(&path)
-            {
-                manifest.insert(
-                    format!("lock:{name}"),
-                    (metadata.len(), metadata.modified().ok()),
-                );
-            }
-        }
-    }
     manifest
 }
 
@@ -1640,17 +1619,6 @@ async fn temporal_health_path_api_creates_no_authority_wal_shm_or_schema_artifac
     // immutable path API — the cold foreign Doctor/transport surface.
     let before_bytes = std::fs::read(&db_path).unwrap();
     let before_family = temporal_family_manifest(&db_path);
-    let lock_root = db_path.parent().unwrap().join(".tracedecay-database-locks");
-    let lock_names_before = if lock_root.is_dir() {
-        std::fs::read_dir(&lock_root)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect::<BTreeSet<_>>()
-    } else {
-        BTreeSet::new()
-    };
-
     let report =
         crate::global_db::session_temporal::session_temporal_doctor_health_at(&db_path).await;
     assert_eq!(
@@ -1662,18 +1630,12 @@ async fn temporal_health_path_api_creates_no_authority_wal_shm_or_schema_artifac
     assert_eq!(std::fs::read(&db_path).unwrap(), before_bytes);
     assert_eq!(temporal_family_manifest(&db_path), before_family);
 
-    let lock_names_after = if lock_root.is_dir() {
-        std::fs::read_dir(&lock_root)
+    assert!(
+        !db_path
+            .parent()
             .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect::<BTreeSet<_>>()
-    } else {
-        BTreeSet::new()
-    };
-    assert_eq!(
-        lock_names_after, lock_names_before,
-        "immutable doctor health must not create authority/lock/owner files"
+            .join(".tracedecay-database-locks")
+            .exists()
     );
     for suffix in ["-wal", "-shm"] {
         let mut path = db_path.as_os_str().to_os_string();
