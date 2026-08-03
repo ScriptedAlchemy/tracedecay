@@ -49,7 +49,10 @@ pub struct TranscriptBatch {
 }
 
 pub trait HermesStore: Sync {
-    fn load_cursor<'a>(&'a self, path: &'a str) -> Pin<Box<dyn Future<Output = StoredCursor> + Send + 'a>>;
+    fn load_cursor<'a>(
+        &'a self,
+        path: &'a str,
+    ) -> Pin<Box<dyn Future<Output = StoredCursor> + Send + 'a>>;
     fn advance_cursor<'a>(
         &'a self,
         path: &'a str,
@@ -108,7 +111,10 @@ fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
 ///
 /// Discovery is bounded to the default user integration (`~/.hermes`) and its
 /// immediate named-profile children; environment overrides are ignored.
-pub async fn ingest_for_project(db: &dyn HermesStore, project_root: &Path) -> TranscriptIngestStats {
+pub async fn ingest_for_project(
+    db: &dyn HermesStore,
+    project_root: &Path,
+) -> TranscriptIngestStats {
     let homes = super::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
@@ -300,7 +306,8 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
 fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root).is_some()
+    let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root)
+        .is_some()
         || tracedecay_runtime_core::config::has_project_database(project_root);
     for home in hermes_homes {
         let mut candidates: Vec<(PathBuf, Option<String>)> = vec![(home.clone(), None)];
@@ -454,9 +461,7 @@ async fn try_ingest_state_db(
     let conn = open_read_only_strict(state_db).await?;
     let path_str = state_db.to_string_lossy().to_string();
     let cursor_path = format!("{path_str}#{CORRELATION_CURSOR_VERSION}");
-    let mut cursor = {
-        db.load_cursor(&cursor_path).await
-    };
+    let mut cursor = { db.load_cursor(&cursor_path).await };
     let mut sessions_seen = BTreeSet::new();
     let select_sql = select_new_messages_sql(
         &message_columns(&conn).await,
@@ -526,10 +531,7 @@ async fn try_ingest_state_db_for_projects(
     let cursor_path = format!("{path_str}#{CORRELATION_CURSOR_VERSION}");
     let mut states = Vec::with_capacity(destinations.len());
     for destination in destinations {
-        let prev = destination
-            .db
-            .load_cursor(&cursor_path)
-            .await;
+        let prev = destination.db.load_cursor(&cursor_path).await;
         states.push(ProjectDestinationState {
             destination: *destination,
             cursor: prev,
@@ -660,9 +662,7 @@ async fn try_ingest_user_state_db(
     let conn = open_read_only_strict(state_db).await?;
     let path_str = state_db.to_string_lossy().to_string();
     let cursor_path = format!("{path_str}#{USER_CURSOR_VERSION}");
-    let mut cursor = {
-        db.load_cursor(&cursor_path).await
-    };
+    let mut cursor = { db.load_cursor(&cursor_path).await };
     let select_sql = select_new_messages_sql(
         &message_columns(&conn).await,
         &table_columns(&conn, "sessions").await,
@@ -1310,7 +1310,9 @@ fn session_usage_counters(row: &HermesRow) -> Option<Value> {
 /// LCM-store import) across incremental sweeps, mirroring the file-source
 /// driver's merge semantics.
 async fn merge_with_existing(db: &dyn HermesStore, batch: &mut TranscriptBatch) {
-    let existing = db.existing_session(PROVIDER, &batch.session.session_id).await;
+    let existing = db
+        .existing_session(PROVIDER, &batch.session.session_id)
+        .await;
     let first_ts = batch.messages.first().and_then(|message| message.timestamp);
     let last_ts = batch.messages.last().and_then(|message| message.timestamp);
 

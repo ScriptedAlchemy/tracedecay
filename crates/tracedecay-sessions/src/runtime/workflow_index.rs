@@ -161,7 +161,10 @@ pub struct WorkflowRun {
     pub result_summary: Option<String>,
     /// Number of agents recorded for the run (`agentCount`), for a cheap
     /// list-view count without joining `workflow_agents`.
-    #[serde(default, skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default"
+    )]
     pub agent_count: i64,
 }
 
@@ -192,7 +195,10 @@ pub struct WorkflowAgent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Total tokens (input+output, summed from transcript `usage`), when known.
-    #[serde(default, skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default")]
+    #[serde(
+        default,
+        skip_serializing_if = "tracedecay_runtime_core::serde_util::is_default"
+    )]
     pub tokens: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_ts: Option<i64>,
@@ -208,9 +214,7 @@ fn matches_token(value: &str, tokens: &[&str]) -> bool {
 /// through the shared `session_schema_migrations` table exactly like
 /// [`crate::sessions::git_correlation::ensure_git_correlation_schema`], so both
 /// stores register under their own migration name in one table.
-pub async fn ensure_workflow_index_schema(
-    conn: &Connection,
-) -> Result<(), WorkflowIndexError> {
+pub async fn ensure_workflow_index_schema(conn: &Connection) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
         .await
         .is_some_and(|version| version >= WORKFLOW_INDEX_SCHEMA_VERSION)

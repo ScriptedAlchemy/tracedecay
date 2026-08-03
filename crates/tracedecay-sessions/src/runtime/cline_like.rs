@@ -96,8 +96,7 @@ impl ClineLikeSource {
         Self {
             provider: "kilo",
             storage_roots: vec![
-                super::vscode_data_dir(home)
-                    .join("User/globalStorage/kilocode.kilo-code/tasks"),
+                super::vscode_data_dir(home).join("User/globalStorage/kilocode.kilo-code/tasks"),
                 home.join(".kilocode/cli/global/tasks"),
             ],
             user_registered_roots: None,

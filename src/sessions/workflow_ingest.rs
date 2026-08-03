@@ -1,6 +1,8 @@
 use std::future::Future;
 
-use tracedecay_sessions::runtime::workflow_index::{WorkflowAgent, WorkflowIndexError, WorkflowRun};
+use tracedecay_sessions::runtime::workflow_index::{
+    WorkflowAgent, WorkflowIndexError, WorkflowRun,
+};
 
 pub use tracedecay_sessions::runtime::workflow_ingest::*;
 

@@ -31,10 +31,7 @@ pub struct WorkflowStateItem {
     pub evidence: String,
 }
 
-pub async fn list_unfinished<S>(
-    db: &S,
-    limit: usize,
-) -> Result<Vec<WorkflowStateItem>, String>
+pub async fn list_unfinished<S>(db: &S, limit: usize) -> Result<Vec<WorkflowStateItem>, String>
 where
     S: WorkflowStateStore,
 {

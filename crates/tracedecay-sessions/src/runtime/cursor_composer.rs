@@ -171,8 +171,7 @@ impl CursorComposerSource {
         envelope_cap: usize,
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
-    )
-    where
+    ) where
         S: TranscriptIngestStore,
     {
         if !self.state_db_path.is_file() {
@@ -320,8 +319,7 @@ impl CursorComposerSource {
         registered_roots: &[PathBuf],
         workspace_paths: &HashMap<String, String>,
         outcome: &mut CursorComposerSweepOutcome,
-    )
-    where
+    ) where
         S: TranscriptIngestStore,
     {
         let Ok(ws_entries) = std::fs::read_dir(&self.chats_dir) else {
@@ -367,8 +365,7 @@ impl CursorComposerSource {
         store_path: &Path,
         project_path: &str,
         outcome: &mut CursorComposerSweepOutcome,
-    )
-    where
+    ) where
         S: TranscriptIngestStore,
     {
         let Some(ro) = open_readonly_immutable(store_path).await else {

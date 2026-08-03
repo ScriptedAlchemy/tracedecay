@@ -33,8 +33,8 @@ use crate::runtime::shared::{
     title_from_messages,
 };
 use crate::runtime::source::{
-    ParsedTranscript, SessionDraft, TranscriptIngestStore, TranscriptSource, collect_files_with_ext,
-    ingest_source, stream_new_jsonl,
+    ParsedTranscript, SessionDraft, TranscriptIngestStore, TranscriptSource,
+    collect_files_with_ext, ingest_source, stream_new_jsonl,
 };
 
 const PROVIDER: &str = "claude";

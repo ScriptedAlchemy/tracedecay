@@ -1,7 +1,7 @@
 use super::*;
 use crate::runtime::workflow_index::{
-    WorkflowIndexError, agents_for_run, ensure_workflow_index_schema, run_for_id,
-    runs_for_session, upsert_agent, upsert_run,
+    WorkflowIndexError, agents_for_run, ensure_workflow_index_schema, run_for_id, runs_for_session,
+    upsert_agent, upsert_run,
 };
 
 struct GlobalDb {

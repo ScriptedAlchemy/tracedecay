@@ -32,8 +32,8 @@ use crate::runtime::shared::{
     content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
 };
 use crate::runtime::source::{
-    ParsedTranscript, SessionDraft, TranscriptIngestStore, TranscriptSource, collect_files_with_ext,
-    read_changed_file,
+    ParsedTranscript, SessionDraft, TranscriptIngestStore, TranscriptSource,
+    collect_files_with_ext, read_changed_file,
 };
 
 const PROVIDER: &str = "kiro";

@@ -1,8 +1,8 @@
 use super::*;
-use crate::runtime::workflow_index::WorkflowScopeFilter;
 use crate::runtime::git_correlation::{
     SpanObservation, SpanSource, ensure_git_correlation_schema, record_span_observation,
 };
+use crate::runtime::workflow_index::WorkflowScopeFilter;
 
 async fn mem_conn() -> Connection {
     let db = libsql::Builder::new_local(":memory:")
