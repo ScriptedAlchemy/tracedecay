@@ -8,10 +8,12 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [dependencies]
-gix = { version = "0.81", default-features = false, features = [
+gix = { version = "=0.86.0", default-features = false, features = [
     "revision",
     "blob-diff",
+    "parallel",
     "sha1",
+    "sha256",
     "status",
 ] }
 hex = "0.4"

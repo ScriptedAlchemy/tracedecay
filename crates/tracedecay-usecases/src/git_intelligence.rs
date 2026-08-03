@@ -37,16 +37,13 @@ pub use tracedecay_application::git::{
 };
 use tracedecay_domain::git::{
     GitBlameAvailabilityV1, GitBlameLineV1, GitBlamePreviousV1, GitBlameV1, GitBlobExpectationV1,
-    GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitCoverageV1, GitDegradationV1,
-    GitDiffScopeV1, GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHeadStateV1, GitHistoryV1,
-    GitHunkV1, GitIndexEntryExpectationV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1,
-    GitStatusEntryV1, GitStatusV1, GitTrackedStatusV1, HUNK_REF_SCHEMA_VERSION_V1, HunkDirectionV1,
-    HunkRefV1, full_hunk_selection_bitmap,
+    GitChangeKindV1, GitCommitIdentityV1, GitCoverageV1, GitDegradationV1, GitDiffScopeV1,
+    GitDiffV1, GitFileDiffV1, GitFileModeV1, GitHeadStateV1, GitHistoryV1, GitHunkV1,
+    GitIndexEntryExpectationV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitStatusV1,
+    HUNK_REF_SCHEMA_VERSION_V1, HunkDirectionV1, HunkRefV1, full_hunk_selection_bitmap,
 };
 use tracedecay_domain::research::time::UtcMicros;
-use tracedecay_domain::research::{
-    DomainError, ManifestDigest, RepositoryId, WorktreeId, canonical_sha256,
-};
+use tracedecay_domain::research::{ManifestDigest, RepositoryId, WorktreeId, canonical_sha256};
 
 /// Read subcommands the adapter is allowed to run. Anything outside this
 /// list is refused before spawn, which makes index/ref/worktree/config
@@ -166,6 +163,22 @@ pub struct NativeGitIntelligence {
     repo_root: PathBuf,
     repository: RepositoryId,
     worktree: WorktreeId,
+}
+
+fn map_repository_error(
+    error: tracedecay_runtime_core::git_repository::GitRepositoryError,
+) -> GitIntelligenceError {
+    use tracedecay_runtime_core::git_repository::GitRepositoryError;
+
+    match error {
+        GitRepositoryError::NotARepository { path } => GitIntelligenceError::NotARepository(path),
+        GitRepositoryError::Operation { operation, detail } => GitIntelligenceError::GitFailed {
+            operation,
+            status: "gix".to_owned(),
+            stderr: detail,
+        },
+        GitRepositoryError::Domain(error) => GitIntelligenceError::Domain(error),
+    }
 }
 
 impl NativeGitIntelligence {
@@ -404,63 +417,19 @@ impl NativeGitIntelligence {
     /// renamed, conflicted, submodule, sparse, split-index, and file-mode
     /// state plus explicit coverage.
     pub fn status(&self) -> Result<GitStatusV1, GitIntelligenceError> {
-        let output = self.run_git(
-            "status",
-            &[
-                "status",
-                "--porcelain=v2",
-                "--branch",
-                "-z",
-                "--untracked-files=all",
-                "--ignored=matching",
-            ],
-        )?;
-        let text = String::from_utf8(output.stdout).map_err(|_| {
-            GitIntelligenceError::MalformedOutput {
-                operation: "status",
-                detail: "stdout was not UTF-8".to_owned(),
-            }
-        })?;
-
-        let (head, entries) = parse_status_porcelain(&text)?;
-        let git_dir = self.git_dir()?;
-        let mut degradations = self.state_degradations(&git_dir)?;
-
-        let mut head_degradations = BTreeSet::new();
-        let head = match head {
-            StatusHead::Attached { branch, commit } => GitHeadStateV1::Attached { branch, commit },
-            StatusHead::Detached { commit } => {
-                head_degradations.insert(GitDegradationV1::DetachedHead);
-                GitHeadStateV1::Detached { commit }
-            }
-            StatusHead::Unborn { branch } => {
-                head_degradations.insert(GitDegradationV1::UnbornBranch);
-                GitHeadStateV1::Unborn { branch }
-            }
-        };
-        degradations.extend(head_degradations);
-
-        if entries.iter().any(
-            |entry| matches!(entry, GitStatusEntryV1::Tracked(tracked) if tracked.is_conflicted()),
-        ) {
-            degradations.insert(GitDegradationV1::ConflictedState);
-        }
-        if entries
-            .iter()
-            .any(|entry| matches!(entry, GitStatusEntryV1::Tracked(tracked) if tracked.submodule))
-        {
-            degradations.insert(GitDegradationV1::SubmoduleState);
-        }
-        if has_ignored_collision(&entries) {
-            degradations.insert(GitDegradationV1::IgnoredCollision);
-        }
+        let authority = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(
+            &self.repo_root,
+        )
+        .map_err(map_repository_error)?;
+        let _object_format = authority.object_format().map_err(map_repository_error)?;
+        let snapshot = authority.status().map_err(map_repository_error)?;
 
         let status = GitStatusV1 {
             repository: self.repository.clone(),
-            head,
-            operation: Self::operation_state(&git_dir),
-            entries,
-            coverage: GitCoverageV1::degraded(degradations.into_iter().collect()),
+            head: snapshot.head,
+            operation: snapshot.operation,
+            entries: snapshot.entries,
+            coverage: GitCoverageV1::degraded(snapshot.degradations.into_iter().collect()),
         };
         status.validate()?;
         Ok(status)
@@ -669,61 +638,28 @@ impl NativeGitIntelligence {
         &self,
         request: &GitHistoryRequest,
     ) -> Result<GitHistoryV1, GitIntelligenceError> {
-        let git_dir = self.git_dir()?;
-        let mut degradations = self.state_degradations(&git_dir)?;
-        let (head, head_degradations) = self.head_state()?;
-        degradations.extend(head_degradations);
-
-        if matches!(head, GitHeadStateV1::Unborn { .. }) {
-            let history = GitHistoryV1 {
-                repository: self.repository.clone(),
-                commits: vec![],
-                truncated: false,
-                coverage: GitCoverageV1::degraded(degradations.into_iter().collect()),
-            };
-            history.validate()?;
-            return Ok(history);
-        }
-
-        if git_dir.join("shallow").is_file() {
-            degradations.insert(GitDegradationV1::ShallowBoundary);
-        }
-
         let max_count = request.max_count.clamp(1, GIT_HISTORY_MAX_COUNT_LIMIT);
-        // Ask for one extra record so truncation is proven, not guessed.
-        let mut args: Vec<String> = vec![
-            "log".to_owned(),
-            "--no-color".to_owned(),
-            "--no-ext-diff".to_owned(),
-            "--format=%H%x1f%T%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ce%x1f%ct%x1f%B%x1e"
-                .to_owned(),
-            format!("--max-count={}", u64::from(max_count) + 1),
-        ];
-        if request.first_parent {
-            args.push("--first-parent".to_owned());
-        }
-        if request.follow {
-            args.push("--follow".to_owned());
-        }
-        if let Some(path) = &request.path {
-            args.push("--".to_owned());
-            args.push(path.clone());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let text = self.stdout("log", &arg_refs)?;
-
-        let mut commits = parse_history(&text)?;
-        let truncated = commits.len() > max_count as usize;
-        if truncated {
-            commits.truncate(max_count as usize);
-            degradations.insert(GitDegradationV1::TruncatedOutput);
-        }
+        let authority = tracedecay_runtime_core::git_repository::GitRepositoryAuthority::discover(
+            &self.repo_root,
+        )
+        .map_err(map_repository_error)?;
+        let _object_format = authority.object_format().map_err(map_repository_error)?;
+        let snapshot = authority
+            .history(
+                &tracedecay_runtime_core::git_repository::GitHistoryOptions {
+                    max_count,
+                    first_parent: request.first_parent,
+                    path: request.path.clone(),
+                    follow_renames: request.follow,
+                },
+            )
+            .map_err(map_repository_error)?;
 
         let history = GitHistoryV1 {
             repository: self.repository.clone(),
-            commits,
-            truncated,
-            coverage: GitCoverageV1::degraded(degradations.into_iter().collect()),
+            commits: snapshot.commits,
+            truncated: snapshot.truncated,
+            coverage: GitCoverageV1::degraded(snapshot.degradations.into_iter().collect()),
         };
         history.validate()?;
         Ok(history)
@@ -1095,13 +1031,6 @@ impl GitReadPort for NativeGitIntelligence {
     }
 }
 
-/// Parsed HEAD summary from porcelain v2 branch headers.
-enum StatusHead {
-    Attached { branch: String, commit: GitOidV1 },
-    Detached { commit: GitOidV1 },
-    Unborn { branch: String },
-}
-
 fn parse_status_char(value: char) -> GitChangeKindV1 {
     match value {
         'M' => GitChangeKindV1::Modified,
@@ -1113,165 +1042,6 @@ fn parse_status_char(value: char) -> GitChangeKindV1 {
         'U' => GitChangeKindV1::Unmerged,
         _ => GitChangeKindV1::Unmodified,
     }
-}
-
-fn parse_status_mode(value: &str) -> Result<Option<GitFileModeV1>, GitIntelligenceError> {
-    if value.bytes().all(|byte| byte == b'0') {
-        Ok(None)
-    } else {
-        Ok(Some(GitFileModeV1::new(value)?))
-    }
-}
-
-/// Parse `git status --porcelain=v2 --branch -z` output.
-fn parse_status_porcelain(
-    text: &str,
-) -> Result<(StatusHead, Vec<GitStatusEntryV1>), GitIntelligenceError> {
-    let malformed = |detail: String| GitIntelligenceError::MalformedOutput {
-        operation: "status",
-        detail,
-    };
-
-    let mut branch_oid: Option<String> = None;
-    let mut branch_head: Option<String> = None;
-    let mut entries = Vec::new();
-
-    let mut records = text
-        .split('\0')
-        .filter(|record| !record.is_empty())
-        .peekable();
-    while let Some(record) = records.next() {
-        if let Some(header) = record.strip_prefix("# ") {
-            if let Some(value) = header.strip_prefix("branch.oid ") {
-                branch_oid = Some(value.trim().to_owned());
-            } else if let Some(value) = header.strip_prefix("branch.head ") {
-                branch_head = Some(value.trim().to_owned());
-            }
-            continue;
-        }
-        match record.chars().next() {
-            Some('1' | '2') => {
-                let is_rename = record.starts_with('2');
-                let expected_fields = if is_rename { 10 } else { 9 };
-                let fields: Vec<&str> = record.splitn(expected_fields, ' ').collect();
-                if fields.len() < expected_fields {
-                    return Err(malformed(format!("short ordinary entry {record:?}")));
-                }
-                let xy = fields[1];
-                let submodule = fields[2].starts_with('S');
-                let path = fields[if is_rename { 9 } else { 8 }].to_owned();
-                let original_path = if is_rename {
-                    Some(
-                        records
-                            .next()
-                            .ok_or_else(|| {
-                                malformed("rename entry missing source path".to_owned())
-                            })?
-                            .to_owned(),
-                    )
-                } else {
-                    None
-                };
-                let mut chars = xy.chars();
-                let index = parse_status_char(chars.next().unwrap_or('.'));
-                let worktree = parse_status_char(chars.next().unwrap_or('.'));
-                entries.push(GitStatusEntryV1::Tracked(GitTrackedStatusV1 {
-                    path,
-                    original_path,
-                    index,
-                    worktree,
-                    head_mode: parse_status_mode(fields[3])?,
-                    index_mode: parse_status_mode(fields[4])?,
-                    worktree_mode: parse_status_mode(fields[5])?,
-                    submodule,
-                }));
-            }
-            Some('u') => {
-                let fields: Vec<&str> = record.splitn(11, ' ').collect();
-                if fields.len() < 11 {
-                    return Err(malformed(format!("short unmerged entry {record:?}")));
-                }
-                let submodule = fields[2].starts_with('S');
-                entries.push(GitStatusEntryV1::Tracked(GitTrackedStatusV1 {
-                    path: fields[10].to_owned(),
-                    original_path: None,
-                    index: GitChangeKindV1::Unmerged,
-                    worktree: GitChangeKindV1::Unmerged,
-                    head_mode: None,
-                    index_mode: None,
-                    worktree_mode: parse_status_mode(fields[6])?,
-                    submodule,
-                }));
-            }
-            Some('?') => {
-                entries.push(GitStatusEntryV1::Untracked {
-                    path: record[2..].to_owned(),
-                });
-            }
-            Some('!') => {
-                entries.push(GitStatusEntryV1::Ignored {
-                    path: record[2..].to_owned(),
-                });
-            }
-            other => {
-                return Err(malformed(format!("unknown record tag {other:?}")));
-            }
-        }
-    }
-
-    let head = match (branch_oid.as_deref(), branch_head.as_deref()) {
-        (Some("(initial)"), _) => StatusHead::Unborn {
-            branch: branch_head.unwrap_or_default(),
-        },
-        (Some(oid), Some("(detached)") | None) => StatusHead::Detached {
-            commit: GitOidV1::new(oid)?,
-        },
-        (Some(oid), Some(branch)) => StatusHead::Attached {
-            branch: branch.to_owned(),
-            commit: GitOidV1::new(oid)?,
-        },
-        _ => StatusHead::Unborn {
-            branch: branch_head.unwrap_or_default(),
-        },
-    };
-
-    Ok((head, entries))
-}
-
-/// Conservative typed signal: ignored content shares a directory with live
-/// tracked/untracked entries (or collapses a parent of one), so Git's
-/// untracked/ignored view may be degraded.
-fn parent_dir(path: &str) -> &str {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(index) => &trimmed[..index],
-        None => "",
-    }
-}
-
-fn has_ignored_collision(entries: &[GitStatusEntryV1]) -> bool {
-    let ignored: Vec<&str> = entries
-        .iter()
-        .filter_map(|entry| match entry {
-            GitStatusEntryV1::Ignored { path } => Some(path.trim_end_matches('/')),
-            _ => None,
-        })
-        .collect();
-    if ignored.is_empty() {
-        return false;
-    }
-    entries.iter().any(|entry| {
-        let path = match entry {
-            GitStatusEntryV1::Ignored { .. } => return false,
-            _ => entry.path(),
-        };
-        ignored.iter().any(|ignored_path| {
-            parent_dir(ignored_path) == parent_dir(path)
-                || path.starts_with(&format!("{ignored_path}/"))
-                || (!parent_dir(path).is_empty()
-                    && ignored_path.starts_with(&format!("{}/", parent_dir(path))))
-        })
-    })
 }
 
 /// Parse `git diff --raw -z` records.
@@ -1437,62 +1207,6 @@ fn parse_diff_patch(text: &str) -> Vec<PatchFile> {
     files
 }
 
-/// Parse the fixed `%x1f`-separated log format.
-fn parse_history(text: &str) -> Result<Vec<GitCommitMetadataV1>, GitIntelligenceError> {
-    let malformed = |detail: String| GitIntelligenceError::MalformedOutput {
-        operation: "log",
-        detail,
-    };
-    let mut commits = Vec::new();
-    for record in text.split('\u{1e}') {
-        let record = record.trim_matches('\n');
-        if record.is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = record.split('\u{1f}').collect();
-        if fields.len() != 10 {
-            return Err(malformed(format!(
-                "expected 10 fields, got {} in record",
-                fields.len()
-            )));
-        }
-        let seconds = |value: &str| -> Result<UtcMicros, GitIntelligenceError> {
-            let seconds: i64 = value
-                .parse()
-                .map_err(|_| malformed(format!("non-numeric timestamp {value:?}")))?;
-            Ok(UtcMicros(seconds.saturating_mul(1_000_000)))
-        };
-        let parents: Result<Vec<GitOidV1>, DomainError> =
-            fields[2].split_whitespace().map(GitOidV1::new).collect();
-        let message = fields[9];
-        let subject: String = message
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(512)
-            .collect();
-        commits.push(GitCommitMetadataV1 {
-            commit: GitOidV1::new(fields[0])?,
-            tree: GitOidV1::new(fields[1])?,
-            parents: parents?,
-            author: GitCommitIdentityV1 {
-                name: fields[3].to_owned(),
-                email: fields[4].to_owned(),
-                at: seconds(fields[5])?,
-            },
-            committer: GitCommitIdentityV1 {
-                name: fields[6].to_owned(),
-                email: fields[7].to_owned(),
-                at: seconds(fields[8])?,
-            },
-            subject,
-            message_digest: canonical_sha256(&message)?,
-        });
-    }
-    Ok(commits)
-}
-
 /// Parse `git blame --line-porcelain` output.
 fn parse_blame_porcelain(text: &str) -> Result<Vec<GitBlameLineV1>, GitIntelligenceError> {
     let malformed = |detail: String| GitIntelligenceError::MalformedOutput {
@@ -1628,6 +1342,7 @@ mod tests {
     use super::*;
     use std::process::Command;
     use tempfile::TempDir;
+    use tracedecay_domain::git::GitStatusEntryV1;
 
     fn git_available() -> bool {
         Command::new(tracedecay_runtime_core::git::git_program())

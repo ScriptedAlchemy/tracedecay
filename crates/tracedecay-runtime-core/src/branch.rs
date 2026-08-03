@@ -29,21 +29,12 @@ pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration:
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
 pub fn current_branch(project_root: &Path) -> Option<String> {
-    if crate::worktree::is_linked_worktree(project_root) {
-        return current_branch_git(project_root);
-    }
-    match current_branch_gix(project_root) {
-        GixHead::Branch(branch) => Some(branch),
-        // A readable repo answered with a detached HEAD; `git symbolic-ref`
-        // would fail the same way, so don't spawn it.
-        GixHead::Detached => None,
-        GixHead::Unavailable => {
-            if !crate::worktree::git_may_resolve_repo(project_root) {
-                return None;
-            }
-            current_branch_git(project_root)
-        }
-    }
+    crate::git_repository::GitRepositoryAuthority::discover(project_root)
+        .ok()?
+        .head()
+        .ok()?
+        .branch()
+        .map(str::to_owned)
 }
 
 /// One live-branch resolution, scoped to a single request or write gate.
@@ -108,53 +99,6 @@ impl BranchMemo {
             current_branch(root)
         }
     }
-}
-
-/// What gix could learn about HEAD without spawning `git`.
-enum GixHead {
-    /// HEAD points at a local branch.
-    Branch(String),
-    /// A readable repo whose HEAD is detached (or on a non-branch ref).
-    Detached,
-    /// No repo could be opened at this path or its HEAD was unreadable;
-    /// the `git` subprocess fallback should decide.
-    Unavailable,
-}
-
-fn current_branch_gix(project_root: &Path) -> GixHead {
-    let Ok(repo) = gix::open(project_root) else {
-        return GixHead::Unavailable;
-    };
-    let Ok(head) = repo.head() else {
-        return GixHead::Unavailable;
-    };
-    // `Head::name()` is always the literal "HEAD"; the branch HEAD points
-    // to (if any) is the referent.
-    let Some(name) = head.referent_name() else {
-        return GixHead::Detached;
-    };
-    let Ok(name_str) = std::str::from_utf8(name.as_bstr()) else {
-        return GixHead::Unavailable;
-    };
-    match name_str.strip_prefix("refs/heads/") {
-        Some(branch) => GixHead::Branch(branch.to_string()),
-        None => GixHead::Detached,
-    }
-}
-
-fn current_branch_git(project_root: &Path) -> Option<String> {
-    let output = std::process::Command::new(crate::git::git_program())
-        .args(["symbolic-ref", "-q", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let name = std::str::from_utf8(&output.stdout).ok()?;
-    name.strip_prefix("refs/heads/")
-        .and_then(|s| s.strip_suffix('\n'))
-        .map(std::string::ToString::to_string)
 }
 
 /// Acquires the shared branch-add lock without consulting the pending
@@ -233,29 +177,25 @@ fn acquire_branch_add_lock_blocking_with(
 /// than inventing a default branch.
 #[must_use]
 pub fn detect_default_branch(project_root: &Path) -> Option<String> {
-    let repo = gix::open(project_root).ok()?;
+    let authority = crate::git_repository::GitRepositoryAuthority::discover(project_root).ok()?;
+    let references = authority.references().ok()?;
 
-    // Try symbolic-ref first (refs/remotes/origin/HEAD -> refs/remotes/origin/<branch>)
-    if let Ok(reference) = repo.find_reference("refs/remotes/origin/HEAD")
-        && let Some(Ok(target)) = reference.follow()
-        && let Some(name) = target
-            .name()
-            .as_bstr()
-            .to_string()
-            .strip_prefix("refs/remotes/origin/")
+    if let Some(branch) = references
+        .iter()
+        .find(|reference| reference.name == "refs/remotes/origin/HEAD")
+        .and_then(|reference| reference.symbolic_target.as_deref())
+        .and_then(|name| name.strip_prefix("refs/remotes/origin/"))
     {
-        return Some(name.to_string());
+        return Some(branch.to_owned());
     }
-
-    // Fall back to heuristics
     for candidate in &["main", "master"] {
         let refname = format!("refs/heads/{candidate}");
-        if repo.find_reference(&refname).is_ok() {
+        if references.iter().any(|reference| reference.name == refname) {
             return Some((*candidate).to_string());
         }
     }
 
-    current_branch(project_root)
+    authority.head().ok()?.branch().map(str::to_owned)
 }
 
 /// Sanitizes a branch name for use as a filename.
