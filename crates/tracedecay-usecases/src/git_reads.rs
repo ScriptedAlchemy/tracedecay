@@ -160,7 +160,10 @@ where
         let mut mounted = BTreeMap::new();
         for root in roots {
             let scope = root.scope();
-            if !scope_set.roots().iter().any(|candidate| candidate == scope)
+            if !scope_set
+                .roots()
+                .iter()
+                .any(|candidate| candidate.scope() == scope)
                 || mounted.insert(scope.scope_digest.clone(), root).is_some()
             {
                 return Err(MultiRootGitMountError::RootSetMismatch);
@@ -180,7 +183,8 @@ where
         let mut roots = Vec::with_capacity(self.scope_set.roots().len());
         let mut values = Vec::new();
         let mut unavailable = false;
-        for scope in self.scope_set.roots() {
+        for authorized_root in self.scope_set.roots() {
+            let scope = authorized_root.scope();
             let outcome = self.roots.get(&scope.scope_digest).map_or(
                 ScopeOutcome::Unavailable {
                     reason: ScopeUnavailableReasonV1::AuthorityUnavailable,

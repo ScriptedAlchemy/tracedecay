@@ -150,11 +150,12 @@ pub use memory::{
     converge_derived_memory,
 };
 pub use multi_root::{
-    AuthorizedMultiRootQueryService, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
-    AuthorizedScopeSetError, MultiRootContinuationV1, MultiRootExecuteRequestV1,
-    MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1, MultiRootQueryPort,
-    MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1,
-    MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    AuthorizedMultiRootQueryService, AuthorizedRoot, AuthorizedRootAdmission, AuthorizedScopeSet,
+    AuthorizedScopeSetAuthority, AuthorizedScopeSetError, MultiRootContinuationV1,
+    MultiRootExecuteRequestV1, MultiRootOperationV1, MultiRootQueryError, MultiRootQueryPageV1,
+    MultiRootQueryPort, MultiRootQueryRequestV1, MultiRootScopeSetCasRequestV1,
+    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
 pub use observability::*;
 pub use policy::{
