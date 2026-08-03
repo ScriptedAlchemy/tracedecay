@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::errors::{Result, TraceDecayError};
+use crate::adapters::LspAdapterDefinition;
+use crate::{LspError, Result};
 
 const SETTINGS_FILENAME: &str = "code_diagnostics_settings.json";
 
@@ -88,7 +88,7 @@ pub fn settings_path(dashboard_root: &Path) -> PathBuf {
 pub async fn load_settings(dashboard_root: &Path) -> Result<CodeDiagnosticsSettings> {
     let path = settings_path(dashboard_root);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| TraceDecayError::Config {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| LspError::Config {
             message: format!(
                 "failed to parse code diagnostics settings '{}': {e}",
                 path.display()
@@ -97,7 +97,7 @@ pub async fn load_settings(dashboard_root: &Path) -> Result<CodeDiagnosticsSetti
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             Ok(CodeDiagnosticsSettings::default())
         }
-        Err(e) => Err(TraceDecayError::Config {
+        Err(e) => Err(LspError::Config {
             message: format!(
                 "failed to read code diagnostics settings '{}': {e}",
                 path.display()
@@ -114,19 +114,19 @@ pub async fn save_settings(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
             .await
-            .map_err(|e| TraceDecayError::Config {
+            .map_err(|e| LspError::Config {
                 message: format!(
                     "failed to create code diagnostics settings directory '{}': {e}",
                     parent.display()
                 ),
             })?;
     }
-    let bytes = serde_json::to_vec_pretty(settings).map_err(|e| TraceDecayError::Config {
+    let bytes = serde_json::to_vec_pretty(settings).map_err(|e| LspError::Config {
         message: format!("failed to serialize code diagnostics settings: {e}"),
     })?;
     tokio::fs::write(&path, bytes)
         .await
-        .map_err(|e| TraceDecayError::Config {
+        .map_err(|e| LspError::Config {
             message: format!(
                 "failed to write code diagnostics settings '{}': {e}",
                 path.display()

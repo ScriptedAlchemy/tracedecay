@@ -129,19 +129,4 @@ pub fn current_timestamp() -> i64 {
         .as_secs() as i64
 }
 
-/// Returns `true` if the file path looks like a test file.
-pub fn is_test_file(path: &str) -> bool {
-    let test_segments = [
-        "test/",
-        "tests/",
-        "__tests__/",
-        "spec/",
-        "e2e/",
-        ".test.",
-        ".spec.",
-        "_test.",
-        "_spec.",
-    ];
-    let lower = path.to_ascii_lowercase();
-    test_segments.iter().any(|s| lower.contains(s))
-}
+pub use tracedecay_code_index::is_test_file;

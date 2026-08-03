@@ -39,6 +39,14 @@ pub enum TraceDecayError {
 /// Convenience alias for results using `TraceDecayError`.
 pub type Result<T> = std::result::Result<T, TraceDecayError>;
 
+impl From<tracedecay_lsp::LspError> for TraceDecayError {
+    fn from(value: tracedecay_lsp::LspError) -> Self {
+        match value {
+            tracedecay_lsp::LspError::Config { message } => Self::Config { message },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

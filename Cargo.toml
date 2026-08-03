@@ -2,7 +2,9 @@
 members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-code-extraction",
+    "crates/tracedecay-code-index",
     "crates/tracedecay-jsonrpc",
+    "crates/tracedecay-lsp",
 ]
 resolver = "3"
 
@@ -60,49 +62,49 @@ token-counting = ["dep:tiktoken-rs"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift
-lite = ["tracedecay-code-extraction/lite"]
+lite = ["tracedecay-code-extraction/lite", "tracedecay-code-index/lite"]
 
-medium = ["lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
-full = ["medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
+medium = ["tracedecay-code-index/medium", "lang-dart", "lang-pascal", "lang-php", "lang-ruby", "lang-bash", "lang-protobuf", "lang-powershell", "lang-nix", "lang-vbnet"]
+full = ["tracedecay-code-index/full", "medium", "lang-lua", "lang-zig", "lang-objc", "lang-perl", "lang-batch", "lang-fortran", "lang-cobol", "lang-msbasic2", "lang-gwbasic", "lang-qbasic", "lang-dockerfile", "lang-glsl", "lang-wgsl", "lang-hlsl", "lang-metal", "lang-markdown", "lang-r", "lang-sql", "lang-julia", "lang-haskell", "lang-ocaml", "lang-clojure", "lang-erlang", "lang-elixir", "lang-fsharp", "lang-quint", "lang-toml", "lang-lean"]
 
 # Language features backed by the bundled tree-sitter grammar crate.
-lang-dart = ["tracedecay-code-extraction/lang-dart"]
-lang-pascal = ["tracedecay-code-extraction/lang-pascal"]
-lang-php = ["tracedecay-code-extraction/lang-php"]
-lang-ruby = ["tracedecay-code-extraction/lang-ruby"]
-lang-bash = ["tracedecay-code-extraction/lang-bash"]
-lang-protobuf = ["tracedecay-code-extraction/lang-protobuf"]
-lang-powershell = ["tracedecay-code-extraction/lang-powershell"]
-lang-nix = ["tracedecay-code-extraction/lang-nix"]
-lang-vbnet = ["tracedecay-code-extraction/lang-vbnet"]
-lang-lua = ["tracedecay-code-extraction/lang-lua"]
-lang-zig = ["tracedecay-code-extraction/lang-zig"]
-lang-objc = ["tracedecay-code-extraction/lang-objc"]
-lang-perl = ["tracedecay-code-extraction/lang-perl"]
-lang-batch = ["tracedecay-code-extraction/lang-batch"]
-lang-fortran = ["tracedecay-code-extraction/lang-fortran"]
-lang-cobol = ["tracedecay-code-extraction/lang-cobol"]
-lang-msbasic2 = ["tracedecay-code-extraction/lang-msbasic2"]
-lang-gwbasic = ["tracedecay-code-extraction/lang-gwbasic"]
-lang-qbasic = ["tracedecay-code-extraction/lang-qbasic"]
-lang-dockerfile = ["tracedecay-code-extraction/lang-dockerfile"]
-lang-glsl = ["tracedecay-code-extraction/lang-glsl"]
-lang-wgsl = ["tracedecay-code-extraction/lang-wgsl"]
-lang-hlsl = ["tracedecay-code-extraction/lang-hlsl"]
-lang-metal = ["tracedecay-code-extraction/lang-metal"]
-lang-markdown = ["tracedecay-code-extraction/lang-markdown"]
-lang-r = ["tracedecay-code-extraction/lang-r"]
-lang-sql = ["tracedecay-code-extraction/lang-sql"]
-lang-julia = ["tracedecay-code-extraction/lang-julia"]
-lang-haskell = ["tracedecay-code-extraction/lang-haskell"]
-lang-ocaml = ["tracedecay-code-extraction/lang-ocaml"]
-lang-clojure = ["tracedecay-code-extraction/lang-clojure"]
-lang-erlang = ["tracedecay-code-extraction/lang-erlang"]
-lang-elixir = ["tracedecay-code-extraction/lang-elixir"]
-lang-fsharp = ["tracedecay-code-extraction/lang-fsharp"]
-lang-quint = ["tracedecay-code-extraction/lang-quint"]
-lang-toml = ["tracedecay-code-extraction/lang-toml"]
-lang-lean = ["tracedecay-code-extraction/lang-lean"]
+lang-dart = ["tracedecay-code-extraction/lang-dart", "tracedecay-code-index/lang-dart"]
+lang-pascal = ["tracedecay-code-extraction/lang-pascal", "tracedecay-code-index/lang-pascal"]
+lang-php = ["tracedecay-code-extraction/lang-php", "tracedecay-code-index/lang-php"]
+lang-ruby = ["tracedecay-code-extraction/lang-ruby", "tracedecay-code-index/lang-ruby"]
+lang-bash = ["tracedecay-code-extraction/lang-bash", "tracedecay-code-index/lang-bash"]
+lang-protobuf = ["tracedecay-code-extraction/lang-protobuf", "tracedecay-code-index/lang-protobuf"]
+lang-powershell = ["tracedecay-code-extraction/lang-powershell", "tracedecay-code-index/lang-powershell"]
+lang-nix = ["tracedecay-code-extraction/lang-nix", "tracedecay-code-index/lang-nix"]
+lang-vbnet = ["tracedecay-code-extraction/lang-vbnet", "tracedecay-code-index/lang-vbnet"]
+lang-lua = ["tracedecay-code-extraction/lang-lua", "tracedecay-code-index/lang-lua"]
+lang-zig = ["tracedecay-code-extraction/lang-zig", "tracedecay-code-index/lang-zig"]
+lang-objc = ["tracedecay-code-extraction/lang-objc", "tracedecay-code-index/lang-objc"]
+lang-perl = ["tracedecay-code-extraction/lang-perl", "tracedecay-code-index/lang-perl"]
+lang-batch = ["tracedecay-code-extraction/lang-batch", "tracedecay-code-index/lang-batch"]
+lang-fortran = ["tracedecay-code-extraction/lang-fortran", "tracedecay-code-index/lang-fortran"]
+lang-cobol = ["tracedecay-code-extraction/lang-cobol", "tracedecay-code-index/lang-cobol"]
+lang-msbasic2 = ["tracedecay-code-extraction/lang-msbasic2", "tracedecay-code-index/lang-msbasic2"]
+lang-gwbasic = ["tracedecay-code-extraction/lang-gwbasic", "tracedecay-code-index/lang-gwbasic"]
+lang-qbasic = ["tracedecay-code-extraction/lang-qbasic", "tracedecay-code-index/lang-qbasic"]
+lang-dockerfile = ["tracedecay-code-extraction/lang-dockerfile", "tracedecay-code-index/lang-dockerfile"]
+lang-glsl = ["tracedecay-code-extraction/lang-glsl", "tracedecay-code-index/lang-glsl"]
+lang-wgsl = ["tracedecay-code-extraction/lang-wgsl", "tracedecay-code-index/lang-wgsl"]
+lang-hlsl = ["tracedecay-code-extraction/lang-hlsl", "tracedecay-code-index/lang-hlsl"]
+lang-metal = ["tracedecay-code-extraction/lang-metal", "tracedecay-code-index/lang-metal"]
+lang-markdown = ["tracedecay-code-extraction/lang-markdown", "tracedecay-code-index/lang-markdown"]
+lang-r = ["tracedecay-code-extraction/lang-r", "tracedecay-code-index/lang-r"]
+lang-sql = ["tracedecay-code-extraction/lang-sql", "tracedecay-code-index/lang-sql"]
+lang-julia = ["tracedecay-code-extraction/lang-julia", "tracedecay-code-index/lang-julia"]
+lang-haskell = ["tracedecay-code-extraction/lang-haskell", "tracedecay-code-index/lang-haskell"]
+lang-ocaml = ["tracedecay-code-extraction/lang-ocaml", "tracedecay-code-index/lang-ocaml"]
+lang-clojure = ["tracedecay-code-extraction/lang-clojure", "tracedecay-code-index/lang-clojure"]
+lang-erlang = ["tracedecay-code-extraction/lang-erlang", "tracedecay-code-index/lang-erlang"]
+lang-elixir = ["tracedecay-code-extraction/lang-elixir", "tracedecay-code-index/lang-elixir"]
+lang-fsharp = ["tracedecay-code-extraction/lang-fsharp", "tracedecay-code-index/lang-fsharp"]
+lang-quint = ["tracedecay-code-extraction/lang-quint", "tracedecay-code-index/lang-quint"]
+lang-toml = ["tracedecay-code-extraction/lang-toml", "tracedecay-code-index/lang-toml"]
+lang-lean = ["tracedecay-code-extraction/lang-lean", "tracedecay-code-index/lang-lean"]
 test-transport = []
 
 [lib]
@@ -118,15 +120,11 @@ tower = "0.5"
 libsql = "0.9.30"
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
-# In-process structural-search engine. ast-grep-core is generic over a
-# tree-sitter `Language`; we wire the repo's own bundled grammars (via
-# `extraction::ts_provider`) into its `Language` trait, so no extra grammar
-# crates are pulled in and no external `ast-grep` binary is required. Pinned to
-# tree-sitter ^0.26.3, ABI-compatible with the 0.26 grammars this repo builds.
-ast-grep-core = "0.44"
 tracedecay-domain = { path = "crates/tracedecay-domain" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", default-features = false }
+tracedecay-code-index = { path = "crates/tracedecay-code-index", default-features = false }
 tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc" }
+tracedecay-lsp = { path = "crates/tracedecay-lsp" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

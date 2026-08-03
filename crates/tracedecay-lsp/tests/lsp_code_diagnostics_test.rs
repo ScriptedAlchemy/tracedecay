@@ -1,6 +1,6 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use tracedecay::diagnostics::lsp;
+use tracedecay_lsp as lsp;
 
 const FAKE_LANGUAGE: &str = "fake";
 const FAKE_PATH: &str = "src/lib.fake";

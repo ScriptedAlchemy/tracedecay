@@ -4859,7 +4859,6 @@ name = "tracedecay"
 version = "0.0.67"
 dependencies = [
  "amari-holographic",
- "ast-grep-core",
  "axum 0.8.9",
  "bincode",
  "clap",
@@ -4899,8 +4898,10 @@ dependencies = [
  "toml",
  "tower 0.5.3",
  "tracedecay-code-extraction",
+ "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-jsonrpc",
+ "tracedecay-lsp",
  "tracing",
  "tree-sitter",
  "tree-sitter-language",
@@ -4925,6 +4926,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-code-index"
+version = "0.1.0"
+dependencies = [
+ "ast-grep-core",
+ "ignore",
+ "tempfile",
+ "tracedecay-code-extraction",
+]
+
+[[package]]
 name = "tracedecay-domain"
 version = "0.1.0"
 dependencies = [
@@ -4939,6 +4950,17 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tracedecay-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

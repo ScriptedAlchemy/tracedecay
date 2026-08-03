@@ -11,8 +11,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
-use crate::errors::{Result, TraceDecayError};
+use crate::broker::{CodeDiagnostic, DiagnosticSeverity};
+use crate::{LspError, LspError as TraceDecayError, Result};
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -336,7 +336,7 @@ async fn captured_stderr(capture: &Arc<Mutex<Vec<u8>>>) -> String {
     String::from_utf8_lossy(&captured).trim().to_string()
 }
 
-fn enrich_start_error(command: &str, err: TraceDecayError, stderr: &str) -> TraceDecayError {
+fn enrich_start_error(command: &str, err: LspError, stderr: &str) -> LspError {
     if stderr.is_empty() {
         return err;
     }
@@ -395,7 +395,7 @@ async fn write_message_with_timeout(
         })?
 }
 
-fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> TraceDecayError {
+fn refresh_timed_out(timeouts: LspRefreshTimeouts) -> LspError {
     TraceDecayError::Config {
         message: format!(
             "LSP diagnostics collection timed out after {} ms",
@@ -562,7 +562,8 @@ fn file_uri(path: &Path) -> String {
 /// Build a `file://` URI from raw path text, normalizing `\` to `/` and
 /// percent-encoding. Handles POSIX paths, Windows drive paths (`C:/…`), and UNC
 /// (`//server/share`) prefixes. Shared with the Kiro installer.
-pub(crate) fn file_uri_from_path_text(path: &str) -> String {
+#[doc(hidden)]
+pub fn file_uri_from_path_text(path: &str) -> String {
     let normalized = path.replace('\\', "/");
     let encoded = percent_encode_file_uri_path(&normalized);
     if normalized.starts_with("//") {

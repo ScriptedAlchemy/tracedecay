@@ -6,11 +6,11 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::diagnostics::lsp::activity::adapter_workspace_root;
-use crate::diagnostics::lsp::adapters::{LspAdapterDefinition, LspInstallOption};
-use crate::diagnostics::lsp::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
-use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
-use crate::errors::{Result, TraceDecayError};
+use crate::activity::adapter_workspace_root;
+use crate::adapters::{LspAdapterDefinition, LspInstallOption};
+use crate::client::{LspDocument, LspRefreshTimeouts, StdioLspClient};
+use crate::settings::CodeDiagnosticsSettings;
+use crate::{LspError, Result};
 
 /// Normalized code diagnostic shared by the LSP broker and dashboard API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,7 +220,7 @@ struct RefreshFailure {
 }
 
 impl RefreshFailure {
-    fn crashed(err: &TraceDecayError) -> Self {
+    fn crashed(err: &LspError) -> Self {
         Self {
             state: EngineState::Crashed,
             message: err.to_string(),
@@ -357,7 +357,7 @@ impl DiagnosticBroker {
             .iter()
             .find(|adapter| adapter.language == language)
             .cloned()
-            .ok_or_else(|| TraceDecayError::Config {
+            .ok_or_else(|| LspError::Config {
                 message: format!("no LSP adapter registered for language '{language}'"),
             })?;
 
@@ -369,7 +369,7 @@ impl DiagnosticBroker {
             self.engine_overrides
                 .insert(language.to_string(), EngineState::Unavailable);
             self.remove_language_clients(language);
-            return Err(TraceDecayError::Config { message });
+            return Err(LspError::Config { message });
         }
 
         self.engine_overrides
@@ -477,7 +477,7 @@ impl DiagnosticBroker {
                 self.engine_overrides
                     .insert(language.clone(), failure.state);
                 self.remove_language_clients(&language);
-                Err(TraceDecayError::Config { message })
+                Err(LspError::Config { message })
             }
         }
     }
