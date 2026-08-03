@@ -104,6 +104,14 @@ pub struct GenerationProviderReadV1<T> {
 }
 
 impl<T> GenerationProviderReadV1<T> {
+    pub fn unavailable() -> Self {
+        Self {
+            provider_state: ProviderEvaluationStateV1::Unavailable,
+            coverage: GenerationProviderCoverageV1::Unavailable,
+            evidence: None,
+        }
+    }
+
     pub fn new(
         provider_state: ProviderEvaluationStateV1,
         coverage: GenerationProviderCoverageV1,

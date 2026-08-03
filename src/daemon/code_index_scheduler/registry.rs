@@ -1960,20 +1960,10 @@ impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
             .values()
             .filter(|(candidate, _)| candidate == generation);
         let Some((_, authority)) = matching.next() else {
-            return crate::code_index::provider::GenerationProviderReadV1::new(
-                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("static unavailable attribution read"));
+            return crate::code_index::provider::GenerationProviderReadV1::unavailable();
         };
         if matching.next().is_some() {
-            return crate::code_index::provider::GenerationProviderReadV1::new(
-                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
-                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("static ambiguous attribution read"));
+            return crate::code_index::provider::GenerationProviderReadV1::unavailable();
         }
         crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
             authority, generation,
