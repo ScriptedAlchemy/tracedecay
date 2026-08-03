@@ -315,11 +315,42 @@ pub fn save_branch_meta(data_dir: &Path, meta: &BranchMeta) -> std::io::Result<(
 /// The shared branch lock serializes this load-modify-save sequence with branch
 /// add, removal, GC, and pending deletion recovery.
 pub fn update_synced_timestamp(tracedecay_dir: &Path, branch: &str) {
-    update_synced_timestamp_with(tracedecay_dir, branch, || {});
+    update_synced_timestamp_with_lock(
+        tracedecay_dir,
+        branch,
+        crate::branch::acquire_branch_lock_blocking,
+    );
+}
+
+/// Updates branch metadata with a caller-supplied shared-lock policy.
+///
+/// The root compatibility façade supplies its pending branch-admin recovery
+/// gate; standalone kernel callers use the raw kernel lock above.
+#[doc(hidden)]
+pub fn update_synced_timestamp_with_lock(
+    tracedecay_dir: &Path,
+    branch: &str,
+    acquire_branch_lock: fn(&Path) -> crate::errors::Result<std::fs::File>,
+) {
+    update_synced_timestamp_with_lock_and(tracedecay_dir, branch, acquire_branch_lock, || {});
 }
 
 fn update_synced_timestamp_with(tracedecay_dir: &Path, branch: &str, after_lock: impl FnOnce()) {
-    let Ok(_branch_lock) = crate::branch::acquire_branch_lock_blocking(tracedecay_dir) else {
+    update_synced_timestamp_with_lock_and(
+        tracedecay_dir,
+        branch,
+        crate::branch::acquire_branch_lock_blocking,
+        after_lock,
+    );
+}
+
+fn update_synced_timestamp_with_lock_and(
+    tracedecay_dir: &Path,
+    branch: &str,
+    acquire_branch_lock: fn(&Path) -> crate::errors::Result<std::fs::File>,
+    after_lock: impl FnOnce(),
+) {
+    let Ok(_branch_lock) = acquire_branch_lock(tracedecay_dir) else {
         return;
     };
     after_lock();
