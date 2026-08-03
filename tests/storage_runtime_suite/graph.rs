@@ -22,10 +22,7 @@ use tracedecay::{
 };
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
-    migration_sql::{
-        MigrationSqlHandle, MigrationSqlRow, MigrationSqlRows, MigrationSqlStatement,
-        MigrationSqlValue,
-    },
+    exact_sql::{ExactSqlHandle, ExactSqlRow, ExactSqlRows, ExactSqlStatement, ExactSqlValue},
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
 use tracedecay_sqlite_parity_protocol::{
@@ -111,12 +108,12 @@ impl ReaderQueryExecutor for NoTypedReads {
         _snapshot: &rusqlite::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        unreachable!("graph parity uses only the bounded migration-SQL read channel")
+        unreachable!("graph parity uses only the bounded exact-SQL read channel")
     }
 }
 
 struct CanonicalGraphReader {
-    handle: MigrationSqlHandle,
+    handle: ExactSqlHandle,
     _readers: ReaderPool<NoTypedReads>,
 }
 
@@ -152,17 +149,17 @@ impl CanonicalGraphReader {
             NoTypedReads,
         )
         .expect("start canonical graph runtime readers");
-        let handle = MigrationSqlHandle::attach_read_only(&readers);
+        let handle = ExactSqlHandle::attach_read_only(&readers);
         Self {
             handle,
             _readers: readers,
         }
     }
 
-    fn query(&self, sql: &str, params: Vec<MigrationSqlValue>) -> MigrationSqlRows {
+    fn query(&self, sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlRows {
         self.handle
             .query(
-                MigrationSqlStatement::new(sql.to_string(), params)
+                ExactSqlStatement::new(sql.to_string(), params)
                     .expect("valid fixed graph runtime query"),
                 Duration::from_secs(5),
             )
@@ -439,8 +436,8 @@ fn fts_matches(database: &CanonicalGraphReader) -> Vec<FtsMatchEvidence> {
     let rows = database.query(
         FTS_SQL,
         vec![
-            MigrationSqlValue::Text(FTS_QUERY.to_string()),
-            MigrationSqlValue::Integer(i64::from(FTS_LIMIT)),
+            ExactSqlValue::Text(FTS_QUERY.to_string()),
+            ExactSqlValue::Integer(i64::from(FTS_LIMIT)),
         ],
     );
     let matches = rows
@@ -456,31 +453,31 @@ fn fts_matches(database: &CanonicalGraphReader) -> Vec<FtsMatchEvidence> {
     matches
 }
 
-fn row_i64(row: &MigrationSqlRow, index: usize, context: &str) -> i64 {
+fn row_i64(row: &ExactSqlRow, index: usize, context: &str) -> i64 {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Integer(value)) => *value,
+        Some(ExactSqlValue::Integer(value)) => *value,
         value => panic!("decode {context} as INTEGER, got {value:?}"),
     }
 }
 
-fn row_f64(row: &MigrationSqlRow, index: usize, context: &str) -> f64 {
+fn row_f64(row: &ExactSqlRow, index: usize, context: &str) -> f64 {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Real(value)) => *value,
+        Some(ExactSqlValue::Real(value)) => *value,
         value => panic!("decode {context} as REAL, got {value:?}"),
     }
 }
 
-fn row_string(row: &MigrationSqlRow, index: usize, context: &str) -> String {
+fn row_string(row: &ExactSqlRow, index: usize, context: &str) -> String {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Text(value)) => value.clone(),
+        Some(ExactSqlValue::Text(value)) => value.clone(),
         value => panic!("decode {context} as TEXT, got {value:?}"),
     }
 }
 
-fn row_optional_string(row: &MigrationSqlRow, index: usize, context: &str) -> Option<String> {
+fn row_optional_string(row: &ExactSqlRow, index: usize, context: &str) -> Option<String> {
     match row.values.get(index) {
-        Some(MigrationSqlValue::Null) => None,
-        Some(MigrationSqlValue::Text(value)) => Some(value.clone()),
+        Some(ExactSqlValue::Null) => None,
+        Some(ExactSqlValue::Text(value)) => Some(value.clone()),
         value => panic!("decode {context} as optional TEXT, got {value:?}"),
     }
 }

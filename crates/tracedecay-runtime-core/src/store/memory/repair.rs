@@ -1,17 +1,17 @@
 //! Compatibility feedback-history repair, missing-vector repair, and dirty-bank rebuilds.
 
-use crate::db::{Database, MemoryV2FeedbackHistoryRepairBatchOutcome};
+use crate::db::Database;
 use crate::memory::encoding::HolographicEncoder;
 
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
     CompatibilityFactRepairVectorV1, CompatibilityFeedbackRepairProgressV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1, FactCompatibilityResult,
-    FactCompatibilityStoreError, FactStoreError, FactStoreResult,
+    FactStoreError, FactStoreResult,
 };
 
 use super::crud::{
@@ -48,158 +48,6 @@ fn compatibility_repair_batches_saturated(
 ) -> bool {
     missing_vectors_repaired >= COMPATIBILITY_REPAIR_VECTOR_BATCH as u64
         || banks_rebuilt >= COMPATIBILITY_REPAIR_BANK_BATCH as u64
-}
-
-async fn advance_compatibility_feedback_history_repair_tx(
-    db: &Database,
-    transaction: &Transaction<'_>,
-    owner: &FactOwnerV1,
-) -> FactCompatibilityResult<CompatibilityFeedbackRepairProgressV1> {
-    let source_store_id = compatibility_source_store_id()?;
-    let outcome = db
-        .repair_memory_v2_feedback_history_batch_in_transaction(
-            transaction,
-            owner,
-            &source_store_id,
-            512,
-        )
-        .await
-        .map_err(|error| {
-            FactCompatibilityStoreError::Store(storage_error(COMPATIBILITY_WRITE_OPERATION, error))
-        })?;
-    match outcome {
-        MemoryV2FeedbackHistoryRepairBatchOutcome::NotRequired => {
-            Ok(CompatibilityFeedbackRepairProgressV1::NotRequired)
-        }
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Advanced { processed } => {
-            let progress = db
-                .feedback_history_repair_progress_in_transaction(
-                    transaction,
-                    owner,
-                    &source_store_id,
-                )
-                .await
-                .map_err(|error| {
-                    FactCompatibilityStoreError::Store(storage_error(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        error,
-                    ))
-                })?
-                .ok_or_else(|| {
-                    storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "feedback history repair progress disappeared after advancement",
-                    )
-                })?;
-            if progress.complete {
-                return Err(storage_message(
-                    COMPATIBILITY_WRITE_OPERATION,
-                    "feedback history repair advanced but reported completion",
-                )
-                .into());
-            }
-            let remaining = u64::try_from(
-                progress
-                    .feedback_frontier
-                    .saturating_sub(progress.feedback_cursor),
-            )
-            .unwrap_or(0);
-            Ok(CompatibilityFeedbackRepairProgressV1::Incomplete {
-                processed: processed as u64,
-                remaining: Some(remaining),
-            })
-        }
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Complete { processed } => {
-            Ok(CompatibilityFeedbackRepairProgressV1::Complete {
-                processed: processed as u64,
-            })
-        }
-    }
-}
-
-fn compatibility_feedback_history_repair_receipt(
-    progress: CompatibilityFeedbackRepairProgressV1,
-) -> Value {
-    match progress {
-        CompatibilityFeedbackRepairProgressV1::Unknown => json!({ "state": "unknown" }),
-        CompatibilityFeedbackRepairProgressV1::NotRequired => {
-            json!({ "state": "not_required" })
-        }
-        CompatibilityFeedbackRepairProgressV1::Complete { processed } => {
-            json!({ "state": "complete", "processed": processed })
-        }
-        CompatibilityFeedbackRepairProgressV1::Incomplete {
-            processed,
-            remaining,
-        } => json!({
-            "state": "incomplete",
-            "processed": processed,
-            "remaining": remaining,
-        }),
-    }
-}
-
-pub(super) fn compatibility_receipt_feedback_history_repair(
-    receipt: &Value,
-) -> FactStoreResult<CompatibilityFeedbackRepairProgressV1> {
-    let progress = receipt
-        .get("feedback_history_repair")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility repair receipt feedback history progress is malformed",
-            )
-        })?;
-    let state = progress
-        .get("state")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                "compatibility repair receipt feedback history state is malformed",
-            )
-        })?;
-    let required_u64 = |field| {
-        progress.get(field).and_then(Value::as_u64).ok_or_else(|| {
-            storage_message(
-                COMPATIBILITY_WRITE_OPERATION,
-                format!("compatibility repair receipt feedback history {field} is malformed"),
-            )
-        })
-    };
-    match state {
-        "unknown" => Ok(CompatibilityFeedbackRepairProgressV1::Unknown),
-        "not_required" => Ok(CompatibilityFeedbackRepairProgressV1::NotRequired),
-        "complete" => Ok(CompatibilityFeedbackRepairProgressV1::Complete {
-            processed: required_u64("processed")?,
-        }),
-        "incomplete" => {
-            let remaining = match progress.get("remaining") {
-                Some(Value::Null) => None,
-                Some(value) => Some(value.as_u64().ok_or_else(|| {
-                    storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "compatibility repair receipt feedback history remaining is malformed",
-                    )
-                })?),
-                None => {
-                    return Err(storage_message(
-                        COMPATIBILITY_WRITE_OPERATION,
-                        "compatibility repair receipt feedback history remaining is missing",
-                    ));
-                }
-            };
-            Ok(CompatibilityFeedbackRepairProgressV1::Incomplete {
-                processed: required_u64("processed")?,
-                remaining,
-            })
-        }
-        _ => Err(storage_message(
-            COMPATIBILITY_WRITE_OPERATION,
-            "compatibility repair receipt feedback history state is unsupported",
-        )),
-    }
 }
 
 pub(super) async fn compatibility_repair_vector_for_fact_tx(
@@ -275,17 +123,12 @@ pub(super) async fn repair_compatibility_memory_tx(
         let banks_rebuilt = compatibility_receipt_u64(&receipt.receipt, "banks_rebuilt")?;
         return Ok(
             CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-                .with_feedback_history_repair(compatibility_receipt_feedback_history_repair(
-                    &receipt.receipt,
-                )?)
                 .with_saturated(compatibility_repair_batches_saturated(
                     missing_vectors_repaired,
                     banks_rebuilt,
                 )),
         );
     }
-    let feedback_repair =
-        advance_compatibility_feedback_history_repair_tx(db, transaction, request.owner()).await?;
     let now = compatibility_now()?;
     let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
         db,
@@ -300,7 +143,6 @@ pub(super) async fn repair_compatibility_memory_tx(
     let receipt = json!({
         "missing_vectors_repaired": missing_vectors_repaired,
         "banks_rebuilt": banks_rebuilt,
-        "feedback_history_repair": compatibility_feedback_history_repair_receipt(feedback_repair),
     });
     compatibility_record_operation_receipt_tx(
         transaction,
@@ -316,7 +158,6 @@ pub(super) async fn repair_compatibility_memory_tx(
     .await?;
     Ok(
         CompatibilityMemoryRepairStatsV1::new(missing_vectors_repaired, banks_rebuilt)
-            .with_feedback_history_repair(feedback_repair)
             .with_saturated(compatibility_repair_batches_saturated(
                 missing_vectors_repaired,
                 banks_rebuilt,

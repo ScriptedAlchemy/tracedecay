@@ -1,9 +1,8 @@
 use super::{
-    CapturedMemoryV2Frontiers, Connection, Database, DatabaseEngineConnection,
-    DatabaseEngineReadSnapshot, DatabaseMemoryTransaction, DatabaseMemoryWriter,
-    DatabaseWriteTransaction, DatabaseWriterConnection, FactOwnerV1, MemoryV2BackfillBatchOutcome,
-    ReadSnapshot, Result, SourceStoreId, TraceDecayError, TransactionBehavior,
-    database_query_error, integrity, memory_v2,
+    Connection, Database, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
+    DatabaseMemoryTransaction, DatabaseMemoryWriter, DatabaseWriteTransaction,
+    DatabaseWriterConnection, ReadSnapshot, Result, TraceDecayError, TransactionBehavior,
+    database_query_error, integrity,
 };
 
 impl Database {
@@ -171,51 +170,6 @@ impl Database {
         })
     }
 
-    /// Whether this owner has no V1 legacy memory at all, so the cutover
-    /// ladder would only manufacture an all-zero backfill row and a receipt
-    /// for a migration that never happened.
-    pub(crate) async fn memory_v2_cutover_is_vacuous(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-    ) -> Result<bool> {
-        let writer = self
-            .writer_connection("probe memory v2 legacy cutover source")
-            .await?;
-        memory_v2::memory_v2_cutover_is_vacuous(&writer.conn, owner, source_store_id).await
-    }
-
-    pub(crate) async fn load_or_capture_memory_v2_frontiers(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-    ) -> Result<CapturedMemoryV2Frontiers> {
-        let writer = self
-            .writer_connection("capture memory v2 backfill frontiers")
-            .await?;
-        memory_v2::load_or_capture_memory_v2_frontiers(&writer.conn, owner, source_store_id).await
-    }
-
-    pub async fn backfill_memory_v2_batch(
-        &self,
-        owner: &FactOwnerV1,
-        source_store_id: &SourceStoreId,
-        frontiers: CapturedMemoryV2Frontiers,
-        batch_size: i64,
-    ) -> Result<MemoryV2BackfillBatchOutcome> {
-        let writer = self
-            .writer_connection("backfill one memory v2 batch")
-            .await?;
-        memory_v2::backfill_memory_v2_batch(
-            &writer.conn,
-            owner,
-            source_store_id,
-            frontiers,
-            batch_size,
-        )
-        .await
-    }
-
     /// Starts a query-only snapshot on a separate connection that cannot join
     /// a transaction running on the retained writable connection.
     pub(crate) async fn begin_isolated_read_snapshot(
@@ -291,7 +245,7 @@ impl Database {
     /// A full index can contain more than a million rows. Unlike an ordinary
     /// mutation, it can legitimately remain active beyond the fixed
     /// transaction lease while continuously making progress. The runtime's
-    /// migration policy renews that lease only after successful commands;
+    /// long-lease policy renews that lease only after successful commands;
     /// idle transactions, revoked authority, and shutdown still cancel it.
     pub async fn begin_bulk_write_transaction(
         &self,
@@ -299,12 +253,13 @@ impl Database {
     ) -> Result<DatabaseWriteTransaction<'_>> {
         let guard = self.writer().await;
         let conn = self.open_writer_connection_unguarded(operation).await?;
-        let transaction = conn.schema_migration_transaction().await.map_err(|error| {
-            TraceDecayError::Database {
+        let transaction = conn
+            .authorized_long_lease_transaction()
+            .await
+            .map_err(|error| TraceDecayError::Database {
                 message: format!("failed to begin bulk writer transaction: {error}"),
                 operation: operation.to_string(),
-            }
-        })?;
+            })?;
         Ok(DatabaseWriteTransaction { transaction, guard })
     }
 

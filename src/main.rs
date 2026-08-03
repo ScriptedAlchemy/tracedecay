@@ -601,7 +601,6 @@ impl CommandFamily {
             | Commands::HookUserSessionReview => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
-            | Commands::Dogfood
             | Commands::PostUpdate { .. }
             | Commands::PackageHook { .. }
             | Commands::Channel { .. } => Self::Update,
@@ -646,7 +645,7 @@ fn validate_host_bundle_options(
     // meaningful for the agent-lifecycle commands. Enforcing that scope here
     // (rather than via a global clap `requires = "component"`) keeps the flags
     // from leaking a spurious `--component` requirement onto unrelated verbs
-    // such as `branch gc` and `migrate registry-gc`.
+    // such as `branch gc` and `migrate storage-report`.
     if !matches!(family, CommandFamily::Agent)
         && (host_bundle.component.is_some() || host_bundle.dry_run || host_bundle.yes)
     {
@@ -1162,22 +1161,15 @@ async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Resul
         } => {
             update_cmd::run_update_command(no_heal, no_reinstall)?;
         }
-        Commands::Dogfood => {
-            update_cmd::run_dogfood_command()?;
-        }
         Commands::PostUpdate {
             no_heal,
             no_reinstall,
             lifecycle_lease_token,
-            strict,
-            mode,
         } => {
             update_cmd::run_post_update_command(
                 no_heal,
                 no_reinstall,
                 lifecycle_lease_token.as_deref(),
-                strict,
-                mode,
             )
             .await?;
         }
@@ -1350,7 +1342,6 @@ impl CommandStartupPolicy {
             | Commands::HostBundle { .. }
             | Commands::Upgrade { .. }
             | Commands::Update { .. }
-            | Commands::Dogfood
             | Commands::PostUpdate { .. }
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }

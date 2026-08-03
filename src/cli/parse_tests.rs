@@ -2,7 +2,7 @@ use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
-    MigrateAction, PackageHookAction, PostUpdateMode, ScoopPackageHookAction, SessionsAction,
+    MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
     SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
@@ -123,29 +123,6 @@ fn every_visible_top_level_subcommand_ships_rich_help() {
             after_help.contains("Related:") || after_help.contains("Notes:"),
             "`tracedecay {name}` after_help must cross-reference related commands \
              or carry agent-relevant notes"
-        );
-    }
-}
-
-/// `dogfood` is how a source checkout reaches the live user environment
-/// without cutting a release, so it must stay discoverable in `--help`. The
-/// machine-invoked plumbing around it stays hidden.
-#[test]
-fn dogfood_is_discoverable_while_plumbing_stays_hidden() {
-    let command = Cli::command();
-    let visible: Vec<String> = command
-        .get_subcommands()
-        .filter(|sub| !sub.is_hide_set())
-        .map(|sub| sub.get_name().to_string())
-        .collect();
-    assert!(
-        visible.iter().any(|name| name == "dogfood"),
-        "`dogfood` must appear in top-level help; visible: {visible:?}"
-    );
-    for hidden in ["post-update", "extract-worker", "hook-stop"] {
-        assert!(
-            !visible.iter().any(|name| name == hidden),
-            "`{hidden}` is machine-invoked plumbing and must stay hidden"
         );
     }
 }
@@ -530,15 +507,6 @@ fn update_and_post_update_parse_no_heal_flag() {
         .expect("post-update --no-heal should parse");
     let post_update_default = Cli::try_parse_from(["tracedecay", "post-update"])
         .expect("post-update should parse without --no-heal");
-    let post_update_strict = Cli::try_parse_from(["tracedecay", "post-update", "--strict"])
-        .expect("post-update --strict should parse");
-    let post_update_forward_only = Cli::try_parse_from([
-        "tracedecay",
-        "post-update",
-        "--mode",
-        "dogfood-forward-only",
-    ])
-    .expect("typed dogfood forward-only mode should parse");
 
     assert!(matches!(
         update.command,
@@ -553,8 +521,6 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: true,
             no_reinstall: false,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
         })
     ));
     assert!(matches!(
@@ -563,19 +529,6 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
-        })
-    ));
-    assert!(matches!(
-        post_update_strict.command,
-        Some(Commands::PostUpdate { strict: true, .. })
-    ));
-    assert!(matches!(
-        post_update_forward_only.command,
-        Some(Commands::PostUpdate {
-            mode: PostUpdateMode::DogfoodForwardOnly,
-            ..
         })
     ));
 }
@@ -632,8 +585,6 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
             no_heal: false,
             no_reinstall: true,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
         })
     ));
 
@@ -1699,190 +1650,6 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
 }
 
 #[test]
-fn migrate_commands_parse_manifest_scaffolding_flags() {
-    let consolidate = Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "consolidate",
-        "--project",
-        "/tmp/project",
-        "--profile-root",
-        "/tmp/profile",
-        "--source-project-id",
-        "proj_old",
-        "--target-project-id",
-        "proj_current",
-        "--apply",
-        "--confirm-token",
-        "confirm-123",
-        "--json",
-    ])
-    .expect("migrate consolidate should parse");
-    assert!(matches!(
-        consolidate.command,
-        Some(Commands::Migrate {
-            action:
-                MigrateAction::Consolidate {
-                    project,
-                    profile_root,
-                    source_project_id,
-                    target_project_id,
-                    apply,
-                    confirm_token,
-                    json,
-                }
-        }) if project == "/tmp/project"
-            && profile_root.as_deref() == Some("/tmp/profile")
-            && source_project_id == "proj_old"
-            && target_project_id == "proj_current"
-            && apply
-            && confirm_token.as_deref() == Some("confirm-123")
-            && json
-    ));
-
-    let plan = Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "plan",
-        "--root",
-        "/tmp/project",
-        "--manifest",
-        "/tmp/manifest.json",
-        "--profile-root",
-        "/tmp/profile",
-        "--project-id",
-        "proj_123",
-        "--json",
-    ])
-    .expect("migrate plan should parse");
-    assert!(matches!(
-        plan.command,
-        Some(Commands::Migrate {
-            action:
-                MigrateAction::Plan {
-                    roots,
-                    manifest,
-                    profile_root,
-                    project_id,
-                    json,
-                    ..
-                }
-        }) if roots == vec!["/tmp/project".to_string()]
-            && manifest.as_deref() == Some("/tmp/manifest.json")
-            && profile_root.as_deref() == Some("/tmp/profile")
-            && project_id.as_deref() == Some("proj_123")
-            && json
-    ));
-
-    let apply = Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "apply",
-        "--manifest",
-        "/tmp/manifest.json",
-        "--confirm-token",
-        "confirm-mig_123",
-    ])
-    .expect("migrate apply should parse");
-    assert!(matches!(
-        apply.command,
-        Some(Commands::Migrate {
-            action:
-                MigrateAction::Apply {
-                    manifest,
-                    confirm_token,
-                }
-        }) if manifest == "/tmp/manifest.json" && confirm_token == "confirm-mig_123"
-    ));
-
-    let verify = Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "verify",
-        "--manifest",
-        "/tmp/manifest.json",
-        "--json",
-    ])
-    .expect("migrate verify should parse");
-    assert!(matches!(
-        verify.command,
-        Some(Commands::Migrate {
-            action: MigrateAction::Verify { manifest, json }
-        }) if manifest == "/tmp/manifest.json" && json
-    ));
-}
-
-#[test]
-fn migrate_reconstruct_apply_flag_parses() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "reconstruct",
-        "--profile-root",
-        "/tmp/profile",
-        "--apply",
-        "--json",
-    ])
-    .expect("migrate reconstruct should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Migrate {
-            action:
-                MigrateAction::Reconstruct {
-                    profile_root,
-                    apply,
-                    json,
-                }
-        }) if profile_root == "/tmp/profile" && apply && json
-    ));
-}
-
-#[test]
-fn migrate_export_requires_from_profile_flag() {
-    let err = match Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "export",
-        "--project-id",
-        "proj_123",
-        "--to",
-        "/tmp/exported",
-    ]) {
-        Ok(_) => panic!("migrate export should require --from-profile"),
-        Err(err) => err,
-    };
-
-    assert_eq!(err.kind(), ErrorKind::MissingRequiredArgument);
-}
-
-#[test]
-fn migrate_registry_gc_parses() {
-    let cli = Cli::try_parse_from([
-        "tracedecay",
-        "migrate",
-        "registry-gc",
-        "--prefix",
-        "/tmp",
-        "--apply",
-        "--json",
-    ])
-    .expect("migrate registry-gc should parse");
-
-    assert!(matches!(
-        cli.command,
-        Some(Commands::Migrate {
-            action:
-                MigrateAction::RegistryGc {
-                    prefix,
-                    apply,
-                    json,
-                }
-        }) if prefix.as_deref() == Some("/tmp") && apply && json
-    ));
-}
-
-#[test]
 fn migrate_storage_report_parses() {
     let cli = Cli::try_parse_from([
         "tracedecay",
@@ -1938,6 +1705,24 @@ fn migrate_storage_report_parses_targeted_project() {
             && project_id.as_deref() == Some("proj_a")
             && project_root.as_deref() == Some("/repos/a")
     ));
+}
+
+#[test]
+fn migrate_cleanup_sources_is_not_a_supported_subcommand() {
+    let err = match Cli::try_parse_from([
+        "tracedecay",
+        "migrate",
+        "cleanup-sources",
+        "--manifest",
+        "/tmp/migration-manifest.json",
+        "--confirm-token",
+        "confirm",
+    ]) {
+        Ok(_) => panic!("cleanup-sources must not parse"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
 }
 
 #[test]

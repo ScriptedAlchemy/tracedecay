@@ -150,7 +150,7 @@ impl Database {
     /// test markers than the `SQLite` runtime will materialize for one query,
     /// and the runtime refuses an oversized query outright rather than
     /// truncating it — which failed `tracedecay_health` with "failed to query
-    /// test marker ids: … migration SQL query materialization exceeded its
+    /// test marker ids: … exact SQL query materialization exceeded its
     /// limit".
     ///
     /// Paging keeps the property the two-step "resolve + use" pattern depends

@@ -22,12 +22,12 @@ use super::{TraceDecay, TraceDecayOpenOptions};
 /// Outcome of the post-crash / post-open health preflight a registered open
 /// runs before it can trust the mounted database.
 ///
-/// `Ready` carries the mounted database and migration result onward so the
-/// caller can finish constructing `Self`. `Recovered` means the preflight
+/// `Ready` carries the mounted database onward so the caller can finish
+/// constructing `Self`. `Recovered` means the preflight
 /// already resolved the open completely — either by recursing into a repaired
 /// branch open or by failing closed — and the caller must return it as-is.
 pub(super) enum OpenHealthOutcome {
-    Ready { db: Database, migrated: Option<u32> },
+    Ready { db: Database },
     Recovered(Box<Result<TraceDecay>>),
 }
 
@@ -290,7 +290,7 @@ impl TraceDecay {
             }
             Err(e) => return Err(e),
         };
-        let migrated = crate::db::migrations::migrate(&db).await?;
+        crate::db::migrations::ensure_schema_current(&db).await?;
 
         // Validation before Database::open cannot observe FTS damage on a
         // retained shared handle because the open reuses that connection.
@@ -418,7 +418,7 @@ impl TraceDecay {
             }
         }
 
-        Ok(OpenHealthOutcome::Ready { db, migrated })
+        Ok(OpenHealthOutcome::Ready { db })
     }
 
     async fn recover_corrupt_branch_or_fail(

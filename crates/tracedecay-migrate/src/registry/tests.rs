@@ -168,13 +168,19 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     let project = harness.registered.db_path().parent().unwrap().join("gone");
     register_both_generations(&harness.registered, &project).await;
 
+    // The refresh races the sweep through the *same* registered runtime, which
+    // is how a daemon actually reaches this database: one mount, one serialized
+    // writer lane. A second independent mount would not serialize — connection
+    // policy pins `busy_timeout = 0` precisely so SQLite never waits behind the
+    // runtime's own queue — and would fail the write outright instead.
+    let concurrent_db = std::sync::Arc::clone(&harness.registered);
+
     let transaction = harness
         .registered
         .begin_write_transaction()
         .await
         .expect("begin registry cleanup transaction");
 
-    let concurrent_db = harness.mount().await;
     let concurrent_project = project.clone();
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let refresh = tokio::spawn(async move {

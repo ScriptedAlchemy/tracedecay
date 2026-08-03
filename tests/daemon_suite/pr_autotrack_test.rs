@@ -17,24 +17,35 @@ use std::sync::Arc;
 
 use crate::common::fixture::{GitFixture, RegisteredProject, TestProfile, git_run};
 use fs2::FileExt;
+use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
 use tracedecay::branch_meta::{load_branch_meta, save_branch_meta};
 use tracedecay::daemon::pr_autotrack;
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+use tracedecay::store::memory::DatabaseFactStore;
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_domain::{FactOwnerV1, ProjectId};
 
-fn seed_branch_only_fact(database_path: &Path, content: &str) -> i64 {
-    let connection = rusqlite::Connection::open(database_path).unwrap();
-    connection
-        .execute(
-            "INSERT INTO memory_facts(
-                 content, category, tags, trust_score, access_count,
-                 created_at, updated_at, source, metadata, hrr_precision
-             ) VALUES(?1, 'project', '[\"branch-cutover\"]', 0.9, 1,
-                      42, 42, 'legacy-pr-branch', '{\"fixture\":\"production-pr-autotrack\"}',
-                      'f32')",
-            [content],
-        )
-        .unwrap();
-    connection.last_insert_rowid()
+/// Deletes the `.tracedecay-test-profile-*.db` family that the canonical test
+/// runtime publishes beside a non-profile database it opens.
+///
+/// A production store has exactly one `*.db` per tracked branch under
+/// `branches/`, and the project-memory cutover treats every `*.db` there as a
+/// branch memory source. Leaving the harness's sidecar behind would invent a
+/// schema-less extra source and make the cutover refuse.
+fn remove_test_runtime_profile_sidecars(database_path: &Path) {
+    let directory = database_path
+        .parent()
+        .expect("branch database has a parent");
+    for entry in fs::read_dir(directory).expect("branch directory is readable") {
+        let path = entry.expect("branch directory entry is readable").path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tracedecay-test-profile-"))
+        {
+            fs::remove_file(&path).expect("test-runtime profile sidecar is removable");
+        }
+    }
 }
 
 /// An indexed project on `main` with a local bare `origin` it has been pushed
@@ -80,6 +91,70 @@ impl PrProject {
 
     fn graph(&self) -> &Arc<TraceDecay> {
         self.project.graph()
+    }
+
+    /// Writes one durable project-memory fact into a *branch* store through
+    /// the ordinary production write path — the owner-bound compatibility fact
+    /// authority the daemon itself writes through — rather than by
+    /// hand-inserting a raw `memory_facts` row.
+    ///
+    /// The distinction is the whole point of the fixture: a hand-written legacy
+    /// row carries no Memory V2 authority, so the surviving archive merge in
+    /// `memory_cutover::apply_for_retained_project` has nothing to carry into
+    /// project memory. Seeding through `add_fact_v1` produces exactly the rows
+    /// a real branch-local fact has (V2 identity, assertion, lineage, legacy
+    /// map, and the compatibility `memory_facts` projection), so branch
+    /// retirement is exercised against production-shaped state and the "branch
+    /// retirement never loses memory" contract is what the assertions actually
+    /// observe. Returns the fact's compatibility id — the id project memory
+    /// must still resolve after the branch store is gone.
+    ///
+    /// The fact is written under this project's own memory owner, the only
+    /// owner the cutover receipt accepts an archive proof for.
+    ///
+    /// Writing needs exclusive ownership of the branch family, which the
+    /// branch-graph open does not grant (it publishes a shared read-only
+    /// connection). The fixture therefore takes explicit test authority over
+    /// the branch database and drops the synthetic profile sidecar that the
+    /// test runtime leaves beside it — the store must be back in its exact
+    /// production shape before the cutover planner enumerates `branches/`.
+    async fn seed_branch_only_fact(&self, branch: &str, content: &str) -> i64 {
+        let owner = FactOwnerV1::Project {
+            project_id: ProjectId::new(self.project.project_id().to_owned()).unwrap(),
+        };
+        let branch_database = self.data_root().join(
+            &load_branch_meta(self.data_root())
+                .expect("branch meta exists")
+                .branches[branch]
+                .db_file,
+        );
+        let (database, _) = crate::common::open_test_database(&branch_database)
+            .await
+            .expect("branch store opens for the fixture seed write");
+        let fact = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database))
+            .unwrap()
+            .add_fact_v1(
+                AddFactRequest {
+                    content: content.to_owned(),
+                    category: MemoryCategory::Project,
+                    source: Some("pr-branch".to_owned()),
+                    tags: vec!["branch-cutover".to_owned()],
+                    entities: Vec::new(),
+                    trust: Some(0.9),
+                    metadata: serde_json::json!({ "fixture": "production-pr-autotrack" }),
+                },
+                MemoryOperationContext::generated(&owner, "seed branch-only fact", None).unwrap(),
+            )
+            .await
+            .unwrap()
+            .fact
+            .expect("the branch-only fixture fact must be stored");
+        // The cutover snapshots the branch family from disk, so the seed has to
+        // be durable in the main database before the reconcile that reads it.
+        database.checkpoint().await.unwrap();
+        database.close();
+        remove_test_runtime_profile_sidecars(&branch_database);
+        fact.fact_id
     }
 
     fn git(&self, args: &[&str]) {
@@ -258,7 +333,9 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
         1,
         "pr/1 store should contain the PR head's symbol (indexed from its worktree)"
     );
-    let branch_fact_id = seed_branch_only_fact(&tracked_database, branch_only_content);
+    let branch_fact_id = fixture
+        .seed_branch_only_fact(tracking_label, branch_only_content)
+        .await;
     let branch_fact = rusqlite::Connection::open_with_flags(
         &tracked_database,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -418,8 +495,7 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
     let discovery = fixture.discover();
     let tracked = fixture.reconcile(&discovery, 10).await;
     assert_eq!(tracked.tracked, vec![label.to_string()]);
-    let branch_entry = load_branch_meta(&data_root).unwrap().branches[label].clone();
-    seed_branch_only_fact(&data_root.join(branch_entry.db_file), retry_content);
+    fixture.seed_branch_only_fact(label, retry_content).await;
 
     // The branch-administration coordinator takes this same metadata lock. It
     // must fail closed while another mutation owns it, not delete Git artifacts
@@ -526,7 +602,7 @@ async fn target_durability_failure_blocks_cleanup_and_retry_is_idempotent() {
     assert_eq!(tracked.tracked, vec![label.to_string()]);
     let branch = load_branch_meta(&data_root).unwrap().branches[label].clone();
     let database = data_root.join(&branch.db_file);
-    seed_branch_only_fact(&database, content);
+    fixture.seed_branch_only_fact(label, content).await;
     fixture.origin_git(&["update-ref", "-d", "refs/pull/16/head"]);
     let closed = fixture.discover();
 
@@ -581,7 +657,7 @@ async fn receipt_durability_failure_blocks_cleanup_until_durable_retry() {
     assert_eq!(tracked.tracked, vec![label.to_string()]);
     let branch = load_branch_meta(&data_root).unwrap().branches[label].clone();
     let database = data_root.join(&branch.db_file);
-    seed_branch_only_fact(&database, content);
+    fixture.seed_branch_only_fact(label, content).await;
     fixture.origin_git(&["update-ref", "-d", "refs/pull/17/head"]);
     let closed = fixture.discover();
 

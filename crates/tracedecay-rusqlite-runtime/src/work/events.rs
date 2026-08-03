@@ -28,7 +28,7 @@ impl WorkStoragePort for WorkSqliteStorage {
 /// Reads the published projection for one task. The snapshot row is what every
 /// append publishes with the fold; it is the ordinary read authority.
 pub(crate) fn load_registered_projection(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<WorkProjection, WorkStorageError> {
@@ -39,20 +39,20 @@ pub(crate) fn load_registered_projection(
            AND actor_id = ?4 AND policy_digest = ?5 AND task_id = ?6",
         authority_params_owned(authority)
             .into_iter()
-            .chain([MigrationSqlValue::Text(task_id.as_str().to_owned())])
+            .chain([ExactSqlValue::Text(task_id.as_str().to_owned())])
             .collect(),
     )
     .map_err(|_| WorkStorageError::Unavailable)?;
     let payload = rows
         .rows
         .first()
-        .and_then(|row| migration_text(&row.values, 0))
+        .and_then(|row| exact_sql_text(&row.values, 0))
         .ok_or(WorkStorageError::NotFoundOrNotAuthorized)?;
     serde_json::from_str(payload).map_err(|_| WorkStorageError::Unavailable)
 }
 
 pub(crate) fn load_registered_history(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<Vec<WorkEvent>, WorkStorageError> {
@@ -64,7 +64,7 @@ pub(crate) fn load_registered_history(
          ORDER BY version",
         authority_params_owned(authority)
             .into_iter()
-            .chain([MigrationSqlValue::Text(task_id.as_str().to_owned())])
+            .chain([ExactSqlValue::Text(task_id.as_str().to_owned())])
             .collect(),
     )
     .map_err(|_| WorkStorageError::Unavailable)?;
@@ -72,7 +72,7 @@ pub(crate) fn load_registered_history(
 }
 
 pub(crate) fn load_registered_history_in_transaction(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<Vec<WorkEvent>, WorkStorageError> {
@@ -84,7 +84,7 @@ pub(crate) fn load_registered_history_in_transaction(
          ORDER BY version",
         authority_params_owned(authority)
             .into_iter()
-            .chain([MigrationSqlValue::Text(task_id.as_str().to_owned())])
+            .chain([ExactSqlValue::Text(task_id.as_str().to_owned())])
             .collect(),
     )
     .map_err(|_| WorkStorageError::Unavailable)?;
@@ -92,7 +92,7 @@ pub(crate) fn load_registered_history_in_transaction(
 }
 
 pub(crate) fn decode_registered_events(
-    rows: MigrationSqlRows,
+    rows: ExactSqlRows,
 ) -> Result<Vec<WorkEvent>, WorkStorageError> {
     if rows.rows.is_empty() {
         return Err(WorkStorageError::NotFoundOrNotAuthorized);
@@ -100,14 +100,14 @@ pub(crate) fn decode_registered_events(
     rows.rows
         .into_iter()
         .map(|row| {
-            let payload = migration_text(&row.values, 0).ok_or(WorkStorageError::Unavailable)?;
+            let payload = exact_sql_text(&row.values, 0).ok_or(WorkStorageError::Unavailable)?;
             serde_json::from_str(payload).map_err(|_| WorkStorageError::Unavailable)
         })
         .collect()
 }
 
 pub(crate) fn append_registered(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     request: &WorkAppendRequest,
 ) -> Result<WorkAppendOutcome, WorkStorageError> {
     let transaction = handle
@@ -176,7 +176,7 @@ pub(crate) fn append_registered(
 /// task has none yet — an unmigrated task, or one last written before the
 /// current state version. That task folds incrementally from then on.
 pub(crate) fn load_fold_state(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<Option<WorkProjectionStateV1>, WorkStorageError> {
@@ -189,8 +189,8 @@ pub(crate) fn load_fold_state(
         authority_params_owned(authority)
             .into_iter()
             .chain([
-                MigrationSqlValue::Text(task_id.as_str().to_owned()),
-                MigrationSqlValue::Integer(i64::from(WORK_PROJECTION_STATE_VERSION_V1)),
+                ExactSqlValue::Text(task_id.as_str().to_owned()),
+                ExactSqlValue::Integer(i64::from(WORK_PROJECTION_STATE_VERSION_V1)),
             ])
             .collect(),
     )
@@ -198,7 +198,7 @@ pub(crate) fn load_fold_state(
     if let Some(payload) = rows
         .rows
         .first()
-        .and_then(|row| migration_text(&row.values, 0))
+        .and_then(|row| exact_sql_text(&row.values, 0))
     {
         return serde_json::from_str(payload)
             .map(Some)
@@ -221,7 +221,7 @@ pub(crate) fn load_fold_state(
 
 /// Reads the one stored event that already used this command identity.
 pub(crate) fn replayed_input_digest(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
     task_id: &TaskId,
     event: &WorkEvent,
@@ -234,8 +234,8 @@ pub(crate) fn replayed_input_digest(
         authority_params_owned(authority)
             .into_iter()
             .chain([
-                MigrationSqlValue::Text(task_id.as_str().to_owned()),
-                MigrationSqlValue::Text(event.command_id().as_str().to_owned()),
+                ExactSqlValue::Text(task_id.as_str().to_owned()),
+                ExactSqlValue::Text(event.command_id().as_str().to_owned()),
             ])
             .collect(),
     )
@@ -243,17 +243,17 @@ pub(crate) fn replayed_input_digest(
     Ok(rows
         .rows
         .first()
-        .and_then(|row| migration_text(&row.values, 0))
+        .and_then(|row| exact_sql_text(&row.values, 0))
         .map(str::to_owned))
 }
 
 pub(crate) fn advance_registered_owner_cursor(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     authority: &WorkAuthority,
 ) -> Result<u64, WorkStorageError> {
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_owner_cursors_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest, sequence
                  ) VALUES (?1, ?2, ?3, ?4, ?5, 1)
@@ -275,13 +275,13 @@ pub(crate) fn advance_registered_owner_cursor(
     cursor_rows
         .rows
         .first()
-        .and_then(|row| migration_integer(&row.values, 0))
+        .and_then(|row| exact_sql_integer(&row.values, 0))
         .and_then(|value| u64::try_from(value).ok())
         .ok_or(WorkStorageError::Unavailable)
 }
 
 pub(crate) fn registered_publish_fold_state(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     state: &WorkProjectionStateV1,
 ) -> Result<(), WorkStorageError> {
     let projection = state.projection();
@@ -290,7 +290,7 @@ pub(crate) fn registered_publish_fold_state(
         i64::try_from(projection.version().get()).map_err(|_| WorkStorageError::Unavailable)?;
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_projection_fold_state_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     task_id, version, state_version, state_payload
@@ -305,10 +305,10 @@ pub(crate) fn registered_publish_fold_state(
                 authority_params_owned(projection.authority())
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Text(projection.task_id().as_str().to_owned()),
-                        MigrationSqlValue::Integer(version),
-                        MigrationSqlValue::Integer(i64::from(state.state_version())),
-                        MigrationSqlValue::Text(payload),
+                        ExactSqlValue::Text(projection.task_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(version),
+                        ExactSqlValue::Integer(i64::from(state.state_version())),
+                        ExactSqlValue::Text(payload),
                     ])
                     .collect(),
             )
@@ -325,13 +325,13 @@ pub(crate) fn registered_publish_fold_state(
 }
 
 pub(crate) fn registered_insert_event(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     event: &WorkEvent,
 ) -> Result<(), WorkStorageError> {
     let payload = serde_json::to_string(event).map_err(|_| WorkStorageError::Unavailable)?;
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_events_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     task_id, version, command_id, input_digest, occurred_at, event_payload
@@ -339,15 +339,15 @@ pub(crate) fn registered_insert_event(
                 authority_params_owned(event.authority())
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Text(event.task_id().as_str().to_owned()),
-                        MigrationSqlValue::Integer(
+                        ExactSqlValue::Text(event.task_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(
                             i64::try_from(event.version().get())
                                 .map_err(|_| WorkStorageError::Unavailable)?,
                         ),
-                        MigrationSqlValue::Text(event.command_id().as_str().to_owned()),
-                        MigrationSqlValue::Text(event.input_digest().as_str().to_owned()),
-                        MigrationSqlValue::Integer(event.occurred_at().0),
-                        MigrationSqlValue::Text(payload),
+                        ExactSqlValue::Text(event.command_id().as_str().to_owned()),
+                        ExactSqlValue::Text(event.input_digest().as_str().to_owned()),
+                        ExactSqlValue::Integer(event.occurred_at().0),
+                        ExactSqlValue::Text(payload),
                     ])
                     .collect(),
             )
@@ -358,7 +358,7 @@ pub(crate) fn registered_insert_event(
 }
 
 pub(crate) fn registered_publish_projection(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     projection: &WorkProjection,
     owner_sequence: u64,
 ) -> Result<(), WorkStorageError> {
@@ -368,7 +368,7 @@ pub(crate) fn registered_publish_projection(
     let sequence = i64::try_from(owner_sequence).map_err(|_| WorkStorageError::Unavailable)?;
     let changed = transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_projection_snapshots_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     task_id, version, owner_sequence, accepted_proposal_id,
@@ -386,24 +386,20 @@ pub(crate) fn registered_publish_projection(
                 authority_params_owned(projection.authority())
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Text(projection.task_id().as_str().to_owned()),
-                        MigrationSqlValue::Integer(version),
-                        MigrationSqlValue::Integer(sequence),
+                        ExactSqlValue::Text(projection.task_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(version),
+                        ExactSqlValue::Integer(sequence),
                         projection
                             .accepted_proposal()
-                            .map(|proposal| MigrationSqlValue::Text(proposal.as_str().to_owned()))
-                            .unwrap_or(MigrationSqlValue::Null),
-                        MigrationSqlValue::Integer(if projection.is_execution_admitted() {
+                            .map(|proposal| ExactSqlValue::Text(proposal.as_str().to_owned()))
+                            .unwrap_or(ExactSqlValue::Null),
+                        ExactSqlValue::Integer(if projection.is_execution_admitted() {
                             1
                         } else {
                             0
                         }),
-                        MigrationSqlValue::Integer(if projection.is_task_accepted() {
-                            1
-                        } else {
-                            0
-                        }),
-                        MigrationSqlValue::Text(payload.clone()),
+                        ExactSqlValue::Integer(if projection.is_task_accepted() { 1 } else { 0 }),
+                        ExactSqlValue::Text(payload.clone()),
                     ])
                     .collect(),
             )
@@ -415,7 +411,7 @@ pub(crate) fn registered_publish_projection(
     }
     transaction
         .execute(
-            migration_statement(
+            exact_sql_statement(
                 "INSERT INTO work_projection_deltas_v1 (
                     project_id, repository_id, worktree_id, actor_id, policy_digest,
                     owner_sequence, task_id, version, projection_payload
@@ -423,10 +419,10 @@ pub(crate) fn registered_publish_projection(
                 authority_params_owned(projection.authority())
                     .into_iter()
                     .chain([
-                        MigrationSqlValue::Integer(sequence),
-                        MigrationSqlValue::Text(projection.task_id().as_str().to_owned()),
-                        MigrationSqlValue::Integer(version),
-                        MigrationSqlValue::Text(payload),
+                        ExactSqlValue::Integer(sequence),
+                        ExactSqlValue::Text(projection.task_id().as_str().to_owned()),
+                        ExactSqlValue::Integer(version),
+                        ExactSqlValue::Text(payload),
                     ])
                     .collect(),
             )

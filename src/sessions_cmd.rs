@@ -863,7 +863,7 @@ mod tests {
     #[test]
     fn message_search_rpc_args_omit_absent_optional_filters() {
         let args = message_search_rpc_args(SessionsSearchArgs {
-            query: "dogfood".to_string(),
+            query: "example-query".to_string(),
             provider: None,
             scope: "all".to_string(),
             message_type: "all".to_string(),
@@ -881,7 +881,7 @@ mod tests {
         assert_eq!(
             args,
             json!({
-                "query": "dogfood",
+                "query": "example-query",
                 "scope": "all",
                 "message_type": "all",
                 "limit": 3,
@@ -893,7 +893,7 @@ mod tests {
     #[test]
     fn message_search_rpc_args_preserve_explicit_typed_filters() {
         let args = message_search_rpc_args(SessionsSearchArgs {
-            query: "dogfood".to_string(),
+            query: "example-query".to_string(),
             provider: Some("cursor".to_string()),
             scope: "subagents_only".to_string(),
             message_type: "direct_user".to_string(),
@@ -911,7 +911,7 @@ mod tests {
         assert_eq!(
             args,
             json!({
-                "query": "dogfood",
+                "query": "example-query",
                 "provider": "cursor",
                 "scope": "subagents_only",
                 "message_type": "direct_user",

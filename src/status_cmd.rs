@@ -9,7 +9,7 @@ use crate::{commands, current_unix_timestamp, global, resolve_cli_project_root};
 
 /// Absolute wall-clock budget for one `tracedecay status` invocation, covering
 /// project resolution and every daemon RPC. Override with
-/// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests and dogfood.
+/// `TRACEDECAY_STATUS_DEADLINE_MS` (milliseconds) for tests.
 const DEFAULT_STATUS_COMMAND_DEADLINE: Duration = Duration::from_secs(30);
 
 fn status_command_deadline() -> Duration {
@@ -108,7 +108,6 @@ pub(crate) fn format_memory_status_report(
             "helpful feedback: {}\n",
             "unhelpful feedback: {}\n",
             "trust buckets: <0.25={}  0.25-0.50={}  0.50-0.75={}  0.75-1.00={}\n",
-            "legacy backfill complete: {}\n",
             "repair: missing_vectors_repaired={}  banks_rebuilt={}\n",
             "feedback funnel: retrieved={} accessed={} facts_retrieved={} facts_rated={} feedback_total={} seen:feedback={}\n"
         ),
@@ -129,11 +128,6 @@ pub(crate) fn format_memory_status_report(
         status.trust_025_050_count,
         status.trust_050_075_count,
         status.trust_075_100_count,
-        if status.legacy_backfill_complete {
-            "yes"
-        } else {
-            "no"
-        },
         status.repair.missing_vectors_repaired,
         status.repair.banks_rebuilt,
         status.feedback_funnel.retrieval_count_total,

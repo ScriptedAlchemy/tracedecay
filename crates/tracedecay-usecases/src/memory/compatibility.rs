@@ -23,7 +23,6 @@ use tracedecay_store::{
     CompatibilityFactRetrievalCommandV1, CompatibilityFactSearchCursorV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
     CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
     CompatibilityMemoryStatusV1, FactCompatibilityStore,
 };
 
@@ -253,7 +252,6 @@ pub(super) fn project_memory_status_v1(
             status.missing_vector_count(),
             "legacy memory missing vector count",
         )?,
-        legacy_backfill_complete: status.legacy_backfill_complete(),
         repair: MemoryRepairStats {
             missing_vectors_repaired: legacy_usize(
                 repair.missing_vectors_repaired(),
@@ -482,24 +480,6 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             });
         }
         Ok(result)
-    }
-
-    /// Advances one persisted V1 raw-memory cutover batch. This daemon-only
-    /// command is the sole raw legacy import boundary; reads and curation use
-    /// typed canonical projections only.
-    pub async fn daemon_legacy_memory_cutover_v1(
-        &self,
-        context: MemoryOperationContext,
-    ) -> Result<CompatibilityLegacyMemoryCutoverProgressV1, MemoryApplicationError> {
-        self.authority
-            .advance_compatibility_legacy_memory_cutover(
-                CompatibilityLegacyMemoryCutoverCommandV1::new(
-                    self.owner.clone(),
-                    context.operation_id().clone(),
-                )?,
-            )
-            .await
-            .map_err(Into::into)
     }
 
     pub async fn get_compatibility_history(

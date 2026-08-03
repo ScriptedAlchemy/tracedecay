@@ -16,7 +16,6 @@ pub mod observation;
 mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
-mod session_temporal_repair;
 mod support;
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
@@ -83,14 +82,6 @@ pub use api_types::{
     StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert,
     TranscriptBatch,
 };
-#[cfg(test)]
-use session_temporal_repair::connection_table_exists;
-pub use session_temporal_repair::{
-    SessionTemporalRepairOutcome, SessionTemporalRepairStage,
-    advance_required_session_temporal_state_repair, advance_session_temporal_store_repair,
-    advance_session_temporal_store_repair_with_page_rows, enqueue_session_temporal_store_repair,
-    repair_session_temporal_store, session_temporal_store_repair_status,
-};
 pub use support::{
     AccountingMode, env_flag, env_value_truthy, estimate_tokens, global_accounting_enabled,
     global_accounting_mode, global_db_path, global_db_path_is_overridden,
@@ -115,7 +106,3 @@ mod checkpoint_tests;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 pub mod tests;
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod session_temporal_repair_tests;
