@@ -39,8 +39,7 @@ pub use access::windows_hard_link_count;
 pub use access::{DaemonDatabaseScope, MaintenanceDatabaseScope};
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
 pub use access::{
-    DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
-    enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
+    WriterOwnership, enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use analytics::HealthFileAggregate;
 pub use connection::Database;

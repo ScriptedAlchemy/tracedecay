@@ -193,8 +193,7 @@ fn unique_branch_db_stem(
             .any(|(name, entry)| name != branch_name && entry.db_file == db_file);
         let database_path = branches_dir.join(format!("{stem}.db"));
         let file_conflict = database_path.exists();
-        let retired_path = crate::db::database_path_is_tombstoned(&database_path)?;
-        Ok(meta_conflict || file_conflict || retired_path)
+        Ok(meta_conflict || file_conflict)
     };
     if !conflicts(&base)? {
         return Ok(Some(base));
@@ -608,7 +607,7 @@ fn rollback_keeps_database_when_metadata_removal_cannot_be_saved() {
 
 #[cfg(test)]
 #[test]
-fn rollback_quarantines_complete_database_family_and_retires_path() {
+fn rollback_quarantines_complete_database_family() {
     let temp = tempfile::tempdir().unwrap();
     let data_dir = temp.path();
     let branches_dir = data_dir.join("branches");
@@ -636,53 +635,13 @@ fn rollback_quarantines_complete_database_family_and_retires_path() {
             .unwrap()
             .is_tracked("feature")
     );
-    assert!(crate::db::database_path_is_tombstoned(&db_path).unwrap());
     assert!(!data_dir.join(".branch-delete-transaction.json").exists());
-}
-
-#[cfg(test)]
-#[test]
-fn rollback_refuses_database_with_active_authority() {
-    let temp = tempfile::tempdir().unwrap();
-    let data_dir = temp.path();
-    let branches_dir = data_dir.join("branches");
-    std::fs::create_dir_all(&branches_dir).unwrap();
-    let db_path = branches_dir.join("feature.db");
-    std::fs::write(&db_path, b"sqlite").unwrap();
-
-    let mut meta = crate::branch_meta::BranchMeta::new("main");
-    meta.add_branch("feature", "branches/feature.db", "main");
-    crate::branch_meta::save_branch_meta(data_dir, &meta).unwrap();
-    let _authority = crate::db::DatabaseAuthority::for_runtime(
-        &db_path,
-        "test active branch database authority",
-    )
-    .unwrap();
-
-    let error = rollback_branch_tracking(data_dir, "feature", "branches/feature.db", &db_path)
-        .expect_err("active database authority must fence rollback");
-
-    assert!(
-        error
-            .to_string()
-            .contains("incompatible database authority")
-    );
-    assert!(db_path.exists());
-    assert!(
-        crate::branch_meta::load_branch_meta(data_dir)
-            .unwrap()
-            .is_tracked("feature")
-    );
 }
 
 /// A branch sync mounts the new branch database through the process-wide store
 /// runtime registry, and that mount keeps the database authority lease alive
 /// after the failed graph handle is dropped. Rollback fences the same `SQLite`
-/// family for deletion, and a deletion fence refuses any database this process
-/// still holds an authority for — so branch sync used to fail with "this
-/// process already holds an incompatible database authority or deletion fence
-/// (operation: roll back published branch `SQLite` family)" and leave the failed
-/// branch published until some other process cleaned it up.
+/// family for deletion, so the runtime must be retired before rollback.
 ///
 /// Retiring the registered runtime first must make the exact same rollback
 /// succeed in this process, and must leave the pre-sync branch metadata intact.

@@ -12,6 +12,7 @@
 mod attachment;
 mod capacity;
 mod close;
+mod destructive;
 mod leases;
 mod open;
 mod ports;
@@ -41,6 +42,7 @@ pub use attachment::{PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, Publish
 pub use capacity::StoreRuntimeRegistryConfig;
 pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_OPEN_RUNTIMES};
 pub use close::ClosedStoreRuntime;
+pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use leases::{
     ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
     StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
@@ -594,6 +596,12 @@ pub enum StoreRuntimeRegistryFailure {
     RuntimeEvictionInProgress {
         key: Box<StoreRuntimeKey>,
     },
+    DestructiveMaintenanceInProgress {
+        root: PathBuf,
+    },
+    DestructiveMaintenanceInvalidTarget {
+        message: String,
+    },
     RuntimeCloseBlocked {
         binding: Box<StoreRuntimeBindingV1>,
         external_handles: usize,
@@ -705,6 +713,12 @@ struct EvictingRuntime {
     handle: StoreRuntimeHandle,
 }
 
+struct DestructivePathReservation {
+    root: PathBuf,
+    database_paths: Vec<PathBuf>,
+    released: tokio::sync::watch::Sender<bool>,
+}
+
 enum RegistryEntry {
     Opening(open::OpeningRuntime),
     Ready(ReadyRuntime),
@@ -714,7 +728,9 @@ enum RegistryEntry {
 #[derive(Default)]
 struct RegistryState {
     entries: BTreeMap<StoreRuntimeKey, RegistryEntry>,
+    destructive_paths: BTreeMap<u64, DestructivePathReservation>,
     profile_authorities: BTreeMap<StoreShardIdV1, StoreRuntimeBindingV1>,
+    next_destructive_attempt: u64,
     next_open_attempt: u64,
     next_eviction_attempt: u64,
     next_publication: u64,

@@ -11,6 +11,41 @@ use super::{
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) async fn begin_destructive_code_maintenance(
+        &self,
+        root: &Path,
+        database_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<super::DestructiveMaintenanceReservation> {
+        let target =
+            super::DestructiveMaintenanceTarget::new(root, database_paths).map_err(|error| {
+                session_registry_error(
+                    "construct destructive code-store reservation",
+                    format!("{error:?}"),
+                )
+            })?;
+        let reservation = self
+            .registry
+            .begin_destructive_maintenance(target)
+            .await
+            .map_err(|error| {
+                session_registry_error(
+                    "reserve destructive code-store maintenance",
+                    format!("{error:?}"),
+                )
+            })?;
+        for closed in reservation.closed() {
+            self.resolver
+                .retire_code_authority(&closed.binding().shard_id, closed.path())
+                .map_err(|error| {
+                    session_registry_error(
+                        "retire destructively closed code-shard authority",
+                        format!("{error:?}"),
+                    )
+                })?;
+        }
+        Ok(reservation)
+    }
+
     pub(crate) async fn close_code_graph_paths(
         &self,
         database_paths: impl IntoIterator<Item = PathBuf>,

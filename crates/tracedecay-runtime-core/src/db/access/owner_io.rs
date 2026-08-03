@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-use std::fs::File;
 #[cfg(not(windows))]
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
@@ -9,70 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::errors::Result;
 
-use super::{
-    AUTHORITY_NONCE, PROCESS_STARTED_EPOCH_MS, WriterOwner, access_error, access_io_error,
-};
-
-pub(super) fn open_lock_file(path: &Path) -> Result<File> {
-    #[cfg(windows)]
-    {
-        crate::windows_security::open_or_create_private_lock_file(path)
-            .map_err(|error| access_io_error("open lock", path, &error))
-    }
-
-    #[cfg(not(windows))]
-    let mut options = OpenOptions::new();
-    #[cfg(not(windows))]
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(not(windows))]
-    options
-        .open(path)
-        .map_err(|error| access_io_error("open lock", path, &error))
-}
-
-pub(super) fn write_owner(path: &Path, owner: &WriterOwner) -> Result<()> {
-    let payload = format!(
-        "token={}\tpid={}\tstarted_epoch_ms={}\tversion={}\tintent={}\n",
-        owner.token, owner.pid, owner.started_epoch_ms, owner.version, owner.intent
-    );
-    write_record_atomically(path, payload.as_bytes(), "writer owner")
-}
-
-pub(super) fn write_record_atomically(
-    path: &Path,
-    payload: &[u8],
-    record_name: &str,
-) -> Result<()> {
-    let file_name = path.file_name().ok_or_else(|| {
-        access_error(
-            &format!("write {record_name}"),
-            path,
-            &format!("{record_name} path has no file name"),
-        )
-    })?;
-    let nonce = AUTHORITY_NONCE.fetch_add(1, Ordering::Relaxed);
-    let temporary = temporary_record_path(path, file_name, nonce);
-    publish_record_atomically(&temporary, path, payload, record_name)
-}
-
-fn temporary_record_path(
-    path: &Path,
-    file_name: &std::ffi::OsStr,
-    nonce: u64,
-) -> std::path::PathBuf {
-    path.with_file_name(format!(
-        ".{}.{}.{}.{}.tmp",
-        file_name.to_string_lossy(),
-        std::process::id(),
-        crate::runtime_identity::process_run_id(),
-        nonce
-    ))
-}
+use super::{PROCESS_STARTED_EPOCH_MS, TOKEN_NONCE, WriterOwner, access_error, access_io_error};
 
 pub(super) fn publish_record_atomically(
     temporary: &Path,
@@ -201,12 +136,6 @@ pub(super) fn read_record_strict(path: &Path, record_name: &str) -> Result<Optio
     })
 }
 
-pub(super) fn remove_record_durably(path: &Path, record_name: &str) -> Result<()> {
-    std::fs::remove_file(path)
-        .map_err(|error| access_io_error(&format!("remove {record_name}"), path, &error))?;
-    sync_parent_directory(path, record_name)
-}
-
 #[cfg(not(windows))]
 pub(super) fn replace_file_atomically(
     temporary: &Path,
@@ -285,27 +214,6 @@ pub(super) fn writer_owner(token: &str, intent: &str) -> WriterOwner {
     }
 }
 
-pub(super) fn read_owner(path: &Path) -> Option<WriterOwner> {
-    let mut value = String::new();
-    #[cfg(windows)]
-    let mut file = crate::windows_security::open_private_file(path).ok()?;
-    #[cfg(not(windows))]
-    let mut file = File::open(path).ok()?;
-    file.read_to_string(&mut value).ok()?;
-    let mut fields = HashMap::new();
-    for field in value.trim().split('\t') {
-        let (key, value) = field.split_once('=')?;
-        fields.insert(key, value);
-    }
-    Some(WriterOwner {
-        token: fields.get("token")?.to_string(),
-        pid: fields.get("pid")?.parse().ok()?,
-        started_epoch_ms: fields.get("started_epoch_ms")?.parse().ok()?,
-        version: fields.get("version")?.to_string(),
-        intent: fields.get("intent")?.to_string(),
-    })
-}
-
 #[cfg(windows)]
 pub fn is_lock_contended(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::WouldBlock || error.raw_os_error() == Some(33)
@@ -317,7 +225,7 @@ pub fn is_lock_contended(error: &std::io::Error) -> bool {
 }
 
 pub(super) fn authority_token() -> String {
-    let nonce = AUTHORITY_NONCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = TOKEN_NONCE.fetch_add(1, Ordering::Relaxed);
     format!(
         "{}:{}:{}:{nonce}",
         crate::runtime_identity::process_run_id(),
@@ -334,20 +242,15 @@ pub(super) fn epoch_ms() -> u128 {
 }
 
 fn sanitize_metadata(value: &str) -> String {
-    value.replace(['\t', '\r', '\n'], " ")
-}
+    const MAX_METADATA_BYTES: usize = 256;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn temporary_record_names_are_scoped_to_the_process_run() {
-        let path = Path::new("writer.owner");
-        let temporary = temporary_record_path(path, path.file_name().unwrap(), 17);
-        let name = temporary.file_name().unwrap().to_string_lossy();
-
-        assert!(name.contains(crate::runtime_identity::process_run_id()));
-        assert!(name.ends_with(".17.tmp"));
+    let mut sanitized = value.replace(['\t', '\r', '\n'], " ");
+    if sanitized.len() > MAX_METADATA_BYTES {
+        let mut boundary = MAX_METADATA_BYTES;
+        while !sanitized.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        sanitized.truncate(boundary);
     }
+    sanitized
 }

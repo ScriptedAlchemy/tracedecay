@@ -941,37 +941,30 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
+async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("cooperative-shutdown");
     let lifecycle = DaemonLifecycle::default();
-    let store_administration = StoreAdministration::default();
     let (cancellation_tx, cancellation_rx) = tokio::sync::oneshot::channel();
     let (unit_started_tx, unit_started_rx) = tokio::sync::oneshot::channel();
     let (unit_release_tx, unit_release_rx) = tokio::sync::oneshot::channel();
     let (unit_finished_tx, unit_finished_rx) = tokio::sync::oneshot::channel();
 
     let task_lifecycle = lifecycle.clone();
-    let task_administration = store_administration.clone();
     let state = match tasks
         .start_cancellable(route, move |cancellation| async move {
             let _activity = task_lifecycle
                 .try_enter()
                 .expect("project open lifecycle activity");
             let published_cancellation = cancellation.clone();
-            task_administration
-                .with_writer_until_cancelled(&cancellation, move || async move {
-                    cancellation_tx
-                        .send(published_cancellation)
-                        .expect("publish project-open cancellation");
-                    unit_started_tx.send(()).expect("publish safe unit start");
-                    unit_release_rx.await.expect("release safe unit");
-                    unit_finished_tx
-                        .send(())
-                        .expect("publish safe unit completion");
-                })
-                .await
-                .expect("safe unit acquired writer administration");
+            cancellation_tx
+                .send(published_cancellation)
+                .expect("publish project-open cancellation");
+            unit_started_tx.send(()).expect("publish safe unit start");
+            unit_release_rx.await.expect("release safe unit");
+            unit_finished_tx
+                .send(())
+                .expect("publish safe unit completion");
             cancellation.cancelled().await;
             Err(crate::errors::TraceDecayError::Config {
                 message: "project open cancelled after safe unit".to_string(),
@@ -1017,12 +1010,6 @@ async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
     )
     .await
     .expect("client-drain lifecycle activity must be released");
-    tokio::time::timeout(
-        tokio::time::Duration::from_secs(1),
-        store_administration.with_writer(|| async {}),
-    )
-    .await
-    .expect("server shutdown must reacquire writer administration");
     assert_eq!(tasks.tracked_route_count().await, 0);
     super::super::ProjectOpenTasks::wait_for_completion(state)
         .await

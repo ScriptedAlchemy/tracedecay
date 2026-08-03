@@ -14,6 +14,7 @@ use tracedecay_store::{ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use super::register_registered_schema_installer;
 use super::registry::{
+    DestructiveMaintenanceReservation, DestructiveMaintenanceTarget,
     LifecycleShardRuntimePublisher, ProfileAuthorityPin, ProfileAuthorityPinResult,
     StoreRuntimeHandle, StoreRuntimeKey, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,

@@ -226,6 +226,25 @@ impl StoreRuntimeRegistry {
     }
 
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
+        if let Some(path) = request
+            .database_authority
+            .as_ref()
+            .map(|authority| authority.canonical_database_path())
+        {
+            while let Some(mut released) = self.destructive_wait(path) {
+                while !*released.borrow_and_update() {
+                    if released.changed().await.is_err() {
+                        return StoreRuntimeOpenResult::Failed(
+                            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                operation: "wait for destructive store maintenance",
+                                message: "destructive reservation closed without release"
+                                    .to_owned(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
         self.begin_or_join_open(&request).wait().await
     }
 

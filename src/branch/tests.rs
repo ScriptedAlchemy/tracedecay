@@ -91,28 +91,17 @@ fn unique_stem_rejects_empty_sanitization() {
 }
 
 #[test]
-fn unique_stem_never_reuses_a_deleted_database_path() {
+fn unique_stem_reuses_an_unpublished_missing_database_path() {
     let temp = tempfile::tempdir().unwrap();
     let branches_dir = temp.path().join("branches");
     std::fs::create_dir_all(&branches_dir).unwrap();
-    let retired = branches_dir.join("feature.db");
-    let fence = crate::db::DatabaseDeletionFence::acquire(
-        std::slice::from_ref(&retired),
-        "retire branch database path",
-    )
-    .unwrap();
-    fence.publish_deleting().unwrap();
-    fence.promote_deleted().unwrap();
-    drop(fence);
 
     let meta = crate::branch_meta::BranchMeta::new("main");
     let stem = unique_branch_db_stem(&meta, &branches_dir, "feature")
         .unwrap()
         .unwrap();
 
-    assert_ne!(stem, "feature");
-    assert!(stem.starts_with("feature-"), "got: {stem}");
-    assert!(crate::db::database_path_is_tombstoned(&retired).unwrap());
+    assert_eq!(stem, "feature");
 }
 
 // --- git test harness (mirrors src/mcp/hook_events.rs tests) ------------

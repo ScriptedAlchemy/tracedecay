@@ -26,32 +26,6 @@ use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_re
 
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 
-/// How long a *request-side* caller queues for writer administration before it
-/// gives up and answers with a typed retryable busy error.
-///
-/// The gate is per store now, so the only thing a request can queue behind is
-/// another writer on the store it asked for. Ten seconds is long enough to
-/// absorb ordinary owner bookkeeping and short enough that a stuck writer
-/// surfaces as a retryable error rather than a 900-second hang.
-pub(super) const REQUEST_WRITER_ADMISSION_DEADLINE: std::time::Duration =
-    std::time::Duration::from_secs(10);
-
-/// Outcome of one attempt to run an operation under writer administration.
-pub(super) enum WriterAdmission<Output> {
-    /// Admitted; the operation ran to completion.
-    Completed(Output),
-    /// The caller's cancellation token fired while queued.
-    Cancelled,
-    /// The wait outlived the caller's deadline. Retryable.
-    Busy,
-}
-
-/// Typed, retryable error for a request that could not be admitted to a store's
-/// writer lane inside its deadline.
-pub(super) fn store_writer_busy(detail: impl Into<String>) -> TraceDecayError {
-    TraceDecayError::project_route("store_writer_busy", true, detail)
-}
-
 /// Resolves the writer scope for one store family.
 ///
 /// The key is the canonical `data_root` — the exact value
@@ -74,21 +48,6 @@ pub(super) fn store_writer_scope(data_root: &Path, class: StoreWriterClass) -> W
 #[cfg(any(unix, test))]
 pub(super) fn owner_writer_scope(key: &ProjectServerKey) -> WriterScope {
     WriterScope::store(key.owner.store_root.clone(), StoreWriterClass::Owner)
-}
-
-/// Owner-lane scope for a project that is about to be opened.
-///
-/// A project already enrolled in this profile resolves to its persisted
-/// `data_root`, so its open contends only with writers on its own store — the
-/// case that used to park the first request after a daemon start behind an
-/// unrelated project's sync. A project with no persisted layout yet (first
-/// `init`) names no store, so it falls back to the daemon-wide lane, which is
-/// exactly what the single gate always did.
-pub(super) fn project_open_writer_scope(project_root: &Path, profile_root: &Path) -> WriterScope {
-    match crate::storage::resolve_persisted_layout(project_root, profile_root) {
-        Ok(Some(layout)) => store_writer_scope(&layout.data_root, StoreWriterClass::Owner),
-        Ok(None) | Err(_) => WriterScope::Daemon,
-    }
 }
 
 /// [`store_writer_scope`] for the store an open graph is serving.
@@ -1182,78 +1141,6 @@ impl StoreAdministration {
         Some(output)
     }
 
-    /// Cancels while queued for daemon-wide writer administration, then lets an
-    /// admitted operation finish its transactionally safe unit before releasing
-    /// it. Production request paths use [`Self::with_writer_admission`] with a
-    /// store scope and a deadline instead.
-    #[cfg(test)]
-    pub(super) async fn with_writer_until_cancelled<Operation, OperationFuture, Output>(
-        &self,
-        cancellation: &CancellationToken,
-        operation: Operation,
-    ) -> Option<Output>
-    where
-        Operation: FnOnce() -> OperationFuture,
-        OperationFuture: Future<Output = Output>,
-    {
-        match self
-            .with_writer_admission(WriterScope::Daemon, cancellation, None, operation)
-            .await
-        {
-            WriterAdmission::Completed(output) => Some(output),
-            WriterAdmission::Cancelled | WriterAdmission::Busy => None,
-        }
-    }
-
-    /// Queues for writer administration on `scope` under both a cancellation
-    /// token and an optional deadline.
-    ///
-    /// A request-side caller passes `Some(deadline)`: a gate wait that outlives
-    /// it reports [`WriterAdmission::Busy`] so the request answers with a typed
-    /// retryable error instead of parking without bound. The deadline bounds
-    /// only the *wait*; an admitted operation always runs to completion so no
-    /// transactional unit is torn.
-    pub(super) async fn with_writer_admission<Operation, OperationFuture, Output>(
-        &self,
-        scope: WriterScope,
-        cancellation: &CancellationToken,
-        deadline: Option<std::time::Duration>,
-        operation: Operation,
-    ) -> WriterAdmission<Output>
-    where
-        Operation: FnOnce() -> OperationFuture,
-        OperationFuture: Future<Output = Output>,
-    {
-        let admitted = super::park_admission(async {
-            let acquire = self.gate.acquire(&scope);
-            let cancellable = async {
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => None,
-                    writer = acquire => Some(writer),
-                }
-            };
-            match deadline {
-                Some(deadline) => match tokio::time::timeout(deadline, cancellable).await {
-                    Ok(Some(writer)) => WriterAdmission::Completed(writer),
-                    Ok(None) => WriterAdmission::Cancelled,
-                    Err(_) => WriterAdmission::Busy,
-                },
-                None => match cancellable.await {
-                    Some(writer) => WriterAdmission::Completed(writer),
-                    None => WriterAdmission::Cancelled,
-                },
-            }
-        })
-        .await;
-        let _writer = match admitted {
-            WriterAdmission::Completed(writer) => writer,
-            WriterAdmission::Cancelled => return WriterAdmission::Cancelled,
-            WriterAdmission::Busy => return WriterAdmission::Busy,
-        };
-        WriterAdmission::Completed(operation().await)
-    }
-
     /// Resolves the authenticated client's project layout and runs destructive
     /// branch administration against that exact profile-owned store.
     pub(super) async fn execute_branch_admin_for_handshake(
@@ -1311,16 +1198,8 @@ impl StoreAdministration {
         .await
     }
 
-    /// Prepares, proves, and commits one destructive branch-store mutation while
-    /// excluding every writer on *this* store. Cached owners fail closed and are
-    /// left completely untouched; operators must restart the daemon to release
-    /// them.
-    ///
-    /// The destructive lane is store-scoped, not daemon-wide, because the holder
-    /// proof below is computed entirely from this `data_root`'s database paths:
-    /// a writer on another store cannot invalidate it. Within this store the
-    /// lane is still totally exclusive — see
-    /// [`store_writer_gate`](super::store_writer_gate).
+    /// Prepares, proves, and commits one destructive branch-store mutation under
+    /// the physical runtime registry's exact path reservation.
     pub(super) async fn execute_branch_admin_in_layout(
         &self,
         project_root: &Path,
@@ -1329,93 +1208,8 @@ impl StoreAdministration {
         branch_gc_days: u64,
         orphan_db_gc_days: u64,
     ) -> Result<crate::branch::BranchAdminReport> {
-        let scope = store_writer_scope(data_root, StoreWriterClass::Destructive);
-        self.try_with_writer_in(scope, || async {
-            if let Some(recovery) =
-                crate::branch::prepare_pending_branch_admin_recovery(data_root)?
-            {
-                let database_paths =
-                    canonical_branch_database_paths(recovery.database_paths())?;
-                {
-                    let project_servers = self.project_servers.lock().await;
-                    let refresh_scheduler_busy = self
-                        .session_temporal_refresh_schedulers
-                        .owns_project_database_paths(&database_paths)
-                        .await;
-                    #[cfg(unix)]
-                    let scheduler_busy = cached_scheduler_owns_selected(
-                        &*self.automation_schedulers.lock().await,
-                        &database_paths,
-                    ) || cached_scheduler_owns_selected(
-                        &*self.memory_repair_schedulers.lock().await,
-                        &database_paths,
-                    ) || refresh_scheduler_busy;
-                    #[cfg(not(unix))]
-                    let scheduler_busy = refresh_scheduler_busy;
-                    ensure_no_cached_store_owners(
-                        &project_servers,
-                        scheduler_busy,
-                        &database_paths,
-                    )?;
-                }
-
-                let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
-                canonical_paths.sort();
-                let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
-                    &canonical_paths,
-                    recovery.transaction_id(),
-                    "recover branch SQLite family deletion",
-                )?;
-                ensure_recovery_tombstone_states(recovery.disposition(), states)?;
-                let fenced_paths = fence.database_paths().collect::<Vec<_>>();
-                if fenced_paths.len() != database_paths.len()
-                    || fenced_paths
-                        .iter()
-                        .any(|path| !database_paths.contains(*path))
-                {
-                    return Err(TraceDecayError::Config {
-                        message: "database deletion recovery fence resolved a different branch-store identity set"
-                            .to_string(),
-                    });
-                }
-
-                recovery.recover(
-                    |paths| {
-                        self.prove_no_external_branch_store_holders(paths)?;
-                        crate::migrate::memory_cutover::verify_branch_removal_receipts(
-                            data_root,
-                            &canonical_paths,
-                            paths,
-                        )
-                    },
-                    |disposition| match disposition {
-                        crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => {
-                            fence.rollback_deleting()
-                        }
-                        crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup => {
-                            fence.promote_deleted()
-                        }
-                    },
-                )?;
-            }
-
-            let prepared = crate::branch::prepare_branch_admin_mutation(
-                project_root,
-                data_root,
-                action,
-                branch_gc_days,
-                orphan_db_gc_days,
-            )?;
-            let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
-            if database_paths.is_empty() {
-                return prepared.finish_without_database_deletion();
-            }
-
-            self.session_runtime_registry()
-                .await?
-                .close_code_graph_paths(database_paths.iter().cloned())
-                .await?;
-
+        if let Some(recovery) = crate::branch::prepare_pending_branch_admin_recovery(data_root)? {
+            let database_paths = canonical_branch_database_paths(recovery.database_paths())?;
             {
                 let project_servers = self.project_servers.lock().await;
                 let refresh_scheduler_busy = self
@@ -1432,34 +1226,18 @@ impl StoreAdministration {
                 ) || refresh_scheduler_busy;
                 #[cfg(not(unix))]
                 let scheduler_busy = refresh_scheduler_busy;
-                ensure_no_cached_store_owners(
-                    &project_servers,
-                    scheduler_busy,
-                    &database_paths,
-                )?;
+                ensure_no_cached_store_owners(&project_servers, scheduler_busy, &database_paths)?;
             }
 
             let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
             canonical_paths.sort();
-            let fence = crate::db::DatabaseDeletionFence::acquire(
-                &canonical_paths,
-                "delete branch SQLite families",
-            )?;
-            let fenced_paths = fence.database_paths().collect::<Vec<_>>();
-            if fenced_paths.len() != database_paths.len()
-                || fenced_paths
-                    .iter()
-                    .any(|path| !database_paths.contains(*path))
-            {
-                return Err(TraceDecayError::Config {
-                    message:
-                        "database deletion fence resolved a different branch-store identity set"
-                            .to_string(),
-                });
-            }
-            prepared.commit_with_transaction(
-                fence.transaction_id(),
-                || fence.publish_deleting(),
+            let reservation = self
+                .session_runtime_registry()
+                .await?
+                .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
+                .await?;
+            let disposition = recovery.disposition();
+            recovery.recover(
                 |paths| {
                     self.prove_no_external_branch_store_holders(paths)?;
                     crate::migrate::memory_cutover::verify_branch_removal_receipts(
@@ -1468,16 +1246,69 @@ impl StoreAdministration {
                         paths,
                     )
                 },
-                || fence.rollback_deleting(),
-                || fence.promote_deleted(),
+                |_| Ok(()),
+            )?;
+            match disposition {
+                crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => {
+                    reservation.abort_preserved()
+                }
+                crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup => {
+                    reservation.finish_deleted()
+                }
+            }
+            .map_err(destructive_reservation_error)?;
+        }
+
+        let prepared = crate::branch::prepare_branch_admin_mutation(
+            project_root,
+            data_root,
+            action,
+            branch_gc_days,
+            orphan_db_gc_days,
+        )?;
+        let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
+        if database_paths.is_empty() {
+            return prepared.finish_without_database_deletion();
+        }
+
+        {
+            let project_servers = self.project_servers.lock().await;
+            let refresh_scheduler_busy = self
+                .session_temporal_refresh_schedulers
+                .owns_project_database_paths(&database_paths)
+                .await;
+            #[cfg(unix)]
+            let scheduler_busy = cached_scheduler_owns_selected(
+                &*self.automation_schedulers.lock().await,
+                &database_paths,
+            ) || cached_scheduler_owns_selected(
+                &*self.memory_repair_schedulers.lock().await,
+                &database_paths,
+            ) || refresh_scheduler_busy;
+            #[cfg(not(unix))]
+            let scheduler_busy = refresh_scheduler_busy;
+            ensure_no_cached_store_owners(&project_servers, scheduler_busy, &database_paths)?;
+        }
+
+        let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+        canonical_paths.sort();
+        let reservation = self
+            .session_runtime_registry()
+            .await?
+            .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
+            .await?;
+        let report = prepared.commit_registered(|paths| {
+            self.prove_no_external_branch_store_holders(paths)?;
+            crate::migrate::memory_cutover::verify_branch_removal_receipts(
+                data_root,
+                &canonical_paths,
+                paths,
             )
-        })
-        .await
-        .unwrap_or_else(|| {
-            Err(branch_administration_busy(
-                "branch store administration is busy: another daemon writer is active; retry after current project maintenance finishes",
-            ))
-        })
+        })?;
+        reservation
+            .finish_deleted()
+            .map_err(destructive_reservation_error)?;
+        Ok(report)
     }
 }
 
@@ -1557,25 +1388,12 @@ fn ensure_no_cached_store_owners<Server>(
     )))
 }
 
-fn ensure_recovery_tombstone_states(
-    disposition: crate::branch::BranchAdminRecoveryDisposition,
-    states: crate::db::DatabaseDeletionStates,
-) -> Result<()> {
-    let valid = match disposition {
-        crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => !states.has_deleted(),
-        crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup => !states.has_missing(),
-    };
-    if valid {
-        return Ok(());
+fn destructive_reservation_error(
+    error: crate::daemon::store_runtime::registry::StoreRuntimeRegistryFailure,
+) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("destructive store runtime reservation failed: {error:?}"),
     }
-    Err(TraceDecayError::Config {
-        message: format!(
-            "branch deletion recovery found incompatible tombstone states for {disposition:?}: missing={}, deleting={}, deleted={}",
-            states.missing(),
-            states.deleting(),
-            states.deleted(),
-        ),
-    })
 }
 
 fn ensure_no_external_branch_store_holders(database_paths: &[PathBuf]) -> Result<()> {
@@ -1784,37 +1602,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_side_gate_wait_reports_typed_busy_at_its_deadline() {
-        let administration = StoreAdministration::default();
-        let store = PathBuf::from("/stores/held");
-        let _held = administration
-            .gate
-            .acquire(&WriterScope::store(&store, StoreWriterClass::Owner))
-            .await;
-
-        let cancellation = CancellationToken::new();
-        let outcome = administration
-            .with_writer_admission(
-                WriterScope::store(&store, StoreWriterClass::Owner),
-                &cancellation,
-                Some(std::time::Duration::from_millis(50)),
-                || async { "unexpected admission" },
-            )
-            .await;
-
-        assert!(matches!(outcome, WriterAdmission::Busy));
-        let error = store_writer_busy("project open could not acquire the store writer lane");
-        assert_eq!(
-            error.project_route_context(),
-            Some((
-                "store_writer_busy",
-                true,
-                "project open could not acquire the store writer lane",
-            ))
-        );
-    }
-
-    #[tokio::test]
     async fn unavailable_spool_does_not_block_unrelated_database_authority() {
         let temp = tempfile::tempdir().unwrap();
         let blocked_path = temp.path().join("blocked.db");
@@ -1873,76 +1660,6 @@ mod tests {
             project_path: PathBuf::from(project_path),
             scope_prefix: scope_prefix.map(str::to_string),
         }
-    }
-
-    #[test]
-    fn recovery_phase_validation_accepts_only_phase_compatible_mixed_states() {
-        let temp = tempfile::tempdir().unwrap();
-        let first = temp.path().join("a.db");
-        let second = temp.path().join("b.db");
-
-        let fence = crate::db::DatabaseDeletionFence::acquire(
-            &[first.clone(), second.clone()],
-            "test partial publication",
-        )
-        .unwrap();
-        fence.publish_deleting().unwrap();
-        let transaction_id = fence.transaction_id().to_string();
-        let first_tombstone = fence.tombstone_paths().next().unwrap().to_path_buf();
-        std::fs::remove_file(first_tombstone).unwrap();
-        drop(fence);
-        let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
-            &[second.clone(), first.clone()],
-            &transaction_id,
-            "test partial publication recovery",
-        )
-        .unwrap();
-        ensure_recovery_tombstone_states(
-            crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback,
-            states,
-        )
-        .unwrap();
-        ensure_recovery_tombstone_states(
-            crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup,
-            states,
-        )
-        .unwrap_err();
-        fence.rollback_deleting().unwrap();
-        drop(fence);
-
-        let fence = crate::db::DatabaseDeletionFence::acquire(
-            &[first.clone(), second.clone()],
-            "test partial promotion",
-        )
-        .unwrap();
-        fence.publish_deleting().unwrap();
-        fence.promote_deleted().unwrap();
-        let transaction_id = fence.transaction_id().to_string();
-        let first_tombstone = fence.tombstone_paths().next().unwrap().to_path_buf();
-        let deleted = std::fs::read_to_string(&first_tombstone).unwrap();
-        std::fs::write(
-            &first_tombstone,
-            deleted.replace("state=deleted", "state=deleting"),
-        )
-        .unwrap();
-        drop(fence);
-        let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
-            &[second, first],
-            &transaction_id,
-            "test partial promotion recovery",
-        )
-        .unwrap();
-        ensure_recovery_tombstone_states(
-            crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup,
-            states,
-        )
-        .unwrap();
-        ensure_recovery_tombstone_states(
-            crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback,
-            states,
-        )
-        .unwrap_err();
-        fence.promote_deleted().unwrap();
     }
 
     #[test]

@@ -498,6 +498,71 @@ mod tests {
         drop(profile);
     }
 
+    #[tokio::test]
+    async fn destructive_reservation_fences_open_until_preserved_store_reopens() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (registry, profile, code, authority) = mount_graph(path.clone()).await;
+        let old_runtime_identity = code.runtime_identity();
+        let authority_token = authority.token().to_owned();
+        drop(code);
+
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path.clone()])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reservation.closed().len(), 1);
+
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let open_registry = registry.clone();
+        let open_authority = authority.clone();
+        let pending = tokio::spawn(async move {
+            open_registry
+                .open(StoreRuntimeOpenRequest::new_authorized(
+                    code_shard(),
+                    StoreIncarnationV1::new(1).unwrap(),
+                    Some(pin),
+                    open_authority,
+                ))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !pending.is_finished(),
+            "ordinary opens must wait for destructive maintenance"
+        );
+
+        reservation.abort_preserved().unwrap();
+        let reopened = match tokio::time::timeout(Duration::from_secs(2), pending)
+            .await
+            .expect("reserved open must wake")
+            .unwrap()
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("reserved open failed after release: {failure:?}")
+            }
+        };
+        assert_ne!(reopened.runtime_identity(), old_runtime_identity);
+        assert_eq!(
+            reopened
+                .database_authority("verify reopened destructive store")
+                .unwrap()
+                .token(),
+            authority_token
+        );
+        drop(reopened);
+        drop(profile);
+    }
+
     struct BlockingCloseAttachment {
         opened_file_identity: u64,
         drained: AtomicBool,
