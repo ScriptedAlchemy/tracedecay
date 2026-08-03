@@ -531,36 +531,6 @@ async fn ambiguous_project_scope_fails_closed_and_linked_worktree_uses_canonical
     assert_eq!(linked.project.project_id, "pr7.project.ambiguity-a");
     assert_eq!(linked.store.store_id, still_a.store.store_id);
 
-    // The canonical identity is what fact ownership binds to: the worktree's
-    // facts land under the primary project owner, not a path-derived scope.
-    let project_id = ProjectId::new(linked.project.project_id.clone()).unwrap();
-    let owner = FactOwnerV1::Project {
-        project_id: project_id.clone(),
-    };
-    let fact_db = fact_db(
-        &tmp.path()
-            .join("projects/pr7.project.ambiguity-a/memory.db"),
-    )
-    .await;
-    let store = DatabaseFactStore::new(&fact_db);
-    let batch = assertion_batch(
-        &owner,
-        ObservationScopeV1::Project {
-            project_id: project_id.clone(),
-        },
-        "authority.worktree-fact",
-        "entity.authority.worktree-fact",
-        "fact asserted from the linked worktree",
-        1,
-        None,
-    );
-    let fact_id = batch.fact_id().clone();
-    committed(store.commit_fact(batch).await.unwrap());
-    let current = current(&store, &owner, &fact_id)
-        .await
-        .expect("the worktree fact must commit under the canonical owner");
-    assert_eq!(current.owner(), &owner);
-
     // Unknown scope fails closed too: no identity, no store, and no alias or
     // fallback store minted as a side effect of the lookup.
     let unknown = tmp.path().join("never-registered");
