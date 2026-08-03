@@ -7,9 +7,12 @@
 //! ingest accepted, and adds the formatting and relative-filter parsing that
 //! only the executable needs.
 
+use std::time::SystemTime;
+
+use chrono::{DateTime, Utc};
+
 pub use tracedecay_capture::{
-    format_yyyy_mm_dd, humanize_unix_secs, now_iso_utc, parse_cursor_human_timestamp,
-    parse_rfc3339_timestamp, parse_yyyy_mm_dd_utc_start,
+    parse_cursor_human_timestamp, parse_rfc3339_timestamp, parse_yyyy_mm_dd_utc_start,
 };
 
 /// Returns the nearest-rank percentile from an ascending sample.
@@ -90,6 +93,66 @@ fn bound_day_timestamp(day_start: i64, bound: SearchTimeBound) -> i64 {
     }
 }
 
+/// Formats "days since 1970-01-01 UTC" as `YYYY-MM-DD`.
+pub fn format_yyyy_mm_dd(days: i64) -> String {
+    days.checked_mul(86_400)
+        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
+        .map_or_else(
+            || format_calendar_day(days),
+            |timestamp| timestamp.format("%Y-%m-%d").to_string(),
+        )
+}
+
+/// Formats Unix seconds as `YYYY-MM-DD HH:MM:SSZ`.
+pub fn humanize_unix_secs(secs: i64) -> String {
+    DateTime::<Utc>::from_timestamp(secs, 0).map_or_else(
+        || {
+            let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+            let seconds_of_day = secs.rem_euclid(86_400);
+            format!(
+                "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}Z",
+                hour = seconds_of_day / 3_600,
+                minute = (seconds_of_day / 60) % 60,
+                second = seconds_of_day % 60,
+            )
+        },
+        |timestamp| timestamp.format("%Y-%m-%d %H:%M:%SZ").to_string(),
+    )
+}
+
+/// The current UTC time as an ISO 8601 `yyyy-mm-ddThh:mm:ssZ` string.
+pub fn now_iso_utc() -> String {
+    DateTime::<Utc>::from(SystemTime::now())
+        .format("%Y-%m-%dT%H:%M:%SZ")
+        .to_string()
+}
+
+fn format_calendar_day(days: i64) -> String {
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// Converts a Unix-day count to a proleptic Gregorian date outside Chrono's
+/// representable range, preserving the established formatting contract.
+fn civil_from_days(days: i64) -> (i128, u32, u32) {
+    let z = i128::from(days) + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = (z - era * 146_097) as u32;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = i128::from(year_of_era) + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = if month_prime < 10 {
+        month_prime + 3
+    } else {
+        month_prime - 9
+    };
+    let year = if month <= 2 { year + 1 } else { year };
+    (year, month, day)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -137,6 +200,15 @@ mod tests {
     fn formats_epoch_boundaries_as_exact_utc_bytes() {
         assert_eq!(format_yyyy_mm_dd(-1), "1969-12-31");
         assert_eq!(humanize_unix_secs(-1), "1969-12-31 23:59:59Z");
+    }
+
+    #[test]
+    fn formats_days_beyond_chrono_range_with_prior_bytes() {
+        assert_eq!(format_yyyy_mm_dd(100_000_000), "275760-09-13");
+        assert_eq!(
+            humanize_unix_secs(8_640_000_000_000),
+            "275760-09-13 00:00:00Z"
+        );
     }
 
     #[test]
