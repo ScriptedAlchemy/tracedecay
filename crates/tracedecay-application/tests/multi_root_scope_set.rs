@@ -1,13 +1,15 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use serde_json::json;
 use tracedecay_application::{
-    AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
+    AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, MultiRootScopeSetCasRequestV1,
+    RegisteredRootLocatorV1, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId, ScopeSetRevision,
-    UtcMicros, WorktreeId,
+    UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -86,8 +88,14 @@ fn authorized_scope_set_canonicalizes_two_exact_linked_worktrees() {
     assert_eq!(forward.roots(), reverse.roots());
     assert_eq!(forward.actor_id().as_str(), "actor.requester");
     assert_eq!(forward.roots().len(), 2);
-    assert_eq!(forward.roots()[0].worktree_id.as_str(), "worktree.linked");
-    assert_eq!(forward.roots()[1].worktree_id.as_str(), "worktree.main");
+    assert_eq!(
+        forward.roots()[0].scope().worktree_id.as_str(),
+        "worktree.linked"
+    );
+    assert_eq!(
+        forward.roots()[1].scope().worktree_id.as_str(),
+        "worktree.main"
+    );
 }
 
 #[test]
@@ -119,5 +127,57 @@ fn local_worktree_ids_are_qualified_by_project_and_repository() {
     ]);
 
     assert_eq!(set.roots().len(), 2);
-    assert_ne!(set.roots()[0].scope_digest, set.roots()[1].scope_digest);
+    assert_ne!(
+        set.roots()[0].scope().scope_digest,
+        set.roots()[1].scope().scope_digest
+    );
+}
+
+#[test]
+fn authorized_scope_set_preserves_registered_root_locator() {
+    let context = context("worktree.main", "main");
+    let locator = RegisteredRootLocatorV1::new(
+        context.scope().project_id.clone(),
+        UserProfileId::new("profile.fixture").unwrap(),
+        "store.fixture".to_owned(),
+        "/workspace/main".to_owned(),
+    )
+    .unwrap();
+    let set = AuthorizedScopeSetAuthority::authorize_registered(
+        ScopeSetId::new("scope-set.registered-root").unwrap(),
+        ScopeSetRevision::new(1).unwrap(),
+        vec![AuthorizedRootAdmission::new(context, locator.clone()).unwrap()],
+        &CapabilityId::new(CAPABILITY).unwrap(),
+        &UseCaseId::new(USE_CASE).unwrap(),
+        UtcMicros(10),
+    )
+    .unwrap();
+
+    assert_eq!(set.roots()[0].locator(), Some(&locator));
+    assert_eq!(set.roots()[0].scope().project_id, locator.project_id);
+}
+
+#[test]
+fn scope_set_cas_selects_exact_registered_roots() {
+    let request: MultiRootScopeSetCasRequestV1 = serde_json::from_value(json!({
+        "scope_set_id": "scope-set.exact-roots",
+        "expected_revision": null,
+        "roots": [
+            {
+                "project_id": "project.same",
+                "root": "/workspace/linked"
+            },
+            {
+                "project_id": "project.same",
+                "root": "/workspace/main"
+            }
+        ]
+    }))
+    .expect("exact registered root selectors");
+    request.validate().expect("canonical exact root order");
+
+    let encoded = serde_json::to_value(request).expect("serialize selector");
+    assert_eq!(encoded["roots"][0]["root"], "/workspace/linked");
+    assert_eq!(encoded["roots"][1]["root"], "/workspace/main");
+    assert!(encoded.get("project_ids").is_none());
 }
