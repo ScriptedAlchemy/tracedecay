@@ -56,13 +56,12 @@ the maintained API can materially delete the existing bounded transport.
 
 ### 4. `croner`
 
-Rejected after implementation and focused review. Preserving the shipped
-five-field numeric grammar, full-range DOM/DOW wildcard behavior, scalar-step
-semantics, Sunday `0/7`, UTC behavior, and the exact 367-day lookup bound
-required a second normalization/parser layer beside `croner`. The complete
-cutover produced no production-code deletion (`+168/-166`) and added `croner`,
-`strum`, and `strum_macros`; malformed full-range expressions also bypassed
-validation. Keep the existing scheduler and do not add `croner`.
+Continue the focused cutover. Net line reduction is not an acceptance gate:
+adopt `croner` when it provides the maintained scheduling authority while
+preserving the shipped five-field numeric grammar, full-range DOM/DOW wildcard
+behavior, scalar-step semantics, Sunday `0/7`, UTC behavior, and the exact
+367-day lookup bound. Validate the raw expression before normalization so
+malformed full-range expressions cannot bypass `croner`.
 
 ### 5. `binrw`
 
