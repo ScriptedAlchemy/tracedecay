@@ -16,16 +16,16 @@
  */
 import {
   assertNever,
-  DoctorFindingsPayloadSchema,
-  DoctorRemediationApplyRequestSchema,
-  DoctorRemediationPayloadSchema,
-  DoctorRemediationPreviewRequestSchema,
-  type DoctorFindingFamily,
-  type DoctorFindingsPayload,
-  type DoctorRemediationApplyRequest,
-  type DoctorRemediationPayload,
-  type DoctorRemediationPreviewRequest,
-} from '../../contracts/wire.ts';
+  DoctorFindingsPayloadV1Schema,
+  DoctorRemediationApplyRequestV1Schema,
+  DoctorRemediationPayloadV1Schema,
+  DoctorRemediationPreviewRequestV1Schema,
+  type DoctorFindingFamilyV1,
+  type DoctorFindingsPayloadV1,
+  type DoctorRemediationApplyRequestV1,
+  type DoctorRemediationPayloadV1,
+  type DoctorRemediationPreviewRequestV1,
+} from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from './envelope.ts';
 import {
   scopeKey,
@@ -53,7 +53,7 @@ export const doctorOperationQueryKey = (scope: DashboardScope, operationId: stri
  * and said no.
  */
 export type DoctorWriteResult =
-  | EnvelopeResult<DoctorRemediationPayload>
+  | EnvelopeResult<DoctorRemediationPayloadV1>
   /** `writable` is excluded rather than merely unused: a dispatch that did not
    * happen always has a reason, so the type carries one instead of leaving the
    * surface to handle a case the control cannot produce. */
@@ -64,28 +64,28 @@ export type DoctorWriteResult =
 
 export function fetchDoctorFindings(
   scope: DashboardScope,
-  family?: DoctorFindingFamily,
-): Promise<EnvelopeResult<DoctorFindingsPayload>> {
+  family?: DoctorFindingFamilyV1,
+): Promise<EnvelopeResult<DoctorFindingsPayloadV1>> {
   const query = family ? `?family=${encodeURIComponent(family)}` : '';
   return fetchEnvelope(
     scopedUrl(scope, `/api/doctor/findings${query}`),
-    DoctorFindingsPayloadSchema,
+    DoctorFindingsPayloadV1Schema,
   );
 }
 
 export function previewDoctorRemediation(
   scope: DashboardScope,
-  request: DoctorRemediationPreviewRequest,
+  request: DoctorRemediationPreviewRequestV1,
 ): Promise<DoctorWriteResult> {
-  const body = DoctorRemediationPreviewRequestSchema.parse(request);
+  const body = DoctorRemediationPreviewRequestV1Schema.parse(request);
   return dispatchRemediation(scope, '/api/doctor/remediations/preview', body);
 }
 
 export function applyDoctorRemediation(
   scope: DashboardScope,
-  request: DoctorRemediationApplyRequest,
+  request: DoctorRemediationApplyRequestV1,
 ): Promise<DoctorWriteResult> {
-  const body = DoctorRemediationApplyRequestSchema.parse(request);
+  const body = DoctorRemediationApplyRequestV1Schema.parse(request);
   return dispatchRemediation(scope, '/api/doctor/remediations/apply', body);
 }
 
@@ -115,7 +115,7 @@ async function dispatchRemediation(
     default:
       return assertNever(writability);
   }
-  return fetchEnvelope(scopedUrl(scope, route), DoctorRemediationPayloadSchema, {
+  return fetchEnvelope(scopedUrl(scope, route), DoctorRemediationPayloadV1Schema, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(body),
@@ -125,10 +125,10 @@ async function dispatchRemediation(
 export function fetchDoctorRemediationStatus(
   scope: DashboardScope,
   operationId: string,
-): Promise<EnvelopeResult<DoctorRemediationPayload>> {
+): Promise<EnvelopeResult<DoctorRemediationPayloadV1>> {
   return fetchEnvelope(
     scopedUrl(scope, `/api/doctor/remediations/${encodeURIComponent(operationId)}`),
-    DoctorRemediationPayloadSchema,
+    DoctorRemediationPayloadV1Schema,
   );
 }
 

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate, ContentDigest, EdgeAuthorityV1,
@@ -23,6 +24,9 @@ use super::{
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
+
+mod measurement;
+mod scale;
 
 fn id<T>(value: &str) -> T
 where
@@ -309,6 +313,165 @@ fn result_order(batch: &RetrieverBatch<GraphLaneEvidence>, expected: &[&str]) {
         .map(|candidate| candidate.source_occurrence_id.as_str())
         .collect();
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn graph_projection_bounds_self_loop_and_cycle_at_depth_with_exact_coverage() {
+    let request = graph_request(8, 2);
+    let edge = |from: &str, to: &str, start_byte| CanonicalRelationEdgeV1 {
+        from_occurrence: id(from),
+        to_occurrence: id(to),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::SyntaxExact,
+        evidence_span: SourceSpan {
+            start_byte,
+            end_byte: start_byte + 1,
+        },
+    };
+    let edges = vec![
+        edge("symbol.seed", "symbol.seed", 0),
+        edge("symbol.seed", "symbol.middle", 1),
+        edge("symbol.middle", "symbol.seed", 2),
+        edge("symbol.middle", "symbol.target", 3),
+        edge("symbol.target", "symbol.sink", 4),
+    ];
+
+    let result = projection_batch(
+        &request,
+        &edges,
+        &[
+            "symbol.seed",
+            "symbol.middle",
+            "symbol.target",
+            "symbol.sink",
+        ],
+    );
+
+    result_order(
+        &result,
+        &["code-graph:symbol.middle", "code-graph:symbol.target"],
+    );
+    assert_eq!(
+        result.coverage,
+        RetrieverCoverage {
+            examined: 4,
+            eligible: 2,
+            excluded: 0,
+            capped: 0,
+            unknown: 0,
+        }
+    );
+    assert_eq!(
+        result.evidence_by_occurrence[&id("code-graph:symbol.middle")]
+            .path
+            .len(),
+        1
+    );
+    assert_eq!(
+        result.evidence_by_occurrence[&id("code-graph:symbol.target")]
+            .path
+            .len(),
+        2
+    );
+    assert!(
+        !result
+            .evidence_by_occurrence
+            .contains_key(&id("code-graph:symbol.sink"))
+    );
+}
+
+#[test]
+fn graph_projection_deduplicates_identical_edges_byte_for_byte_including_coverage() {
+    let request = graph_request(8, 1);
+    let edge = CanonicalRelationEdgeV1 {
+        from_occurrence: id("symbol.seed"),
+        to_occurrence: id("symbol.target"),
+        kind: RelationEdgeKindV1::Calls,
+        authority: EdgeAuthorityV1::SyntaxExact,
+        evidence_span: SourceSpan {
+            start_byte: 0,
+            end_byte: 1,
+        },
+    };
+    let single = projection_batch(
+        &request,
+        std::slice::from_ref(&edge),
+        &["symbol.seed", "symbol.target"],
+    );
+    let duplicate = projection_batch(
+        &request,
+        &[edge.clone(), edge],
+        &["symbol.seed", "symbol.target"],
+    );
+
+    assert_eq!(single, duplicate);
+    assert_eq!(
+        serde_json::to_vec(&single).expect("serialize single projection"),
+        serde_json::to_vec(&duplicate).expect("serialize duplicate projection")
+    );
+    assert_eq!(
+        single.coverage,
+        RetrieverCoverage {
+            examined: 1,
+            eligible: 1,
+            excluded: 0,
+            capped: 0,
+            unknown: 0,
+        }
+    );
+}
+
+#[test]
+fn graph_projection_rejects_foreign_generation_chunks() {
+    let request = graph_request(8, 1);
+    let mut foreign = projection_chunk(&request, "chunk.foreign", "symbol.foreign");
+    foreign.anchor.generation_id = id("generation.foreign");
+
+    let result = CodeGraphEvidenceAdapterV1::new(
+        request.generation,
+        None,
+        freshness(FreshnessCompatibilityV1::Current),
+        &[],
+        &[foreign],
+    );
+
+    assert!(matches!(
+        result,
+        Err(RetrievalPortError::GenerationMismatch)
+    ));
+}
+
+#[test]
+fn graph_projection_rejects_conflicting_symbol_bindings() {
+    let request = graph_request(8, 1);
+    let primary = projection_chunk(&request, "chunk.target.a", "symbol.target");
+    let mut conflicting = projection_chunk(&request, "chunk.target.b", "symbol.target");
+    conflicting.anchor.file_occurrence_id = id("file.symbol.other");
+
+    let result = CodeGraphEvidenceAdapterV1::new(
+        request.generation,
+        None,
+        freshness(FreshnessCompatibilityV1::Current),
+        &[],
+        &[primary, conflicting],
+    );
+
+    assert!(matches!(
+        result,
+        Err(RetrievalPortError::Contract(message))
+            if message == "one symbol occurrence has conflicting graph candidate bindings"
+    ));
+}
+
+#[test]
+fn graph_lane_rejects_depth_above_the_callable_code_contract() {
+    let request = graph_request(8, MAX_CALLABLE_CODE_DEPTH + 1);
+
+    assert!(matches!(
+        request.validate(),
+        Err(RetrievalPortError::Contract(message))
+            if message == "graph traversal depth exceeds the callable code bound"
+    ));
 }
 
 #[test]
