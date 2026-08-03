@@ -2175,6 +2175,7 @@ mod classification;
 pub(crate) mod identity;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
+mod record_index;
 mod registry;
 mod resident_generation;
 pub(crate) mod semantic_query_runtime;

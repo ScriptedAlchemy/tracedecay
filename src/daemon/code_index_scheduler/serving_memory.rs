@@ -17,7 +17,7 @@ use tracedecay_runtime_core::resident_memory::{
     ResidentMemoryComponentIdV1, ResidentMemoryKeyV1, ResidentMemoryReservationV1,
 };
 
-use super::{LatestCompleteCodeIndexV1, queries};
+use super::{LatestCompleteCodeIndexV1, record_index::GenerationRecordIndexV1};
 
 pub(super) struct ResidentReadyV1<T> {
     pub(super) value: T,
@@ -60,7 +60,7 @@ pub(super) struct ExactLexicalOwnersV1 {
 }
 
 pub(super) struct ProductionCodeIndexServingGenerationV1 {
-    record_index: queries::GenerationRecordIndexV1,
+    record_index: GenerationRecordIndexV1,
     exact_lexical: ExactLexicalOwnersV1,
     graph: GraphLane<CodeGraphEvidenceAdapterV1>,
 }
@@ -108,7 +108,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         &self.ready.graph
     }
 
-    fn record_index(&self) -> &queries::GenerationRecordIndexV1 {
+    fn record_index(&self) -> &GenerationRecordIndexV1 {
         &self.ready.record_index
     }
 }
@@ -152,7 +152,7 @@ fn conservative_exact_lexical_reservation(
 impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn record_index(
         &self,
-    ) -> Result<&queries::GenerationRecordIndexV1, RetrievalPortError> {
+    ) -> Result<&GenerationRecordIndexV1, RetrievalPortError> {
         self.ensure_serving_ready()?;
         self.serving
             .get()
@@ -259,7 +259,7 @@ impl LatestCompleteCodeIndexV1 {
         let reservation = self.reserve_serving_component(serving_bytes)?;
 
         let record_index =
-            queries::GenerationRecordIndexV1::build(self.generation.as_ref(), &self.warm_control)?;
+            GenerationRecordIndexV1::build(self.generation.as_ref(), &self.warm_control)?;
         let exact_lexical = self.build_exact_lexical_owners()?;
         let graph = self.build_graph_owner()?;
         self.warm_control.checkpoint()?;
