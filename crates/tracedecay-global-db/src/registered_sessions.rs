@@ -15,26 +15,11 @@ use super::{
 };
 
 const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
-const SESSION_MESSAGE_READ_PAGE_SIZE: i64 = 512;
-
-const SESSION_MESSAGES_PAGE_FIRST_SQL: &str = "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind, \
-                        model, tool_names, source_path, source_offset, metadata_json \
-                 FROM session_messages \
-                 WHERE provider = ?1 AND session_id = ?2 \
-                 ORDER BY ordinal, message_id \
-                 LIMIT ?3";
-const SESSION_MESSAGES_PAGE_AFTER_SQL: &str = "SELECT provider, message_id, session_id, role, timestamp, ordinal, text, kind, \
-                        model, tool_names, source_path, source_offset, metadata_json \
-                 FROM session_messages \
-                 WHERE provider = ?1 AND session_id = ?2 \
-                   AND (ordinal > ?3 OR (ordinal = ?3 AND message_id > ?4)) \
-                 ORDER BY ordinal, message_id \
-                 LIMIT ?5";
 const SESSION_MESSAGES_AFTER_SQL: &str = "SELECT timestamp, ordinal, kind, tool_names, metadata_json \
                  FROM session_messages \
                  WHERE provider = ?1 AND session_id = ?2 \
                    AND timestamp IS NOT NULL AND timestamp >= ?3 \
-                 ORDER BY timestamp, ordinal \
+                 ORDER BY timestamp, ordinal, message_id \
                  LIMIT ?4";
 
 impl RegisteredGlobalDb {
@@ -249,60 +234,6 @@ impl RegisteredGlobalDb {
             });
         }
         Ok(out)
-    }
-
-    /// Reads one stable, bounded page of projected session messages.
-    ///
-    /// The cursor is scoped to one provider/session and follows the same
-    /// `(ordinal, message_id)` order as the matching index. `message_id`
-    /// breaks ordinal ties so a page boundary cannot repeat or skip a message.
-    pub async fn session_messages_page(
-        &self,
-        provider: &str,
-        session_id: &str,
-        after_ordinal: Option<i64>,
-        after_message_id: &str,
-    ) -> Result<Vec<SessionMessageRecord>, String> {
-        let (sql, params) = match after_ordinal {
-            Some(ordinal) => (
-                SESSION_MESSAGES_PAGE_AFTER_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    provider,
-                    session_id,
-                    ordinal,
-                    after_message_id,
-                    SESSION_MESSAGE_READ_PAGE_SIZE,
-                ],
-            ),
-            None => (
-                SESSION_MESSAGES_PAGE_FIRST_SQL,
-                tracedecay_runtime_core::db::engine::params![
-                    provider,
-                    session_id,
-                    SESSION_MESSAGE_READ_PAGE_SIZE,
-                ],
-            ),
-        };
-        let snapshot = self
-            .read_snapshot()
-            .await
-            .map_err(|error| format!("failed to begin session message page snapshot: {error}"))?;
-        let mut rows = snapshot
-            .query(sql, params)
-            .await
-            .map_err(|error| format!("failed to query session message page: {error}"))?;
-        let mut messages = Vec::with_capacity(SESSION_MESSAGE_READ_PAGE_SIZE as usize);
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| format!("failed to read session message page: {error}"))?
-        {
-            messages.push(
-                row_to_message(&row, 0)
-                    .ok_or_else(|| "failed to decode session message page row".to_string())?,
-            );
-        }
-        Ok(messages)
     }
 
     pub async fn latest_session_activity_secs(&self) -> Option<i64> {
@@ -860,16 +791,12 @@ fn row_to_workflow_message(
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
-
     use tempfile::TempDir;
     use tracedecay_runtime_core::db::engine::Value;
 
     use super::*;
     use crate::ParseOffset;
 
-    const INTERLEAVED_SESSION_QUERY_BENCHMARK_ROWS: i64 = 100_000;
-    const INTERLEAVED_SESSION_QUERY_BENCHMARK_TURNS: usize = 128;
     use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 
     fn session(provider: &str, session_id: &str, transcript_path: &str) -> SessionRecord {
@@ -943,9 +870,9 @@ mod tests {
                     printf('message-%04d', value),
                     CASE WHEN value % 2 = 0 THEN 'target' ELSE 'noise' END,
                     'assistant',
-                    1700000000 + ({final_value} - value / 2),
+                    1700000000 + ({final_value} - value / 8),
                     CASE WHEN value % 2 = 0 THEN value / 4 ELSE value / 2 END,
-                    'payload', NULL, NULL, NULL, NULL, NULL, NULL
+                    'payload', NULL, NULL, printf('tool-%04d', {final_value} - value), NULL, NULL, NULL
                  FROM rows;"
             ))
             .await
@@ -1019,7 +946,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn interleaved_session_pages_and_activity_reads_use_scoped_indexes() {
+    async fn interleaved_session_activity_reads_use_covering_index() {
         let profile = TempDir::new().unwrap();
         let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
             .await
@@ -1040,29 +967,6 @@ mod tests {
 
         insert_interleaved_session_messages(database, 2_048).await;
 
-        let first = database
-            .session_messages_page("claude", "target", None, "")
-            .await
-            .unwrap();
-        assert_eq!(first.len(), SESSION_MESSAGE_READ_PAGE_SIZE as usize);
-        assert!(first.iter().all(|message| message.session_id == "target"));
-        assert!(first.windows(2).all(|window| {
-            (window[0].ordinal, &window[0].message_id) < (window[1].ordinal, &window[1].message_id)
-        }));
-        let after = first.last().unwrap();
-        let after_ordinal = after.ordinal;
-        let after_message_id = after.message_id.clone();
-
-        let second = database
-            .session_messages_page("claude", "target", Some(after_ordinal), &after_message_id)
-            .await
-            .unwrap();
-        assert_eq!(second.len(), SESSION_MESSAGE_READ_PAGE_SIZE as usize);
-        assert!(second.iter().all(|message| message.session_id == "target"));
-        assert!(second.iter().all(|message| {
-            (message.ordinal, &message.message_id) > (after_ordinal, &after_message_id)
-        }));
-
         let activities = database
             .session_messages_after("claude", "target", 1_700_000_000, 512)
             .await
@@ -1071,20 +975,15 @@ mod tests {
         assert!(activities.windows(2).all(|window| {
             (window[0].timestamp, window[0].ordinal) <= (window[1].timestamp, window[1].ordinal)
         }));
-
-        let page_plan = query_plan(
-            database,
-            SESSION_MESSAGES_PAGE_AFTER_SQL,
-            vec![
-                Value::Text("claude".to_owned()),
-                Value::Text("target".to_owned()),
-                Value::Integer(after_ordinal),
-                Value::Text(after_message_id),
-                Value::Integer(SESSION_MESSAGE_READ_PAGE_SIZE),
-            ],
-        )
-        .await;
-        assert_scoped_index_plan(&page_plan, "idx_session_messages_session");
+        for window in activities.windows(2) {
+            if (window[0].timestamp, window[0].ordinal) == (window[1].timestamp, window[1].ordinal)
+            {
+                assert!(
+                    window[0].tool_names > window[1].tool_names,
+                    "message_id tie-break did not produce a stable order: {window:?}"
+                );
+            }
+        }
 
         let activity_plan = query_plan(
             database,
@@ -1097,74 +996,12 @@ mod tests {
             ],
         )
         .await;
-        assert_scoped_index_plan(
-            &activity_plan,
-            "idx_session_messages_session_timestamp_ordinal",
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "100k indexed session-query workload; run explicitly for performance measurement"]
-    async fn interleaved_100k_session_query_benchmark() {
-        let profile = TempDir::new().unwrap();
-        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
-            .await
-            .unwrap();
-        let database = runtime
-            .registered_database(HostAdmissionScope::Profile)
-            .unwrap();
-        for session_id in ["target", "noise"] {
-            assert!(
-                database
-                    .upsert_session(&session("claude", session_id, "/tmp/session.jsonl"))
-                    .await
-            );
-        }
-
-        let setup_started = Instant::now();
-        insert_interleaved_session_messages(database, INTERLEAVED_SESSION_QUERY_BENCHMARK_ROWS)
-            .await;
-        let setup_elapsed = setup_started.elapsed();
-        let after_ordinal = INTERLEAVED_SESSION_QUERY_BENCHMARK_ROWS / 8;
-        let after_message_id = format!("message-{:04}", after_ordinal * 4);
-        let activity_since = 1_700_075_000;
-        let mut page_elapsed = Duration::ZERO;
-        let mut activity_elapsed = Duration::ZERO;
-
-        for turn in 0..INTERLEAVED_SESSION_QUERY_BENCHMARK_TURNS {
-            let started = Instant::now();
-            if turn % 2 == 0 {
-                let page = database
-                    .session_messages_page(
-                        "claude",
-                        "target",
-                        Some(after_ordinal),
-                        &after_message_id,
-                    )
-                    .await
-                    .unwrap();
-                assert_eq!(page.len(), SESSION_MESSAGE_READ_PAGE_SIZE as usize);
-                assert!(page.iter().all(|message| message.session_id == "target"));
-                page_elapsed += started.elapsed();
-            } else {
-                let activities = database
-                    .session_messages_after("claude", "target", activity_since, 512)
-                    .await
-                    .unwrap();
-                assert_eq!(activities.len(), 512);
-                activity_elapsed += started.elapsed();
-            }
-        }
-
-        let turns_per_query = INTERLEAVED_SESSION_QUERY_BENCHMARK_TURNS / 2;
-        eprintln!(
-            "interleaved 100k session query benchmark: rows={} setup_ms={} page_turns={} page_ms={} activity_turns={} activity_ms={}",
-            INTERLEAVED_SESSION_QUERY_BENCHMARK_ROWS,
-            setup_elapsed.as_millis(),
-            turns_per_query,
-            page_elapsed.as_millis(),
-            turns_per_query,
-            activity_elapsed.as_millis(),
+        assert_scoped_index_plan(&activity_plan, "idx_session_messages_session_activity");
+        assert!(
+            activity_plan
+                .iter()
+                .any(|detail| detail.contains("COVERING INDEX")),
+            "activity query plan is not covering: {activity_plan:?}"
         );
     }
 }

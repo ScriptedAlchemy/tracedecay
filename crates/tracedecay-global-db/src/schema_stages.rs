@@ -180,9 +180,12 @@ const TRANSCRIPT_SCHEMA: &str = "
             REFERENCES sessions(provider, session_id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_session_messages_session
-        ON session_messages(provider, session_id, ordinal, message_id);
-    CREATE INDEX IF NOT EXISTS idx_session_messages_session_timestamp_ordinal
-        ON session_messages(provider, session_id, timestamp, ordinal);
+        ON session_messages(provider, session_id, ordinal);
+    CREATE INDEX IF NOT EXISTS idx_session_messages_session_activity
+        ON session_messages(
+            provider, session_id, timestamp, ordinal, message_id,
+            kind, tool_names, metadata_json
+        );
     CREATE INDEX IF NOT EXISTS idx_session_messages_timestamp
         ON session_messages(timestamp);
     CREATE INDEX IF NOT EXISTS idx_session_messages_source

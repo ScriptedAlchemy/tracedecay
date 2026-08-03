@@ -1,7 +1,9 @@
+use std::time::Instant;
+
 use tempfile::TempDir;
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
+use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 use super::{
@@ -10,6 +12,7 @@ use super::{
 
 const PROJECT: &str = "proj_hint_outcomes";
 const HINT_TS: i64 = 1_000_000;
+const INTERLEAVED_SESSION_ACTIVITY_BENCHMARK_ROWS: i64 = 100_000;
 
 async fn open_db(dir: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -160,6 +163,39 @@ async fn outcome_events(
 async fn correlate(db: &HostAdmissionTestRuntimeV1, now_secs: i64) -> HintOutcomeStats {
     db.correlate_hint_outcomes_for_test(HostAdmissionScope::Profile, PROJECT, now_secs)
         .await
+}
+
+async fn insert_interleaved_session_activity_benchmark_rows(
+    database: &RegisteredGlobalDb,
+    rows: i64,
+) {
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(&format!(
+            "WITH RECURSIVE rows(value) AS (
+                SELECT 0
+                UNION ALL
+                SELECT value + 1 FROM rows WHERE value < {}
+             )
+             INSERT INTO session_messages(
+                provider, message_id, session_id, role, timestamp, ordinal, text,
+                kind, model, tool_names, source_path, source_offset, metadata_json
+             )
+             SELECT
+                'claude',
+                printf('benchmark-message-%06d', value),
+                CASE WHEN value % 2 = 0 THEN 'target' ELSE 'noise' END,
+                'assistant',
+                {} + value / 2,
+                value / 2,
+                'activity', NULL, NULL, 'Read', NULL, NULL, NULL
+             FROM rows;",
+            rows - 1,
+            HINT_TS + 1,
+        ))
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
 }
 
 #[tokio::test]
@@ -330,6 +366,48 @@ async fn correlation_is_idempotent_across_runs() {
         }
     );
     assert_eq!(outcome_events(&db).await.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "100k production hint-outcome correlation workload; run explicitly for measurement"]
+async fn hint_outcome_correlation_100k_session_activity_benchmark() {
+    let dir = TempDir::new().unwrap();
+    let db = open_db(&dir).await;
+    let database = db
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("open registered profile database");
+    for session_id in ["target", "noise"] {
+        seed_session(&db, "claude", session_id).await;
+    }
+
+    let setup_started = Instant::now();
+    insert_interleaved_session_activity_benchmark_rows(
+        database,
+        INTERLEAVED_SESSION_ACTIVITY_BENCHMARK_ROWS,
+    )
+    .await;
+    seed_hint_emitted(&db, "target", "benchmark-hint", "search").await;
+    let setup_elapsed = setup_started.elapsed();
+
+    let correlation_started = Instant::now();
+    let stats = correlate(&db, HINT_TS + 2_000).await;
+    let correlation_elapsed = correlation_started.elapsed();
+
+    assert_eq!(
+        stats,
+        HintOutcomeStats {
+            scanned: 1,
+            acted: 0,
+            ignored: 1,
+            unresolved: 0,
+        }
+    );
+    eprintln!(
+        "hint outcome 100k activity benchmark: rows={} setup_ms={} correlation_ms={}",
+        INTERLEAVED_SESSION_ACTIVITY_BENCHMARK_ROWS,
+        setup_elapsed.as_millis(),
+        correlation_elapsed.as_millis(),
+    );
 }
 
 #[test]
