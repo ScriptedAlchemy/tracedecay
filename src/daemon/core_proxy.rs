@@ -653,7 +653,7 @@ mod tests {
     use super::responses_are_project_open_retryable;
 
     #[test]
-    fn dogfood_recovery_project_open_retry_accepts_warming_and_capacity_errors() {
+    fn project_open_retry_accepts_warming_and_capacity_errors() {
         let retryable = [
             json!({
                 "jsonrpc": "2.0",

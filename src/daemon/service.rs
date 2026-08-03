@@ -28,8 +28,8 @@ use probe::{
 };
 use runner::ServiceRunner;
 use unit_file::{
-    read_service_unit, remove_service_unit, service_unit_exists, service_unit_path,
-    socket_path_from_unit_text, write_service_unit,
+    launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
+    service_unit_path, socket_path_from_unit_text, write_service_unit,
 };
 
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";

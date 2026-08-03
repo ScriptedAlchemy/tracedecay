@@ -8,7 +8,7 @@
 //! `SemVer` build metadata naming the commit it was compiled from
 //! (`0.0.66+ab12cd34ef56`, or `…+ab12cd34ef56.dirty` when the worktree had
 //! uncommitted changes). `SemVer` requires build metadata to be ignored when
-//! determining precedence, so a locally built `cargo dogfood` binary is
+//! determining precedence, so a locally built checkout binary is
 //! traceable to an exact tree without touching the `version` field in
 //! `Cargo.toml`. A build with no git checkout — a published crate, a registry
 //! install — has no commit to name and reports bare [`PACKAGE_VERSION`].

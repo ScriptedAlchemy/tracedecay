@@ -2458,7 +2458,7 @@ async fn daemon_startup_health_surfaces_terminal_project_open_failure_immediatel
         |_| {},
     )
     .await
-    .expect_err("terminal project-open error must fail the dogfood health wait");
+    .expect_err("terminal project-open error must fail the health wait");
 
     assert!(
         error
@@ -2504,7 +2504,7 @@ async fn daemon_startup_health_surfaces_terminal_corruption_immediately() {
     let error = tokio::time::timeout(std::time::Duration::from_millis(100), wait)
         .await
         .expect("terminal corruption must not keep polling")
-        .expect_err("terminal corruption must fail dogfood health validation");
+        .expect_err("terminal corruption must fail startup health validation");
     let message = error.to_string();
 
     assert!(message.contains("terminal daemon startup health failure"));
