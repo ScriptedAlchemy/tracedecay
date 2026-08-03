@@ -1,8 +1,8 @@
 //! Enrolled HTTPS client for the canonical Remote Brain protocol.
 //!
 //! This client deliberately has no project-application route construction:
-//! remote operations always target the versioned `/enrollment`, `/replay`,
-//! `/query`, `/backup`, `/restore`, and `/failover` protocol endpoints.
+//! remote operations always target the versioned `/enrollment`, `/discovery`,
+//! `/replay`, and `/query` protocol endpoints.
 
 use std::fmt;
 use std::time::Duration;
@@ -84,47 +84,11 @@ pub struct RemoteProtocolWireResponseV1 {
 }
 
 impl EnrolledRemoteClient {
-    pub fn new(
-        endpoint: impl AsRef<str>,
-        credential: impl AsRef<[u8]>,
-        timeout: Duration,
-    ) -> Result<Self, RemoteClientError> {
-        let endpoint = reqwest::Url::parse(endpoint.as_ref())
-            .map_err(|error| RemoteClientError::Configuration(error.to_string()))?;
-        if endpoint.scheme() != "https"
-            || endpoint.host_str().is_none()
-            || endpoint.query().is_some()
-            || endpoint.fragment().is_some()
-            || endpoint.username() != ""
-            || endpoint.password().is_some()
-        {
-            return Err(RemoteClientError::Configuration(
-                "Remote Brain endpoint must be a credential-free HTTPS URL".to_owned(),
-            ));
-        }
-        let credential = credential.as_ref();
-        if credential.is_empty() || credential.len() > MAX_CREDENTIAL_BYTES {
-            return Err(RemoteClientError::Configuration(
-                "Remote Brain credential length is invalid".to_owned(),
-            ));
-        }
-        let authorization = authorization_header(credential)?;
-        let http = HttpClient::builder()
-            .timeout(timeout)
-            .build()
-            .map_err(|error| RemoteClientError::Transport(error.to_string()))?;
-        Ok(Self {
-            http,
-            endpoint,
-            authorization,
-        })
-    }
-
     /// Build a client authenticated by an explicit private CA and client identity.
     ///
     /// The caller resolves both PEM values through its secret authority. This
     /// method consumes and clears those input buffers after rustls parses them.
-    pub fn new_mutual_tls(
+    pub fn new(
         endpoint: impl AsRef<str>,
         credential: impl AsRef<[u8]>,
         timeout: Duration,
@@ -346,6 +310,8 @@ mod tests {
             "http://remote.example",
             "credential",
             Duration::from_secs(1),
+            Vec::new(),
+            Vec::new(),
         )
         .expect_err("plaintext endpoint must fail");
 
@@ -358,6 +324,8 @@ mod tests {
             "https://secret@remote.example",
             "credential",
             Duration::from_secs(1),
+            Vec::new(),
+            Vec::new(),
         )
         .expect_err("URL credentials must fail");
 
@@ -366,12 +334,11 @@ mod tests {
 
     #[test]
     fn enrolled_remote_client_debug_redacts_bearer_credential() {
-        let client = EnrolledRemoteClient::new(
-            "https://remote.example",
-            "credential-that-must-stay-secret",
-            Duration::from_secs(1),
-        )
-        .unwrap();
+        let client = EnrolledRemoteClient {
+            http: HttpClient::new(),
+            endpoint: reqwest::Url::parse("https://remote.example").unwrap(),
+            authorization: authorization_header(b"credential-that-must-stay-secret").unwrap(),
+        };
         let debug = format!("{client:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("credential-that-must-stay-secret"));

@@ -5,7 +5,6 @@ pub mod capture;
 pub mod composition;
 pub mod protocol;
 pub mod query;
-pub mod recovery;
 pub mod replay;
 pub mod replay_contract;
 pub mod replay_node;
