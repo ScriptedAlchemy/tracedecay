@@ -6,10 +6,12 @@
 //! (month/day/leap years) and rejects trailing garbage, while still
 //! supporting fractional seconds (which are truncated).
 
+#[cfg(test)]
+use tracedecay_capture::days_from_civil;
+use tracedecay_capture::parse_yyyy_mm_dd_utc_start;
 pub use tracedecay_capture::{
     civil_from_days, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
 };
-use tracedecay_capture::{days_from_civil, parse_yyyy_mm_dd_utc_start};
 
 /// Parses search filter timestamps. Accepts Unix seconds, RFC3339, `YYYY-MM-DD`
 /// UTC dates, `today`, `yesterday`, and relative forms like `last hour`.
