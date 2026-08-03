@@ -159,49 +159,6 @@ impl ServiceRunner {
         self.stop()
     }
 
-    pub(super) fn deactivate_for_forward_recovery(&self) -> Result<()> {
-        match self {
-            Self::Systemd => match run_systemctl(&["disable", "--now", super::super::SERVICE_NAME])
-            {
-                Ok(()) => Ok(()),
-                Err(primary_error) => {
-                    let stop_result = run_systemctl(&["stop", super::super::SERVICE_NAME]);
-                    let disable_result = run_systemctl(&["disable", super::super::SERVICE_NAME]);
-                    match (stop_result, disable_result) {
-                        (Ok(()), Ok(())) => Ok(()),
-                        (stop, disable) => Err(TraceDecayError::Config {
-                            message: format!(
-                                "could not deactivate TraceDecay daemon for forward-only recovery: {primary_error}; fallback stop: {}; fallback disable: {}",
-                                stop.err()
-                                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
-                                disable
-                                    .err()
-                                    .map_or_else(|| "ok".to_string(), |error| error.to_string()),
-                            ),
-                        }),
-                    }
-                }
-            },
-            Self::Launchd => launchd_before_uninstall(true),
-            Self::WindowsTask => windows_task::deactivate(),
-        }
-    }
-
-    pub(super) fn reload_forward_recovery_unit(&self, service_path: &Path) -> Result<()> {
-        match self {
-            Self::Systemd => run_systemctl(&["daemon-reload"]),
-            Self::Launchd => {
-                // launchd has no in-place equivalent to daemon-reload. The
-                // durable plist becomes login/reboot authority before bootout;
-                // bootout is the manager boundary that makes the old loaded
-                // definition inactive.
-                let _ = service_path;
-                Ok(())
-            }
-            Self::WindowsTask => Ok(()),
-        }
-    }
-
     pub(super) fn restore_after_update(
         &self,
         service_path: &Path,

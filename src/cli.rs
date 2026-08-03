@@ -132,14 +132,6 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
-pub enum PostUpdateMode {
-    #[default]
-    Normal,
-    DogfoodForwardOnly,
-    DogfoodRecoverInactive,
-}
-
 #[derive(Subcommand)]
 pub enum PackageHookAction {
     /// Run Scoop package lifecycle integration.
@@ -513,9 +505,6 @@ pub enum Commands {
         #[arg(long)]
         no_reinstall: bool,
     },
-    /// Install this source-built executable into the live user environment.
-    #[command(long_about = DOGFOOD_LONG_ABOUT, after_help = DOGFOOD_AFTER_HELP)]
-    Dogfood,
     /// Refresh plugins and daemon after the binary has been updated.
     #[command(name = "post-update", hide = true)]
     PostUpdate {
@@ -528,14 +517,6 @@ pub enum Commands {
         /// Lifecycle lease token passed only by the parent updater.
         #[arg(long, hide = true)]
         lifecycle_lease_token: Option<String>,
-        /// Fail when any tracked integration cannot be refreshed and verify
-        /// that the managed daemon returns to its exact pre-update state.
-        #[arg(long, hide = true)]
-        strict: bool,
-        /// Select migration-boundary recovery semantics. Dogfood uses the
-        /// forward-only mode after installing the new binary.
-        #[arg(long, value_enum, default_value_t, hide = true)]
-        mode: PostUpdateMode,
     },
     /// Internal package-manager lifecycle integration.
     #[command(name = "package-hook", hide = true)]
