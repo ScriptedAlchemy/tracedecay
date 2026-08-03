@@ -4,6 +4,7 @@
 //! into the typed fields below before this module runs. No handler, query,
 //! store, or renderer is selected here.
 
+use serde_json::json;
 use tracedecay_application::{
     CancellationSignal, Deadline, InvocationTarget, PageRequest, RequestId,
 };
@@ -16,6 +17,70 @@ use crate::application_surface::{
     resolve_application_surface_dispatch_with_controls,
 };
 use crate::daemon_client::{DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat};
+
+use super::ToolDefinition;
+
+pub(crate) const DISPATCH_METADATA_KEY: &str = "tracedecay/dispatch";
+
+/// Resolve the exact lifecycle policy advertised by the MCP catalog.
+///
+/// Catalog surface bindings keep their declared maximum; root handlers must
+/// have a canonical binding row. Missing or invalid catalog authority is
+/// unavailable, never replaced by fabricated metadata or an implicit timeout.
+pub(crate) fn lifecycle_policy_for_tool(
+    tool_name: &str,
+) -> Result<Option<crate::mcp::server::McpToolLifecyclePolicy>, ApplicationSurfaceAdapterError> {
+    if let Some(policy) = crate::application_surface::resolve_catalog_tool_lifecycle_policy(
+        BindingSurface::Mcp,
+        tool_name,
+    )? {
+        return Ok(Some(crate::mcp::server::McpToolLifecyclePolicy::new(
+            std::time::Duration::from_millis(policy.maximum_millis),
+            policy.externally_cancellable,
+        )));
+    }
+    Ok(super::binding::lifecycle_policy_for_bound_tool(tool_name))
+}
+
+pub(crate) fn attach_dispatch_metadata(definitions: &mut [ToolDefinition]) {
+    for definition in definitions {
+        let policy = match lifecycle_policy_for_tool(&definition.name) {
+            Ok(Some(policy)) => json!({
+                "version": 1,
+                "availability": { "state": "available" },
+                "policy_source": "catalog",
+                "deadline_ms": u64::try_from(policy.maximum_duration().as_millis())
+                    .unwrap_or(u64::MAX),
+                "externally_cancellable": policy.externally_cancellable(),
+            }),
+            Ok(None) => json!({
+                "version": 1,
+                "availability": {
+                    "state": "unavailable",
+                    "reason_code": "catalog_binding_missing",
+                    "retryable": false,
+                },
+                "policy_source": "catalog",
+            }),
+            Err(error) => json!({
+                "version": 1,
+                "availability": {
+                    "state": "unavailable",
+                    "reason_code": "catalog_binding_unavailable",
+                    "retryable": true,
+                    "detail": error.to_string(),
+                },
+                "policy_source": "catalog",
+            }),
+        };
+        let meta = definition.meta.get_or_insert_with(|| json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(DISPATCH_METADATA_KEY.to_owned(), policy);
+        } else {
+            *meta = json!({ DISPATCH_METADATA_KEY: policy });
+        }
+    }
+}
 
 /// Reports an argument rejection to the executor and hands the error back so the
 /// caller can return it unchanged.

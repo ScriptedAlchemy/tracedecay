@@ -4105,6 +4105,37 @@ pub fn resolve_catalog_tool_binding(
     Ok(resolve_named_binding(&resolver, surface, operation))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CatalogToolLifecyclePolicy {
+    pub maximum_millis: u64,
+    pub externally_cancellable: bool,
+}
+
+/// Resolve the lifecycle contract owned by the capability behind one visible
+/// transport binding.
+pub fn resolve_catalog_tool_lifecycle_policy(
+    surface: BindingSurface,
+    tool_name: &str,
+) -> Result<Option<CatalogToolLifecyclePolicy>, ApplicationSurfaceAdapterError> {
+    let Some(resolved) = resolve_catalog_tool_binding(surface, tool_name)? else {
+        return Ok(None);
+    };
+    let catalog = application_surface_catalog_ref()?;
+    let binding = catalog
+        .binding(&resolved.binding_id)
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    let capability = catalog
+        .capability(binding.capability_id())
+        .ok_or(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized)?;
+    Ok(Some(CatalogToolLifecyclePolicy {
+        maximum_millis: capability.deadline().maximum_millis(),
+        externally_cancellable: !matches!(
+            capability.cancellation(),
+            tracedecay_tool_catalog::CancellationContract::NotCancellable
+        ),
+    }))
+}
+
 fn application_negotiated_features() -> BTreeSet<FeatureId> {
     BTreeSet::new()
 }

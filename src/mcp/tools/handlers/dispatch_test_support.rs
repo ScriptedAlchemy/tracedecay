@@ -7,6 +7,20 @@ use super::*;
 use crate::config::USER_DATA_DIR_ENV;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 
+pub(super) fn test_dispatch_control(tool_name: &str) -> crate::mcp::server::McpToolDispatchControl {
+    crate::mcp::server::McpRequestRegistry::new()
+        .admit(
+            &format!("dispatch-test:{tool_name}"),
+            tool_name,
+            crate::mcp::server::McpRequestStart::now(),
+            crate::mcp::server::McpToolLifecyclePolicy::new(
+                std::time::Duration::from_mins(2),
+                true,
+            ),
+        )
+        .expect("test dispatch admission")
+}
+
 pub(super) struct SelectorRegistry {
     database: Arc<RegisteredGlobalDb>,
     _registry: DaemonSessionRuntimeRegistryV1,
@@ -121,6 +135,12 @@ pub(super) async fn concrete_dispatch_group_accepts(
     cg: &TraceDecay,
     options: ToolCallRegistryOptions<'_>,
 ) -> bool {
+    let control = options
+        .dispatch_control
+        .clone()
+        .unwrap_or_else(|| test_dispatch_control(tool_name));
+    let mut options = options;
+    options.dispatch_control = Some(control.clone());
     let invalid_args = Value::String("dispatch-metadata-probe".to_owned());
     // The probe args are deliberately invalid, so an accepted tool still fails —
     // just not with the sentinel every group returns for a name it does not own.
@@ -136,7 +156,18 @@ pub(super) async fn concrete_dispatch_group_accepts(
             false
         }
         McpToolDispatchGroup::Graph => owned(
-            dispatch_graph_tools(tool_name, cg, invalid_args, None, None, None, None, None).await,
+            dispatch_graph_tools(
+                tool_name,
+                cg,
+                invalid_args,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &control,
+            )
+            .await,
         ),
         McpToolDispatchGroup::Info => owned(
             dispatch_info_tools(tool_name, cg, invalid_args, None, None, None, None, options).await,

@@ -99,6 +99,25 @@ pub(crate) fn tool_error_response(
     tool_name: &str,
     error: &TraceDecayError,
 ) -> JsonRpcResponse {
+    if let Some((reason_code, stage, retryable, detail)) = error.mcp_tool_dispatch_context() {
+        let code = if retryable {
+            ErrorCode::InternalError
+        } else {
+            ErrorCode::InvalidParams
+        };
+        return JsonRpcResponse::error_with_data(
+            id,
+            code,
+            format!("tool dispatch failed at {stage}: {detail}"),
+            Some(json!({
+                "tool": tool_name,
+                "reason_code": reason_code,
+                "stage": stage,
+                "retryable": retryable,
+                "detail": detail,
+            })),
+        );
+    }
     if let Some((reason_code, retryable, detail)) = error.project_route_context() {
         let code = if retryable {
             ErrorCode::InternalError

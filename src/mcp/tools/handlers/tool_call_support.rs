@@ -53,6 +53,7 @@ pub(crate) async fn selected_registered_project_reader(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    dispatch_control: Option<&crate::mcp::server::McpToolDispatchControl>,
 ) -> Result<Option<crate::mcp::project_route::ResolvedProjectRoute>> {
     if !tool_dispatches_registered_project_reader(&tool_name) {
         return Ok(None);
@@ -62,10 +63,24 @@ pub(crate) async fn selected_registered_project_reader(
         &["project_path", "project_root"],
         global_db,
     ));
-    let Some(context) = context.await.map_err(|error| {
-        crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error).into_error()
-    })?
-    else {
+    let selection = async {
+        context.await.map_err(|error| {
+            crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error)
+                .into_error()
+        })
+    };
+    let context = match dispatch_control {
+        Some(control) => {
+            control
+                .run(
+                    crate::mcp::server::McpToolDispatchStage::ProjectSelection,
+                    selection,
+                )
+                .await
+        }
+        None => selection.await,
+    };
+    let Some(context) = context? else {
         return Ok(None);
     };
 
@@ -96,7 +111,19 @@ pub(crate) async fn selected_registered_project_reader(
         context.clone(),
         requested_path.clone(),
     );
-    let graph = resolver(request.clone()).await?.ok_or_else(|| {
+    let warm_open = resolver(request.clone());
+    let graph = match dispatch_control {
+        Some(control) => {
+            control
+                .run(
+                    crate::mcp::server::McpToolDispatchStage::Readiness,
+                    warm_open,
+                )
+                .await
+        }
+        None => warm_open.await,
+    }?
+    .ok_or_else(|| {
         TraceDecayError::project_route(
             "project_route_unavailable",
             true,

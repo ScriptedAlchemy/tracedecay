@@ -21,38 +21,12 @@ use tokio::sync::Mutex;
 
 use crate::mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
-use super::{ConnectionRouteState, McpServer};
+use super::{ConnectionRouteState, McpRequestStart, McpServer, McpToolDispatchStage};
 
 /// Allows daemon routing to enrich the legacy `initialize` response without
 /// coupling this MCP module to daemon route types.
 pub(crate) type RmcpInitializeResponseDecorator =
     Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
-
-async fn await_dispatch_with_cancellation<F, C, N>(
-    handling: F,
-    cancellation: N,
-    mut cancel_registered_request: C,
-) -> F::Output
-where
-    F: std::future::Future,
-    C: FnMut() -> bool,
-    N: std::future::Future<Output = ()>,
-{
-    tokio::pin!(handling);
-    tokio::pin!(cancellation);
-    tokio::select! {
-        response = &mut handling => response,
-        () = &mut cancellation => {
-            while !cancel_registered_request() {
-                tokio::select! {
-                    response = &mut handling => return response,
-                    () = tokio::task::yield_now() => {}
-                }
-            }
-            handling.await
-        }
-    }
-}
 
 /// Per-connection `rmcp` server facade over the existing `TraceDecay` request
 /// authority.
@@ -108,17 +82,49 @@ impl RmcpConnectionAdapter {
         method: &str,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, ErrorData> {
+        let started = McpRequestStart::now();
         let request_id = context.id;
         let request_cancellation = context.ct;
+        let id = serde_json::to_value(&request_id)
+            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let tool_name = (method == "tools/call")
+            .then(|| {
+                params
+                    .as_ref()
+                    .and_then(|params| params.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
+        let dispatch_control = match tool_name.as_deref() {
+            Some(tool_name) => Some(
+                self.server
+                    .admit_tool_request(&id, tool_name, &self.memory_request_scope, started)
+                    .map_err(|error| typed_tool_error(id.clone(), tool_name, &error))?,
+            ),
+            None => None,
+        };
+        if request_cancellation.is_cancelled() {
+            let _ = self.cancel_request(Some(request_id));
+        }
         let project_tool_call = method == "tools/call" && self.server.project_server_live.is_some();
         let _response_guard = if project_tool_call {
             let response_gate = self.server.project_server_lifecycle.response_gate();
-            Some(tokio::select! {
-                guard = response_gate.read() => guard,
-                () = request_cancellation.cancelled() => {
-                    return Err(request_cancelled_error());
-                }
-            })
+            match dispatch_control.as_ref() {
+                Some(control) => Some(
+                    control
+                        .run_value(McpToolDispatchStage::ProjectGate, response_gate.read())
+                        .await
+                        .map_err(|error| {
+                            typed_tool_error(
+                                id.clone(),
+                                tool_name.as_deref().unwrap_or("<unresolved>"),
+                                &error,
+                            )
+                        })?,
+                ),
+                None => Some(response_gate.read().await),
+            }
         } else {
             None
         };
@@ -131,40 +137,42 @@ impl RmcpConnectionAdapter {
         {
             return Err(project_server_retired_error());
         }
-        let id = serde_json::to_value(request_id)
-            .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
             id: Some(id.clone()),
             method: method.to_owned(),
             params,
         };
-        let mut connection = self.connection.lock().await;
-        let pre_cancelled = request_cancellation.is_cancelled();
-        let response = if pre_cancelled {
-            self.server
-                .handle_request_for_connection(
-                    &request,
-                    self.timings_enabled,
-                    &mut connection,
-                    true,
-                )
+        let mut connection = match dispatch_control.as_ref() {
+            Some(control) => control
+                .run_value(McpToolDispatchStage::QueueAdmission, self.connection.lock())
                 .await
-        } else {
-            await_dispatch_with_cancellation(
-                self.server.handle_request_for_connection(
-                    &request,
-                    self.timings_enabled,
-                    &mut connection,
-                    false,
-                ),
-                request_cancellation.cancelled(),
-                || {
-                    self.server
-                        .cancel_application_surface_request(&id, &self.memory_request_scope)
-                },
-            )
-            .await
+                .map_err(|error| {
+                    typed_tool_error(
+                        id.clone(),
+                        tool_name.as_deref().unwrap_or("<unresolved>"),
+                        &error,
+                    )
+                })?,
+            None => self.connection.lock().await,
+        };
+        let handling = self.server.handle_request_for_connection(
+            &request,
+            self.timings_enabled,
+            &mut connection,
+            dispatch_control,
+            started,
+        );
+        tokio::pin!(handling);
+        let response = tokio::select! {
+            response = &mut handling => response,
+            () = request_cancellation.cancelled() => {
+                let _ = self.server.cancel_application_surface_request(
+                    &id,
+                    &self.memory_request_scope,
+                );
+                handling.await
+            }
         }
         .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
         if project_tool_call
@@ -189,7 +197,13 @@ impl RmcpConnectionAdapter {
         let mut connection = self.connection.lock().await;
         let _ = self
             .server
-            .handle_request_for_connection(&request, self.timings_enabled, &mut connection, false)
+            .handle_request_for_connection(
+                &request,
+                self.timings_enabled,
+                &mut connection,
+                None,
+                McpRequestStart::now(),
+            )
             .await;
     }
 
@@ -308,6 +322,20 @@ fn rmcp_error(error: JsonRpcError) -> ErrorData {
     ErrorData::new(ErrorCode(error.code), error.message, error.data)
 }
 
+fn typed_tool_error(
+    id: Value,
+    tool_name: &str,
+    error: &crate::errors::TraceDecayError,
+) -> ErrorData {
+    match super::tool_errors::tool_error_response(id, tool_name, error).error {
+        Some(error) => rmcp_error(error),
+        None => ErrorData::internal_error(
+            "TraceDecay MCP tool error response omitted its error payload",
+            None,
+        ),
+    }
+}
+
 fn project_server_retired_error() -> ErrorData {
     ErrorData::internal_error(
         "tool project route failed: project server was retired",
@@ -319,23 +347,10 @@ fn project_server_retired_error() -> ErrorData {
     )
 }
 
-fn request_cancelled_error() -> ErrorData {
-    ErrorData::internal_error(
-        "MCP request cancelled before project-route admission",
-        Some(json!({
-            "reason_code": "request_cancelled",
-            "retryable": false,
-        })),
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use rmcp::model::{CallToolResponse, CallToolResult};
     use serde_json::json;
-    use tokio::sync::Notify;
 
     use super::*;
 
@@ -385,38 +400,5 @@ mod tests {
         );
         assert!(initialized.capabilities.tools.is_some());
         assert!(initialized.capabilities.resources.is_some());
-    }
-
-    #[tokio::test]
-    async fn cancellation_retries_until_the_live_request_registers() {
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let registered = Arc::new(Notify::new());
-        let handling_registered = Arc::clone(&registered);
-        let cancel_attempts = Arc::clone(&attempts);
-        let cancel_registered = Arc::clone(&registered);
-
-        let result = await_dispatch_with_cancellation(
-            async move {
-                handling_registered.notified().await;
-                "cancelled"
-            },
-            std::future::ready(()),
-            move || {
-                if cancel_attempts.fetch_add(1, Ordering::SeqCst) == 2 {
-                    cancel_registered.notify_one();
-                    true
-                } else {
-                    false
-                }
-            },
-        )
-        .await;
-
-        assert_eq!(result, "cancelled");
-        assert_eq!(
-            attempts.load(Ordering::SeqCst),
-            3,
-            "cancellation must retry until the request registration is visible"
-        );
     }
 }

@@ -50,6 +50,7 @@ mod lifecycle;
 mod project_registry;
 mod protocol;
 mod read_coalescing;
+mod request_lifecycle;
 mod requests;
 mod rmcp;
 mod routing;
@@ -58,6 +59,11 @@ mod session_retrieval;
 mod staleness;
 mod tool_errors;
 mod workflow_index;
+
+pub(crate) use request_lifecycle::{
+    McpRequestRegistry, McpRequestStart, McpToolDispatchControl, McpToolDispatchStage,
+    McpToolLifecyclePolicy, McpWorkerReaperShutdown,
+};
 
 pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
@@ -431,9 +437,9 @@ pub struct McpServer {
     project_server_live: Option<Arc<AtomicBool>>,
     /// The transport-visible response lifecycle for a retained project route.
     project_server_lifecycle: ProjectServerResponseLifecycle,
-    /// Live MCP cancellation tokens keyed by canonical application request id.
-    application_surface_cancellations:
-        std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    /// Canonical request admission, cancellation retention, absolute deadlines,
+    /// and the server's one bounded worker-settlement reaper.
+    request_registry: request_lifecycle::McpRequestRegistry,
 }
 
 impl McpServer {
@@ -936,7 +942,7 @@ impl McpServer {
             application_invocation_executor,
             project_server_live,
             project_server_lifecycle: ProjectServerResponseLifecycle::default(),
-            application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
+            request_registry: request_lifecycle::McpRequestRegistry::new(),
         });
 
         tokio::task::spawn_blocking(move || {

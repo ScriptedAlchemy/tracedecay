@@ -16,16 +16,20 @@ use super::*;
 /// an inline blocking call runs to completion regardless. Awaiting the
 /// `spawn_blocking` join handle restores exactly that composition, which
 /// `handle_pr_context` already relied on.
-async fn blocking_git_span<T, F>(label: &str, work: F) -> Result<T>
+async fn blocking_git_span<T, F>(
+    control: &crate::mcp::server::McpToolDispatchControl,
+    work: F,
+) -> Result<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
-    tokio::task::spawn_blocking(work)
+    let stage = crate::mcp::server::McpToolDispatchStage::Handler;
+    let reservation = control.reserve_join_required_worker(stage)?;
+    let worker = tokio::task::spawn_blocking(move || Ok(work()));
+    control
+        .run_owned_join_required(stage, reservation, worker)
         .await
-        .map_err(|join_error| TraceDecayError::Config {
-            message: format!("git {label} task failed: {join_error}"),
-        })
 }
 
 /// Handles `tracedecay_diff_context` tool calls.
@@ -132,7 +136,11 @@ pub(crate) async fn handle_diff_context(cg: &TraceDecay, args: Value) -> Result<
     ))
 }
 /// Handles `tracedecay_changelog` tool calls.
-pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_changelog(
+    cg: &TraceDecay,
+    args: Value,
+    control: &crate::mcp::server::McpToolDispatchControl,
+) -> Result<ToolResult> {
     require_object_args(&args, "tracedecay_changelog")?;
     let from_ref = args
         .get("from_ref")
@@ -153,7 +161,7 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
         let project_root = cg.project_root().to_path_buf();
         let from_ref = from_ref.to_owned();
         let to_ref = to_ref.to_owned();
-        match blocking_git_span("tree diff", move || {
+        match blocking_git_span(control, move || {
             git_diff_file_changes(&project_root, &from_ref, &to_ref)
         })
         .await?
@@ -229,7 +237,11 @@ pub(crate) async fn handle_changelog(cg: &TraceDecay, args: Value) -> Result<Too
 }
 
 /// Handles `tracedecay_commit_context` tool calls.
-pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_commit_context(
+    cg: &TraceDecay,
+    args: Value,
+    control: &crate::mcp::server::McpToolDispatchControl,
+) -> Result<ToolResult> {
     let staged_only = args
         .get("staged_only")
         .and_then(serde_json::Value::as_bool)
@@ -239,7 +251,7 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
     // request runtime's workers so the carried dispatch deadline can preempt it.
     let changed_files = {
         let project_root = cg.project_root().to_path_buf();
-        match blocking_git_span("status", move || {
+        match blocking_git_span(control, move || {
             git_changed_files(&project_root, staged_only)
         })
         .await?
@@ -253,7 +265,7 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 
     if changed_files.is_empty() {
         let project_root = cg.project_root().to_path_buf();
-        let recent_commits = blocking_git_span("rev-walk", move || {
+        let recent_commits = blocking_git_span(control, move || {
             git_recent_commits(&project_root, 5).unwrap_or_default()
         })
         .await?;
@@ -316,7 +328,7 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 
     let recent_commits = {
         let project_root = cg.project_root().to_path_buf();
-        blocking_git_span("rev-walk", move || {
+        blocking_git_span(control, move || {
             git_recent_commits(&project_root, 5).unwrap_or_default()
         })
         .await?
@@ -340,7 +352,11 @@ pub(crate) async fn handle_commit_context(cg: &TraceDecay, args: Value) -> Resul
 }
 
 /// Handles `tracedecay_pr_context` tool calls.
-pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle_pr_context(
+    cg: &TraceDecay,
+    args: Value,
+    control: &crate::mcp::server::McpToolDispatchControl,
+) -> Result<ToolResult> {
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
@@ -353,26 +369,19 @@ pub(crate) async fn handle_pr_context(cg: &TraceDecay, args: Value) -> Result<To
     // The gix repo open, merge-base resolution, tree diff, and revwalk are all
     // synchronous and unbounded on a diverged or pathological ref. Run them on
     // the blocking pool so they never starve the async worker and so the
-    // dispatch deadline enforced in `dispatch_git_tools` can actually preempt
-    // this span (a `tokio::time::timeout` cannot interrupt an inline blocking
-    // call — only the `spawn_blocking` join future it awaits here).
+    // the request's absolute lifecycle control can track it through settlement.
     let comparison = {
         let project_root = cg.project_root().to_path_buf();
         let base_ref = base.clone();
         let head_ref = head.to_owned();
-        match tokio::task::spawn_blocking(move || {
+        match blocking_git_span(control, move || {
             git_pr_comparison(&project_root, &base_ref, &head_ref)
         })
-        .await
+        .await?
         {
-            Ok(Ok(comparison)) => comparison,
-            Ok(Err(e)) => {
+            Ok(comparison) => comparison,
+            Err(e) => {
                 return Ok(git_error_result(cg, &args, "diff", &e));
-            }
-            Err(join_error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!("git PR comparison task failed: {join_error}"),
-                });
             }
         }
     };
@@ -501,14 +510,27 @@ mod blocking_git_span_tests {
     use super::blocking_git_span;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    fn control() -> crate::mcp::server::McpToolDispatchControl {
+        crate::mcp::server::McpRequestRegistry::new()
+            .admit(
+                "git-span-test",
+                "tracedecay_commit_context",
+                crate::mcp::server::McpRequestStart::now(),
+                crate::mcp::server::McpToolLifecyclePolicy::new(Duration::from_secs(5), true),
+            )
+            .expect("test lifecycle admission")
+    }
 
     #[tokio::test]
     async fn a_blocking_span_returns_the_synchronous_result_unchanged() {
-        let value = blocking_git_span("test", || Ok::<_, String>(vec!["a".to_owned()]))
+        let control = control();
+        let value = blocking_git_span(&control, || Ok::<_, String>(vec!["a".to_owned()]))
             .await
             .expect("the join must succeed");
         assert_eq!(value, Ok(vec!["a".to_owned()]));
-        let failure = blocking_git_span("test", || Err::<Vec<String>, _>("boom".to_owned()))
+        let failure = blocking_git_span(&control, || Err::<Vec<String>, _>("boom".to_owned()))
             .await
             .expect("a failing gix call is still a successful join");
         assert_eq!(failure, Err("boom".to_owned()));
@@ -524,7 +546,8 @@ mod blocking_git_span_tests {
         let ticker = tokio::spawn(async move {
             flag.store(true, Ordering::Release);
         });
-        let value = blocking_git_span("test", || {
+        let control = control();
+        let value = blocking_git_span(&control, || {
             std::thread::sleep(std::time::Duration::from_millis(100));
             7_u8
         })

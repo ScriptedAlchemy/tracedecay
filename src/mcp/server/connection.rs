@@ -5,33 +5,9 @@ use super::*;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
-fn queued_cancellable_request_key(
-    pending_lines: &VecDeque<String>,
-    request_id: &Value,
-    connection_scope: &str,
-) -> Option<String> {
-    let expected = application_surface_request_id(request_id, connection_scope)?;
-    pending_lines
-        .iter()
-        .any(|line| {
-            let Ok(request) = serde_json::from_str::<JsonRpcRequest>(line.trim()) else {
-                return false;
-            };
-            request.method == "tools/call"
-                && request
-                    .params
-                    .as_ref()
-                    .and_then(|params| params.get("name"))
-                    .and_then(Value::as_str)
-                    .is_some_and(super::requests::tool_supports_live_cancellation)
-                && request
-                    .id
-                    .as_ref()
-                    .and_then(|id| application_surface_request_id(id, connection_scope))
-                    .as_ref()
-                    == Some(&expected)
-        })
-        .then_some(expected)
+struct PendingMcpRequestLine {
+    line: String,
+    started: McpRequestStart,
 }
 
 impl McpServer {
@@ -40,18 +16,30 @@ impl McpServer {
         transport: &mut impl crate::mcp::transport::McpTransport,
         output: &str,
         revocable: bool,
-    ) -> std::io::Result<bool> {
+        dispatch_control: Option<&McpToolDispatchControl>,
+    ) -> Result<bool> {
         let write = async {
             transport.write_line(output).await?;
-            transport.flush().await
+            transport.flush().await?;
+            Ok::<bool, TraceDecayError>(true)
         };
-        if !revocable {
-            return write.await.map(|()| true);
-        }
-        tokio::select! {
-            biased;
-            () = self.project_server_lifecycle.response_revoked().cancelled() => Ok(false),
-            result = write => result.map(|()| true),
+        let write = async {
+            if !revocable {
+                return write.await;
+            }
+            tokio::select! {
+                biased;
+                () = self.project_server_lifecycle.response_revoked().cancelled() => Ok(false),
+                result = write => result,
+            }
+        };
+        match dispatch_control {
+            Some(control) => {
+                control
+                    .run(McpToolDispatchStage::ResponseWrite, write)
+                    .await
+            }
+            None => write.await,
         }
     }
 
@@ -61,21 +49,18 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<String>,
-        pending_cancellations: &mut HashSet<String>,
+        pending_lines: &mut VecDeque<PendingMcpRequestLine>,
+        started: McpRequestStart,
+        dispatch_control: McpToolDispatchControl,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
-        let pre_cancelled = request
-            .id
-            .as_ref()
-            .and_then(|id| application_surface_request_id(id, &connection_scope))
-            .is_some_and(|key| pending_cancellations.remove(&key));
         let handling = Box::pin(self.handle_request_for_connection(
             request,
             timings_enabled,
             connection,
-            pre_cancelled,
+            Some(dispatch_control),
+            started,
         ));
         tokio::pin!(handling);
         // One-shot clients (the CLI and the stdio proxy) shut down their write
@@ -92,7 +77,7 @@ impl McpServer {
                     response = &mut handling => return Ok((response, false)),
                     () = &mut shutdown_requested => {
                         if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                            let _ = self.shutdown_application_surface_request(id, &connection_scope);
                         }
                         return Ok((None, true));
                     }
@@ -108,7 +93,7 @@ impl McpServer {
                 response = &mut handling => return Ok((response, false)),
                 () = &mut shutdown_requested => {
                     if let Some(id) = request.id.as_ref() {
-                        let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        let _ = self.shutdown_application_surface_request(id, &connection_scope);
                     }
                     return Ok((None, true));
                 }
@@ -139,17 +124,9 @@ impl McpServer {
                             .params
                             .as_ref()
                             .and_then(|params| params.get("requestId"))
-                            && !self.cancel_application_surface_request(id, &connection_scope)
-                                && pending_cancellations.len()
-                                    < MAX_PENDING_CANCELLABLE_REQUEST_LINES
-                                && let Some(key) = queued_cancellable_request_key(
-                                    pending_lines,
-                                    id,
-                                    &connection_scope,
-                                )
-                            {
-                                pending_cancellations.insert(key);
-                            }
+                        {
+                            let _ = self.cancel_application_surface_request(id, &connection_scope);
+                        }
                         continue;
                     }
                     if pending_lines.len() >= MAX_PENDING_CANCELLABLE_REQUEST_LINES {
@@ -158,7 +135,10 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(line);
+                    pending_lines.push_back(PendingMcpRequestLine {
+                        line,
+                        started: McpRequestStart::now(),
+                    });
                 }
             }
         }
@@ -174,7 +154,8 @@ impl McpServer {
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
         transport: &mut impl crate::mcp::transport::McpTransport,
-        pending_lines: &mut VecDeque<String>,
+        pending_lines: &mut VecDeque<PendingMcpRequestLine>,
+        started: McpRequestStart,
         mut shutdown_requested: std::pin::Pin<&mut impl std::future::Future<Output = ()>>,
     ) -> Result<(Option<JsonRpcResponse>, bool)> {
         let connection_scope = connection.memory_request_scope().to_owned();
@@ -182,7 +163,8 @@ impl McpServer {
             request,
             timings_enabled,
             connection,
-            false,
+            None,
+            started,
         ));
         tokio::pin!(handling);
         let mut peer_close_check: Option<
@@ -194,7 +176,7 @@ impl McpServer {
                     response = &mut handling => return Ok((response, false)),
                     () = &mut shutdown_requested => {
                         if let Some(id) = request.id.as_ref() {
-                            let _ = self.cancel_application_surface_request(
+                            let _ = self.shutdown_application_surface_request(
                                 id,
                                 &connection_scope,
                             );
@@ -216,7 +198,7 @@ impl McpServer {
                 response = &mut handling => return Ok((response, false)),
                 () = &mut shutdown_requested => {
                     if let Some(id) = request.id.as_ref() {
-                        let _ = self.cancel_application_surface_request(
+                        let _ = self.shutdown_application_surface_request(
                             id,
                             &connection_scope,
                         );
@@ -251,7 +233,10 @@ impl McpServer {
                         }
                         return Ok((None, true));
                     }
-                    pending_lines.push_back(line);
+                    pending_lines.push_back(PendingMcpRequestLine {
+                        line,
+                        started: McpRequestStart::now(),
+                    });
                 }
             }
         }
@@ -358,11 +343,10 @@ impl McpServer {
                     message: format!("MCP connection identity unavailable: {error}"),
                 })?;
         let mut pending_lines = VecDeque::new();
-        let mut pending_cancellations = HashSet::new();
 
         'connection: loop {
-            let line: String = if let Some(line) = pending_lines.pop_front() {
-                line
+            let pending = if let Some(pending) = pending_lines.pop_front() {
+                pending
             } else {
                 let read = {
                     #[cfg(unix)]
@@ -395,7 +379,10 @@ impl McpServer {
                     }
                 };
                 match read {
-                    Ok(Some(line)) => line,
+                    Ok(Some(line)) => PendingMcpRequestLine {
+                        line,
+                        started: McpRequestStart::now(),
+                    },
                     Ok(None) => break,
                     Err(e) => {
                         if is_wire_oversized_io_error(&e) {
@@ -408,7 +395,8 @@ impl McpServer {
                 }
             };
 
-            let line = line.trim().to_string();
+            let started = pending.started;
+            let line = pending.line.trim().to_string();
             if line.is_empty() {
                 continue;
             }
@@ -420,12 +408,38 @@ impl McpServer {
                 let tool_name = request.params.as_ref()?.get("name")?.as_str()?.to_owned();
                 Some((id, tool_name))
             });
+            let (dispatch_control, admission_failure) = match revocable_tool_call.as_ref() {
+                Some((id, tool_name)) => match self.admit_tool_request(
+                    id,
+                    tool_name,
+                    connection_route.memory_request_scope(),
+                    started,
+                ) {
+                    Ok(control) => (Some(control), None),
+                    Err(error) => (None, Some(error)),
+                },
+                None => (None, None),
+            };
             let project_tool_call = parsed
                 .as_ref()
                 .is_ok_and(|request| request.method == "tools/call")
                 && self.project_server_live.is_some();
-            let project_request_guard = if project_tool_call {
-                Some(self.project_server_lifecycle.response_gate().read().await)
+            let mut gate_failure = None;
+            let project_request_guard = if project_tool_call && admission_failure.is_none() {
+                let gate = self.project_server_lifecycle.response_gate().read();
+                match dispatch_control.as_ref() {
+                    Some(control) => match control
+                        .run_value(McpToolDispatchStage::ProjectGate, gate)
+                        .await
+                    {
+                        Ok(guard) => Some(guard),
+                        Err(error) => {
+                            gate_failure = Some(error);
+                            None
+                        }
+                    },
+                    None => Some(gate.await),
+                }
             } else {
                 None
             };
@@ -439,20 +453,37 @@ impl McpServer {
             let rejecting_for_drain = request_lifecycle.is_some() && request_activity.is_none();
             let mut peer_closed = false;
 
-            let response = if rejecting_for_drain {
+            let response = if let Some(error) = admission_failure.or(gate_failure) {
+                revocable_tool_call.as_ref().map(|(id, tool_name)| {
+                    requests::finish_early_tool_call_response(
+                        tool_error_response(id.clone(), tool_name, &error),
+                        started,
+                    )
+                })
+            } else if rejecting_for_drain {
                 parsed.as_ref().ok().and_then(|request| {
                     request.id.clone().map(|id| {
-                        JsonRpcResponse::error(
+                        let response = JsonRpcResponse::error_with_data(
                             id,
                             ErrorCode::InternalError,
                             "TraceDecay daemon is draining for upgrade; retry the request"
                                 .to_string(),
-                        )
+                            Some(json!({
+                                "reason_code": "daemon_draining",
+                                "retryable": true,
+                            })),
+                        );
+                        if request.method == "tools/call" {
+                            requests::finish_early_tool_call_response(response, started)
+                        } else {
+                            response
+                        }
                     })
                 })
             } else if !project_request_admitted {
                 revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    JsonRpcResponse::error_with_data(
+                    requests::finish_early_tool_call_response(
+                        JsonRpcResponse::error_with_data(
                         id.clone(),
                         ErrorCode::InternalError,
                         "tool project route failed: project server was retired".to_owned(),
@@ -462,6 +493,8 @@ impl McpServer {
                             "retryable": true,
                             "detail": "the retained project server was replaced or revoked; retry against the current owner",
                         })),
+                        ),
+                        started,
                     )
                 })
             } else {
@@ -477,14 +510,7 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        let cancellable_tool_call = request.method == "tools/call"
-                            && request
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("name"))
-                                .and_then(Value::as_str)
-                                .is_some_and(super::requests::tool_supports_live_cancellation);
-                        if cancellable_tool_call {
+                        if let Some(request_control) = dispatch_control.clone() {
                             let external_shutdown_requested = async {
                                 if listen_for_process_signals {
                                     #[cfg(unix)]
@@ -523,7 +549,8 @@ impl McpServer {
                                     &mut connection_route,
                                     transport,
                                     &mut pending_lines,
-                                    &mut pending_cancellations,
+                                    started,
+                                    request_control,
                                     shutdown_requested.as_mut(),
                                 )
                                 .await?;
@@ -568,6 +595,7 @@ impl McpServer {
                                     &mut connection_route,
                                     transport,
                                     &mut pending_lines,
+                                    started,
                                     shutdown_requested.as_mut(),
                                 )
                                 .await?;
@@ -604,6 +632,7 @@ impl McpServer {
                                 transport,
                                 &format!("{s}\n"),
                                 revocable_response,
+                                dispatch_control.as_ref(),
                             )
                             .await
                         {
@@ -617,7 +646,7 @@ impl McpServer {
                                     );
                                 }
                                 self.shutdown_if(shutdown_on_exit).await;
-                                return Err(error.into());
+                                return Err(error);
                             }
                         }
                     }
@@ -628,7 +657,12 @@ impl McpServer {
                 let json_line = serialize_response_line(&resp);
                 let output = format!("{json_line}\n");
                 match self
-                    .write_response_line_or_revoke(transport, &output, revocable_response)
+                    .write_response_line_or_revoke(
+                        transport,
+                        &output,
+                        revocable_response,
+                        dispatch_control.as_ref(),
+                    )
                     .await
                 {
                     Ok(true) => {}
@@ -642,7 +676,7 @@ impl McpServer {
                             );
                         }
                         self.shutdown_if(shutdown_on_exit).await;
-                        return Err(error.into());
+                        return Err(error);
                     }
                 }
             }
@@ -672,6 +706,17 @@ impl McpServer {
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
     pub async fn shutdown(&self) {
+        match self
+            .request_registry
+            .shutdown_workers(Duration::from_millis(250))
+            .await
+        {
+            McpWorkerReaperShutdown::Complete { .. } => {}
+            McpWorkerReaperShutdown::Retryable { pending } => {
+                tracing::warn!(pending, "MCP worker settlement shutdown remains retryable");
+                return;
+            }
+        }
         // Idempotency guard: only run the persistence path once.
         if self.shutdown_done.swap(true, Ordering::SeqCst) {
             return;
@@ -922,41 +967,5 @@ impl McpServer {
             0,
             project_host_admission_replay::ProjectHostAdmissionReplayTask::backoff_count,
         )
-    }
-}
-
-#[cfg(test)]
-mod cancellable_queue_tests {
-    use super::*;
-
-    #[test]
-    fn queued_request_cancellation_is_type_preserving() {
-        let pending = VecDeque::from([
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": "1",
-                "method": "tools/call",
-                "params": {"name": "tracedecay_search", "arguments": {"query": "queued"}},
-            })
-            .to_string(),
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 2,
-                "method": "tools/call",
-                "params": {"name": "tracedecay_git_status", "arguments": {}},
-            })
-            .to_string(),
-        ]);
-
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!("1"), "connection")
-                .is_some()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(1), "connection").is_none()
-        );
-        assert!(
-            queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
-        );
     }
 }

@@ -564,15 +564,7 @@ impl McpServer {
 
     pub(crate) fn abort_project_server_requests(&self) {
         self.project_server_lifecycle.abort_requests();
-        // Poison recovery matters most here: skipping this on a poisoned
-        // mutex leaves every in-flight request uncancelled and the shutdown
-        // drain waits forever.
-        let cancellations =
-            crate::mcp::server::requests::recover_lock(&self.application_surface_cancellations);
-        let now = crate::mcp::server::requests::mcp_now_micros();
-        for cancellation in cancellations.values() {
-            cancellation.cancel(now);
-        }
+        self.request_registry.cancel_all_live();
     }
 
     pub(crate) fn cancel_startup_transcript_ingest(&self) {

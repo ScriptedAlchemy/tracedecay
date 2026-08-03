@@ -34,6 +34,7 @@ impl Drop for CancelSearchOnDrop {
 }
 
 async fn search_tree_off_thread(
+    control: &crate::mcp::server::McpToolDispatchControl,
     project_root: std::path::PathBuf,
     pattern: String,
     lang: Option<String>,
@@ -44,7 +45,9 @@ async fn search_tree_off_thread(
     let query = pattern.clone();
     let cancelled = Arc::new(AtomicBool::new(false));
     let cancel_on_drop = CancelSearchOnDrop(cancelled.clone());
-    let result = tokio::task::spawn_blocking(move || {
+    let stage = crate::mcp::server::McpToolDispatchStage::Handler;
+    let reservation = control.reserve_join_required_worker(stage)?;
+    let worker = tokio::task::spawn_blocking(move || {
         search_tree_scoped_with_cancel(
             &project_root,
             &pattern,
@@ -54,16 +57,16 @@ async fn search_tree_off_thread(
             scope_prefix.as_deref(),
             || cancelled.load(Ordering::Acquire),
         )
-    })
-    .await
-    .map_err(|err| TraceDecayError::Search {
-        message: format!("structural search worker failed: {err}"),
-        query,
-    })?;
+        .map_err(|err| TraceDecayError::Search {
+            message: err.to_string(),
+            query,
+        })
+    });
+    let result = control
+        .run_owned_join_required(stage, reservation, worker)
+        .await;
     drop(cancel_on_drop);
-    result.map_err(|err| TraceDecayError::Config {
-        message: err.to_string(),
-    })
+    result
 }
 
 /// Handles `tracedecay_ast_grep_search` tool calls.
@@ -71,6 +74,7 @@ pub(super) async fn handle_ast_grep_search(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
+    control: &crate::mcp::server::McpToolDispatchControl,
 ) -> Result<ToolResult> {
     let pattern =
         args.get("pattern")
@@ -96,6 +100,7 @@ pub(super) async fn handle_ast_grep_search(
 
     let project_root = cg.project_root().to_path_buf();
     let mut search = search_tree_off_thread(
+        control,
         project_root,
         pattern.to_string(),
         lang.map(str::to_owned),
@@ -234,8 +239,20 @@ mod tests {
         let temp = tempfile::tempdir().expect("temp project");
         std::fs::write(temp.path().join("lib.rs"), "fn f() { target(1); }\n")
             .expect("write fixture");
+        let control = crate::mcp::server::McpRequestRegistry::new()
+            .admit(
+                "ast-grep-wrapper-test",
+                "tracedecay_ast_grep_search",
+                crate::mcp::server::McpRequestStart::now(),
+                crate::mcp::server::McpToolLifecyclePolicy::new(
+                    std::time::Duration::from_secs(5),
+                    true,
+                ),
+            )
+            .expect("test lifecycle admission");
 
         let result = search_tree_off_thread(
+            &control,
             temp.path().to_path_buf(),
             "target($A)".to_string(),
             Some("rust".to_string()),

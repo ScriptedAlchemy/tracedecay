@@ -6,6 +6,7 @@ pub(crate) async fn handle_constructors(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
+    control: &crate::mcp::server::McpToolDispatchControl,
 ) -> Result<ToolResult> {
     let struct_name =
         args.get("struct")
@@ -78,7 +79,9 @@ pub(crate) async fn handle_constructors(
     let scan_struct = struct_name.to_string();
     let scan_fields = expected_fields.clone();
 
-    let (sites, touched) = tokio::task::spawn_blocking(move || {
+    let stage = crate::mcp::server::McpToolDispatchStage::Handler;
+    let reservation = control.reserve_join_required_worker(stage)?;
+    let worker = tokio::task::spawn_blocking(move || {
         let mut sites: Vec<Value> = Vec::new();
         let mut touched: Vec<String> = Vec::new();
 
@@ -114,12 +117,11 @@ pub(crate) async fn handle_constructors(
             }
         }
 
-        (sites, touched)
-    })
-    .await
-    .map_err(|e| TraceDecayError::Config {
-        message: format!("tracedecay_constructors scan failed to join: {e}"),
-    })?;
+        Ok((sites, touched))
+    });
+    let (sites, touched) = control
+        .run_owned_join_required(stage, reservation, worker)
+        .await?;
 
     let payload = json!({
         "struct": struct_name,

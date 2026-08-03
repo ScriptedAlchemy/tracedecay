@@ -18,7 +18,9 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::Duration;
 
+use crate::mcp::server::McpToolLifecyclePolicy;
 /// Which dispatch family owns a tool once the surface predicates decline it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum McpToolDispatchGroup {
@@ -165,6 +167,30 @@ fn binding(tool_name: &str) -> Option<&'static McpToolBinding> {
                 .collect()
         });
     BY_NAME.get(tool_name).copied()
+}
+
+const INTERACTIVE_DISPATCH_CEILING: Duration = Duration::from_mins(2);
+const LONG_RUNNING_DISPATCH_CEILING: Duration = Duration::from_mins(10);
+const LONG_RUNNING_DISPATCH_TOOLS: &[&str] = &[
+    "tracedecay_run_affected_tests",
+    "tracedecay_admin_cli",
+    "tracedecay_admin_project",
+    "tracedecay_admin_sync",
+    "tracedecay_admin_branch_add",
+];
+
+/// Exact admission policy for a root MCP binding.
+///
+/// An absent row is unavailable; callers must not invent a default policy for
+/// a name the canonical binding table does not own.
+pub(crate) fn lifecycle_policy_for_bound_tool(tool_name: &str) -> Option<McpToolLifecyclePolicy> {
+    binding(tool_name)?;
+    let ceiling = if LONG_RUNNING_DISPATCH_TOOLS.contains(&tool_name) {
+        LONG_RUNNING_DISPATCH_CEILING
+    } else {
+        INTERACTIVE_DISPATCH_CEILING
+    };
+    Some(McpToolLifecyclePolicy::new(ceiling, true))
 }
 
 /// The statically bound dispatch group, if this tool has one.

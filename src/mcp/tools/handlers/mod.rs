@@ -200,6 +200,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    /// Absolute lifecycle control admitted by the owning MCP server.
+    pub(crate) dispatch_control: Option<crate::mcp::server::McpToolDispatchControl>,
     pub preselected_project_reader: bool,
     pub session_authorities: SessionAuthorities<'a>,
 }
@@ -235,6 +237,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            dispatch_control: None,
             preselected_project_reader: false,
             session_authorities: SessionAuthorities::default(),
         }
@@ -259,6 +262,51 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
     options: ToolCallRegistryOptions<'a>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>> {
     Box::pin(async move {
+        let mut options = options;
+        let dispatch_control = match options.dispatch_control.clone() {
+            Some(control) => control,
+            None => {
+                let policy = super::dispatch::lifecycle_policy_for_tool(tool_name)
+                    .map_err(|error| TraceDecayError::Config {
+                        message: error.to_string(),
+                    })?
+                    .ok_or_else(|| {
+                        TraceDecayError::mcp_tool_dispatch(
+                            "catalog_binding_missing",
+                            crate::mcp::server::McpToolDispatchStage::QueueAdmission.as_str(),
+                            false,
+                            format!("tool '{tool_name}' has no canonical MCP lifecycle policy"),
+                        )
+                    })?;
+                let policy = match options.application_deadline.as_ref() {
+                    Some(deadline) => {
+                        let remaining = crate::daemon_client::deadline_remaining(deadline)
+                            .ok_or_else(|| {
+                                TraceDecayError::mcp_tool_dispatch(
+                                    "tool_dispatch_deadline_exceeded",
+                                    crate::mcp::server::McpToolDispatchStage::QueueAdmission
+                                        .as_str(),
+                                    true,
+                                    format!("tool '{tool_name}' expired before direct dispatch"),
+                                )
+                            })?;
+                        policy.bounded_by(remaining)
+                    }
+                    None => policy,
+                };
+                crate::mcp::server::McpRequestRegistry::new().admit(
+                    &format!("direct:{tool_name}"),
+                    tool_name,
+                    crate::mcp::server::McpRequestStart::now(),
+                    policy,
+                )?
+            }
+        };
+        dispatch_control.check(crate::mcp::server::McpToolDispatchStage::SchemaValidation)?;
+        options.application_request_id = Some(dispatch_control.request_id());
+        options.application_deadline = Some(dispatch_control.deadline());
+        options.application_cancellation = Some(dispatch_control.cancellation());
+        options.dispatch_control = Some(dispatch_control.clone());
         for removed in ["hermes_home"] {
             if args.get(removed).is_some() {
                 return Err(TraceDecayError::Config {
@@ -291,7 +339,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                             &profile_root,
                             options.clone(),
                         ));
-                        return dispatch.await;
+                        return dispatch_control.run_handler(dispatch).await;
                     }
                     let dispatch: std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
@@ -303,7 +351,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         options.global_db.map(std::sync::Arc::as_ref),
                         options.session_authorities.profile_retrieval,
                     ));
-                    return dispatch.await;
+                    return dispatch_control.run_handler(dispatch).await;
                 }
                 "project" => {
                     if let Some(object) = args.as_object_mut() {
@@ -344,6 +392,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 args.clone(),
                 options.global_db.map(std::sync::Arc::as_ref),
                 options.retained_project_graph_resolver.clone(),
+                Some(&dispatch_control),
             ))
             .await?
         };
@@ -379,13 +428,18 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             options.application_invocation_executor.is_some(),
         );
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
-            return boxed_send(dispatch_application_surface_tools(
+            let dispatch = boxed_send(dispatch_application_surface_tools(
                 tool_name,
                 cg,
                 args,
                 options.clone(),
-            ))
-            .await;
+            ));
+            return dispatch_control
+                .run(
+                    crate::mcp::server::McpToolDispatchStage::ApplicationRoute,
+                    dispatch,
+                )
+                .await;
         }
         // Catalog-declared compatibility operations must resolve the MCP binding
         // before reaching their retained typed handler. Operations without an
@@ -401,21 +455,6 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         {
             return Err(unknown_tool_error(tool_name));
         }
-        // The universal ceiling. Every dispatch group below runs inside this one
-        // bound, so a group added later inherits it without opting in and no
-        // handler can be reached unbounded. Per-group wraps (git, memory) stay:
-        // they report a nicer domain-shaped result and a shorter bound, and this
-        // is only the backstop beneath them.
-        let dispatch_budget =
-            dispatch_groups::tool_dispatch_budget(tool_name, options.application_deadline.as_ref());
-        let Some(dispatch_budget) = dispatch_budget else {
-            // `deadline_remaining` yields `None` only for an already-elapsed
-            // carried deadline, which must be rejected rather than dispatched.
-            return Err(dispatch_groups::tool_dispatch_deadline_error(
-                tool_name,
-                std::time::Duration::ZERO,
-            ));
-        };
         let dispatched = async {
             match dispatch_group {
                 Some(McpToolDispatchGroup::Graph) => {
@@ -428,6 +467,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         options.code_index_search_authority.as_ref(),
                         options.application_deadline.clone(),
                         options.application_cancellation.clone(),
+                        &dispatch_control,
                     ))
                     .await
                 }
@@ -506,13 +546,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 }
             }
         };
-        match tokio::time::timeout(dispatch_budget, dispatched).await {
-            Ok(result) => result,
-            Err(_elapsed) => Err(dispatch_groups::tool_dispatch_deadline_error(
-                tool_name,
-                dispatch_budget,
-            )),
-        }
+        dispatch_control.run_handler(dispatched).await
     })
 }
 
@@ -550,14 +584,4 @@ fn classify_mcp_tool_dispatch_group(
     }
     RetainedSurfaceOperation::from_name(tool_name)
         .map(|_| McpToolDispatchGroup::RetainedApplication)
-}
-
-/// Whether a tool's dispatch resolves to the git handler family.
-///
-/// The MCP server uses this to give every git-walking read the same bounded
-/// deadline the catalog-owned git reads already carry. Asking the canonical
-/// binding table keeps that horizon from drifting into a separate name list
-/// that a newly added git tool would silently miss.
-pub(crate) fn tool_dispatches_git_reads(tool_name: &str) -> bool {
-    dispatch_group_for_tool(tool_name) == Some(McpToolDispatchGroup::Git)
 }

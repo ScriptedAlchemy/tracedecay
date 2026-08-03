@@ -459,6 +459,7 @@ fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = get_maximal_tool_definitions();
     retain_host_available_tool_definitions(&mut definitions);
+    super::dispatch::attach_dispatch_metadata(&mut definitions);
     definitions
 }
 

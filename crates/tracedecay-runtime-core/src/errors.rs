@@ -48,6 +48,14 @@ pub enum TraceDecayError {
         detail: String,
     },
 
+    #[error("MCP tool dispatch error ({reason_code}) at {stage}: {detail}")]
+    McpToolDispatch {
+        reason_code: String,
+        stage: String,
+        retryable: bool,
+        detail: String,
+    },
+
     #[error("sync lock: {message}")]
     SyncLock { message: String },
 
@@ -128,6 +136,33 @@ impl TraceDecayError {
             return None;
         };
         Some((reason_code, *retryable, detail))
+    }
+
+    pub fn mcp_tool_dispatch(
+        reason_code: impl Into<String>,
+        stage: impl Into<String>,
+        retryable: bool,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::McpToolDispatch {
+            reason_code: reason_code.into(),
+            stage: stage.into(),
+            retryable,
+            detail: detail.into(),
+        }
+    }
+
+    pub fn mcp_tool_dispatch_context(&self) -> Option<(&str, &str, bool, &str)> {
+        let Self::McpToolDispatch {
+            reason_code,
+            stage,
+            retryable,
+            detail,
+        } = self
+        else {
+            return None;
+        };
+        Some((reason_code, stage, *retryable, detail))
     }
 
     pub fn database_operation(
