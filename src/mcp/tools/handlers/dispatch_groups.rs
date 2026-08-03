@@ -577,15 +577,12 @@ pub(super) async fn execute_project_retained_application_tool(
             .await
         }
         RetainedSurfaceOperation::MessageSearch => {
-            Box::pin(
-                session::message_search::handle_message_search_with_registry(
-                    Some(cg.project_root()),
-                    session::message_search::SessionRetrievalStoreScope::Project,
-                    request.arguments,
-                    options.session_authorities.project_retrieval,
-                    options.project_registry_reads,
-                ),
-            )
+            Box::pin(session::message_search::handle_message_search_with_service(
+                Some(cg.project_root()),
+                session::message_search::SessionRetrievalStoreScope::Project,
+                request.arguments,
+                options.session_authorities.project_retrieval,
+            ))
             .await
         }
         RetainedSurfaceOperation::SessionsFor => {
