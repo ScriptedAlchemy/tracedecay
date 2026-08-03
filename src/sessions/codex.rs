@@ -1623,7 +1623,7 @@ mod source_matcher_cache_tests {
             .ancestors()
             .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
             .unwrap_or(path);
-        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
             return crate::worktree::GitRepoIdentityOutcome::Unknown;
         }
         crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {

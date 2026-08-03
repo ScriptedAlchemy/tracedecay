@@ -167,6 +167,12 @@ struct LocationWorktreeCacheEntry {
     unknown_retry_after: Mutex<Option<Instant>>,
 }
 
+#[derive(Debug)]
+struct ProjectRootMatcherCacheEntry {
+    matcher: Arc<ProjectRootMatcher>,
+    unknown_retry_after: Mutex<Option<Instant>>,
+}
+
 /// A project root with its git worktree/common-dir resolutions computed once,
 /// so repeated membership tests (e.g. one per discovered workflow run) do not
 /// re-run `git_worktree_root`/`git_common_dir` on the fixed project side. A
@@ -287,7 +293,7 @@ impl ProjectRootMatcher {
 /// retaining per-path membership caching inside [`ProjectRootMatcher`].
 #[derive(Clone, Debug)]
 pub(crate) struct ProjectRootMatcherCache {
-    matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcher>>>>,
+    matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcherCacheEntry>>>>,
     location_worktrees: Arc<Mutex<HashMap<PathBuf, Arc<LocationWorktreeCacheEntry>>>>,
     identity_resolver: GitIdentityResolver,
 }
@@ -312,33 +318,81 @@ impl ProjectRootMatcherCache {
     }
 
     pub(crate) fn get(&self, project_root: &Path) -> Arc<ProjectRootMatcher> {
+        self.get_at(project_root, Instant::now())
+    }
+
+    fn get_at(&self, project_root: &Path, now: Instant) -> Arc<ProjectRootMatcher> {
         let key = project_root
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
-        if let Some(matcher) = self
-            .matchers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&key)
-            .cloned()
-        {
-            return matcher;
-        }
+        loop {
+            let entry = self
+                .matchers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    Arc::new(ProjectRootMatcherCacheEntry {
+                        matcher: Arc::new(ProjectRootMatcher::new_with_identity_resolver(
+                            project_root,
+                            self.identity_resolver,
+                        )),
+                        unknown_retry_after: Mutex::new(None),
+                    })
+                })
+                .clone();
+            if entry.matcher.identity != crate::worktree::GitRepoIdentityOutcome::Unknown {
+                return entry.matcher.clone();
+            }
 
-        let matcher = Arc::new(ProjectRootMatcher::new_with_identity_resolver(
-            project_root,
-            self.identity_resolver,
-        ));
-        if matcher.identity == crate::worktree::GitRepoIdentityOutcome::Unknown {
-            return matcher;
-        }
+            let should_retry = {
+                let mut retry_after = entry
+                    .unknown_retry_after
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let retry_after =
+                    retry_after.get_or_insert(now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
+                now >= *retry_after
+            };
+            if !should_retry {
+                return entry.matcher.clone();
+            }
 
-        self.matchers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .entry(key)
-            .or_insert_with(|| matcher.clone())
-            .clone()
+            let mut matchers = self
+                .matchers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matchers
+                .get(&key)
+                .is_some_and(|cached| Arc::ptr_eq(cached, &entry))
+            {
+                matchers.remove(&key);
+            }
+        }
+    }
+
+    pub(crate) fn membership(&self, path: &Path, project_root: &Path) -> ProjectMembership {
+        self.get(project_root).contains_status(path)
+    }
+
+    pub(crate) fn membership_against_roots(
+        &self,
+        path: &Path,
+        project_roots: &[PathBuf],
+    ) -> ProjectMembership {
+        let mut unknown = false;
+        for root in project_roots {
+            match self.membership(path, root) {
+                ProjectMembership::Match => return ProjectMembership::Match,
+                ProjectMembership::NoMatch => {}
+                ProjectMembership::Unknown => unknown = true,
+            }
+        }
+        if unknown {
+            ProjectMembership::Unknown
+        } else {
+            ProjectMembership::NoMatch
+        }
     }
 
     /// Resolve a transcript cwd's worktree once for this ingest source.
@@ -803,6 +857,7 @@ pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<S
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
@@ -818,6 +873,19 @@ mod tests {
     use super::append_location_metadata_cached;
     use super::one_line_truncated;
     use super::usage_counters_from;
+
+    static MATCHER_CACHE_RESOLVER_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn unknown_then_resolved_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
+        if MATCHER_CACHE_RESOLVER_CALLS.fetch_add(1, Ordering::SeqCst) == 0 {
+            crate::worktree::GitRepoIdentityOutcome::Unknown
+        } else {
+            crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
+                worktree_root: path.to_path_buf(),
+                common_dir: path.join(".git"),
+            })
+        }
+    }
 
     fn resolved_test_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
         let root = path
@@ -846,6 +914,47 @@ mod tests {
         );
 
         assert_eq!(membership, ProjectMembership::Unknown);
+    }
+
+    #[test]
+    fn matcher_cache_suppresses_repeated_unknown_identity_lookups() {
+        let temp = TempDir::new().expect("temp dir");
+        let root = temp.path().join("repo");
+        std::fs::create_dir_all(&root).expect("root");
+        MATCHER_CACHE_RESOLVER_CALLS.store(0, Ordering::SeqCst);
+        let cache = ProjectRootMatcherCache::with_identity_resolver(unknown_then_resolved_identity);
+        let now = Instant::now();
+
+        let first = cache.get_at(&root, now);
+        let first_path = root.join("first-session");
+        let second_path = root.join("second-session");
+        std::fs::create_dir_all(&first_path).expect("first session");
+        std::fs::create_dir_all(&second_path).expect("second session");
+        assert_eq!(
+            first.contains_status(&first_path),
+            ProjectMembership::Unknown
+        );
+        assert_eq!(
+            first.contains_status(&second_path),
+            ProjectMembership::Unknown
+        );
+        let during_cooldown =
+            cache.get_at(&root, now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN / 2);
+
+        assert!(Arc::ptr_eq(&first, &during_cooldown));
+        assert_eq!(
+            first.identity,
+            crate::worktree::GitRepoIdentityOutcome::Unknown
+        );
+        assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 1);
+
+        let retried = cache.get_at(&root, now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
+        assert!(!Arc::ptr_eq(&first, &retried));
+        assert!(matches!(
+            retried.identity,
+            crate::worktree::GitRepoIdentityOutcome::Resolved(_)
+        ));
+        assert_eq!(MATCHER_CACHE_RESOLVER_CALLS.load(Ordering::SeqCst), 2);
     }
 
     #[test]
