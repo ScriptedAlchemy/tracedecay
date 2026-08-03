@@ -2,7 +2,7 @@
 
 Owner-profile storage must stay proportional to live, retrievable value. This
 plan is the product contract for database size and efficiency across every
-TraceDecay store. It is grounded in measured dogfood evidence from
+TraceDecay store. It is grounded in measured development evidence from
 2026-07-23, when one owner profile reached **256 GB** and was reduced to
 ~75 GB purely by removing data the product should never have retained.
 
@@ -47,7 +47,7 @@ behavior, but it does not complete this plan's retention, measured-size,
 debris, generation-GC, or full-profile acceptance requirements. Historical
 suite names and counts are run evidence, not plan requirements.
 
-## Measured failure classes (evidence, one dogfood profile)
+## Measured failure classes (evidence, one historical owner profile)
 
 **Superseded 2026-07-31.** The 106 GB / 22.2 GiB figures below described the
 profile as measured on 2026-07-23 and are retained only as the historical
@@ -116,7 +116,7 @@ measurements, not inferred table sizes.
    file. Structurally, `lcm_raw_messages` and `session_messages` can retain the
    same conversations in raw and projected form, with FTS shadows and
    append-only evidence beside them. This plan does not assign per-table
-   contributions because no cited dogfood measurement has been reproduced
+   contributions because no cited telemetry measurement has been reproduced
    through the product telemetry path.
 5. **Incident debris classifier that existed but never fired on live names.**
    The live profile carried bare `tracedecay.db.corrupt` artifacts totalling

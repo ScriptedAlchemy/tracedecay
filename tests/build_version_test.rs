@@ -1,7 +1,7 @@
 //! A binary built from a checkout must say which commit it came from.
 //!
-//! `cargo dogfood` installs successive builds of the same released version, so
-//! the semver alone cannot tell two dogfood binaries apart. These tests pin the
+//! Successive checkout builds can share the same released version, so the
+//! semver alone cannot tell two checkout binaries apart. These tests pin the
 //! SemVer build metadata that does, and pin that the reported version still
 //! starts with the release-plz-owned version so nothing that compares
 //! precedence is disturbed.
@@ -79,10 +79,9 @@ fn version_flag_names_the_commit_when_there_is_one_and_bare_semver_otherwise() {
     );
 }
 
-/// `tracedecay update`'s forward-only dogfood step verifies the staged binary
-/// by matching its `--version` output against this string, and the daemon
-/// service probe matches it against the daemon's advertised `serverInfo`.
-/// Both break silently if the CLI ever prints something else.
+/// The CLI and daemon service probes compare this value with the daemon's
+/// advertised `serverInfo`. Both break silently if the CLI ever prints
+/// something else.
 #[test]
 fn version_flag_matches_the_version_the_library_reports() {
     assert_eq!(reported_version(), build_version());

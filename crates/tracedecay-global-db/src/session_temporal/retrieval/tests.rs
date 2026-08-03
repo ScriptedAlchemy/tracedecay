@@ -1659,8 +1659,37 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
             .await,
         [Some("message-plan-inside".to_string()), None]
     );
+
+    let mut first_page_params = root_derived_params.clone();
+    first_page_params[7] = SqlValue::Integer(1);
+    assert_eq!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, first_page_params, 0)
+            .await,
+        ["derived-plan-inside"]
+    );
+
+    let mut second_page_params = root_derived_params.clone();
+    second_page_params[4] = SqlValue::Integer(20);
+    second_page_params[5] = SqlValue::Text("session-plan-inside".to_string());
+    second_page_params[6] = SqlValue::Text("derived-plan-inside".to_string());
+    second_page_params[7] = SqlValue::Integer(1);
+    assert_eq!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, second_page_params, 0)
+            .await,
+        ["derived-plan-inside-old"],
+        "root derived retrieval must preserve keyset pagination order"
+    );
+
+    let mut full_root_params = root_derived_params.clone();
+    full_root_params[0] = SqlValue::Text("project-outside".to_string());
+    assert_eq!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, full_root_params, 0)
+            .await,
+        ["derived-plan-outside"],
+        "a root containing the complete fixture must retain its derived evidence"
+    );
     let root_derived_plan = read
-        .explain_query_plan(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params)
+        .explain_query_plan(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params.clone())
         .await;
     assert!(
         root_derived_plan.iter().any(|detail| {
@@ -1671,40 +1700,54 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
     assert!(
         root_derived_plan
             .iter()
-            .any(|detail| detail.contains("IDX_SESSION_DERIVED_EVIDENCE_SCOPE_ORDER")),
-        "root derived retrieval must use the live evidence scope index: {root_derived_plan:?}"
+            .any(|detail| detail.contains("SEARCH EVIDENCE")),
+        "root derived retrieval must perform a bounded evidence search: {root_derived_plan:?}"
     );
-    let root_derived_wrong_provider = vec![
-        SqlValue::Text("user".to_string()),
-        SqlValue::Text("span".to_string()),
-        SqlValue::Text("codex".to_string()),
-        SqlValue::Text(fts_phrase("derived needle")),
-        SqlValue::Integer(i64::MAX),
-        SqlValue::Text(String::new()),
-        SqlValue::Text(String::new()),
-        SqlValue::Integer(10),
-    ];
     assert!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_wrong_provider, 0)
+        root_derived_plan
+            .iter()
+            .all(|detail| !detail.contains("SCAN EVIDENCE")),
+        "root derived retrieval must never scan the evidence table: {root_derived_plan:?}"
+    );
+
+    let mut wrong_provider_params = root_derived_params.clone();
+    wrong_provider_params[2] = SqlValue::Text("codex".to_string());
+    assert!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, wrong_provider_params, 0)
             .await
             .is_empty(),
         "root derived retrieval must fail closed for the wrong provider"
     );
-    let root_derived_missing_phrase = vec![
-        SqlValue::Text("user".to_string()),
-        SqlValue::Text("span".to_string()),
-        SqlValue::Text("claude".to_string()),
-        SqlValue::Text(fts_phrase("absent derived phrase")),
-        SqlValue::Integer(i64::MAX),
-        SqlValue::Text(String::new()),
-        SqlValue::Text(String::new()),
-        SqlValue::Integer(10),
-    ];
+
+    let mut missing_phrase_params = root_derived_params.clone();
+    missing_phrase_params[3] = SqlValue::Text(fts_phrase("absent derived phrase"));
     assert!(
-        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_missing_phrase, 0)
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, missing_phrase_params, 0)
             .await
             .is_empty(),
         "root derived retrieval must require an FTS-matching member"
+    );
+
+    drop(read);
+    let database = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .expect("registered profile database");
+    Executor::execute_batch(
+        &database
+            .writer_connection()
+            .expect("registered profile writer"),
+        "UPDATE session_temporal_generations
+         SET state = 'superseded', completed_at = unixepoch()
+         WHERE session_id = 'session-plan-inside' AND state = 'active'",
+    )
+    .await
+    .expect("supersede candidate generation");
+    let read = runtime.retrieval_read_for_test().await;
+    assert!(
+        read.text_column(ROOT_DERIVED_CANDIDATE_QUERY, root_derived_params, 0)
+            .await
+            .is_empty(),
+        "root derived retrieval must exclude superseded temporal generations"
     );
 }
 

@@ -40,8 +40,8 @@ interface Body {
  */
 function envelope(revision: number, filler = ""): SseEventEnvelope<Body> {
   return {
-    stream: { stream_id: "code_index", generation: 1 },
-    event_id: `run-1-1700000000000000:code_index:${revision}`,
+    stream: { stream_id: "code_index_activity", generation: 1 },
+    event_id: `run-1-1700000000000000:code_index_activity:${revision}`,
     revision: { event_revision: revision, entity_revision: revision },
     scope: '{"project_id":"project.alpha","storage_mode":"profile_sharded"}',
     observation_time: String(1_700_000_000_000_000 + revision),

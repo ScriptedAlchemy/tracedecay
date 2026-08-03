@@ -73,7 +73,7 @@ impl DatabaseInner {
             })?;
             Some(Connection::attach(
                 runtime
-                    .authorized_migration_sql_handle(authority)
+                    .authorized_exact_sql_handle(authority)
                     .map_err(|error| {
                         database_registry_error(
                             "authorize canonical database engine",

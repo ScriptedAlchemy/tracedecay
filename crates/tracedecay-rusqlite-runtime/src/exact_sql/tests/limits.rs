@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn query_materialization_is_bounded() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     let error = channel
         .query(
@@ -20,13 +20,13 @@ fn query_materialization_is_bounded() {
         )
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::QueryLimitExceeded));
+    assert!(matches!(error, ExactSqlError::QueryLimitExceeded));
 }
 
 #[test]
 fn query_execution_time_is_bounded() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let started = Instant::now();
 
     let error = channel
@@ -44,17 +44,14 @@ fn query_execution_time_is_bounded() {
         )
         .unwrap_err();
 
-    assert!(matches!(
-        error,
-        MigrationSqlError::Sqlite { code: Some(9), .. }
-    ));
+    assert!(matches!(error, ExactSqlError::Sqlite { code: Some(9), .. }));
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
 fn invalid_sqlite_text_is_rejected_without_lossy_conversion() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch(
             "CREATE TABLE invalid_text (value TEXT NOT NULL);
@@ -72,7 +69,7 @@ fn invalid_sqlite_text_is_rejected_without_lossy_conversion() {
 
     assert!(matches!(
         error,
-        MigrationSqlError::Sqlite {
+        ExactSqlError::Sqlite {
             operation: "decode query text",
             ..
         }
@@ -82,27 +79,27 @@ fn invalid_sqlite_text_is_rejected_without_lossy_conversion() {
 #[test]
 fn sqlite_errors_preserve_primary_and_extended_codes() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE unique_value (value INTEGER UNIQUE)".to_owned())
         .unwrap();
     channel
         .execute(statement(
             "INSERT INTO unique_value VALUES (?)",
-            vec![MigrationSqlValue::Integer(1)],
+            vec![ExactSqlValue::Integer(1)],
         ))
         .unwrap();
 
     let error = channel
         .execute(statement(
             "INSERT INTO unique_value VALUES (?)",
-            vec![MigrationSqlValue::Integer(1)],
+            vec![ExactSqlValue::Integer(1)],
         ))
         .unwrap_err();
 
     assert!(matches!(
         error,
-        MigrationSqlError::Sqlite {
+        ExactSqlError::Sqlite {
             code: Some(19),
             extended_code: Some(2067),
             ..
@@ -113,14 +110,14 @@ fn sqlite_errors_preserve_primary_and_extended_codes() {
 #[test]
 fn read_snapshot_stays_frozen_across_queries() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE frozen (value INTEGER NOT NULL)".to_owned())
         .unwrap();
     channel
         .execute(statement(
             "INSERT INTO frozen VALUES (?)",
-            vec![MigrationSqlValue::Integer(1)],
+            vec![ExactSqlValue::Integer(1)],
         ))
         .unwrap();
     let snapshot = channel.begin_read_snapshot(Duration::from_secs(1)).unwrap();
@@ -130,7 +127,7 @@ fn read_snapshot_stays_frozen_across_queries() {
     channel
         .execute(statement(
             "INSERT INTO frozen VALUES (?)",
-            vec![MigrationSqlValue::Integer(2)],
+            vec![ExactSqlValue::Integer(2)],
         ))
         .unwrap();
 
@@ -138,8 +135,8 @@ fn read_snapshot_stays_frozen_across_queries() {
         .query(statement("SELECT count(*) FROM frozen", vec![]))
         .unwrap();
 
-    assert_eq!(first.rows[0].values, vec![MigrationSqlValue::Integer(1)]);
-    assert_eq!(frozen.rows[0].values, vec![MigrationSqlValue::Integer(1)]);
+    assert_eq!(first.rows[0].values, vec![ExactSqlValue::Integer(1)]);
+    assert_eq!(frozen.rows[0].values, vec![ExactSqlValue::Integer(1)]);
     drop(snapshot);
     let current = channel
         .query(
@@ -147,13 +144,13 @@ fn read_snapshot_stays_frozen_across_queries() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(current.rows[0].values, vec![MigrationSqlValue::Integer(2)]);
+    assert_eq!(current.rows[0].values, vec![ExactSqlValue::Integer(2)]);
 }
 
 #[test]
 fn health_snapshot_retires_the_reserved_reader() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     let snapshot = channel
         .begin_health_read_snapshot(Duration::from_secs(1))

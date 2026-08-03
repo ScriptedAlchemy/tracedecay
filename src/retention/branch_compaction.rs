@@ -6,7 +6,7 @@
 //! Every *other* tracked branch gets its own `SQLite` family under
 //! `branches/`, cloned wholesale from an ancestor at `branch add` time and
 //! then never revisited by any compaction pass. This is the exact bloat class
-//! the owner's dogfood audit measured directly: 2.4 GB of free-page bloat
+//! the owner's storage audit measured directly: 2.4 GB of free-page bloat
 //! with individual branch databases sitting at 87-91% free pages.
 //!
 //! Those files are not mounted by any live daemon runtime between syncs, so

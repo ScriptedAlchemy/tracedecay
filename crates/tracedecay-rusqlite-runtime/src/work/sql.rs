@@ -1,4 +1,4 @@
-//! Shared registered migration-SQL plumbing for every Work table.
+//! Shared registered exact-SQL plumbing for every Work table.
 
 use super::*;
 
@@ -12,41 +12,41 @@ pub(crate) fn authority_params(authority: &WorkAuthority) -> [&str; 5] {
     ]
 }
 
-pub(crate) fn authority_params_owned(authority: &WorkAuthority) -> Vec<MigrationSqlValue> {
+pub(crate) fn authority_params_owned(authority: &WorkAuthority) -> Vec<ExactSqlValue> {
     authority_params(authority)
         .into_iter()
-        .map(|value| MigrationSqlValue::Text(value.to_owned()))
+        .map(|value| ExactSqlValue::Text(value.to_owned()))
         .collect()
 }
 
-pub(crate) fn migration_statement(
+pub(crate) fn exact_sql_statement(
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlStatement, crate::migration_sql::MigrationSqlError> {
-    MigrationSqlStatement::new(sql.to_owned(), params)
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlStatement, crate::exact_sql::ExactSqlError> {
+    ExactSqlStatement::new(sql.to_owned(), params)
 }
 
 pub(crate) trait RegisteredWorkQuery {
     fn work_query(
         &self,
-        statement: MigrationSqlStatement,
-    ) -> Result<MigrationSqlRows, crate::migration_sql::MigrationSqlError>;
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError>;
 }
 
-impl RegisteredWorkQuery for MigrationSqlHandle {
+impl RegisteredWorkQuery for ExactSqlHandle {
     fn work_query(
         &self,
-        statement: MigrationSqlStatement,
-    ) -> Result<MigrationSqlRows, crate::migration_sql::MigrationSqlError> {
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
         self.query(statement, Duration::from_secs(5))
     }
 }
 
-impl RegisteredWorkQuery for MigrationSqlTransaction {
+impl RegisteredWorkQuery for ExactSqlTransaction {
     fn work_query(
         &self,
-        statement: MigrationSqlStatement,
-    ) -> Result<MigrationSqlRows, crate::migration_sql::MigrationSqlError> {
+        statement: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
         self.query(statement)
     }
 }
@@ -54,21 +54,21 @@ impl RegisteredWorkQuery for MigrationSqlTransaction {
 pub(crate) fn registered_work_query(
     source: &impl RegisteredWorkQuery,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlRows, crate::migration_sql::MigrationSqlError> {
-    source.work_query(migration_statement(sql, params)?)
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlRows, crate::exact_sql::ExactSqlError> {
+    source.work_query(exact_sql_statement(sql, params)?)
 }
 
-pub(crate) fn migration_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
+pub(crate) fn exact_sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
-        MigrationSqlValue::Text(value) => Some(value),
+        ExactSqlValue::Text(value) => Some(value),
         _ => None,
     }
 }
 
-pub(crate) fn migration_integer(values: &[MigrationSqlValue], index: usize) -> Option<i64> {
+pub(crate) fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
     match values.get(index)? {
-        MigrationSqlValue::Integer(value) => Some(*value),
+        ExactSqlValue::Integer(value) => Some(*value),
         _ => None,
     }
 }
