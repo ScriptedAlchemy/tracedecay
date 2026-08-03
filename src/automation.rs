@@ -3,14 +3,121 @@
 pub use tracedecay_agent_hosts::automation::{
     agent_targets, artifacts, backend, config, fact_proposals, hermes_skill_bridge, host_receipts,
     jobs, lifecycle, managed_skills, memory_curator, memory_digest, outcomes, run_ledger,
-    scheduler, session_reflector, skill_frontmatter, skill_materialization, skill_targets,
-    skill_writer, staged_notice, text,
+    session_reflector, skill_frontmatter, skill_materialization, skill_targets, skill_writer,
+    staged_notice, text,
 };
 
+pub mod scheduler {
+    pub use tracedecay_agent_hosts::automation::scheduler::{
+        AutomationSchedule, AutomationScheduleDecision, AutomationSchedulerControl,
+        AutomationTaskLock, CronSchedule, SessionActivity, cron_is_due, host_receipt_decision,
+        load_scheduler_control, parse_schedule, save_scheduler_control, schedule_decision,
+        scheduler_control_path, stale_lock_secs, validate_schedule,
+    };
+
+    pub async fn load_session_activity(sessions_db_path: &std::path::Path) -> SessionActivity {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::scheduler::load_session_activity(sessions_db_path).await
+    }
+}
+
 pub mod runner {
-    pub use tracedecay_agent_hosts::automation::runner::*;
+    pub use tracedecay_agent_hosts::automation::runner::{
+        CombinedReviewAutomationOptions, CombinedReviewAutomationRun, CombinedReviewDispatch,
+        MemoryCuratorAutomationOptions, MemoryCuratorAutomationRun, ProjectAutomationStore,
+        SessionReflectorAutomationOptions, SessionReflectorAutomationRun,
+        SkillWriterAutomationOptions, SkillWriterAutomationRun, UserSessionAutomationOptions,
+        UserSessionAutomationRun, run_memory_curator_with_backend, user_automation_root,
+    };
 
     pub use super::run_user_memory_curator_with_backend;
+
+    pub async fn run_user_session_automation_with_backend(
+        profile_root: &std::path::Path,
+        config: &super::config::AutomationConfig,
+        backend: &dyn super::backend::AgentTaskBackend,
+        options: UserSessionAutomationOptions,
+    ) -> crate::errors::Result<UserSessionAutomationRun> {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::runner::run_user_session_automation_with_backend(
+            profile_root,
+            config,
+            backend,
+            options,
+        )
+        .await
+    }
+
+    pub async fn run_session_reflector_with_backend(
+        store: &dyn ProjectAutomationStore,
+        config: &super::config::AutomationConfig,
+        backend: &dyn super::backend::AgentTaskBackend,
+        options: SessionReflectorAutomationOptions,
+    ) -> crate::errors::Result<SessionReflectorAutomationRun> {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::runner::run_session_reflector_with_backend(
+            store, config, backend, options,
+        )
+        .await
+    }
+
+    pub async fn run_user_session_reflector_with_backend(
+        profile_root: &std::path::Path,
+        config: &super::config::AutomationConfig,
+        backend: &dyn super::backend::AgentTaskBackend,
+        options: SessionReflectorAutomationOptions,
+    ) -> crate::errors::Result<SessionReflectorAutomationRun> {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::runner::run_user_session_reflector_with_backend(
+            profile_root,
+            config,
+            backend,
+            options,
+        )
+        .await
+    }
+
+    pub async fn run_skill_writer_with_backend(
+        store: &dyn ProjectAutomationStore,
+        config: &super::config::AutomationConfig,
+        backend: &dyn super::backend::AgentTaskBackend,
+        options: SkillWriterAutomationOptions,
+    ) -> crate::errors::Result<SkillWriterAutomationRun> {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::runner::run_skill_writer_with_backend(
+            store, config, backend, options,
+        )
+        .await
+    }
+
+    pub async fn run_user_skill_writer_with_backend(
+        profile_root: &std::path::Path,
+        config: &super::config::AutomationConfig,
+        backend: &dyn super::backend::AgentTaskBackend,
+        options: SkillWriterAutomationOptions,
+    ) -> crate::errors::Result<SkillWriterAutomationRun> {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::runner::run_user_skill_writer_with_backend(
+            profile_root,
+            config,
+            backend,
+            options,
+        )
+        .await
+    }
+
+    pub async fn run_combined_review_with_backend(
+        store: &dyn ProjectAutomationStore,
+        config: &super::config::AutomationConfig,
+        backend: &dyn super::backend::AgentTaskBackend,
+        options: CombinedReviewAutomationOptions,
+    ) -> crate::errors::Result<CombinedReviewDispatch> {
+        crate::agents::configure_root_ports();
+        tracedecay_agent_hosts::automation::runner::run_combined_review_with_backend(
+            store, config, backend, options,
+        )
+        .await
+    }
 }
 
 pub mod skill_usage {
