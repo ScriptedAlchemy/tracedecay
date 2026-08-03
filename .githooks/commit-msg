@@ -4,4 +4,4 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-npm run --silent lint:commit -- --edit "$1"
+git stripspace --strip-comments < "$1" | npm run --silent lint:commit --
