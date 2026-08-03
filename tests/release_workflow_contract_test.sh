@@ -6,6 +6,8 @@ release_workflow=".github/workflows/release.yml"
 release_beta=".github/workflows/release-beta.yml"
 release_pr_integrity=".github/workflows/release-pr-integrity.yml"
 ci_workflow=".github/workflows/ci.yml"
+release_config="release-plz.toml"
+root_manifest="Cargo.toml"
 
 if grep -q 'GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}' "$release_plz"; then
   echo "release-plz must not publish releases with GITHUB_TOKEN" >&2
@@ -16,10 +18,93 @@ fi
 python3 - "$release_plz" <<'PY'
 import sys
 
+text = open(sys.argv[1], encoding="utf-8").read()
+for forbidden in [
+    "environment: crates-io",
+    "id-token: write",
+    "Publish crate",
+]:
+    if forbidden in text:
+        raise SystemExit(f"root-only GitHub release workflow must not contain {forbidden!r}")
+
+for required in [
+    "  github-release:",
+    "name: Create GitHub release",
+    "- name: Create GitHub release with release-plz",
+    "- name: Retry GitHub release after transient API failure",
+    "- name: Fail when GitHub release still fails",
+    "- name: Check GitHub release version drift",
+]:
+    if required not in text:
+        raise SystemExit(f"root-only GitHub release workflow missing {required!r}")
+PY
+
+python3 - "$release_config" "$root_manifest" \
+  crates/tracedecay-domain/Cargo.toml \
+  crates/tracedecay-code-extraction/Cargo.toml \
+  crates/tracedecay-jsonrpc/Cargo.toml <<'PY'
+import sys
+import tomllib
+
+config_path, root_path, *internal_paths = sys.argv[1:]
+with open(config_path, "rb") as handle:
+    config = tomllib.load(handle)
+
+workspace = config["workspace"]
+for key in ("release", "publish"):
+    if workspace.get(key) is not False:
+        raise SystemExit(f"release-plz workspace {key} must default to false")
+
+packages = {package["name"]: package for package in config.get("package", [])}
+root_release = packages.get("tracedecay")
+if root_release is None:
+    raise SystemExit("release-plz must manage the tracedecay root package")
+for key, value in {
+    "release": True,
+    "git_only": True,
+    "publish": False,
+    "git_release_enable": True,
+    "git_release_name": "v{{ version }}",
+    "git_tag_enable": True,
+    "git_tag_name": "v{{ version }}",
+}.items():
+    if root_release.get(key) != value:
+        raise SystemExit(f"tracedecay release-plz {key} must be {value!r}")
+
+internal_names = [
+    "tracedecay-domain",
+    "tracedecay-code-extraction",
+    "tracedecay-jsonrpc",
+]
+for name in internal_names:
+    if packages.get(name, {}).get("release") is not False:
+        raise SystemExit(f"internal crate {name} must be ignored by release-plz")
+
+with open(root_path, "rb") as handle:
+    root_manifest = tomllib.load(handle)
+if root_manifest["package"].get("name") != "tracedecay":
+    raise SystemExit("root package must remain named tracedecay")
+if root_manifest["package"].get("publish") is not False:
+    raise SystemExit("root package must set publish = false")
+if not any(binary.get("name") == "tracedecay" for binary in root_manifest.get("bin", [])):
+    raise SystemExit("root binary must remain named tracedecay")
+
+for path, name in zip(internal_paths, internal_names, strict=True):
+    with open(path, "rb") as handle:
+        manifest = tomllib.load(handle)
+    if manifest["package"].get("name") != name:
+        raise SystemExit(f"unexpected internal manifest {path}")
+    if manifest["package"].get("publish") is not False:
+        raise SystemExit(f"internal crate {name} must set publish = false")
+PY
+
+python3 - "$release_plz" <<'PY'
+import sys
+
 path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
-release_step = text.split("- name: Run release-plz release", 1)[1].split("- name:", 1)[0]
-retry_step = text.split("- name: Retry release-plz release after transient GitHub API failure", 1)[1].split("- name:", 1)[0]
+release_step = text.split("- name: Create GitHub release with release-plz", 1)[1].split("- name:", 1)[0]
+retry_step = text.split("- name: Retry GitHub release after transient API failure", 1)[1].split("- name:", 1)[0]
 release_pr_step = text.split("- name: Run release-plz release-pr", 1)[1]
 
 for name, step in [

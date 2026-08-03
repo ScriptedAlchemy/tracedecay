@@ -3,15 +3,18 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/check-release-drift.sh [--repo PATH] [--registry-version VERSION]
+Usage: scripts/check-release-drift.sh [--repo PATH] [--release-version VERSION]
 
-Fails when Cargo.toml is ahead of crates.io. That state means a release-plz
-version bump reached master without the crate publish/tag/release completing.
+Fails when Cargo.toml differs from the latest non-prerelease GitHub release
+tag. That state means a release-plz version bump reached master without the
+GitHub tag/release completing.
+
+--registry-version remains an alias for --release-version.
 EOF
 }
 
 repo="."
-registry_version=""
+release_version=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -19,8 +22,8 @@ while [[ $# -gt 0 ]]; do
       repo="${2:?missing value for --repo}"
       shift 2
       ;;
-    --registry-version)
-      registry_version="${2:?missing value for --registry-version}"
+    --release-version|--registry-version)
+      release_version="${2:?missing value for $1}"
       shift 2
       ;;
     -h|--help)
@@ -46,14 +49,24 @@ print(manifest["package"]["version"])
 PY
 )"
 
-if [[ -z "$registry_version" ]]; then
-  registry_version="$(curl -fsSL \
+if [[ -z "$release_version" ]]; then
+  release_version="$(curl -fsSL \
     -A "tracedecay-release-drift-check" \
-    https://crates.io/api/v1/crates/tracedecay \
-    | python3 -c 'import json, sys; print(json.load(sys.stdin)["crate"]["max_version"])')"
+    https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest \
+    | python3 -c '
+import json
+import sys
+
+tag = json.load(sys.stdin).get("tag_name")
+if not isinstance(tag, str) or not tag:
+    raise SystemExit("latest GitHub release response has no tag_name")
+print(tag)
+')"
 fi
 
-comparison="$(python3 - "$local_version" "$registry_version" <<'PY'
+release_version="${release_version#v}"
+
+comparison="$(python3 - "$local_version" "$release_version" <<'PY'
 import sys
 
 def parse(version: str):
@@ -62,10 +75,10 @@ def parse(version: str):
     return parts + ((1, "") if not sep else (0, pre))
 
 local = parse(sys.argv[1])
-registry = parse(sys.argv[2])
-if local > registry:
+release = parse(sys.argv[2])
+if local > release:
     print("ahead")
-elif local < registry:
+elif local < release:
     print("behind")
 else:
     print("equal")
@@ -77,12 +90,12 @@ case "$comparison" in
     echo "release versions are aligned: $local_version"
     ;;
   ahead)
-    echo "release drift detected: local Cargo.toml version $local_version is ahead of crates.io $registry_version" >&2
-    echo "Reset the unpublished release bump so release-plz can recreate it, or publish $local_version manually before merging more release changes." >&2
+    echo "release drift detected: local Cargo.toml version $local_version is ahead of GitHub release v$release_version" >&2
+    echo "Reset the unpublished release bump so release-plz can recreate it, or create GitHub release v$local_version manually before merging more release changes." >&2
     exit 1
     ;;
   behind)
-    echo "release drift detected: local Cargo.toml version $local_version is behind crates.io $registry_version" >&2
+    echo "release drift detected: local Cargo.toml version $local_version is behind GitHub release v$release_version" >&2
     echo "Update the checkout from master before running release automation." >&2
     exit 1
     ;;

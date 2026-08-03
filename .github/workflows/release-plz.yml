@@ -11,22 +11,20 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Publishing mutates crates.io and GitHub release state. Serialize master
-# updates, but never cancel a publication after it has started.
+# GitHub release creation mutates release state. Serialize master updates, but
+# never cancel a release after it has started.
 concurrency:
   group: release-plz-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release-plz-release:
-    name: Publish crate and create GitHub release
+  github-release:
+    name: Create GitHub release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
     runs-on: ubuntu-latest
-    environment: crates-io
     permissions:
       contents: write
       pull-requests: read
-      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -58,12 +56,12 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-release-plz-release-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-github-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-release-plz-release-
+            ${{ runner.os }}-cargo-github-release-
             ${{ runner.os }}-cargo-
 
-      - name: Run release-plz release
+      - name: Create GitHub release with release-plz
         id: release
         uses: release-plz/action@v0.5
         continue-on-error: true
@@ -72,7 +70,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - name: Retry release-plz release after transient GitHub API failure
+      - name: Retry GitHub release after transient API failure
         id: release_retry
         if: steps.release.outcome == 'failure'
         uses: release-plz/action@v0.5
@@ -82,18 +80,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
-      - name: Fail when release-plz release still fails
+      - name: Fail when GitHub release still fails
         if: steps.release.outcome == 'failure' && steps.release_retry.outcome == 'failure'
         run: exit 1
 
-      - name: Check release version drift
+      - name: Check GitHub release version drift
         if: always()
         run: scripts/check-release-drift.sh
 
   release-plz-pr:
     name: Open or update release PR
     if: github.repository == 'ScriptedAlchemy/tracedecay'
-    needs: release-plz-release
+    needs: github-release
     runs-on: ubuntu-latest
     permissions:
       contents: write
