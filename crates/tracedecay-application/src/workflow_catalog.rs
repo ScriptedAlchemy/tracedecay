@@ -4,14 +4,18 @@ use tracedecay_tool_catalog::{
     CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1, CatalogValidationError,
     CodecBindingKey, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
     ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1, ExecutableBindingV1,
-    ExecutableUnavailableDispositionV1, IdempotencyContract, LifecycleClass, OperationId,
-    PaginationContract, PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract,
-    RevalidationContract, RevalidationPoint, RouteExposureV1, RoutingContractV1,
-    SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, ServiceId,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    IdempotencyContract, LifecycleClass, OperationId, PaginationContract, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, ServiceId, StreamingContract, TerminalState, TerminalStateContract,
+    UseCaseId,
 };
 
-use crate::WorkflowFanOutRequest;
+use crate::{
+    TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
+    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowFanOutRequest,
+};
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
@@ -48,19 +52,34 @@ pub fn workflow_executable_binding_registry()
     ExecutableBindingRegistryV1::new(
         WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
-            .map(|(operation, _, _)| {
-                if *operation == "execute_fan_out" {
+            .map(|(operation, _, _)| match *operation {
+                "register_definition" => {
+                    available::<
+                        WorkflowDefinitionRegisterRequest,
+                        tracedecay_domain::WorkflowDefinition,
+                    >(operation, "/application/workflow/register-definition")
+                }
+                "activate_definition" => {
+                    available::<WorkflowDefinitionActivateRequest, WorkflowActivation>(
+                        operation,
+                        "/application/workflow/activate-definition",
+                    )
+                }
+                "execute_fan_out" => {
                     available::<WorkflowFanOutRequest, tracedecay_domain::WorkflowRunProjection>(
                         operation,
                         "/application/workflow/execute-fan-out",
                     )
-                } else {
-                    Ok(ExecutableBindingAvailabilityV1::Unavailable {
-                        operation_id: OperationId::new(format!("operation.workflow.{operation}"))
-                            .expect("static Workflow operation ID is valid"),
-                        disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
-                    })
                 }
+                "handoff_issue" => available::<TaskHandoffIssueRequest, TaskHandoffGrant>(
+                    operation,
+                    "/application/workflow/handoff-issue",
+                ),
+                "handoff_redeem" => available::<TaskHandoffRedeemRequest, TaskHandoffRedeemed>(
+                    operation,
+                    "/application/workflow/handoff-redeem",
+                ),
+                _ => unreachable!("static Workflow operation is exhaustive"),
             })
             .collect::<Result<Vec<_>, _>>()?,
     )
@@ -170,23 +189,21 @@ mod tests {
     use super::workflow_executable_binding_registry;
 
     #[test]
-    fn workflow_registry_advertises_only_the_mounted_fan_out_route() {
+    fn workflow_registry_advertises_every_mounted_application_route() {
         let registry = workflow_executable_binding_registry().unwrap();
         assert_eq!(registry.iter().count(), 5);
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 1);
-        assert_eq!(
-            advertised[0].operation_id().as_str(),
-            "operation.workflow.execute_fan_out"
-        );
-        let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
-            advertised[0].exposure()
-        else {
-            panic!("mounted Workflow fan-out must have a public route");
-        };
-        assert_eq!(route_path, "/application/workflow/execute-fan-out");
+        assert_eq!(advertised.len(), 5);
+        for binding in advertised {
+            let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
+                binding.exposure()
+            else {
+                panic!("mounted Workflow operation must have a public route");
+            };
+            assert!(route_path.starts_with("/application/workflow/"));
+        }
     }
 }
