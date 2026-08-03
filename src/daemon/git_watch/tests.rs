@@ -598,7 +598,36 @@ async fn ensure_watching_registers_dedups_and_caps() {
     assert_eq!(watcher.health_report().await.len(), 2);
 
     watcher.ensure_watching(repo_c.path()).await;
-    assert_eq!(watcher.health_report().await.len(), 2);
+    assert_eq!(watcher.health_report().await.len(), 3);
+    assert_eq!(watcher.inner.projects.lock().await.len(), 2);
+    assert_eq!(watcher.inner.degraded_projects.lock().await.len(), 1);
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn capacity_rejected_project_has_bounded_degraded_coverage() {
+    let repo_a = temp_repo();
+    let repo_b = temp_repo();
+    let mut config = fast_watch_config();
+    config.watch_max_projects = 1;
+    let watcher = GitWatcher::new(config);
+
+    watcher.ensure_watching(repo_a.path()).await;
+    watcher.ensure_watching(repo_b.path()).await;
+
+    let report = watcher.health_report().await;
+    assert_eq!(report.len(), 2);
+    assert_eq!(
+        report
+            .iter()
+            .find(|(root, _)| *root == watcher_key(repo_b.path()))
+            .map(|(_, health)| health.coverage),
+        Some(ProjectWatchCoverage::DegradedPoll),
+        "a project beyond the OS watcher cap must retain bounded degraded coverage"
+    );
+    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
+    assert_eq!(watcher.inner.degraded_projects.lock().await.len(), 1);
+    watcher.shutdown().await;
 }
 
 #[tokio::test]
@@ -642,6 +671,61 @@ async fn removed_worktree_snapshot_root_is_pruned() {
     state.prune_missing_roots().await;
 
     assert_eq!(state.roots().await, vec![repo.path().to_path_buf()]);
+}
+
+#[tokio::test]
+async fn resolved_worktree_is_retained_as_a_snapshot_root() {
+    let repo = temp_repo();
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked_root = linked_parent.path().join("linked");
+    let linked = linked_root.to_string_lossy().into_owned();
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "feature/snapshot-root", &linked],
+    );
+    let state = test_watch_state(repo.path());
+
+    state.register_snapshot_root(&linked_root).await;
+
+    let roots = state.roots().await;
+    assert_eq!(roots.len(), 2);
+    assert!(
+        roots.contains(&repo.path().to_path_buf()) && roots.contains(&linked_root),
+        "a resolved linked worktree must participate in later generation checks"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn degraded_retry_timer_merges_drained_work_without_backstop() {
+    let state = test_watch_state("/repo");
+    let mut first = DirtyPlan::sync();
+    first.branches.insert("main".to_string());
+    let mut second = DirtyPlan::sync();
+    second.new_worktrees.insert("feature".to_string());
+
+    state.schedule_retry(first, Duration::from_hours(1)).await;
+    let waiting_state = Arc::clone(&state);
+    let waiting = tokio::spawn(async move { wait_for_degraded_retry(&waiting_state).await });
+    tokio::task::yield_now().await;
+
+    state.schedule_retry(second, Duration::from_secs(1)).await;
+    let retry_deadline = state
+        .retry_deadline()
+        .await
+        .expect("merged retry work should retain a deadline");
+    assert!(
+        retry_deadline <= Instant::now() + Duration::from_mins(1),
+        "retry delay must be bounded even when a caller supplies a longer wait"
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let plan = waiting
+        .await
+        .expect("degraded retry timer task should not panic")
+        .expect("the earlier retry should release the merged drained work");
+    assert!(plan.dirty);
+    assert!(plan.branches.contains("main"));
+    assert!(plan.new_worktrees.contains("feature"));
 }
 
 #[test]
@@ -729,6 +813,56 @@ async fn generation_gate_serializes_different_generations() {
         gate.reserve(&second, now).is_ok(),
         "the newer generation remains eligible after the active sync finishes"
     );
+}
+
+#[test]
+fn stale_generation_never_records_success_for_a_newer_snapshot() {
+    let first = SnapshotGeneration::test("/repo", "main", "a");
+    let second = SnapshotGeneration::test("/repo", "main", "b");
+    let mut gate = GenerationGate::default();
+    let reservation = gate
+        .reserve(&first, Instant::now())
+        .expect("first generation should claim the sync lane");
+
+    assert!(
+        !gate.record_success_if_current(first.clone(), &second),
+        "a semaphore-delayed watcher must not stamp an older generation as fresh"
+    );
+    drop(reservation);
+    assert!(
+        gate.reserve(&second, Instant::now()).is_ok(),
+        "the newer generation remains eligible after stale work is discarded"
+    );
+}
+
+#[test]
+fn semaphore_delayed_generation_releases_its_claim_before_sync() {
+    let first = SnapshotGeneration::test("/repo", "main", "a");
+    let second = SnapshotGeneration::test("/repo", "main", "b");
+    let mut gate = GenerationGate::default();
+    let reservation = gate
+        .reserve(&first, Instant::now())
+        .expect("first generation should claim the sync lane");
+
+    assert!(
+        gate.release_if_stale(&first, &second),
+        "a generation that moved while waiting for the semaphore must not sync"
+    );
+    drop(reservation);
+    assert!(
+        gate.reserve(&second, Instant::now()).is_ok(),
+        "the newer generation must be retried after the stale claim is released"
+    );
+}
+
+#[test]
+fn deferred_worktree_tracking_is_retryable_not_successful() {
+    assert!(!planner::worktree_tracking_succeeded(
+        &crate::branch::BranchAddOutcome::Deferred
+    ));
+    assert!(planner::worktree_tracking_succeeded(
+        &crate::branch::BranchAddOutcome::Added
+    ));
 }
 
 #[test]

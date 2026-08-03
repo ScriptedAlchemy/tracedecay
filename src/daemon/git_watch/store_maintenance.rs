@@ -66,23 +66,18 @@ pub(super) async fn sync_project(
 }
 
 /// Proactively tracks a linked worktree's branch. Returns the
-/// [`crate::branch::BranchAddOutcome`] name for logging, or `None` on error.
+/// [`crate::branch::BranchAddOutcome`], or `None` on error.
 #[cfg(unix)]
 pub(super) async fn track_worktree_branch(
     administration: &StoreAdministration,
     cg: &TraceDecay,
     wt_root: PathBuf,
     branch: String,
-) -> Option<String> {
+) -> Option<crate::branch::BranchAddOutcome> {
     administration
         .with_writer_in(
             crate::daemon::branch_admin::graph_writer_scope(cg, StoreWriterClass::Owner),
-            || async {
-                cg.track_worktree_branch(&wt_root, &branch)
-                    .await
-                    .ok()
-                    .map(|outcome| format!("{outcome:?}"))
-            },
+            || async { cg.track_worktree_branch(&wt_root, &branch).await.ok() },
         )
         .await
 }

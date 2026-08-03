@@ -7,7 +7,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 pub(super) const SYNC_RETRY_INITIAL: Duration = Duration::from_secs(1);
-const SYNC_RETRY_MAX: Duration = Duration::from_mins(1);
+pub(super) const SYNC_RETRY_MAX: Duration = Duration::from_mins(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SnapshotGeneration {
@@ -141,7 +141,7 @@ pub(super) enum GenerationDecision {
 pub(super) enum ReservationError {
     Unchanged,
     InFlight,
-    Backoff,
+    Backoff { remaining: Duration },
 }
 
 #[derive(Clone, Debug)]
@@ -220,8 +220,38 @@ impl GenerationGate {
             }
             GenerationDecision::Unchanged => Err(ReservationError::Unchanged),
             GenerationDecision::InFlight => Err(ReservationError::InFlight),
-            GenerationDecision::Backoff { .. } => Err(ReservationError::Backoff),
+            GenerationDecision::Backoff { remaining } => {
+                Err(ReservationError::Backoff { remaining })
+            }
         }
+    }
+
+    /// Records a successful sync only when the repository generation observed
+    /// after the operation still matches the generation that claimed the lane.
+    pub(super) fn record_success_if_current(
+        &mut self,
+        generation: SnapshotGeneration,
+        observed: &SnapshotGeneration,
+    ) -> bool {
+        if generation != *observed {
+            self.finish_reservation();
+            return false;
+        }
+        self.record_success(generation);
+        true
+    }
+
+    /// Releases a claim whose repository moved before work could begin.
+    pub(super) fn release_if_stale(
+        &mut self,
+        generation: &SnapshotGeneration,
+        observed: &SnapshotGeneration,
+    ) -> bool {
+        if generation == observed {
+            return false;
+        }
+        self.finish_reservation();
+        true
     }
 
     pub(super) fn record_success(&mut self, generation: SnapshotGeneration) {
@@ -230,7 +260,11 @@ impl GenerationGate {
         self.finish_reservation();
     }
 
-    pub(super) fn record_failure(&mut self, generation: SnapshotGeneration, now: Instant) {
+    pub(super) fn record_failure(
+        &mut self,
+        generation: SnapshotGeneration,
+        now: Instant,
+    ) -> Duration {
         let delay = self
             .failed
             .as_ref()
@@ -244,6 +278,7 @@ impl GenerationGate {
             delay,
         });
         self.finish_reservation();
+        delay
     }
 
     fn clear_cancelled_reservation(&mut self) {

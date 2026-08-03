@@ -2,17 +2,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 use tokio::time::Instant;
+
+use crate::branch::BranchAddOutcome;
 
 use super::generation::{
     GenerationError, GenerationGate, GenerationReservation, ReservationError, SnapshotGeneration,
     snapshot_generation,
 };
 use super::{
-    DirtyPlan, GitWatcherInner, TraceDecay, WatchState, log_daemon_event, retained_project_graph,
-    store_maintenance,
+    DirtyPlan, GitWatcherInner, IN_FLIGHT_RETRY_DELAY, TraceDecay, WatchState, log_daemon_event,
+    retained_project_graph, store_maintenance,
 };
 
 pub(super) async fn execute_plan(
@@ -23,12 +26,8 @@ pub(super) async fn execute_plan(
 ) {
     if plan.worktree_removed || plan.reconcile_metadata {
         state.prune_missing_roots().await;
-        state
-            .worktree_gates
-            .lock()
-            .await
-            .retain(|root, _| root.is_dir());
     }
+    let retry_plan = plan.clone();
     let roots = state.roots().await;
     let owner_graph = first_retained_project_graph(inner, &roots).await;
 
@@ -40,10 +39,18 @@ pub(super) async fn execute_plan(
         let Some((wt_root, branch)) = store_maintenance::resolve_worktree(common, name) else {
             continue;
         };
+        state.register_snapshot_root(&wt_root).await;
         let generation = match snapshot_generation(&wt_root) {
             Ok(generation) => generation,
             Err(error) => {
-                backoff_generation_error(state, &state.worktree_gates, &wt_root, error).await;
+                defer_generation_error(
+                    state,
+                    &state.worktree_gates,
+                    &wt_root,
+                    error,
+                    retry_plan.clone(),
+                )
+                .await;
                 continue;
             }
         };
@@ -56,13 +63,31 @@ pub(super) async fn execute_plan(
                     .fetch_add(1, Ordering::Relaxed);
                 continue;
             }
-            Err(ReservationError::InFlight | ReservationError::Backoff) => {
-                state.health.backoff_skips.fetch_add(1, Ordering::Relaxed);
+            Err(error) => {
+                defer_plan(state, retry_plan.clone(), error).await;
                 continue;
             }
         };
 
         let _permit = inner.sync_semaphore.acquire().await;
+        match generation_still_current(&state.worktree_gates, &generation, &wt_root).await {
+            Ok(true) => {}
+            Ok(false) => {
+                state
+                    .schedule_retry(retry_plan.clone(), IN_FLIGHT_RETRY_DELAY)
+                    .await;
+                drop(reservation);
+                continue;
+            }
+            Err(error) => {
+                let retry_after =
+                    record_generation_error(&state.worktree_gates, &wt_root, &error).await;
+                state.schedule_retry(retry_plan.clone(), retry_after).await;
+                log_generation_failure(&wt_root, &error);
+                drop(reservation);
+                continue;
+            }
+        }
         let outcome = match owner_graph.as_deref() {
             Some(graph) => {
                 store_maintenance::track_worktree_branch(
@@ -75,27 +100,60 @@ pub(super) async fn execute_plan(
             }
             None => None,
         };
-        if let Some(outcome) = outcome {
-            record_generation_success(&state.worktree_gates, generation).await;
-            log_daemon_event(
-                "git_watch_synced",
-                &[
-                    ("project", state.project_root.display().to_string()),
-                    ("action", "worktree_tracked".to_string()),
-                    ("worktree", wt_root.display().to_string()),
-                    ("branch", branch),
-                    ("outcome", outcome),
-                ],
-            );
-        } else {
-            record_generation_failure(&state.worktree_gates, generation).await;
-            log_daemon_event(
-                "git_watch_degraded",
-                &[
-                    ("project", state.project_root.display().to_string()),
-                    ("reason", "worktree_track_failed".to_string()),
-                ],
-            );
+        match outcome {
+            Some(outcome) if worktree_tracking_succeeded(&outcome) => {
+                match record_success_if_current(&state.worktree_gates, generation.clone(), &wt_root)
+                    .await
+                {
+                    Ok(true) => {
+                        log_daemon_event(
+                            "git_watch_synced",
+                            &[
+                                ("project", state.project_root.display().to_string()),
+                                ("action", "worktree_tracked".to_string()),
+                                ("worktree", wt_root.display().to_string()),
+                                ("branch", branch),
+                                ("outcome", format!("{outcome:?}")),
+                            ],
+                        );
+                    }
+                    Ok(false) => {
+                        state
+                            .schedule_retry(retry_plan.clone(), IN_FLIGHT_RETRY_DELAY)
+                            .await;
+                    }
+                    Err(error) => {
+                        let retry_after =
+                            record_generation_error(&state.worktree_gates, &wt_root, &error).await;
+                        state.schedule_retry(retry_plan.clone(), retry_after).await;
+                        log_generation_failure(&wt_root, &error);
+                    }
+                }
+            }
+            Some(BranchAddOutcome::Deferred) => {
+                let retry_after =
+                    record_generation_failure(&state.worktree_gates, generation).await;
+                state.schedule_retry(retry_plan.clone(), retry_after).await;
+                log_daemon_event(
+                    "git_watch_degraded",
+                    &[
+                        ("project", state.project_root.display().to_string()),
+                        ("reason", "worktree_track_deferred".to_string()),
+                    ],
+                );
+            }
+            Some(_) | None => {
+                let retry_after =
+                    record_generation_failure(&state.worktree_gates, generation).await;
+                state.schedule_retry(retry_plan.clone(), retry_after).await;
+                log_daemon_event(
+                    "git_watch_degraded",
+                    &[
+                        ("project", state.project_root.display().to_string()),
+                        ("reason", "worktree_track_failed".to_string()),
+                    ],
+                );
+            }
         }
         drop(reservation);
     }
@@ -139,29 +197,77 @@ async fn reserve_generation(
         .reserve(generation, Instant::now())
 }
 
-async fn record_generation_success(
-    gates: &Mutex<HashMap<PathBuf, GenerationGate>>,
-    generation: SnapshotGeneration,
-) {
-    gates
-        .lock()
-        .await
-        .entry(generation.root.clone())
-        .or_default()
-        .record_success(generation);
-}
-
 async fn record_generation_failure(
     gates: &Mutex<HashMap<PathBuf, GenerationGate>>,
     generation: SnapshotGeneration,
-) {
+) -> Duration {
     let root = generation.root.clone();
     gates
         .lock()
         .await
         .entry(root)
         .or_default()
-        .record_failure(generation, Instant::now());
+        .record_failure(generation, Instant::now())
+}
+
+async fn record_success_if_current(
+    gates: &Mutex<HashMap<PathBuf, GenerationGate>>,
+    generation: SnapshotGeneration,
+    root: &Path,
+) -> Result<bool, GenerationError> {
+    let observed = snapshot_generation(root)?;
+    Ok(gates
+        .lock()
+        .await
+        .entry(generation.root.clone())
+        .or_default()
+        .record_success_if_current(generation, &observed))
+}
+
+async fn generation_still_current(
+    gates: &Mutex<HashMap<PathBuf, GenerationGate>>,
+    generation: &SnapshotGeneration,
+    root: &Path,
+) -> Result<bool, GenerationError> {
+    let observed = snapshot_generation(root)?;
+    Ok(!gates
+        .lock()
+        .await
+        .entry(generation.root.clone())
+        .or_default()
+        .release_if_stale(generation, &observed))
+}
+
+async fn record_generation_error(
+    gates: &Mutex<HashMap<PathBuf, GenerationGate>>,
+    root: &Path,
+    error: &GenerationError,
+) -> Duration {
+    record_generation_failure(gates, SnapshotGeneration::unavailable(root, error.kind)).await
+}
+
+fn retry_delay(error: ReservationError) -> Duration {
+    match error {
+        ReservationError::InFlight => IN_FLIGHT_RETRY_DELAY,
+        ReservationError::Backoff { remaining } => remaining,
+        ReservationError::Unchanged => IN_FLIGHT_RETRY_DELAY,
+    }
+}
+
+async fn defer_plan(state: &WatchState, plan: DirtyPlan, error: ReservationError) {
+    if error == ReservationError::Unchanged {
+        state
+            .health
+            .unchanged_generation_skips
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    state.health.backoff_skips.fetch_add(1, Ordering::Relaxed);
+    state.schedule_retry(plan, retry_delay(error)).await;
+}
+
+pub(super) fn worktree_tracking_succeeded(outcome: &BranchAddOutcome) -> bool {
+    !matches!(outcome, BranchAddOutcome::Deferred)
 }
 
 fn log_generation_failure(root: &Path, error: &GenerationError) {
@@ -175,16 +281,18 @@ fn log_generation_failure(root: &Path, error: &GenerationError) {
     );
 }
 
-async fn backoff_generation_error(
+async fn defer_generation_error(
     state: &WatchState,
     gates: &Mutex<HashMap<PathBuf, GenerationGate>>,
     root: &Path,
     error: GenerationError,
+    plan: DirtyPlan,
 ) {
     let unavailable = SnapshotGeneration::unavailable(root, error.kind);
     match reserve_generation(gates, &unavailable).await {
         Ok(reservation) => {
-            record_generation_failure(gates, unavailable).await;
+            let retry_after = record_generation_failure(gates, unavailable).await;
+            state.schedule_retry(plan, retry_after).await;
             log_generation_failure(root, &error);
             drop(reservation);
         }
@@ -194,8 +302,8 @@ async fn backoff_generation_error(
                 .unchanged_generation_skips
                 .fetch_add(1, Ordering::Relaxed);
         }
-        Err(ReservationError::InFlight | ReservationError::Backoff) => {
-            state.health.backoff_skips.fetch_add(1, Ordering::Relaxed);
+        Err(error) => {
+            defer_plan(state, plan, error).await;
         }
     }
 }
@@ -209,28 +317,21 @@ pub(super) async fn sync_snapshot(
     let generation = match snapshot_generation(root) {
         Ok(generation) => generation,
         Err(error) => {
-            backoff_generation_error(state, &state.sync_gates, root, error).await;
+            defer_generation_error(state, &state.sync_gates, root, error, DirtyPlan::sync()).await;
             return;
         }
     };
 
     let reservation = match reserve_generation(&state.sync_gates, &generation).await {
         Ok(reservation) => reservation,
-        Err(ReservationError::Unchanged) => {
-            state
-                .health
-                .unchanged_generation_skips
-                .fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        Err(ReservationError::InFlight | ReservationError::Backoff) => {
-            state.health.backoff_skips.fetch_add(1, Ordering::Relaxed);
+        Err(error) => {
+            defer_plan(state, DirtyPlan::sync(), error).await;
             return;
         }
     };
 
     let Some(graph) = retained_project_graph(inner, root).await else {
-        record_generation_failure(&state.sync_gates, generation).await;
+        let retry_after = record_generation_failure(&state.sync_gates, generation).await;
         log_daemon_event(
             "git_watch_degraded",
             &[
@@ -238,11 +339,29 @@ pub(super) async fn sync_snapshot(
                 ("reason", "project_graph_unavailable".to_string()),
             ],
         );
+        state.schedule_retry(DirtyPlan::sync(), retry_after).await;
         drop(reservation);
         return;
     };
 
     let _permit = inner.sync_semaphore.acquire().await;
+    match generation_still_current(&state.sync_gates, &generation, root).await {
+        Ok(true) => {}
+        Ok(false) => {
+            state
+                .schedule_retry(DirtyPlan::sync(), IN_FLIGHT_RETRY_DELAY)
+                .await;
+            drop(reservation);
+            return;
+        }
+        Err(error) => {
+            let retry_after = record_generation_error(&state.sync_gates, root, &error).await;
+            state.schedule_retry(DirtyPlan::sync(), retry_after).await;
+            log_generation_failure(root, &error);
+            drop(reservation);
+            return;
+        }
+    }
     if store_maintenance::sync_project(
         &graph,
         inner.config.full_sync_escalation_files,
@@ -250,22 +369,36 @@ pub(super) async fn sync_snapshot(
     )
     .await
     {
-        let branch = generation
-            .branch
-            .clone()
-            .unwrap_or_else(|| "detached".to_string());
-        record_generation_success(&state.sync_gates, generation).await;
-        state.health.mark_synced();
-        log_daemon_event(
-            "git_watch_synced",
-            &[
-                ("project", root.display().to_string()),
-                ("action", action.to_string()),
-                ("synced_branch", branch),
-            ],
-        );
+        match record_success_if_current(&state.sync_gates, generation.clone(), root).await {
+            Ok(true) => {
+                let branch = generation
+                    .branch
+                    .clone()
+                    .unwrap_or_else(|| "detached".to_string());
+                state.health.mark_synced();
+                log_daemon_event(
+                    "git_watch_synced",
+                    &[
+                        ("project", root.display().to_string()),
+                        ("action", action.to_string()),
+                        ("synced_branch", branch),
+                    ],
+                );
+            }
+            Ok(false) => {
+                state
+                    .schedule_retry(DirtyPlan::sync(), IN_FLIGHT_RETRY_DELAY)
+                    .await;
+            }
+            Err(error) => {
+                let retry_after = record_generation_error(&state.sync_gates, root, &error).await;
+                state.schedule_retry(DirtyPlan::sync(), retry_after).await;
+                log_generation_failure(root, &error);
+            }
+        }
     } else {
-        record_generation_failure(&state.sync_gates, generation).await;
+        let retry_after = record_generation_failure(&state.sync_gates, generation).await;
+        state.schedule_retry(DirtyPlan::sync(), retry_after).await;
         log_daemon_event(
             "git_watch_degraded",
             &[
