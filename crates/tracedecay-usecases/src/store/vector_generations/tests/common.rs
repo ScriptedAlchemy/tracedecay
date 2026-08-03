@@ -279,6 +279,13 @@ async fn open_project_database(
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await
             .expect("database");
+    database
+        .execute_write_batch(
+            "install final semantic vector test schema",
+            SEMANTIC_VECTOR_GRAPH_SCHEMA_V2,
+        )
+        .await
+        .expect("final semantic vector schema");
     (database, authority)
 }
 

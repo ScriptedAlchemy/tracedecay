@@ -41,9 +41,9 @@ use tracedecay_query::retrieval::ports::{
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
-    SemanticAbstentionDispositionV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
-    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCalibrationProfileV1,
+    SemanticCodeRetriever, SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1,
+    SemanticLaneRetriever, SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
     SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
     SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
     SemanticVectorScanSummaryV1,
@@ -1130,26 +1130,34 @@ impl ProductionSemanticRuntimeV1 {
     where
         C: SemanticExecutionControl + Sync,
     {
+        if control.is_cancelled() {
+            return cancelled_semantic_outcome(mode, fallback);
+        }
         let source_manifest_digest =
             semantic_source_manifest_digest(code_generation.projection().request());
-        let mut active = match DatabaseVectorGenerationStoreV1::read_active_generation_for(
-            self.database.as_ref(),
-            request.projection,
-            &code_generation.manifest().generation_id,
-            source_manifest_digest,
-        )
-        .await
-        {
-            Ok(active) => active,
-            Err(_) => {
-                return execute_calibrated_semantic_query(
-                    &NeverCalledSemanticLane,
-                    SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
-                    mode,
-                    fallback,
-                );
-            }
-        };
+        let mut active =
+            match DatabaseVectorGenerationStoreV1::read_active_generation_for_with_control(
+                self.database.as_ref(),
+                request.projection,
+                &code_generation.manifest().generation_id,
+                source_manifest_digest,
+                &|| control.is_cancelled(),
+            )
+            .await
+            {
+                Ok(active) => active,
+                Err(crate::store::vector_generations::VectorGenerationStoreErrorV1::Cancelled) => {
+                    return cancelled_semantic_outcome(mode, fallback);
+                }
+                Err(_) => {
+                    return execute_calibrated_semantic_query(
+                        &NeverCalledSemanticLane,
+                        SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
+                        mode,
+                        fallback,
+                    );
+                }
+            };
         if active.is_none() {
             let replay_digest =
                 semantic_projection_request(code_generation, request.projection, None)
@@ -1157,14 +1165,22 @@ impl ProductionSemanticRuntimeV1 {
                     .changes
                     .manifest_digest;
             if &replay_digest != source_manifest_digest {
-                active = DatabaseVectorGenerationStoreV1::read_active_generation_for(
-                    self.database.as_ref(),
-                    request.projection,
-                    &code_generation.manifest().generation_id,
-                    &replay_digest,
-                )
-                .await
-                .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+                active =
+                    match DatabaseVectorGenerationStoreV1::read_active_generation_for_with_control(
+                        self.database.as_ref(),
+                        request.projection,
+                        &code_generation.manifest().generation_id,
+                        &replay_digest,
+                        &|| control.is_cancelled(),
+                    )
+                    .await
+                    {
+                        Ok(active) => active,
+                        Err(
+                            crate::store::vector_generations::VectorGenerationStoreErrorV1::Cancelled,
+                        ) => return cancelled_semantic_outcome(mode, fallback),
+                        Err(_) => return Err(SemanticQueryServiceError::InvalidFallback),
+                    };
             }
         }
         let Some(active) = active else {
@@ -2093,6 +2109,21 @@ where
         RetrievalSelectionV1::Unavailable => SemanticQueryDecisionV1::RejectUnavailable,
     };
     CalibratedSemanticQueryService::new(lane).execute(readiness, decision, fallback)
+}
+
+fn cancelled_semantic_outcome(
+    mode: SemanticQueryModeV1,
+    fallback: Arc<QueryFallbackSubpayload>,
+) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError> {
+    match mode {
+        SemanticQueryModeV1::FallbackAllowed => Ok(SemanticQueryServiceOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::Cancelled,
+            fallback,
+        }),
+        SemanticQueryModeV1::StrictSemantic => Err(SemanticQueryServiceError::StrictUnavailable(
+            SemanticAbstentionV1::Cancelled,
+        )),
+    }
 }
 
 /// Complete input set for one application semantic-search composition.

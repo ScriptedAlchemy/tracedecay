@@ -172,10 +172,10 @@ pub enum VectorGenerationStoreErrorV1 {
     PhysicalVectorConflict,
     #[error("injected failure before atomic publication swap")]
     InjectedPublicationFailure,
-    #[error("legacy vector generation singleton is not the exact empty state")]
-    NonemptyLegacySingleton,
     #[error("vector generation active pointer belongs to another store shard")]
     ShardIdentityMismatch,
+    #[error("vector generation read was cancelled")]
+    Cancelled,
     #[error("project vector generation storage failed: {0}")]
     Storage(String),
     #[error("project vector generation state changed repeatedly during compare-and-swap")]

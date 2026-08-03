@@ -67,8 +67,6 @@ fn validate_batch_identity(
         || prepared.receipt.target_projection_key != plan.target_projection_key
         || prepared.request.changes.to_generation != plan.source_generation
         || prepared.receipt.source_generation != plan.source_generation
-        || prepared.request.changes.manifest_digest != plan.source_manifest_digest
-        || prepared.receipt.source_manifest_digest != plan.source_manifest_digest
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }

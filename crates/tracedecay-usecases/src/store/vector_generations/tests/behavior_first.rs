@@ -43,12 +43,12 @@ fn batch_watermark_and_base_generation_must_match_the_projection_request() {
         Err(VectorGenerationStoreErrorV1::IncompatibleBaseGeneration)
     );
 
-    let mismatched_manifest = manifest_digest('f');
+    let mismatched_source = id("code-generation.mismatched");
     let mismatched_build = store
         .begin_generation(VectorGenerationPlanV1 {
             target_projection_key: embedding.projection_key().clone(),
-            source_generation: target_source,
-            source_manifest_digest: mismatched_manifest,
+            source_generation: mismatched_source,
+            source_manifest_digest: prepared.request.changes.manifest_digest.clone(),
             expected_chunk_ids: vec![chunk_id].into(),
             base_generation: Some(base_id),
         })
@@ -120,126 +120,40 @@ fn successful_publication_consumes_the_staged_build() {
 }
 
 #[tokio::test]
-async fn opening_exact_empty_singleton_binds_the_active_pointer_and_drops_the_singleton() {
+async fn opening_vector_store_is_read_only() {
     let temporary = tempfile::tempdir().expect("temporary project database");
     let (database, _authority) =
-        open_project_database(&temporary, "empty vector singleton cutover").await;
-    database
-        .execute_write_batch(
-            "install empty vector singleton fixture",
-            VECTOR_GENERATION_STATE_SCHEMA_V1,
+        open_project_database(&temporary, "read-only vector store open").await;
+    let catalog_before = database
+        .query_scalar_i64(
+            "count schema before vector open",
+            "SELECT COUNT(*) FROM sqlite_schema",
         )
         .await
-        .expect("legacy singleton schema");
-    database
-        .execute_write_engine(
-            "install empty vector singleton fixture",
-            "INSERT INTO semantic_vector_generation_state_v1 (
-                singleton, revision, state_json
-             ) VALUES (1, 0, ?1)",
-            params![
-                r#"{"staged":{},"published":{"generations":{},"active_generation":null,"legacy_migration_receipts":{},"physical_vector_bindings":{}}}"#
-            ],
-        )
-        .await
-        .expect("legacy singleton row");
+        .expect("schema count");
 
     DatabaseVectorGenerationStoreV1::open(&database)
         .await
-        .expect("exact empty singleton migrates");
+        .expect("read-only open");
 
     assert_eq!(
         database
             .query_scalar_i64(
-                "prove singleton removed",
-                "SELECT COUNT(*)
-                 FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name = 'semantic_vector_generation_state_v1'",
+                "count schema after vector open",
+                "SELECT COUNT(*) FROM sqlite_schema",
             )
             .await
-            .expect("singleton schema count"),
-        0
-    );
-    let mut rows = database
-        .engine_conn()
-        .query(
-            "SELECT revision, shard_id_json, generation_id
-             FROM semantic_vector_active_generation_v1
-             WHERE singleton = 1",
-            (),
-        )
-        .await
-        .expect("active pointer");
-    let row = rows
-        .next()
-        .await
-        .expect("active pointer row")
-        .expect("active pointer row");
-    assert_eq!(row.get::<i64>(0).expect("revision"), 0);
-    let bound: tracedecay_store::StoreShardIdV1 =
-        serde_json::from_str(&row.get::<String>(1).expect("shard identity"))
-            .expect("canonical shard identity");
-    assert_eq!(&bound, &database.retained_runtime().binding().shard_id);
-    assert_eq!(
-        row.get::<Option<String>>(2).expect("generation identity"),
-        None
-    );
-}
-
-#[tokio::test]
-async fn opening_nonempty_singleton_fails_typed_without_partial_cutover() {
-    let temporary = tempfile::tempdir().expect("temporary project database");
-    let (database, _authority) =
-        open_project_database(&temporary, "nonempty vector singleton refusal").await;
-    database
-        .execute_write_batch(
-            "install nonempty vector singleton fixture",
-            VECTOR_GENERATION_STATE_SCHEMA_V1,
-        )
-        .await
-        .expect("legacy singleton schema");
-    database
-        .execute_write_engine(
-            "install nonempty vector singleton fixture",
-            "INSERT INTO semantic_vector_generation_state_v1 (
-                singleton, revision, state_json
-             ) VALUES (1, 0, ?1)",
-            params![
-                r#"{"staged":{},"published":{"generations":{},"active_generation":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","legacy_migration_receipts":{},"physical_vector_bindings":{}}}"#
-            ],
-        )
-        .await
-        .expect("legacy singleton row");
-
-    assert!(matches!(
-        DatabaseVectorGenerationStoreV1::open(&database).await,
-        Err(VectorGenerationStoreErrorV1::NonemptyLegacySingleton)
-    ));
-    assert_eq!(
-        database
-            .query_scalar_i64(
-                "prove singleton retained after refusal",
-                "SELECT COUNT(*)
-                 FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name = 'semantic_vector_generation_state_v1'",
-            )
-            .await
-            .expect("singleton schema count"),
-        1
+            .expect("schema count"),
+        catalog_before
     );
     assert_eq!(
         database
             .query_scalar_i64(
-                "prove cutover rolled back",
-                "SELECT COUNT(*)
-                 FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name = 'semantic_vector_active_generation_v1'",
+                "prove open did not initialize vector pointer",
+                "SELECT COUNT(*) FROM semantic_vector_active_generation_v1",
             )
             .await
-            .expect("active schema count"),
+            .expect("pointer count"),
         0
     );
 }
@@ -249,9 +163,21 @@ async fn reopening_rejects_an_active_pointer_bound_to_another_shard() {
     let temporary = tempfile::tempdir().expect("temporary project database");
     let (database, _authority) =
         open_project_database(&temporary, "vector active pointer identity").await;
-    DatabaseVectorGenerationStoreV1::open(&database)
+    let store = DatabaseVectorGenerationStoreV1::open(&database)
         .await
         .expect("initial vector store");
+    let embedding = admitted_embedding();
+    let source = id("code-generation.pointer-identity");
+    store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: source,
+            source_manifest_digest: manifest_digest('a'),
+            expected_chunk_ids: Vec::new().into(),
+            base_generation: None,
+        })
+        .await
+        .expect("initialize active pointer");
     database
         .execute_write_engine(
             "corrupt vector active pointer identity",
@@ -264,7 +190,11 @@ async fn reopening_rejects_an_active_pointer_bound_to_another_shard() {
         .expect("foreign shard fixture");
 
     assert!(matches!(
-        DatabaseVectorGenerationStoreV1::open(&database).await,
+        DatabaseVectorGenerationStoreV1::open(&database)
+            .await
+            .expect("read-only open")
+            .active_generation_id()
+            .await,
         Err(VectorGenerationStoreErrorV1::ShardIdentityMismatch)
     ));
 }
@@ -368,6 +298,13 @@ async fn native_evaluation_state_is_sqlite_backed_and_never_becomes_authoritativ
         Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
             .await
             .expect("database");
+    database
+        .execute_write_batch(
+            "install final semantic vector test schema",
+            SEMANTIC_VECTOR_GRAPH_SCHEMA_V2,
+        )
+        .await
+        .expect("final semantic vector schema");
 
     let evaluation =
         DatabaseVectorEvaluationStoreV1::open(&database, "semantic-native-evaluation:test")

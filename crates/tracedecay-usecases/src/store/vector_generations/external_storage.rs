@@ -170,11 +170,13 @@ fn fill_from_sealed(
 }
 
 /// Fill one standalone published generation read outside the writer lane.
-async fn hydrate_generation_payloads(
+async fn hydrate_generation_payloads_with_control(
     database: &Database,
     payload_table: &str,
     generation: &mut PublishedVectorGenerationV1,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), VectorGenerationStoreErrorV1> {
+    ensure_vector_read_not_cancelled(is_cancelled)?;
     let wanted = generation
         .vectors
         .values()
@@ -184,8 +186,10 @@ async fn hydrate_generation_payloads(
     if wanted.is_empty() {
         return Ok(());
     }
-    let payloads = read_vector_payloads(database, payload_table, &wanted).await?;
+    let payloads =
+        read_vector_payloads_with_control(database, payload_table, &wanted, is_cancelled).await?;
     for vector in generation.vectors.values_mut() {
+        ensure_vector_read_not_cancelled(is_cancelled)?;
         if !vector.values.is_empty() {
             continue;
         }
@@ -205,10 +209,20 @@ async fn read_vector_payloads(
     payload_table: &str,
     wanted: &BTreeSet<ContentDigest>,
 ) -> Result<BTreeMap<ContentDigest, Vec<f32>>, VectorGenerationStoreErrorV1> {
+    read_vector_payloads_with_control(database, payload_table, wanted, &|| false).await
+}
+
+async fn read_vector_payloads_with_control(
+    database: &Database,
+    payload_table: &str,
+    wanted: &BTreeSet<ContentDigest>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<BTreeMap<ContentDigest, Vec<f32>>, VectorGenerationStoreErrorV1> {
     let connection = database.engine_conn();
     let addresses = wanted.iter().cloned().collect::<Vec<_>>();
     let mut payloads = BTreeMap::new();
     for group in addresses.chunks(VECTOR_PAYLOAD_STATEMENT_ROWS) {
+        ensure_vector_read_not_cancelled(is_cancelled)?;
         let placeholders = (1..=group.len())
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
@@ -232,6 +246,7 @@ async fn read_vector_payloads(
             .await
             .map_err(storage_error)?;
         while let Some(row) = rows.next().await.map_err(storage_error)? {
+            ensure_vector_read_not_cancelled(is_cancelled)?;
             let output_digest =
                 ContentDigest::try_from(row.get::<String>(0).map_err(storage_error)?)
                     .map_err(storage_error)?;
@@ -398,11 +413,13 @@ async fn hydrate_external_state(
 }
 
 /// Fill one standalone published generation read outside the writer lane.
-async fn hydrate_generation_slices(
+async fn hydrate_generation_slices_with_control(
     database: &Database,
     slice_table: &str,
     generation: &mut PublishedVectorGenerationV1,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), VectorGenerationStoreErrorV1> {
+    ensure_vector_read_not_cancelled(is_cancelled)?;
     let mut wanted = BTreeSet::new();
     generation.visit_external_slots(&mut |slot| {
         if let Some(address) = slot.address() {
@@ -411,7 +428,9 @@ async fn hydrate_generation_slices(
         Ok(())
     })?;
     for address in &wanted {
-        let slices = read_state_slices(database, slice_table, address).await?;
+        ensure_vector_read_not_cancelled(is_cancelled)?;
+        let slices =
+            read_state_slices_with_control(database, slice_table, address, is_cancelled).await?;
         generation.visit_external_slots(&mut |slot| {
             if slot.address() == Some(address) {
                 slot.fill(&slices)?;
@@ -433,6 +452,15 @@ async fn read_state_slices(
     slice_table: &str,
     address: &ContentDigest,
 ) -> Result<Vec<Vec<u8>>, VectorGenerationStoreErrorV1> {
+    read_state_slices_with_control(database, slice_table, address, &|| false).await
+}
+
+async fn read_state_slices_with_control(
+    database: &Database,
+    slice_table: &str,
+    address: &ContentDigest,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Vec<Vec<u8>>, VectorGenerationStoreErrorV1> {
     let connection = database.engine_conn();
     let sql = format!(
         "SELECT ordinal, payload
@@ -442,6 +470,7 @@ async fn read_state_slices(
     );
     let mut slices = Vec::new();
     loop {
+        ensure_vector_read_not_cancelled(is_cancelled)?;
         let start = i64::try_from(slices.len()).map_err(storage_error)?;
         let end = start
             .checked_add(i64::try_from(VECTOR_STATE_SLICE_READ_ROWS).map_err(storage_error)?)
@@ -456,6 +485,7 @@ async fn read_state_slices(
             .map_err(storage_error)?;
         let mut read = 0_usize;
         while let Some(row) = rows.next().await.map_err(storage_error)? {
+            ensure_vector_read_not_cancelled(is_cancelled)?;
             let ordinal = row.get::<i64>(0).map_err(storage_error)?;
             if usize::try_from(ordinal).ok() != Some(slices.len()) {
                 return Err(VectorGenerationStoreErrorV1::Storage(format!(
@@ -476,6 +506,16 @@ async fn read_state_slices(
         )));
     }
     Ok(slices)
+}
+
+fn ensure_vector_read_not_cancelled(
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    if is_cancelled() {
+        Err(VectorGenerationStoreErrorV1::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 /// Persist sealed collection slices inside the caller's transaction.

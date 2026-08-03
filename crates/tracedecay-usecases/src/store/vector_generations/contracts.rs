@@ -2,15 +2,11 @@ const VECTOR_GENERATION_BUILD_DIGEST_DOMAIN: &str = "tracedecay.vector-generatio
 const VECTOR_GENERATION_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.vector-generation-manifest.v1";
 const PHYSICAL_VECTOR_REUSE_DIGEST_DOMAIN: &str = "tracedecay.physical-vector-reuse.v1";
 const VECTOR_GENERATION_STATE_OPERATION: &str = "persist semantic vector generations";
-#[cfg(test)]
-const VECTOR_GENERATION_STATE_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS semantic_vector_generation_state_v1 (
-    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    revision INTEGER NOT NULL CHECK (revision >= 0),
-    state_json TEXT NOT NULL
-) STRICT;
-";
-const VECTOR_GENERATION_RECORD_SCHEMA_V1: &str = "
+/// Final project-graph schema for semantic-vector generation publication.
+///
+/// This fragment belongs in the canonical store installer. Runtime vector
+/// constructors never execute DDL and do not recognize predecessor schemas.
+pub const SEMANTIC_VECTOR_GRAPH_SCHEMA_V2: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_generation_v1 (
     build_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL CHECK (revision >= 0),
@@ -50,47 +46,16 @@ CREATE TABLE IF NOT EXISTS semantic_vector_orphan_resource_v1 (
     address TEXT NOT NULL,
     PRIMARY KEY (kind, address)
 ) STRICT;
-";
-/// Row-per-vector float storage for the production generation state.
-///
-/// The payload is content-addressed by `output_digest`, which the projector
-/// derives from `(projection_key, chunk_id, chunk_digest, values)`. Two rows
-/// with the same address therefore hold the same floats, and
-/// [`ProjectedChunkVectorV1::validate`] re-derives that address on every load,
-/// so a mis-bound payload fails closed instead of being served.
-const VECTOR_PAYLOAD_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_payload_v1 (
     output_digest TEXT PRIMARY KEY,
     dimensions INTEGER NOT NULL CHECK (dimensions > 0),
     payload BLOB NOT NULL
 ) STRICT;
-";
-/// The evaluation lane keeps a separate payload table so that reclaiming
-/// unreferenced production payloads can never delete evaluation rows.
-const VECTOR_EVALUATION_PAYLOAD_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_payload_v1 (
     output_digest TEXT PRIMARY KEY,
     dimensions INTEGER NOT NULL CHECK (dimensions > 0),
     payload BLOB NOT NULL
 ) STRICT;
-";
-/// Rows bound per statement when writing or reading payloads. Keeps every
-/// statement inside the runtime's bound-parameter and materialization limits
-/// so a whole-corpus generation moves as a sequence of bounded pages.
-const VECTOR_PAYLOAD_STATEMENT_ROWS: usize = 256;
-const VECTOR_PAYLOAD_TABLE_V1: &str = "semantic_vector_payload_v1";
-const VECTOR_EVALUATION_PAYLOAD_TABLE_V1: &str = "semantic_vector_evaluation_payload_v1";
-/// Slice storage for the state document's corpus-sized metadata.
-///
-/// Every collection that scales with the corpus — per-vector row metadata,
-/// per-chunk projection receipts, the plan's expected chunk set, the staged
-/// committed-effect set, and the prepared batches — is encoded once, addressed
-/// by the SHA-256 of those bytes, and written as bounded slices. The state
-/// document keeps only the address, so it stays generation-level regardless of
-/// corpus size. Content addressing also means a staged collection and the
-/// published collection it becomes share one stored copy, so publication
-/// writes no new slices.
-const VECTOR_STATE_SLICE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_state_slice_v1 (
     collection_digest TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
@@ -98,11 +63,6 @@ CREATE TABLE IF NOT EXISTS semantic_vector_state_slice_v1 (
 ) STRICT;
 CREATE UNIQUE INDEX IF NOT EXISTS semantic_vector_state_slice_v1_address
     ON semantic_vector_state_slice_v1 (collection_digest, ordinal);
-";
-/// The evaluation lane keeps a separate slice table for the same reason it
-/// keeps a separate payload table: reclaiming unreferenced production slices
-/// can never delete evaluation rows.
-const VECTOR_EVALUATION_STATE_SLICE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_slice_v1 (
     collection_digest TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
@@ -110,28 +70,26 @@ CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_slice_v1 (
 ) STRICT;
 CREATE UNIQUE INDEX IF NOT EXISTS semantic_vector_evaluation_state_slice_v1_address
     ON semantic_vector_evaluation_state_slice_v1 (collection_digest, ordinal);
-";
-const VECTOR_STATE_SLICE_TABLE_V1: &str = "semantic_vector_state_slice_v1";
-const VECTOR_EVALUATION_STATE_SLICE_TABLE_V1: &str = "semantic_vector_evaluation_state_slice_v1";
-/// Bytes per stored slice. One statement carries
-/// `VECTOR_STATE_SLICE_STATEMENT_ROWS` of these, so the widest statement this
-/// store issues stays near a megabyte no matter how large the collection is.
-const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
-/// Slices bound per statement.
-const VECTOR_STATE_SLICE_STATEMENT_ROWS: usize = 32;
-/// Slices read per statement. A single query may materialize neither more rows
-/// nor more bytes than the runtime allows, and a whole-corpus collection
-/// exceeds both, so reads page through the ordinals in bounded groups.
-const VECTOR_STATE_SLICE_READ_ROWS: usize = 128;
-/// Addresses resolved per read statement.
-const VECTOR_STATE_ADDRESS_STATEMENT_ROWS: usize = 64;
-const VECTOR_EVALUATION_STATE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_v1 (
     evaluation_id TEXT PRIMARY KEY,
     revision INTEGER NOT NULL CHECK (revision >= 0),
     state_json TEXT NOT NULL
 ) STRICT;
 ";
+/// Rows bound per statement when writing or reading payloads.
+const VECTOR_PAYLOAD_STATEMENT_ROWS: usize = 256;
+const VECTOR_PAYLOAD_TABLE_V1: &str = "semantic_vector_payload_v1";
+const VECTOR_EVALUATION_PAYLOAD_TABLE_V1: &str = "semantic_vector_evaluation_payload_v1";
+const VECTOR_STATE_SLICE_TABLE_V1: &str = "semantic_vector_state_slice_v1";
+const VECTOR_EVALUATION_STATE_SLICE_TABLE_V1: &str = "semantic_vector_evaluation_state_slice_v1";
+/// Bytes per stored slice.
+const VECTOR_STATE_SLICE_BYTES: usize = 32 * 1024;
+/// Slices bound per statement.
+const VECTOR_STATE_SLICE_STATEMENT_ROWS: usize = 32;
+/// Slices read per statement.
+const VECTOR_STATE_SLICE_READ_ROWS: usize = 128;
+/// Addresses resolved per read statement.
+const VECTOR_STATE_ADDRESS_STATEMENT_ROWS: usize = 64;
 const MAX_STATE_CAS_RETRIES: usize = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]

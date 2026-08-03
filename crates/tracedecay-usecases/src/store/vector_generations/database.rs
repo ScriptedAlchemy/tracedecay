@@ -1,124 +1,5 @@
 impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     pub async fn open(database: &'database Database) -> Result<Self, VectorGenerationStoreErrorV1> {
-        let transaction = database
-            .begin_write_transaction(VECTOR_GENERATION_STATE_OPERATION)
-            .await
-            .map_err(storage_error)?;
-        let mut legacy_schema = transaction
-            .query_engine(
-                "SELECT 1
-                 FROM sqlite_schema
-                 WHERE type = 'table'
-                   AND name = 'semantic_vector_generation_state_v1'",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-        let has_legacy_singleton = legacy_schema
-            .next()
-            .await
-            .map_err(storage_error)?
-            .is_some();
-        drop(legacy_schema);
-        if has_legacy_singleton {
-            let mut rows = transaction
-                .query_engine(
-                    "SELECT singleton, revision, state_json
-                     FROM semantic_vector_generation_state_v1
-                     ORDER BY singleton",
-                    (),
-                )
-                .await
-                .map_err(storage_error)?;
-            let row = rows
-                .next()
-                .await
-                .map_err(storage_error)?
-                .ok_or(VectorGenerationStoreErrorV1::NonemptyLegacySingleton)?;
-            let singleton = row.get::<i64>(0).map_err(storage_error)?;
-            let revision = row.get::<i64>(1).map_err(storage_error)?;
-            let state_json = row.get::<String>(2).map_err(storage_error)?;
-            let extra_row = rows.next().await.map_err(storage_error)?.is_some();
-            drop(rows);
-            let state: serde_json::Value =
-                serde_json::from_str(&state_json).map_err(|_| {
-                    VectorGenerationStoreErrorV1::NonemptyLegacySingleton
-                })?;
-            let exact_empty = serde_json::json!({
-                "staged": {},
-                "published": {
-                    "generations": {},
-                    "active_generation": null,
-                    "legacy_migration_receipts": {},
-                    "physical_vector_bindings": {}
-                }
-            });
-            if singleton != 1 || revision != 0 || extra_row || state != exact_empty {
-                transaction.rollback().await.map_err(storage_error)?;
-                return Err(VectorGenerationStoreErrorV1::NonemptyLegacySingleton);
-            }
-        }
-
-        transaction
-            .execute_batch_engine(VECTOR_GENERATION_RECORD_SCHEMA_V1)
-            .await
-            .map_err(storage_error)?;
-        transaction
-            .execute_batch_engine(VECTOR_PAYLOAD_SCHEMA_V1)
-            .await
-            .map_err(storage_error)?;
-        transaction
-            .execute_batch_engine(VECTOR_STATE_SLICE_SCHEMA_V1)
-            .await
-            .map_err(storage_error)?;
-        let shard_id_json = serde_json::to_string(
-            &database.retained_runtime().binding().shard_id,
-        )
-        .map_err(storage_error)?;
-        transaction
-            .execute_engine(
-                "INSERT OR IGNORE INTO semantic_vector_active_generation_v1 (
-                    singleton, revision, shard_id_json, generation_id
-                 ) VALUES (1, 0, ?1, NULL)",
-                params![shard_id_json],
-            )
-            .await
-            .map_err(storage_error)?;
-        let mut active_rows = transaction
-            .query_engine(
-                "SELECT shard_id_json
-                 FROM semantic_vector_active_generation_v1
-                 WHERE singleton = 1",
-                (),
-            )
-            .await
-            .map_err(storage_error)?;
-        let active_shard_json = active_rows
-            .next()
-            .await
-            .map_err(storage_error)?
-            .ok_or_else(|| {
-                VectorGenerationStoreErrorV1::Storage(
-                    "vector generation active pointer is missing".to_owned(),
-                )
-            })?
-            .get::<String>(0)
-            .map_err(storage_error)?;
-        drop(active_rows);
-        let active_shard: tracedecay_store::StoreShardIdV1 =
-            serde_json::from_str(&active_shard_json)
-                .map_err(|_| VectorGenerationStoreErrorV1::ShardIdentityMismatch)?;
-        if &active_shard != &database.retained_runtime().binding().shard_id {
-            transaction.rollback().await.map_err(storage_error)?;
-            return Err(VectorGenerationStoreErrorV1::ShardIdentityMismatch);
-        }
-        if has_legacy_singleton {
-            transaction
-                .execute_batch_engine("DROP TABLE semantic_vector_generation_state_v1;")
-                .await
-                .map_err(storage_error)?;
-        }
-        transaction.commit().await.map_err(storage_error)?;
         Ok(Self { database })
     }
 
@@ -130,11 +11,29 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         source_generation: &CodeGenerationId,
         source_manifest_digest: &ManifestDigest,
     ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
-        Ok(Self::read_active_generation_snapshot_for(
+        Self::read_active_generation_for_with_control(
             database,
             embedding_key,
             source_generation,
             source_manifest_digest,
+            &|| false,
+        )
+        .await
+    }
+
+    pub(crate) async fn read_active_generation_for_with_control(
+        database: &Database,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        is_cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        Ok(Self::read_active_generation_snapshot_for_with_control(
+            database,
+            embedding_key,
+            source_generation,
+            source_manifest_digest,
+            is_cancelled,
         )
         .await?
         .map(ActiveVectorGenerationSnapshotV1::into_generation))
@@ -153,13 +52,22 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
     async fn read_active_generation_snapshot(
         database: &Database,
     ) -> Result<Option<ActiveVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        Self::read_active_generation_snapshot_with_control(database, &|| false).await
+    }
+
+    async fn read_active_generation_snapshot_with_control(
+        database: &Database,
+        is_cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<ActiveVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        ensure_vector_read_not_cancelled(is_cancelled)?;
         let pointer = active_generation_pointer(database).await?;
         let Some(generation_id) = pointer.generation_id else {
             return Ok(None);
         };
-        let generation = load_published_generation_record(database, &generation_id)
-            .await?
-            .ok_or_else(|| {
+        let generation =
+            load_published_generation_record_with_control(database, &generation_id, is_cancelled)
+                .await?
+                .ok_or_else(|| {
                 VectorGenerationStoreErrorV1::Storage(
                     "active vector generation record is missing".to_owned(),
                 )
@@ -176,7 +84,26 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         source_generation: &CodeGenerationId,
         source_manifest_digest: &ManifestDigest,
     ) -> Result<Option<ActiveVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
-        let Some(snapshot) = Self::read_active_generation_snapshot(database).await? else {
+        Self::read_active_generation_snapshot_for_with_control(
+            database,
+            embedding_key,
+            source_generation,
+            source_manifest_digest,
+            &|| false,
+        )
+        .await
+    }
+
+    async fn read_active_generation_snapshot_for_with_control(
+        database: &Database,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+        is_cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Option<ActiveVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        let Some(snapshot) =
+            Self::read_active_generation_snapshot_with_control(database, is_cancelled).await?
+        else {
             return Ok(None);
         };
         if snapshot.generation.embedding_key() != embedding_key
@@ -246,6 +173,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
             .begin_write_transaction(VECTOR_GENERATION_STATE_OPERATION)
             .await
             .map_err(storage_error)?;
+        initialize_active_generation_pointer(&transaction, self.database).await?;
         write_state_slices(&transaction, VECTOR_STATE_SLICE_TABLE_V1, &pending_slices).await?;
         write_generation_resource_owners(
             &transaction,

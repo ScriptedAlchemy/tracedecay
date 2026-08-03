@@ -13,27 +13,6 @@ impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
                 "semantic evaluation identity is invalid".to_owned(),
             ));
         }
-        database
-            .execute_write_batch(
-                VECTOR_GENERATION_STATE_OPERATION,
-                VECTOR_EVALUATION_STATE_SCHEMA_V1,
-            )
-            .await
-            .map_err(storage_error)?;
-        database
-            .execute_write_batch(
-                VECTOR_GENERATION_STATE_OPERATION,
-                VECTOR_EVALUATION_PAYLOAD_SCHEMA_V1,
-            )
-            .await
-            .map_err(storage_error)?;
-        database
-            .execute_write_batch(
-                VECTOR_GENERATION_STATE_OPERATION,
-                VECTOR_EVALUATION_STATE_SLICE_SCHEMA_V1,
-            )
-            .await
-            .map_err(storage_error)?;
         let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
             .map_err(storage_error)?;
         let inserted = database

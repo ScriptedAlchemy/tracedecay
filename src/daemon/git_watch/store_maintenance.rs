@@ -197,22 +197,12 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention as run_retention,
     };
-    use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
-
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
     // No published generation means nothing has been sealed for this project.
     if !store_root.join("active-code-generation-v1.json").is_file() {
         return true;
     }
-
-    let _store = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
-        Ok(store) => store,
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_generation_store_unavailable");
-            return false;
-        }
-    };
 
     // Hold the canonical graph writer lane from the pin read through durable
     // filesystem publication. A vector-generation writer cannot publish a new

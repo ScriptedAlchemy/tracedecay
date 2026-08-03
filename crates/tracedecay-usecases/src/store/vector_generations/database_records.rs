@@ -10,6 +10,52 @@ struct ActiveGenerationPointerV1 {
     generation_id: Option<VectorGenerationIdV1>,
 }
 
+async fn initialize_active_generation_pointer(
+    transaction: &tracedecay_runtime_core::db::DatabaseWriteTransaction<'_>,
+    database: &Database,
+) -> Result<(), VectorGenerationStoreErrorV1> {
+    let shard_id_json =
+        serde_json::to_string(&database.retained_runtime().binding().shard_id)
+            .map_err(storage_error)?;
+    transaction
+        .execute_engine(
+            "INSERT OR IGNORE INTO semantic_vector_active_generation_v1 (
+                singleton, revision, shard_id_json, generation_id
+             ) VALUES (1, 0, ?1, NULL)",
+            params![shard_id_json],
+        )
+        .await
+        .map_err(storage_error)?;
+    let mut rows = transaction
+        .query_engine(
+            "SELECT shard_id_json
+             FROM semantic_vector_active_generation_v1
+             WHERE singleton = 1",
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+    let actual = rows
+        .next()
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Storage(
+                "vector generation active pointer is missing".to_owned(),
+            )
+        })?
+        .get::<String>(0)
+        .map_err(storage_error)?;
+    drop(rows);
+    let actual: tracedecay_store::StoreShardIdV1 =
+        serde_json::from_str(&actual)
+            .map_err(|_| VectorGenerationStoreErrorV1::ShardIdentityMismatch)?;
+    if &actual != &database.retained_runtime().binding().shard_id {
+        return Err(VectorGenerationStoreErrorV1::ShardIdentityMismatch);
+    }
+    Ok(())
+}
+
 async fn load_staged_generation_record(
     database: &Database,
     build_id: &VectorGenerationBuildIdV1,
@@ -60,6 +106,15 @@ async fn load_published_generation_record(
     database: &Database,
     generation_id: &VectorGenerationIdV1,
 ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+    load_published_generation_record_with_control(database, generation_id, &|| false).await
+}
+
+async fn load_published_generation_record_with_control(
+    database: &Database,
+    generation_id: &VectorGenerationIdV1,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+    ensure_vector_read_not_cancelled(is_cancelled)?;
     let mut rows = database
         .engine_conn()
         .query(
@@ -78,8 +133,21 @@ async fn load_published_generation_record(
     drop(rows);
     let mut generation: PublishedVectorGenerationV1 =
         serde_json::from_str(&record_json).map_err(storage_error)?;
-    hydrate_generation_slices(database, VECTOR_STATE_SLICE_TABLE_V1, &mut generation).await?;
-    hydrate_generation_payloads(database, VECTOR_PAYLOAD_TABLE_V1, &mut generation).await?;
+    hydrate_generation_slices_with_control(
+        database,
+        VECTOR_STATE_SLICE_TABLE_V1,
+        &mut generation,
+        is_cancelled,
+    )
+    .await?;
+    hydrate_generation_payloads_with_control(
+        database,
+        VECTOR_PAYLOAD_TABLE_V1,
+        &mut generation,
+        is_cancelled,
+    )
+    .await?;
+    ensure_vector_read_not_cancelled(is_cancelled)?;
     generation.validate_persisted()?;
     if generation.generation_id() != generation_id {
         return Err(VectorGenerationStoreErrorV1::Storage(
@@ -102,15 +170,12 @@ async fn active_generation_pointer(
         )
         .await
         .map_err(storage_error)?;
-    let row = rows
-        .next()
-        .await
-        .map_err(storage_error)?
-        .ok_or_else(|| {
-            VectorGenerationStoreErrorV1::Storage(
-                "vector generation active pointer is missing".to_owned(),
-            )
-        })?;
+    let Some(row) = rows.next().await.map_err(storage_error)? else {
+        return Ok(ActiveGenerationPointerV1 {
+            revision: 0,
+            generation_id: None,
+        });
+    };
     let revision = row.get::<i64>(0).map_err(storage_error)?;
     let shard_json = row.get::<String>(1).map_err(storage_error)?;
     let generation_id = row

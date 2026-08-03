@@ -546,6 +546,59 @@ async fn row_per_vector_storage_preserves_identity_and_resumes_staged_builds() {
 }
 
 #[tokio::test]
+async fn active_generation_hydration_observes_live_cancellation_between_pages() {
+    let temporary = tempfile::tempdir().expect("temporary project database");
+    let (database, _authority) =
+        open_project_database(&temporary, "cancel bounded vector read").await;
+    let embedding = admitted_embedding();
+    let source: CodeGenerationId = id("code-generation.cancel-read");
+    let chunk: CodeSearchChunkId = id("chunk.v1.cancel-read");
+    let prepared = added_prepared(
+        &embedding,
+        &source,
+        &chunk,
+        &content_digest('c'),
+        vec![0.75],
+    );
+    let source_manifest = prepared.request.changes.manifest_digest.clone();
+    let store = DatabaseVectorGenerationStoreV1::open(&database)
+        .await
+        .expect("vector store");
+    let build = store
+        .begin_generation(VectorGenerationPlanV1 {
+            target_projection_key: embedding.projection_key().clone(),
+            source_generation: source.clone(),
+            source_manifest_digest: source_manifest.clone(),
+            expected_chunk_ids: vec![chunk].into(),
+            base_generation: None,
+        })
+        .await
+        .expect("build");
+    store
+        .commit_batch(&build, None, prepared)
+        .await
+        .expect("batch");
+    store
+        .publish_generation(&build, None)
+        .await
+        .expect("publication");
+    let checks = std::sync::atomic::AtomicUsize::new(0);
+
+    assert!(matches!(
+        DatabaseVectorGenerationStoreV1::read_active_generation_for_with_control(
+            &database,
+            &embedding,
+            &source,
+            &source_manifest,
+            &|| checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2,
+        )
+        .await,
+        Err(VectorGenerationStoreErrorV1::Cancelled)
+    ));
+    assert!(checks.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+}
+
+#[tokio::test]
 async fn publication_fault_rolls_back_and_pointer_cas_preserves_snapshot_identity() {
     let temporary = tempfile::tempdir().expect("temporary project database");
     let (database, _authority) =
