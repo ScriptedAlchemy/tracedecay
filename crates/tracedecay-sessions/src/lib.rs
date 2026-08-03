@@ -1,10 +1,10 @@
 //! Provider-neutral session parsing and retrieval primitives.
 
+pub mod compatibility;
 pub mod lcm;
-pub mod message_noise;
-pub mod providers;
+pub mod provider;
 
-pub use providers::{
+pub use provider::{
     EXPECTED_MESSAGE_SEARCH_PROVIDER, MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider,
 };
 
