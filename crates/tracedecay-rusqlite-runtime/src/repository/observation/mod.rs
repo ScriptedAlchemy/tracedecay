@@ -7,8 +7,8 @@
 
 use rusqlite::{OptionalExtension, Savepoint, Transaction, params};
 use tracedecay_domain::{
-    CanonicalObservationIdV1, ObservationCollisionOutcomeV1, ProjectionGenerationId,
-    classify_observation_collision,
+    CanonicalObservationIdV1, ContentDigest, DurableObservationV1, ObservationCollisionOutcomeV1,
+    ProjectionGenerationId, canonical_json_bytes, classify_observation_collision,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
@@ -16,7 +16,7 @@ use tracedecay_store::{
     ProjectionRebuildStateV1, SESSION_MESSAGE_PROJECTOR_VERSION,
 };
 
-use super::support::{decode, encode, invalid};
+use super::support::{encode, invalid};
 
 mod authority;
 mod rows;
@@ -26,7 +26,8 @@ use authority::{
     persist_sanitization_receipt, read_cursor, verify_observation_authority,
 };
 use rows::{
-    OBSERVATION_ROW_PROJECTION, decode_nonnegative, decode_observation_row, encoded_observation_row,
+    OBSERVATION_ROW_PROJECTION, decode_nonnegative, decode_observation_row,
+    encoded_observation_row, read_stored_observation_content,
 };
 
 #[derive(Clone, Default)]
@@ -41,28 +42,15 @@ impl ObservationExecutor {
         let observation = write.observation();
         let source_json = encode(observation.source())?;
         let scope_json = encode(observation.scope())?;
-        let observation_json = encode(observation)?;
         let committed_cursor_json = encode(write.next_cursor())?;
         let receipt = observation.receipt();
         let receipt_json = encode(receipt)?;
         let receipt_id = receipt.receipt().receipt_id().as_str();
         let payload_digest = observation.payload_reference().digest().as_str();
-        let existing = savepoint
-            .query_row(
-                "SELECT payload_digest, receipt_id, observation_json
-                 FROM observations WHERE observation_id = ?1",
-                [observation.observation_id().as_str()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((stored_digest, stored_receipt_id, stored_observation)) = existing {
-            let stored_observation = decode(stored_observation)?;
+        let existing =
+            read_stored_observation_content(savepoint, observation.observation_id().as_str())?;
+        if let Some(existing) = existing {
+            let stored_observation = existing.observation;
             let collision = classify_observation_collision(&stored_observation, observation);
             if collision == ObservationCollisionOutcomeV1::ExactDuplicate
                 && stored_observation.identity() != observation.identity()
@@ -92,8 +80,8 @@ impl ObservationExecutor {
                 return self.execute_cursor_advance(savepoint, &advance);
             }
             if collision != ObservationCollisionOutcomeV1::ExactDuplicate
-                || stored_digest != payload_digest
-                || stored_receipt_id != receipt_id
+                || existing.payload_digest != payload_digest
+                || existing.receipt_id != receipt_id
                 || stored_observation != *observation
             {
                 return Err(invalid("observation identity collision"));
@@ -116,17 +104,18 @@ impl ObservationExecutor {
         }
 
         persist_sanitization_receipt(savepoint, receipt)?;
+        let content_digest = persist_observation_content(savepoint, observation, receipt_id)?;
 
         savepoint.execute(
             "INSERT INTO observations (
                 observation_id, payload_digest, receipt_id,
-                observation_json, committed_cursor_json
+                content_digest, committed_cursor_json
              ) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 observation.observation_id().as_str(),
                 payload_digest,
                 receipt_id,
-                observation_json,
+                content_digest.as_str(),
                 committed_cursor_json,
             ],
         )?;
@@ -368,6 +357,87 @@ impl ObservationExecutor {
             }
         }
     }
+}
+
+fn persist_observation_content(
+    savepoint: &Savepoint<'_>,
+    observation: &DurableObservationV1,
+    receipt_id: &str,
+) -> rusqlite::Result<ContentDigest> {
+    let bytes = canonical_json_bytes(observation).map_err(invalid)?;
+    let content_digest = ContentDigest::of_bytes(&bytes);
+    let byte_count =
+        i64::try_from(bytes.len()).map_err(|_| invalid("observation content is too large"))?;
+    let text = std::str::from_utf8(&bytes).map_err(invalid)?;
+    let char_count = i64::try_from(text.chars().count())
+        .map_err(|_| invalid("observation content character count is too large"))?;
+    savepoint.execute(
+        "INSERT INTO session_content_objects (
+            content_digest, inline_bytes, durable_file_locator, byte_count, char_count
+         ) VALUES (?1, ?2, NULL, ?3, ?4)
+         ON CONFLICT(content_digest) DO NOTHING",
+        params![
+            content_digest.as_str(),
+            bytes.as_slice(),
+            byte_count,
+            char_count
+        ],
+    )?;
+    let stored = savepoint.query_row(
+        "SELECT inline_bytes, durable_file_locator, byte_count, char_count
+         FROM session_content_objects
+         WHERE content_digest = ?1",
+        [content_digest.as_str()],
+        |row| {
+            Ok((
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    if stored != (Some(bytes), None, byte_count, char_count) {
+        return Err(invalid("session content object identity collision"));
+    }
+
+    savepoint.execute(
+        "INSERT INTO session_content_references (
+            owner_kind, owner_id, content_kind, content_digest,
+            sanitization_receipt_id, retrieval_anchor_id
+         ) VALUES ('projection', ?1, 'observation_json', ?2, ?3, NULL)
+         ON CONFLICT(owner_kind, owner_id) DO NOTHING",
+        params![
+            observation.observation_id().as_str(),
+            content_digest.as_str(),
+            receipt_id
+        ],
+    )?;
+    let reference = savepoint.query_row(
+        "SELECT content_kind, content_digest, sanitization_receipt_id, retrieval_anchor_id
+         FROM session_content_references
+         WHERE owner_kind = 'projection' AND owner_id = ?1",
+        [observation.observation_id().as_str()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        },
+    )?;
+    if reference
+        != (
+            "observation_json".to_owned(),
+            content_digest.as_str().to_owned(),
+            Some(receipt_id.to_owned()),
+            None,
+        )
+    {
+        return Err(invalid("session content projection reference collision"));
+    }
+    Ok(content_digest)
 }
 
 #[cfg(test)]
