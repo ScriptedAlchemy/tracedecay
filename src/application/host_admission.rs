@@ -460,6 +460,10 @@ impl HostAdmissionTestRuntimeV1 {
             let raw = database
                 .lcm_load_raw_message(&message.provider, &message.message_id)
                 .await
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "read registered transcript fixture store id".to_owned(),
+                    message: error.to_string(),
+                })?
                 .ok_or_else(|| TraceDecayError::Database {
                     operation: "read registered transcript fixture store id".to_owned(),
                     message: format!(
@@ -548,6 +552,10 @@ impl HostAdmissionTestRuntimeV1 {
             .project_database_for_test()?
             .lcm_load_raw_message(provider, message_id)
             .await
+            .map_err(|error| TraceDecayError::Database {
+                operation: "check registered project LCM raw message".to_owned(),
+                message: error.to_string(),
+            })?
             .is_some())
     }
 

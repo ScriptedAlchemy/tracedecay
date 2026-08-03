@@ -16,6 +16,7 @@ use super::detector_kernel::{
     high_entropy_ranges, visit_json_object_keys, visit_sensitive_json_mut,
 };
 use super::length_prefixed_sha256_hex;
+use super::structured::{StructuredSanitizationLimits, sanitize_structured_payload};
 
 const REDACTED_EXACT: &str = "[TraceDecay redacted: exact credential]";
 const REDACTED_BEARER: &str = "[TraceDecay redacted: bearer token]";
@@ -27,6 +28,9 @@ const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
 const MEMORY_FACT_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.memory-fact.receipt.v1\0";
 pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1";
 const CODE_SOURCE_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.code-source.receipt.v1\0";
+pub const LCM_PAYLOAD_SANITIZER_VERSION_V1: &str = "privacy.lcm-payload.v1";
+const LCM_PAYLOAD_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.lcm-payload.receipt.v1\0";
+const MAX_LCM_PAYLOAD_BYTES_V1: usize = 64 * 1024 * 1024;
 const MAX_FINDING_LOCATION_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -370,6 +374,8 @@ fn is_safe_structural_location(location: &str) -> bool {
 pub enum DetectionError {
     #[error("privacy detector initialization failed")]
     Initialization,
+    #[error("privacy detector input exceeds the bounded scan limit")]
+    ScanLimitExceeded,
     #[error("privacy sanitizer receipt construction failed")]
     Receipt,
 }
@@ -400,6 +406,43 @@ impl CodeSourceSanitizationV1 {
     pub fn into_parts(self) -> (Vec<u8>, SanitizationReceiptV1) {
         (self.sanitized_bytes, self.receipt)
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct LcmPayloadSanitizationV1 {
+    sanitized_text: String,
+    receipt: SanitizationReceiptV1,
+    findings: Vec<SanitizationFindingV1>,
+}
+
+impl LcmPayloadSanitizationV1 {
+    pub fn sanitized_text(&self) -> &str {
+        &self.sanitized_text
+    }
+
+    pub fn receipt(&self) -> &SanitizationReceiptV1 {
+        &self.receipt
+    }
+
+    pub fn findings(&self) -> &[SanitizationFindingV1] {
+        &self.findings
+    }
+
+    pub fn into_parts(self) -> (String, SanitizationReceiptV1, Vec<SanitizationFindingV1>) {
+        (self.sanitized_text, self.receipt, self.findings)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum SanitizedPayloadVerificationError {
+    #[error("sanitized payload receipt has a stale sanitizer revision")]
+    StaleRevision,
+    #[error("sanitized payload receipt has a non-durable disposition")]
+    NonDurableDisposition,
+    #[error("sanitized payload does not match its exact receipt reference")]
+    PayloadMismatch,
+    #[error("sanitized payload cannot be canonically encoded")]
+    CanonicalEncoding,
 }
 
 pub(crate) struct DetectionResult {
@@ -537,16 +580,127 @@ pub fn sanitize_code_source_bytes(raw: &[u8]) -> Result<CodeSourceSanitizationV1
     } else {
         SensitivityV1::Secret
     };
-    let payload_reference = PayloadReferenceV1::for_payload(&Value::String(sanitized.clone()))
+    let receipt = issue_text_receipt(
+        raw,
+        &sanitized,
+        disposition,
+        sensitivity,
+        CODE_SOURCE_SANITIZER_VERSION_V1,
+        "privacy.code-source.v1.",
+        CODE_SOURCE_RECEIPT_DOMAIN_V1,
+    )?;
+    Ok(CodeSourceSanitizationV1 {
+        sanitized_bytes: sanitized.into_bytes(),
+        receipt,
+    })
+}
+
+pub fn sanitize_lcm_payload_text(raw: &str) -> Result<LcmPayloadSanitizationV1, DetectionError> {
+    let (sanitized_text, findings) = detect_lcm_payload(raw)?;
+    bind_lcm_payload(raw, sanitized_text, findings)
+}
+
+pub fn bind_sanitized_lcm_payload_text(
+    raw: &str,
+    candidate: &str,
+) -> Result<LcmPayloadSanitizationV1, DetectionError> {
+    let (sanitized_text, findings) = detect_lcm_payload(candidate)?;
+    bind_lcm_payload(raw, sanitized_text, findings)
+}
+
+fn bind_lcm_payload(
+    raw: &str,
+    sanitized_text: String,
+    findings: Vec<SanitizationFindingV1>,
+) -> Result<LcmPayloadSanitizationV1, DetectionError> {
+    let (disposition, sensitivity) = if findings.is_empty() {
+        (
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+        )
+    } else {
+        (SanitizerDispositionV1::Redacted, SensitivityV1::Secret)
+    };
+    let receipt = issue_text_receipt(
+        raw.as_bytes(),
+        &sanitized_text,
+        disposition,
+        sensitivity,
+        LCM_PAYLOAD_SANITIZER_VERSION_V1,
+        "privacy.lcm-payload.v1.",
+        LCM_PAYLOAD_RECEIPT_DOMAIN_V1,
+    )?;
+    Ok(LcmPayloadSanitizationV1 {
+        sanitized_text,
+        receipt,
+        findings,
+    })
+}
+
+fn detect_lcm_payload(raw: &str) -> Result<(String, Vec<SanitizationFindingV1>), DetectionError> {
+    if raw.len() > MAX_LCM_PAYLOAD_BYTES_V1 {
+        return Err(DetectionError::ScanLimitExceeded);
+    }
+    let trimmed = raw.trim_start();
+    let json_container = trimmed.starts_with('{')
+        || trimmed
+            .strip_prefix('[')
+            .and_then(|rest| rest.trim_start().chars().next())
+            .is_some_and(|next| {
+                matches!(
+                    next,
+                    '"' | '{' | '[' | ']' | '-' | '0'..='9' | 't' | 'f' | 'n'
+                )
+            });
+    if json_container {
+        let limits = StructuredSanitizationLimits::new(
+            MAX_LCM_PAYLOAD_BYTES_V1,
+            MAX_LCM_PAYLOAD_BYTES_V1,
+            64,
+            1_000_000,
+        )
         .map_err(|_| DetectionError::Receipt)?;
-    let sanitizer_version = ComponentVersion::new(CODE_SOURCE_SANITIZER_VERSION_V1)
+        let sanitized = sanitize_structured_payload(raw.as_bytes(), limits)
+            .map_err(|_| DetectionError::Receipt)?;
+        if !sanitized.was_structurally_parsed() {
+            return Err(DetectionError::Receipt);
+        }
+        let text =
+            serde_json::to_string(sanitized.payload()).map_err(|_| DetectionError::Receipt)?;
+        return Ok((text, sanitized.findings().to_vec()));
+    }
+
+    let detected = redact_sensitive_values(Value::String(raw.to_owned()), &BTreeSet::new())?;
+    if !detected.quarantine_findings.is_empty() {
+        return Err(DetectionError::Receipt);
+    }
+    let text = detected
+        .payload
+        .as_str()
+        .ok_or(DetectionError::Receipt)?
+        .to_owned();
+    Ok((text, detected.findings))
+}
+
+fn issue_text_receipt(
+    raw: &[u8],
+    sanitized: &str,
+    disposition: SanitizerDispositionV1,
+    sensitivity: SensitivityV1,
+    sanitizer_revision: &str,
+    receipt_id_prefix: &str,
+    receipt_domain: &[u8],
+) -> Result<SanitizationReceiptV1, DetectionError> {
+    let payload_reference = PayloadReferenceV1::for_payload(&Value::String(sanitized.to_owned()))
         .map_err(|_| DetectionError::Receipt)?;
+    let sanitizer_version =
+        ComponentVersion::new(sanitizer_revision).map_err(|_| DetectionError::Receipt)?;
     let raw_digest = Sha256::digest(raw);
     let payload_len = payload_reference.byte_len().to_be_bytes();
     let receipt_id = SanitizationReceiptId::new(format!(
-        "privacy.code-source.v1.{}",
+        "{receipt_id_prefix}{}",
         length_prefixed_sha256_hex(&[
-            CODE_SOURCE_RECEIPT_DOMAIN_V1,
+            receipt_domain,
             sanitizer_version.as_str().as_bytes(),
             disposition.as_str().as_bytes(),
             sensitivity.as_str().as_bytes(),
@@ -558,17 +712,44 @@ pub fn sanitize_code_source_bytes(raw: &[u8]) -> Result<CodeSourceSanitizationV1
     .map_err(|_| DetectionError::Receipt)?;
     let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
         .map_err(|_| DetectionError::Receipt)?;
-    let receipt = SanitizationReceiptV1::new(
+    SanitizationReceiptV1::new(
         receipt_ref,
         disposition,
         sensitivity,
         Some(payload_reference),
     )
-    .map_err(|_| DetectionError::Receipt)?;
-    Ok(CodeSourceSanitizationV1 {
-        sanitized_bytes: sanitized.into_bytes(),
-        receipt,
-    })
+    .map_err(|_| DetectionError::Receipt)
+}
+
+pub fn verify_sanitized_json_payload(
+    payload: &Value,
+    receipt: &SanitizationReceiptV1,
+    expected_revision: &ComponentVersion,
+) -> Result<(), SanitizedPayloadVerificationError> {
+    if receipt.receipt().sanitizer_version() != expected_revision {
+        return Err(SanitizedPayloadVerificationError::StaleRevision);
+    }
+    if !matches!(
+        receipt.disposition(),
+        SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
+    ) {
+        return Err(SanitizedPayloadVerificationError::NonDurableDisposition);
+    }
+    let payload_reference = PayloadReferenceV1::for_payload(payload)
+        .map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)?;
+    if receipt.payload() != Some(&payload_reference) {
+        return Err(SanitizedPayloadVerificationError::PayloadMismatch);
+    }
+    Ok(())
+}
+
+pub fn serialize_verified_json_payload(
+    payload: &Value,
+    receipt: &SanitizationReceiptV1,
+    expected_revision: &ComponentVersion,
+) -> Result<Vec<u8>, SanitizedPayloadVerificationError> {
+    verify_sanitized_json_payload(payload, receipt, expected_revision)?;
+    serde_json::to_vec(payload).map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)
 }
 
 /// Sanitizes one structured legacy fact payload and binds durable output to
@@ -654,19 +835,58 @@ fn redact_text(
     findings: &mut Vec<SanitizationFindingV1>,
     action: SanitizationActionV1,
 ) -> bool {
-    let mut changed = false;
+    let mut candidates = Vec::new();
     for pattern in patterns {
-        let ranges = pattern.ranges(text);
-        if !ranges.is_empty() {
-            let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
-            for range in ranges.into_iter().rev() {
-                text.replace_range(range, replacement);
+        let (detector, confidence, replacement) = pattern_metadata(pattern.kind());
+        let priority = match pattern.kind() {
+            CredentialPatternKind::PrivateKey => 4,
+            CredentialPatternKind::BearerToken | CredentialPatternKind::CredentialAssignment => 3,
+            CredentialPatternKind::KnownCredential => 2,
+        };
+        candidates.extend(
+            pattern
+                .ranges(text)
+                .into_iter()
+                .map(|range| (range, detector, confidence, replacement, priority)),
+        );
+    }
+    candidates.sort_by(|left, right| {
+        left.0
+            .start
+            .cmp(&right.0.start)
+            .then_with(|| right.4.cmp(&left.4))
+            .then_with(|| right.0.end.cmp(&left.0.end))
+    });
+
+    let mut replacements: Vec<(
+        std::ops::Range<usize>,
+        PrivacyDetectorV1,
+        DetectionConfidenceV1,
+        &'static str,
+        u8,
+    )> = Vec::new();
+    for candidate in candidates {
+        if let Some(previous) = replacements.last_mut()
+            && candidate.0.start < previous.0.end
+        {
+            previous.0.end = previous.0.end.max(candidate.0.end);
+            if candidate.4 > previous.4 {
+                previous.1 = candidate.1;
+                previous.2 = candidate.2;
+                previous.3 = candidate.3;
+                previous.4 = candidate.4;
             }
-            changed = true;
-            findings.push(SanitizationFindingV1::new(
-                detector, path, confidence, action,
-            ));
+            continue;
         }
+        replacements.push(candidate);
+    }
+
+    let mut changed = !replacements.is_empty();
+    for (range, detector, confidence, replacement, _) in replacements.into_iter().rev() {
+        text.replace_range(range, replacement);
+        findings.push(SanitizationFindingV1::new(
+            detector, path, confidence, action,
+        ));
     }
 
     let ranges = high_entropy_ranges(text);
