@@ -21,7 +21,6 @@ DECLARED_CRATE_LANES = (
     "tracedecay-query",
     "tracedecay-code-index",
     "tracedecay-application",
-    "tracedecay-rusqlite-parity",
     "tracedecay-rusqlite-runtime",
     "tracedecay",
 )
@@ -264,14 +263,12 @@ _QUERY_LANES = (
 )
 _STORAGE_LANES = (
     "tracedecay-store",
-    "tracedecay-rusqlite-parity",
     "tracedecay-rusqlite-runtime",
     "tracedecay-application",
     "tracedecay",
 )
 _SESSION_LANES = (
     "tracedecay-store",
-    "tracedecay-rusqlite-parity",
     "tracedecay-rusqlite-runtime",
     "tracedecay-query",
     "tracedecay-application",

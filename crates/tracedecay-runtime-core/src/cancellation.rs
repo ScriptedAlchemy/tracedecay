@@ -1,9 +1,7 @@
 //! Monotonic deadlines and the cooperative cancellation token.
 //!
-//! These two primitives were defined in the root crate's
-//! `application::context`, but the kernel's `store_runtime::rusqlite_parity`
-//! bounds every parity probe with them, so they had to come down with the
-//! store-runtime move. The root re-exports both from their historical path.
+//! These primitives are shared by storage-runtime and application request
+//! controls. The root re-exports both from its historical path.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

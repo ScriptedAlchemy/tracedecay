@@ -1,8 +1,7 @@
 {
   "scan_roots": [
     "src",
-    "crates/tracedecay-rusqlite-runtime/src",
-    "crates/tracedecay-rusqlite-parity/src"
+    "crates/tracedecay-rusqlite-runtime/src"
   ],
   "direct_open_suffixes": [
     "Builder::new_local",
@@ -14,11 +13,6 @@
     "Connection::open_with_flags"
   ],
   "allowed": [
-    {
-      "path": "crates/tracedecay-rusqlite-parity/src/snapshot.rs",
-      "callee": "Connection::open_with_flags",
-      "disposition": "process-isolated immutable parity probe"
-    },
     {
       "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
       "callee": "Connection::open",

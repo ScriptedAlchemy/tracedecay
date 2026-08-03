@@ -36,7 +36,6 @@ REQUIRED_CRATE_LANES = {
     "tracedecay-query",
     "tracedecay-code-index",
     "tracedecay-application",
-    "tracedecay-rusqlite-parity",
     "tracedecay-rusqlite-runtime",
     "tracedecay",
 }

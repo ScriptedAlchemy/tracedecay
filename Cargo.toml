@@ -23,9 +23,7 @@ members = [
     "crates/tracedecay-semantic",
     "crates/tracedecay-sessions",
     "crates/tracedecay-temporal-query",
-    "crates/tracedecay-rusqlite-parity",
     "crates/tracedecay-rusqlite-runtime",
-    "crates/tracedecay-sqlite-parity-protocol",
     "crates/tracedecay-store",
     "crates/tracedecay-tool-catalog",
     "crates/tracedecay-usecases",
@@ -191,11 +189,6 @@ test-transport = [
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-usecases/test-transport",
 ]
-# Builds the root-package helper shim for integration tests. The rusqlite
-# dependency is used only by that bin target; normal root targets never import
-# it and are link-checked separately.
-rusqlite-parity-helper = ["dep:tracedecay-rusqlite-parity"]
-
 # SEMANTIC FastEmbed adapter (Plan 31). Bundles ORT while leaving FastEmbed's
 # image defaults disabled. Runtime inference still loads only from locally
 # verified artifact bytes; daemon-owned acquisition uses hf-hub against the
@@ -212,23 +205,6 @@ name = "tracedecay"
 [[bin]]
 name = "tracedecay"
 path = "src/main.rs"
-
-# Cargo exposes this target to same-package integration tests through
-# CARGO_BIN_EXE_tracedecay-rusqlite-parity when the feature is enabled. The
-# binary is a process boundary; it is not linked into the normal CLI or lib.
-[[bin]]
-name = "tracedecay-rusqlite-parity"
-path = "src/bin/tracedecay-rusqlite-parity.rs"
-required-features = ["rusqlite-parity-helper"]
-test = false
-bench = false
-
-# Process-isolated storage runtime parity suite. Requires the root helper
-# shim so CARGO_BIN_EXE_tracedecay-rusqlite-parity names a built binary.
-[[test]]
-name = "storage_runtime_suite"
-path = "tests/storage_runtime_suite/main.rs"
-required-features = ["rusqlite-parity-helper"]
 
 # Plan 36 portability: symlink-alias snapshot capture (test-transport only).
 [[test]]
@@ -297,10 +273,8 @@ tracedecay-search-eval = { path = "crates/tracedecay-search-eval", version = "0.
 tracedecay-semantic = { path = "crates/tracedecay-semantic", version = "0.1.0" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions", version = "0.1.0" }
 tracedecay-temporal-query = { path = "crates/tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-rusqlite-parity = { path = "crates/tracedecay-rusqlite-parity", version = "0.1.0", optional = true, default-features = false }
 tracedecay-rusqlite-runtime = { path = "crates/tracedecay-rusqlite-runtime", version = "0.1.0" }
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
-tracedecay-sqlite-parity-protocol = { path = "crates/tracedecay-sqlite-parity-protocol", version = "0.1.0" }
 tracedecay-store = { path = "crates/tracedecay-store", version = "0.1.0" }
 tracedecay-tool-catalog = { path = "crates/tracedecay-tool-catalog", version = "0.1.0" }
 tracedecay-usecases = { path = "crates/tracedecay-usecases", version = "0.1.0" }
