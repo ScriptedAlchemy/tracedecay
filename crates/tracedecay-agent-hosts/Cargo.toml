@@ -1,0 +1,17 @@
+[package]
+name = "tracedecay-agent-hosts"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "MIT"
+description = "Agent host profile schemas and configuration parsing for TraceDecay"
+repository = "https://github.com/ScriptedAlchemy/tracedecay"
+
+[lib]
+doctest = false
+
+[dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

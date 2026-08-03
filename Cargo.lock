@@ -4897,6 +4897,7 @@ dependencies = [
  "tokio",
  "toml",
  "tower 0.5.3",
+ "tracedecay-agent-hosts",
  "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-code-extraction",
@@ -4917,6 +4918,14 @@ dependencies = [
  "walkdir",
  "webpki-roots 1.0.7",
  "zip",
+]
+
+[[package]]
+name = "tracedecay-agent-hosts"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

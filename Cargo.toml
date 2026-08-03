@@ -5,6 +5,7 @@ members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
+    "crates/tracedecay-agent-hosts",
     "crates/tracedecay-dashboard-api",
     "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
@@ -136,6 +137,7 @@ tracedecay-lsp = { path = "crates/tracedecay-lsp" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate" }
 tracedecay-capture = { path = "crates/tracedecay-capture" }
 tracedecay-automation = { path = "crates/tracedecay-automation" }
+tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts" }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core" }
 tracedecay-sessions = { path = "crates/tracedecay-sessions" }
 tracedecay-usecases = { path = "crates/tracedecay-usecases" }
