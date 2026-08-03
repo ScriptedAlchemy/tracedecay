@@ -421,7 +421,7 @@ fn build_mcp_dispatch_catalog()
             McpTerminalState::Failed,
             McpTerminalState::Unavailable,
         ];
-        if tool_supports_live_cancellation(binding.name) {
+        if matches!(cancellation, CancellationContract::Cooperative { .. }) {
             terminal_states.push(McpTerminalState::Cancelled);
         }
         let streaming = application_capability
@@ -585,6 +585,17 @@ mod tests {
                 .cancellation()
                 .points(),
             &[CancellationPoint::EffectInFlight]
+        );
+        let diagnostics = catalog.contract("tracedecay_diagnostics").unwrap();
+        assert!(matches!(
+            diagnostics.cancellation(),
+            CancellationContract::NotCancellable
+        ));
+        assert!(
+            !diagnostics
+                .terminal_states()
+                .contains(&McpTerminalState::Cancelled),
+            "terminal states follow the resolved contract, not the broad dispatch predicate"
         );
     }
 
