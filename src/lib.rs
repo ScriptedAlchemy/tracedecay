@@ -25,7 +25,7 @@
 
 pub mod accounting;
 pub mod agents;
-mod analytics;
+pub(crate) use tracedecay_agent_hosts::analytics;
 pub mod analytics_bridge;
 pub mod ast_grep_search;
 pub mod automation;
@@ -52,6 +52,7 @@ pub mod extraction_worker;
 pub mod git;
 pub mod global_db;
 pub mod graph;
+mod hermes_profile_config;
 pub mod hooks;
 pub mod lifecycle_lease;
 pub mod mcp;

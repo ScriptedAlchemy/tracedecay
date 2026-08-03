@@ -23,13 +23,13 @@ use std::path::Path;
 use crate::errors::{Result, TraceDecayError};
 
 /// Manifest for the wrapper plugin (canonical source: `dashboard/hermes-wrapper/`).
-const MANIFEST_JSON: &str = include_str!("../../../dashboard/hermes-wrapper/manifest.json");
+const MANIFEST_JSON: &str = include_str!("../../../../../dashboard/hermes-wrapper/manifest.json");
 /// `FastAPI` reverse proxy mounted by Hermes at `/api/plugins/tracedecay/`.
-const PLUGIN_API_PY: &str = include_str!("../../../dashboard/hermes-wrapper/plugin_api.py");
+const PLUGIN_API_PY: &str = include_str!("../../../../../dashboard/hermes-wrapper/plugin_api.py");
 /// Wrapper entry bundle (deployed as `dist/index.js`; plain JS, no build step).
-const WRAPPER_ENTRY_JS: &str = include_str!("../../../dashboard/hermes-wrapper/src/entry.js");
+const WRAPPER_ENTRY_JS: &str = include_str!("../../../../../dashboard/hermes-wrapper/src/entry.js");
 /// Wrapper-chrome stylesheet (concatenated ahead of the child stylesheets).
-const WRAPPER_CSS: &str = include_str!("../../../dashboard/hermes-wrapper/src/wrapper.css");
+const WRAPPER_CSS: &str = include_str!("../../../../../dashboard/hermes-wrapper/src/wrapper.css");
 
 /// Placeholder line in `plugin_api.py` rewritten with the installed binary.
 const BIN_PLACEHOLDER: &str = "DEPLOYED_TRACEDECAY_BIN = None";

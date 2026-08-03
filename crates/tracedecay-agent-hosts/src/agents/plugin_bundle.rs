@@ -104,7 +104,7 @@ macro_rules! plugin_file {
     ($relative:literal, $source:literal) => {
         PluginFile {
             relative: $relative,
-            contents: include_str!(concat!("../../plugin/", $source)),
+            contents: include_str!(concat!("../../../../plugin/", $source)),
         }
     };
 }

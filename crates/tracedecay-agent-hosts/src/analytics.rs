@@ -738,7 +738,7 @@ mod tests {
             None,
             Some(r#"{"source":"codex_rollout"}"#),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/codex_skill_prose.txt"
+                "../tests/fixtures/analytics/codex_skill_prose.txt"
             )),
         );
         assert_usage_event(
@@ -761,7 +761,7 @@ mod tests {
             Some("ReadFile"),
             Some(r#"{"raw_type":null,"source":"cursor_transcript"}"#),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/cursor_skill_read_text.json"
+                "../tests/fixtures/analytics/cursor_skill_read_text.json"
             )),
         );
         assert_usage_event(
@@ -789,10 +789,10 @@ mod tests {
         let events = infer_usage_events(
             Some("skill_view"),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/hermes_skill_view_metadata.json"
+                "../tests/fixtures/analytics/hermes_skill_view_metadata.json"
             )),
             Some(include_str!(
-                "../../../tests/fixtures/analytics/hermes_skill_view_text.json"
+                "../tests/fixtures/analytics/hermes_skill_view_text.json"
             )),
         );
         assert_usage_event(&events, UsageKind::Tool, "skill_view", UsageCategory::Other);
