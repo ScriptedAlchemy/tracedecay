@@ -123,7 +123,7 @@ impl SharedCodeIndexBytePoolV1 {
         let mut pool = self
             .bytes
             .lock()
-            .unwrap_or_else(|_| panic!("code-index byte-pool lock"));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(shared) = pool.get(&digest).and_then(Weak::upgrade) {
             self.reused.fetch_add(1, Ordering::Relaxed);
             return (digest, shared);
