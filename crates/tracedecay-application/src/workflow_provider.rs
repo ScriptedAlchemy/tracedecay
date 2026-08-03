@@ -7,32 +7,32 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::configuration::WorkTopologyPolicyV1;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkProviderBackendV1, WorkProviderRouteV1, WorkflowPlacementReceiptV1,
+    ManifestDigest, RunId, WorkProviderBackendV1, WorkProviderRouteV1, WorkflowPlacementReceipt,
     WorkflowStepId, canonical_sha256,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowProviderRegistrationV1 {
+pub struct WorkflowProviderRegistration {
     route: WorkProviderRouteV1,
     backend: WorkProviderBackendV1,
     model: String,
     priority: u32,
 }
 
-impl WorkflowProviderRegistrationV1 {
+impl WorkflowProviderRegistration {
     pub fn new(
         route: WorkProviderRouteV1,
         backend: WorkProviderBackendV1,
         model: String,
         priority: u32,
-    ) -> Result<Self, WorkflowProviderPlacementErrorV1> {
+    ) -> Result<Self, WorkflowProviderPlacementError> {
         if model.is_empty()
             || model.len() > 256
             || model.trim() != model
             || model.chars().any(char::is_control)
         {
-            return Err(WorkflowProviderPlacementErrorV1::InvalidRegistry);
+            return Err(WorkflowProviderPlacementError::InvalidRegistry);
         }
         Ok(Self {
             route,
@@ -60,19 +60,19 @@ impl WorkflowProviderRegistrationV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WorkflowProviderRegistryV1 {
+pub struct WorkflowProviderRegistry {
     configuration_digest: ManifestDigest,
-    registrations: Vec<WorkflowProviderRegistrationV1>,
+    registrations: Vec<WorkflowProviderRegistration>,
     digest: ManifestDigest,
 }
 
-impl WorkflowProviderRegistryV1 {
+impl WorkflowProviderRegistry {
     pub fn new(
         configuration_digest: ManifestDigest,
-        mut registrations: Vec<WorkflowProviderRegistrationV1>,
-    ) -> Result<Self, WorkflowProviderPlacementErrorV1> {
+        mut registrations: Vec<WorkflowProviderRegistration>,
+    ) -> Result<Self, WorkflowProviderPlacementError> {
         if registrations.is_empty() {
-            return Err(WorkflowProviderPlacementErrorV1::InvalidRegistry);
+            return Err(WorkflowProviderPlacementError::InvalidRegistry);
         }
         registrations.sort_by(|left, right| {
             (
@@ -92,7 +92,7 @@ impl WorkflowProviderRegistryV1 {
                 registration.route.provider_id().as_str(),
                 registration.route.route_id().as_str(),
             )) {
-                return Err(WorkflowProviderPlacementErrorV1::InvalidRegistry);
+                return Err(WorkflowProviderPlacementError::InvalidRegistry);
             }
         }
         let digest = canonical_sha256(&(
@@ -100,7 +100,7 @@ impl WorkflowProviderRegistryV1 {
             &configuration_digest,
             &registrations,
         ))
-        .map_err(|_| WorkflowProviderPlacementErrorV1::InvalidRegistry)?;
+        .map_err(|_| WorkflowProviderPlacementError::InvalidRegistry)?;
         Ok(Self {
             configuration_digest,
             registrations,
@@ -112,7 +112,7 @@ impl WorkflowProviderRegistryV1 {
         &self.configuration_digest
     }
 
-    pub fn registrations(&self) -> &[WorkflowProviderRegistrationV1] {
+    pub fn registrations(&self) -> &[WorkflowProviderRegistration] {
         &self.registrations
     }
 
@@ -123,7 +123,7 @@ impl WorkflowProviderRegistryV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowTopologyPlacementRequestV1 {
+pub struct WorkflowTopologyPlacementRequest {
     pub run_id: RunId,
     pub step_id: WorkflowStepId,
     pub configuration_digest: ManifestDigest,
@@ -131,7 +131,7 @@ pub struct WorkflowTopologyPlacementRequestV1 {
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum WorkflowProviderPlacementErrorV1 {
+pub enum WorkflowProviderPlacementError {
     #[error("workflow provider registry is invalid")]
     InvalidRegistry,
     #[error("workflow provider configuration digest is stale")]
@@ -144,39 +144,39 @@ pub enum WorkflowProviderPlacementErrorV1 {
     Unavailable,
 }
 
-pub struct WorkflowProviderPlacementServiceV1 {
-    registry: WorkflowProviderRegistryV1,
+pub struct WorkflowProviderPlacementService {
+    registry: WorkflowProviderRegistry,
 }
 
-impl WorkflowProviderPlacementServiceV1 {
-    pub const fn new(registry: WorkflowProviderRegistryV1) -> Self {
+impl WorkflowProviderPlacementService {
+    pub const fn new(registry: WorkflowProviderRegistry) -> Self {
         Self { registry }
     }
 
     pub fn place(
         &self,
-        request: &WorkflowTopologyPlacementRequestV1,
+        request: &WorkflowTopologyPlacementRequest,
         topology: &WorkTopologyPolicyV1,
-    ) -> Result<WorkflowPlacementReceiptV1, WorkflowProviderPlacementErrorV1> {
+    ) -> Result<WorkflowPlacementReceipt, WorkflowProviderPlacementError> {
         topology
             .validate()
-            .map_err(|_| WorkflowProviderPlacementErrorV1::InvalidTopology)?;
+            .map_err(|_| WorkflowProviderPlacementError::InvalidTopology)?;
         let topology_digest = topology
             .compute_digest()
-            .map_err(|_| WorkflowProviderPlacementErrorV1::InvalidTopology)?
+            .map_err(|_| WorkflowProviderPlacementError::InvalidTopology)?
             .0;
         if &request.configuration_digest != self.registry.configuration_digest() {
-            return Err(WorkflowProviderPlacementErrorV1::ConfigurationDigestMismatch);
+            return Err(WorkflowProviderPlacementError::ConfigurationDigestMismatch);
         }
         if request.topology_digest != topology_digest {
-            return Err(WorkflowProviderPlacementErrorV1::TopologyDigestMismatch);
+            return Err(WorkflowProviderPlacementError::TopologyDigestMismatch);
         }
         let registration = self
             .registry
             .registrations()
             .first()
-            .ok_or(WorkflowProviderPlacementErrorV1::Unavailable)?;
-        WorkflowPlacementReceiptV1::new(
+            .ok_or(WorkflowProviderPlacementError::Unavailable)?;
+        WorkflowPlacementReceipt::new(
             request.run_id.clone(),
             request.step_id.clone(),
             registration.route.clone(),
@@ -187,6 +187,6 @@ impl WorkflowProviderPlacementServiceV1 {
             self.registry.digest().clone(),
             topology.placement.clone(),
         )
-        .map_err(|_| WorkflowProviderPlacementErrorV1::InvalidRegistry)
+        .map_err(|_| WorkflowProviderPlacementError::InvalidRegistry)
     }
 }

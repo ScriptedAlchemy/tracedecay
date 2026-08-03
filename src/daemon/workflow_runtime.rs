@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
-    RequestContext, ReviewProposalCommand, WORKFLOW_CANONICAL_WORK_OPERATION_V1,
-    WorkExecutionError, WorkflowFailurePolicyV1, WorkflowFanOutPlanV1, WorkflowFanOutRequestV1,
-    WorkflowFanOutRuntimeError, WorkflowPlannedChildV1, WorkflowRunService,
+    RequestContext, ReviewProposalCommand, WORKFLOW_CANONICAL_WORK_OPERATION,
+    WorkExecutionError, WorkflowFailurePolicy, WorkflowFanOutPlan, WorkflowFanOutRequest,
+    WorkflowFanOutRuntimeError, WorkflowPlannedChild, WorkflowRunService,
     WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
     prepare_workflow_fan_out,
 };
@@ -18,10 +18,10 @@ use tracedecay_domain::{
     ManifestDigest, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
     WorkAttemptStateV1, WorkAttemptV1, WorkCancellationRequestId, WorkCancellationRequestV1,
     WorkCommandId, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkRecoveryStateV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorkflowOutputArtifactV1,
-    WorkflowRunCommandV1, WorkflowRunEventContextV1, WorkflowRunProjectionV1,
-    WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepOutputV1,
-    WorkflowStepStatusV1, canonical_sha256,
+    WorkRecoveryStateV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorkflowOutputArtifact,
+    WorkflowRunCommand, WorkflowRunEventContext, WorkflowRunProjection,
+    WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepOutput,
+    WorkflowStepStatus, canonical_sha256,
 };
 
 use super::work_runtime::DaemonWorkRuntimeV1;
@@ -39,7 +39,7 @@ pub(crate) fn crash_after_next_workflow_settlement_for_test() {
 }
 
 struct RunningChild {
-    child: WorkflowPlannedChildV1,
+    child: WorkflowPlannedChild,
     identity: WorkAttemptIdentityV1,
     lease: WorkLeaseFenceV1,
 }
@@ -47,7 +47,7 @@ struct RunningChild {
 enum PreparedChild {
     Running(RunningChild),
     Terminal {
-        child: WorkflowPlannedChildV1,
+        child: WorkflowPlannedChild,
         attempt: Box<WorkAttemptV1>,
     },
 }
@@ -57,11 +57,11 @@ pub(crate) async fn execute_canonical_workflow(
     runtime: &Arc<DaemonWorkRuntimeV1<WorkStorage>>,
     context: &RequestContext,
     project_root: &Path,
-    request: WorkflowFanOutRequestV1,
-) -> Result<WorkflowRunProjectionV1, WorkflowFanOutRuntimeError> {
+    request: WorkflowFanOutRequest,
+) -> Result<WorkflowRunProjection, WorkflowFanOutRuntimeError> {
     validate_active_definition(database, context, &request)?;
     let plan = prepare_workflow_fan_out(&request)?;
-    if plan.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION_V1 {
+    if plan.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION {
         return Err(WorkflowFanOutRuntimeError::InvalidPlan);
     }
     let authority = workflow_authority(database)?;
@@ -84,7 +84,7 @@ pub(crate) async fn execute_canonical_workflow(
             .admit(
                 request.run_id.clone(),
                 request.definition.clone(),
-                tracedecay_application::WorkflowAdmissionSnapshotV1 {
+                tracedecay_application::WorkflowAdmissionSnapshot {
                     policy_digest: context.grant().digest.clone(),
                     configuration_digest: request.provider.configuration_digest.clone(),
                     catalog_digest: request.definition.pinned_catalog_digest().clone(),
@@ -111,7 +111,7 @@ pub(crate) async fn execute_canonical_workflow(
             .apply(
                 &request.run_id,
                 projection.sequence(),
-                WorkflowRunCommandV1::RequestCancellation,
+                WorkflowRunCommand::RequestCancellation,
                 run_event_context(
                     &request.run_id,
                     "cancel-request",
@@ -124,7 +124,7 @@ pub(crate) async fn execute_canonical_workflow(
             .apply(
                 &request.run_id,
                 projection.sequence(),
-                WorkflowRunCommandV1::ReconcileCancelled,
+                WorkflowRunCommand::ReconcileCancelled,
                 run_event_context(
                     &request.run_id,
                     "cancel-reconciled",
@@ -139,12 +139,12 @@ pub(crate) async fn execute_canonical_workflow(
         .step(&request.step_id)
         .ok_or(WorkflowFanOutRuntimeError::StepNotFound)?;
     match step.status() {
-        WorkflowStepStatusV1::Ready => {
+        WorkflowStepStatus::Ready => {
             projection = run_service
                 .apply(
                     &request.run_id,
                     projection.sequence(),
-                    WorkflowRunCommandV1::StartStep {
+                    WorkflowRunCommand::StartStep {
                         step_id: request.step_id.clone(),
                         placement,
                     },
@@ -157,11 +157,11 @@ pub(crate) async fn execute_canonical_workflow(
                 )
                 .map_err(run_service_error)?;
         }
-        WorkflowStepStatusV1::Running => {}
-        WorkflowStepStatusV1::Succeeded
-        | WorkflowStepStatusV1::Failed
-        | WorkflowStepStatusV1::Cancelled => return Ok(projection),
-        WorkflowStepStatusV1::Blocked => return Err(WorkflowFanOutRuntimeError::InvalidPlan),
+        WorkflowStepStatus::Running => {}
+        WorkflowStepStatus::Succeeded
+        | WorkflowStepStatus::Failed
+        | WorkflowStepStatus::Cancelled => return Ok(projection),
+        WorkflowStepStatus::Blocked => return Err(WorkflowFanOutRuntimeError::InvalidPlan),
     }
 
     let mut pending = plan.children.iter().cloned().collect::<VecDeque<_>>();
@@ -203,7 +203,7 @@ pub(crate) async fn execute_canonical_workflow(
                 PreparedChild::Terminal { child, attempt } => {
                     attach_terminal_evidence(database, context, &request, &child, &attempt)?;
                     terminal_attempts.push(*attempt);
-                    fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicyV1::FailFast)
+                    fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicy::FailFast)
                         && !matches!(
                             terminal_attempts
                                 .last()
@@ -224,7 +224,7 @@ pub(crate) async fn execute_canonical_workflow(
             } else {
                 settle_child(database, runtime, context, &request, running).await?
             };
-            fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicyV1::FailFast)
+            fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicy::FailFast)
                 && !matches!(
                     attempt.terminal(),
                     Some(WorkTerminalEvidenceV1::Succeeded { .. })
@@ -252,10 +252,10 @@ pub(crate) async fn execute_canonical_workflow(
         })
         .count();
     let succeeded = match plan.failure_policy {
-        WorkflowFailurePolicyV1::FailFast | WorkflowFailurePolicyV1::Collect => {
+        WorkflowFailurePolicy::FailFast | WorkflowFailurePolicy::Collect => {
             terminal_attempts.len() == plan.children.len() && success_count == plan.children.len()
         }
-        WorkflowFailurePolicyV1::RequireAtLeast {
+        WorkflowFailurePolicy::RequireAtLeast {
             successes: required,
         } => usize::try_from(required).is_ok_and(|required| success_count >= required),
     };
@@ -271,27 +271,27 @@ pub(crate) async fn execute_canonical_workflow(
         .and_then(|step| step.placement_receipt())
         .map(|placement| placement.placement_digest().clone())
         .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
-    let effect_receipt = WorkflowStepEffectReceiptV1::new(
+    let effect_receipt = WorkflowStepEffectReceipt::new(
         request.run_id.clone(),
         request.step_id.clone(),
         placement_digest,
         if succeeded {
-            WorkflowStepEffectOutcomeV1::Completed
+            WorkflowStepEffectOutcome::Completed
         } else {
-            WorkflowStepEffectOutcomeV1::Failed
+            WorkflowStepEffectOutcome::Failed
         },
         effect_digest,
         &outputs,
     )
     .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
     let command = if succeeded {
-        WorkflowRunCommandV1::CompleteStep {
+        WorkflowRunCommand::CompleteStep {
             step_id: request.step_id.clone(),
             outputs,
             effect_receipt,
         }
     } else {
-        WorkflowRunCommandV1::FailStep {
+        WorkflowRunCommand::FailStep {
             step_id: request.step_id.clone(),
             outputs,
             effect_receipt,
@@ -333,7 +333,7 @@ fn run_event_context(
     transition: &str,
     input_digest: ManifestDigest,
     occurred_at: UtcMicros,
-) -> Result<WorkflowRunEventContextV1, WorkflowFanOutRuntimeError> {
+) -> Result<WorkflowRunEventContext, WorkflowFanOutRuntimeError> {
     let command_digest = canonical_sha256(&(
         "tracedecay.daemon.workflow-run-command.v1",
         run_id,
@@ -341,7 +341,7 @@ fn run_event_context(
         &input_digest,
     ))
     .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
-    Ok(WorkflowRunEventContextV1 {
+    Ok(WorkflowRunEventContext {
         command_id: WorkCommandId::new(format!(
             "workflow-run-{transition}:{}",
             command_digest.as_str()
@@ -353,10 +353,10 @@ fn run_event_context(
 }
 
 fn completed_outputs(
-    request: &WorkflowFanOutRequestV1,
-    plan: &WorkflowFanOutPlanV1,
+    request: &WorkflowFanOutRequest,
+    plan: &WorkflowFanOutPlan,
     attempts: &[WorkAttemptV1],
-) -> Result<Vec<WorkflowStepOutputV1>, WorkflowFanOutRuntimeError> {
+) -> Result<Vec<WorkflowStepOutput>, WorkflowFanOutRuntimeError> {
     let step = request
         .definition
         .steps()
@@ -388,14 +388,14 @@ fn completed_outputs(
                     .get(ordinal)
                     .cloned()
                     .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
-                Ok(WorkflowOutputArtifactV1::new(
+                Ok(WorkflowOutputArtifact::new(
                     attempt.identity().clone(),
                     artifact,
                 ))
             })
             .collect::<Result<Vec<_>, WorkflowFanOutRuntimeError>>()?;
         outputs.push(
-            WorkflowStepOutputV1::new(output_name.clone(), artifacts)
+            WorkflowStepOutput::new(output_name.clone(), artifacts)
                 .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
         );
     }
@@ -425,7 +425,7 @@ fn run_service_error(error: WorkflowRunServiceError) -> WorkflowFanOutRuntimeErr
 fn validate_active_definition(
     database: &Arc<RegisteredGlobalDb>,
     context: &RequestContext,
-    request: &WorkflowFanOutRequestV1,
+    request: &WorkflowFanOutRequest,
 ) -> Result<(), WorkflowFanOutRuntimeError> {
     if request.definition.project_id() != &context.scope().project_id
         || request.definition.pinned_policy_digest() != &context.grant().digest
@@ -461,9 +461,9 @@ async fn admit_child(
     runtime: &Arc<DaemonWorkRuntimeV1<WorkStorage>>,
     context: &RequestContext,
     project_root: &Path,
-    request: &WorkflowFanOutRequestV1,
+    request: &WorkflowFanOutRequest,
     operation: &WorkflowOperationRef,
-    child: WorkflowPlannedChildV1,
+    child: WorkflowPlannedChild,
     allow_create_or_resume: bool,
 ) -> Result<PreparedChild, WorkflowFanOutRuntimeError> {
     let identity = child.attempt_identity.clone();
@@ -648,7 +648,7 @@ async fn settle_child(
     database: &Arc<RegisteredGlobalDb>,
     runtime: &Arc<DaemonWorkRuntimeV1<WorkStorage>>,
     context: &RequestContext,
-    request: &WorkflowFanOutRequestV1,
+    request: &WorkflowFanOutRequest,
     running: RunningChild,
 ) -> Result<WorkAttemptV1, WorkflowFanOutRuntimeError> {
     let attempt = runtime
@@ -683,8 +683,8 @@ async fn cancel_child(
 fn attach_terminal_evidence(
     database: &Arc<RegisteredGlobalDb>,
     context: &RequestContext,
-    request: &WorkflowFanOutRequestV1,
-    child: &WorkflowPlannedChildV1,
+    request: &WorkflowFanOutRequest,
+    child: &WorkflowPlannedChild,
     attempt: &tracedecay_domain::WorkAttemptV1,
 ) -> Result<(), WorkflowFanOutRuntimeError> {
     let terminal = attempt
@@ -722,9 +722,9 @@ fn attach_terminal_evidence(
 fn validate_existing_attempt(
     context: &RequestContext,
     project_root: &Path,
-    request: &WorkflowFanOutRequestV1,
+    request: &WorkflowFanOutRequest,
     operation: &WorkflowOperationRef,
-    child: &WorkflowPlannedChildV1,
+    child: &WorkflowPlannedChild,
     attempt: &WorkAttemptV1,
 ) -> Result<(), WorkflowFanOutRuntimeError> {
     let execution = attempt.execution();
@@ -754,8 +754,8 @@ fn validate_existing_attempt(
 }
 
 fn child_lease(
-    workflow_fence: &tracedecay_application::WorkflowExecutionFenceV1,
-    child: &WorkflowPlannedChildV1,
+    workflow_fence: &tracedecay_application::WorkflowExecutionFence,
+    child: &WorkflowPlannedChild,
 ) -> Result<WorkLeaseFenceV1, WorkflowFanOutRuntimeError> {
     let digest = canonical_sha256(&(
         "tracedecay.daemon.workflow-work-lease.v3",

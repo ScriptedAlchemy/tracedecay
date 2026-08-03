@@ -10,13 +10,13 @@
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
-    TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffGrantV1, TaskHandoffScopeV1,
+    TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffGrant, TaskHandoffScope,
     WorkflowDefinitionAuthorityPort,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
+    WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowStepId, WorkflowStep, WorktreeId, canonical_sha256,
 };
 
 fn id<T>(value: &str) -> T
@@ -37,12 +37,12 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex_byte.repeat(32))).unwrap()
 }
 
-fn definition() -> WorkflowDefinitionV1 {
-    WorkflowDefinitionV1::new(
+fn definition() -> WorkflowDefinition {
+    WorkflowDefinition::new(
         id("workflow.definition.daemon-restart"),
         1,
         id::<ProjectId>("project.workflow.daemon-restart"),
-        vec![WorkflowStepV1 {
+        vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("prepare"),
             operation: id::<WorkflowOperationRef>("operation.prepare.v1"),
             predecessors: Default::default(),
@@ -57,8 +57,8 @@ fn definition() -> WorkflowDefinitionV1 {
     .unwrap()
 }
 
-fn handoff_scope() -> TaskHandoffScopeV1 {
-    TaskHandoffScopeV1::new(
+fn handoff_scope() -> TaskHandoffScope {
+    TaskHandoffScope::new(
         id::<ProjectId>("project.workflow.daemon-restart"),
         id::<RepositoryId>("repository.workflow.daemon-restart"),
         id::<WorktreeId>("worktree.workflow.daemon-restart"),
@@ -106,7 +106,7 @@ async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
 
     let definition = definition();
     let scope = handoff_scope();
-    let grant = TaskHandoffGrantV1::new(
+    let grant = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&"s".repeat(48)),
         UtcMicros(10),
