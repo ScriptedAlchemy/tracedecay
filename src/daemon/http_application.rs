@@ -20,6 +20,7 @@ use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use constant_time_eq::constant_time_eq;
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
@@ -208,32 +209,23 @@ async fn require_local_http_admission(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !constant_time_header_eq(
-        request.headers().get(AUTHORIZATION),
-        &admission.authorization,
-    ) {
+    let authorization_matches = request.headers().get(AUTHORIZATION).is_some_and(|actual| {
+        let actual = actual.as_bytes();
+        let expected = admission.authorization.as_bytes();
+        actual.len() == expected.len() && constant_time_eq(actual, expected)
+    });
+    if !authorization_matches {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if !constant_time_header_eq(request.headers().get(ORIGIN), &admission.origin) {
+    let origin_matches = request.headers().get(ORIGIN).is_some_and(|actual| {
+        let actual = actual.as_bytes();
+        let expected = admission.origin.as_bytes();
+        actual.len() == expected.len() && constant_time_eq(actual, expected)
+    });
+    if !origin_matches {
         return StatusCode::FORBIDDEN.into_response();
     }
     next.run(request).await
-}
-
-fn constant_time_header_eq(actual: Option<&HeaderValue>, expected: &HeaderValue) -> bool {
-    let Some(actual) = actual else {
-        return false;
-    };
-    let actual = actual.as_bytes();
-    let expected = expected.as_bytes();
-    let mut difference = actual.len() ^ expected.len();
-    for index in 0..actual.len().max(expected.len()) {
-        difference |= usize::from(
-            actual.get(index).copied().unwrap_or_default()
-                ^ expected.get(index).copied().unwrap_or_default(),
-        );
-    }
-    difference == 0
 }
 
 pub(super) struct DaemonHttpApplicationService {
