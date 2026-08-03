@@ -32,8 +32,6 @@ mod code_reads;
 mod maintenance;
 mod mounts;
 
-use maintenance::RegisteredSchemaConvergenceMaintenance;
-
 static LONG_LIVED_SESSION_MAINTENANCE: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn mark_process_long_lived_for_session_maintenance() {
@@ -64,9 +62,6 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
     code_graph_open_gates: Mutex<BTreeMap<StoreShardIdV1, Weak<Mutex<()>>>>,
-    registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
-    #[cfg(test)]
-    long_lived_session_maintenance_for_test: AtomicBool,
 }
 
 impl ProfileRuntime for DaemonSessionRuntimeRegistryV1 {

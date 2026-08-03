@@ -13,16 +13,13 @@ fn normalize_trigger_sql(sql: &str) -> String {
 }
 
 pub use final_schema::{final_registered_schema_contract, install_final_registered_schema};
-pub(super) use invariants::{
-    authority_invariant_triggers_intact, restore_immutability_after_canonical_repair,
-    suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
-    validate_authority_rows_exhaustive,
-};
 pub use invariants::{
     ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
     ensure_authority_invariants, require_foreign_key_audit,
 };
-pub use validation::validate_registry_schema_contract;
-pub(super) use validation::{
-    validate_authority_schema_contract, validate_observation_migration_source,
+pub(super) use invariants::{
+    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
+    validate_authority_rows_exhaustive,
 };
+pub(super) use validation::validate_authority_schema_contract;
+pub use validation::validate_registry_schema_contract;

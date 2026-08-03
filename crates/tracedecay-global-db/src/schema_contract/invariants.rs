@@ -30,7 +30,6 @@ use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intac
 pub(super) use triggers::{INVARIANTS, Trigger};
 pub use triggers::{
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
-    suspend_session_invariants_for_schema_upgrade,
 };
 
 const OPERATION: &str = "ensure global database authority invariants";
@@ -56,12 +55,6 @@ pub(super) const AUDIT_PAGE_ROWS: i64 = 128;
 /// limit while avoiding tens of thousands of SQL-channel round trips on a
 /// production-sized store.
 pub(super) const OBSERVATION_AUDIT_PAGE_ROWS: i64 = 48;
-
-pub async fn authority_invariant_triggers_intact(
-    conn: &impl QueryExecutor,
-) -> tracedecay_runtime_core::errors::Result<bool> {
-    trigger_contracts_intact(conn).await
-}
 
 pub async fn require_foreign_key_audit(
     conn: &impl Executor,

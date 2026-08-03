@@ -1,9 +1,8 @@
-use crate::compatibility::projected_content_hash;
 #[cfg(test)]
 use tracedecay_runtime_core::db::engine::{Connection, TransactionBehavior};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
-use super::{LcmError, LcmRawMessage, LcmStorageKind, raw};
+use super::{LcmError, LcmRawMessage, LcmStorageKind};
 
 #[cfg(test)]
 use super::util;
@@ -11,7 +10,6 @@ use super::util;
 pub const LCM_SCHEMA_VERSION: i64 = 7;
 
 const MIGRATION_NAME: &str = "lcm";
-const TRUNCATION_MARKER: &str = "\n[truncated by tracedecay]";
 
 /// Raw-message FTS structure (schema v3): index only `index_text`, matching
 /// hermes-lcm `build_message_fts_spec` (store.py:173-204), which indexes
@@ -399,7 +397,6 @@ pub async fn ensure_lcm_schema_in_transaction(
         .await?;
     }
 
-    carry_forward_legacy_messages_in_transaction(conn).await?;
     conn.execute(
         "INSERT INTO session_schema_migrations(name, version)
          VALUES (?1, ?2)
@@ -490,60 +487,6 @@ pub async fn load_raw_message(
         legacy_truncated: row.get::<i64>(12).unwrap_or(0) != 0,
         metadata_json: row.get(13).ok()?,
     })
-}
-
-async fn carry_forward_legacy_messages_in_transaction(
-    conn: &(impl Executor + ?Sized),
-) -> Result<(), LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, role, timestamp, ordinal,
-                    text, metadata_json
-             FROM session_messages
-             ORDER BY provider, session_id, ordinal, message_id",
-            (),
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let provider: String = row.get(0)?;
-        let message_id: String = row.get(1)?;
-        let session_id: String = row.get(2)?;
-        let role: String = row.get(3)?;
-        let timestamp: Option<i64> = row.get(4)?;
-        let ordinal: i64 = row.get(5)?;
-        let content: String = row.get(6)?;
-        let metadata_json: Option<String> = row.get(7)?;
-        let legacy_truncated = content.contains(TRUNCATION_MARKER);
-        let content_hash = projected_content_hash(&content);
-        let snippet_text = raw::derived_text_for_snippet(&content);
-        let index_text = raw::derived_text_for_index(&content);
-
-        conn.execute(
-            "INSERT OR IGNORE INTO lcm_raw_messages (
-                provider, message_id, session_id, role, ordinal, timestamp,
-                content, content_hash, storage_kind, payload_ref, snippet_text,
-                index_text, legacy_source, legacy_truncated, metadata_json
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, ?10, ?11, 1, ?12, ?13)",
-            params![
-                provider.as_str(),
-                message_id.as_str(),
-                session_id.as_str(),
-                role.as_str(),
-                ordinal,
-                timestamp,
-                content.as_str(),
-                content_hash.as_str(),
-                LcmStorageKind::Inline.as_str(),
-                snippet_text.as_str(),
-                index_text.as_str(),
-                i64::from(legacy_truncated),
-                metadata_json.as_deref(),
-            ],
-        )
-        .await?;
-    }
-    Ok(())
 }
 
 async fn fetch_i64(
