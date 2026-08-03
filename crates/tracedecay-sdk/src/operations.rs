@@ -4404,6 +4404,93 @@ pub mod work_attempt_acquire_lease {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
         ///`WorkAttemptAcquireLeaseRequestV1`
         ///
         /// <details><summary>JSON schema</summary>
@@ -4716,6 +4803,7 @@ pub mod work_attempt_acquire_lease {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -4751,6 +4839,12 @@ pub mod work_attempt_acquire_lease {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -4802,6 +4896,7 @@ pub mod work_attempt_acquire_lease {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -7025,6 +7120,7 @@ pub mod work_attempt_acquire_lease {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -7060,6 +7156,12 @@ pub mod work_attempt_acquire_lease {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -7111,6 +7213,7 @@ pub mod work_attempt_acquire_lease {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -9880,6 +9983,7 @@ pub mod work_attempt_cancel {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -9915,6 +10019,12 @@ pub mod work_attempt_cancel {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -9966,6 +10076,7 @@ pub mod work_attempt_cancel {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -12661,6 +12772,7 @@ pub mod work_attempt_finish {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -12696,6 +12808,12 @@ pub mod work_attempt_finish {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -12747,6 +12865,7 @@ pub mod work_attempt_finish {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -15520,6 +15639,7 @@ pub mod work_attempt_publish_artifact {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -15555,6 +15675,12 @@ pub mod work_attempt_publish_artifact {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -15606,6 +15732,7 @@ pub mod work_attempt_publish_artifact {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -18274,6 +18401,7 @@ pub mod work_attempt_publish_progress {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -18309,6 +18437,12 @@ pub mod work_attempt_publish_progress {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -18360,6 +18494,7 @@ pub mod work_attempt_publish_progress {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -21077,6 +21212,7 @@ pub mod work_attempt_recover {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -21112,6 +21248,12 @@ pub mod work_attempt_recover {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -21163,6 +21305,7 @@ pub mod work_attempt_recover {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -23798,6 +23941,7 @@ pub mod work_attempt_renew_lease {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -23833,6 +23977,12 @@ pub mod work_attempt_renew_lease {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -23884,6 +24034,7 @@ pub mod work_attempt_renew_lease {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -26862,6 +27013,7 @@ pub mod work_attempt_start {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -26897,6 +27049,12 @@ pub mod work_attempt_start {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -26948,6 +27106,7 @@ pub mod work_attempt_start {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -29803,6 +29962,7 @@ pub mod work_attempt_terminalize {
         ///    "configuration_digest",
         ///    "deadline",
         ///    "effect_state",
+        ///    "input_artifacts",
         ///    "model",
         ///    "operation",
         ///    "project_id",
@@ -29838,6 +29998,12 @@ pub mod work_attempt_terminalize {
         ///    },
         ///    "effect_state": {
         ///      "$ref": "#/definitions/WorkEffectStateV1"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "model": {
         ///      "type": "string"
@@ -29889,6 +30055,7 @@ pub mod work_attempt_terminalize {
             pub configuration_digest: ManifestDigest,
             pub deadline: UtcMicros,
             pub effect_state: WorkEffectStateV1,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub model: ::std::string::String,
             pub operation: WorkflowOperationRef,
             pub project_id: ProjectId,
@@ -36316,6 +36483,93 @@ pub mod workflow_execute_fan_out {
                 self.0.fmt(f)
             }
         }
+        ///Strongly typed canonical identity: `WorkArtifactId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorkArtifactId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorkArtifactId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorkArtifactId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorkArtifactId> for ::std::string::String {
+            fn from(value: WorkArtifactId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorkArtifactId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorkArtifactId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorkArtifactId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`WorkArtifactRefV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "artifact_id",
+        ///    "byte_length",
+        ///    "digest"
+        ///  ],
+        ///  "properties": {
+        ///    "artifact_id": {
+        ///      "$ref": "#/definitions/WorkArtifactId"
+        ///    },
+        ///    "byte_length": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct WorkArtifactRefV1 {
+            pub artifact_id: WorkArtifactId,
+            pub byte_length: u64,
+            pub digest: ManifestDigest,
+        }
         ///Effect semantics admitted for one provider attempt.
         ///
         /// <details><summary>JSON schema</summary>
@@ -36970,11 +37224,18 @@ pub mod workflow_execute_fan_out {
         ///  "type": "object",
         ///  "required": [
         ///    "identity",
+        ///    "input_artifacts",
         ///    "input_digest"
         ///  ],
         ///  "properties": {
         ///    "identity": {
         ///      "type": "string"
+        ///    },
+        ///    "input_artifacts": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/WorkArtifactRefV1"
+        ///      }
         ///    },
         ///    "input_digest": {
         ///      "$ref": "#/definitions/ManifestDigest"
@@ -36988,6 +37249,7 @@ pub mod workflow_execute_fan_out {
         #[serde(deny_unknown_fields)]
         pub struct WorkflowFanOutInput {
             pub identity: ::std::string::String,
+            pub input_artifacts: ::std::vec::Vec<WorkArtifactRefV1>,
             pub input_digest: ManifestDigest,
         }
         ///`WorkflowFanOutRequest`
