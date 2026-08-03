@@ -283,16 +283,20 @@ impl ObservationExecutor {
                 }
                 Ok(ObservationReadResultV1::Replay(observations))
             }
-            ObservationReadOperationV1::NextQueuedProjection => {
+            ObservationReadOperationV1::NextQueuedProjection { now_micros } => {
                 let observation_id = snapshot
                     .query_row(
                         "SELECT observation_id FROM projection_queue
-                         WHERE NOT EXISTS (
+                         WHERE next_retry_at_micros <= ?2
+                           AND observation_sequence = (
+                             SELECT MIN(observation_sequence) FROM projection_queue
+                           )
+                           AND NOT EXISTS (
                            SELECT 1 FROM observation_projection_rebuilds
                            WHERE projector_version = ?1
                          )
-                         ORDER BY observation_sequence ASC LIMIT 1",
-                        [SESSION_MESSAGE_PROJECTOR_VERSION],
+                         LIMIT 1",
+                        (SESSION_MESSAGE_PROJECTOR_VERSION, now_micros),
                         |row| row.get::<_, String>(0),
                     )
                     .optional()?

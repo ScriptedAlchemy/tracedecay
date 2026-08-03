@@ -21,14 +21,14 @@
  *     different populations, and averaging or co-plotting them would invent a
  *     relationship the wire does not assert.
  */
-import { ObservatoryReadModelSchema, type ObservatoryReadModel } from '../../contracts/wire.ts';
+import { ObservatoryReadModelV1Schema, type ObservatoryReadModelV1 } from '../../contracts/generated.ts';
 import { CanonicalReadModelSection } from '../../ui/CanonicalReadModelSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
 
 export function CanonicalObservations() {
   return (
-    <CanonicalReadModelSection<ObservatoryReadModel>
+    <CanonicalReadModelSection<ObservatoryReadModelV1>
       title="Canonical observations"
       blurb={
         'event flow, terminal failures, telemetry drops, and retrieval-feedback latency' +
@@ -36,7 +36,7 @@ export function CanonicalObservations() {
       }
       queryKey={['observatory', 'canonical']}
       url="/api/observatory"
-      schema={ObservatoryReadModelSchema}
+      schema={ObservatoryReadModelV1Schema}
       refetchInterval={30_000}
       loadingDetail="requesting canonical observations"
       className="border-b border-edge-subtle"
@@ -62,7 +62,7 @@ export function CanonicalObservations() {
  * window, not for 1970, so it says so rather than printing an epoch date that
  * reads as a real measurement boundary.
  */
-function HorizonFields({ model }: { model: ObservatoryReadModel }) {
+function HorizonFields({ model }: { model: ObservatoryReadModelV1 }) {
   const stamp = (micros: number) => formatMicrosUtc(micros, { zeroAs: 'unbounded' });
   return (
     <>

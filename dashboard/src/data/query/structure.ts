@@ -28,14 +28,14 @@ import type { z } from 'zod';
 
 import { fetchEnvelope } from './envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../scope/store.ts';
-import type { WireDomainState } from '../../contracts/wire.ts';
+import type { DashboardDomainStateV1 } from '../../contracts/generated.ts';
 
 /** One structure read, transport included, with nothing collapsed. */
 export type StructureResult<T> =
   | { outcome: 'measured'; measurement: T }
   | { outcome: 'unmeasured'; reason: string; detail: string }
   | { outcome: 'failed'; code: string; detail: string; retryable: boolean }
-  | { outcome: 'transport'; state: WireDomainState; detail?: string };
+  | { outcome: 'transport'; state: DashboardDomainStateV1; detail?: string };
 
 /** The shape every `StructureReadV1<T>` alias in the generated barrel takes.
  * Declared structurally so this reader works for all five without naming the

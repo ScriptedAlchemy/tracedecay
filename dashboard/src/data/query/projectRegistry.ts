@@ -17,10 +17,10 @@
  * by remembering to add it to the event handler.
  */
 import {
-  ProjectContextPayloadSchema,
-  ProjectsPayloadSchema,
-  type ProjectContextPayload,
-} from '../../contracts/wire.ts';
+  ProjectContextPayloadV1Schema,
+  ProjectsPayloadV1Schema,
+  type ProjectContextPayloadV1,
+} from '../../contracts/generated.ts';
 import { useLegacy } from './useLegacy.ts';
 import type { LegacyResult } from './legacy.ts';
 import type { RegistryReading } from '../scope/store.ts';
@@ -54,7 +54,7 @@ export const projectRegistryInvalidationKey = [PROJECT_REGISTRY_ROOT] as const;
  * to ask about one.
  */
 export function useProjectRegistry(options?: { enabled?: boolean }) {
-  return useLegacy(projectRegistryListKey, '/api/projects', ProjectsPayloadSchema, options);
+  return useLegacy(projectRegistryListKey, '/api/projects', ProjectsPayloadV1Schema, options);
 }
 
 /**
@@ -71,7 +71,7 @@ export function useProjectEntry(projectId: string | null, options?: { enabled?: 
   return useLegacy(
     projectRegistryEntryKey(projectId ?? ''),
     `/api/projects/${encodeURIComponent(projectId ?? '')}`,
-    ProjectContextPayloadSchema,
+    ProjectContextPayloadV1Schema,
     { ...options, enabled: (options?.enabled ?? true) && projectId !== null },
   );
 }
@@ -91,7 +91,7 @@ export function useProjectEntry(projectId: string | null, options?: { enabled?: 
  * says it is unconfirmed, and settles nothing until an answer arrives.
  */
 export function registryReading(
-  result: LegacyResult<ProjectContextPayload> | undefined,
+  result: LegacyResult<ProjectContextPayloadV1> | undefined,
 ): RegistryReading {
   if (!result) return { state: 'unknown' };
   switch (result.outcome) {
@@ -147,7 +147,7 @@ function withReason(state: string, reason: string | null | undefined): string {
  * unconfirmed, or the middle state presents as settled.
  */
 export function registryAnnotation(
-  result: LegacyResult<ProjectContextPayload> | undefined,
+  result: LegacyResult<ProjectContextPayloadV1> | undefined,
 ): string | null {
   if (!result) return 'resolving';
   switch (result.outcome) {

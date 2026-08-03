@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  DoctorFindingsPayloadSchema,
-  DoctorRemediationPayloadSchema,
+  DoctorFindingsPayloadV1Schema,
+  DoctorRemediationPayloadV1Schema,
   type DashboardDoctorRemediationDescriptorV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import {
   availableRemediationActions,
   doctorEvidencePresentation,
@@ -31,7 +31,7 @@ const projectAuthorityScope = {
 
 describe('Doctor frontend contracts', () => {
   it('decodes canonical finding evidence, coverage, and remediation metadata', () => {
-    const payload = DoctorFindingsPayloadSchema.parse({
+    const payload = DoctorFindingsPayloadV1Schema.parse({
       family_filter: null,
       entries: [
         {
@@ -92,13 +92,13 @@ describe('Doctor frontend contracts', () => {
 
   it('decodes typed remediation unavailable and operation outcomes', () => {
     expect(
-      DoctorRemediationPayloadSchema.parse({
+      DoctorRemediationPayloadV1Schema.parse({
         status: 'unavailable',
         reason: 'denied',
       }),
     ).toEqual({ status: 'unavailable', reason: 'denied' });
 
-    const preview = DoctorRemediationPayloadSchema.parse({
+    const preview = DoctorRemediationPayloadV1Schema.parse({
       status: 'operation',
       operation: {
         operation_id: 'request.doctor.preview',
@@ -130,7 +130,7 @@ describe('Doctor frontend contracts', () => {
   });
 
   it('decodes and binds the owner effect receipt scope', () => {
-    const payload = DoctorRemediationPayloadSchema.parse({
+    const payload = DoctorRemediationPayloadV1Schema.parse({
       status: 'operation',
       operation: {
         operation_id: 'request.doctor.storage-collect',

@@ -68,7 +68,7 @@ const ENVELOPE_DONOR = '/api/observatory';
  *
  * `DashboardEnvelopeV1` carries scope, version, time, watermark, coverage,
  * freshness, authorization and legal actions, and only `payload` varies by
- * route. A hand-written envelope missing one of those fails `EnvelopeSchema`,
+ * route. A hand-written envelope missing one of those fails `DashboardEnvelopeV1Schema`,
  * and the surface then renders one generic schema notice for every state — so
  * the envelope is cloned from a fixture and only the payload is supplied here.
  */

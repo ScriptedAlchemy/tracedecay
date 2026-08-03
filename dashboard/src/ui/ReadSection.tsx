@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import type { WireEnvelope } from '../contracts/wire.ts';
+import type { DashboardEnvelopeV1 } from '../contracts/generated.ts';
 import type { EnvelopeResult } from '../data/query/envelope.ts';
 import type { LegacyResult } from '../data/query/legacy.ts';
 import { Corners } from './instrument.tsx';
@@ -134,7 +134,7 @@ export function legacyReadState<T>(
 /**
  * The envelope ladder, resolved to the envelope itself.
  *
- * The value is the whole `WireEnvelope<T>` rather than its payload because the
+ * The value is the whole `DashboardEnvelopeV1<T>` rather than its payload because the
  * truth header — coverage, freshness, authorization, the server's own legal
  * actions — is what every envelope surface renders beside the body, and a
  * reader handed only the payload would have to fetch it back out.
@@ -155,7 +155,7 @@ export function envelopeReadState<T>(
     /** What the reader is told when the transport outcome carries no reason. */
     transport?: string;
   },
-): ReadState<WireEnvelope<T>> {
+): ReadState<DashboardEnvelopeV1<T>> {
   if (pending) return { kind: 'blocked', state: 'loading', detail: details.loading };
   if (result === undefined) {
     return { kind: 'blocked', state: 'unknown', detail: details.unknown ?? 'no response recorded' };
@@ -283,7 +283,7 @@ export function EnvelopeSection<T>({
   loadingDetail: string;
   transportDetail?: string;
   className?: string;
-  children: (envelope: WireEnvelope<T>) => ReactNode;
+  children: (envelope: DashboardEnvelopeV1<T>) => ReactNode;
 }) {
   return (
     <ReadSection

@@ -4,8 +4,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrainPage } from './BrainPage.tsx';
 import { useScope } from '../../data/scope/store.ts';
 import {
-  ProjectsPayloadSchema,
-} from '../../contracts/wire.ts';
+  ProjectsPayloadV1Schema,
+} from '../../contracts/generated.ts';
 
 /** Wire-true `GET /api/projects` body. `projects.rs::list` answers both failure
  * statuses with an explicit `"summary": null` / `"project_tree": null` — the
@@ -108,7 +108,7 @@ describe('BrainPage registry states', () => {
   // guessing which known state it resembles.
   it('names an unrecognised registry status instead of failing the parse', async () => {
     expect(
-      ProjectsPayloadSchema.safeParse({
+      ProjectsPayloadV1Schema.safeParse({
         ...registryBody('ok'),
         status: 'mystery_success',
       }).success,

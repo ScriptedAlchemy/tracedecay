@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './AgentsPage.tsx';
-import type { AnalyticsUsageSummary } from '../../contracts/wire.ts';
+import type { AnalyticsUsageSummaryV1 } from '../../contracts/generated.ts';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -99,8 +99,8 @@ describe('AgentsPage read coverage', () => {
  * unmeasured event count arriving as an explicit null rather than an absent key.
  */
 function usageSummary(
-  overrides: Partial<AnalyticsUsageSummary> = {},
-): AnalyticsUsageSummary {
+  overrides: Partial<AnalyticsUsageSummaryV1> = {},
+): AnalyticsUsageSummaryV1 {
   return {
     available: true,
     source: null,

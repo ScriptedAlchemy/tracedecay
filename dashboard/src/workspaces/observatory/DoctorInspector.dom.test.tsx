@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DoctorEvidenceStateSchema } from '../../contracts/generated.ts';
+import { DoctorEvidenceStateV1Schema } from '../../contracts/generated.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
 import { saveActiveDoctorOperation } from './doctorModel.ts';
@@ -11,7 +11,7 @@ const operation = 'use-case.application.configuration.pin-authority';
 
 /** Every `DoctorEvidenceStateV1`, so the badge check covers the whole taxonomy
  * rather than the states one fixture happens to carry. */
-const EVIDENCE_STATES = DoctorEvidenceStateSchema.options.map((option) => option.value);
+const EVIDENCE_STATES = DoctorEvidenceStateV1Schema.options.map((option) => option.value);
 
 describe('DoctorInspector', () => {
   beforeEach(() => {
@@ -570,7 +570,7 @@ function envelope<T>(
 }
 
 function findingsEnvelope() {
-  return envelope<import('../../contracts/generated.ts').DoctorFindingsPayload>(
+  return envelope<import('../../contracts/generated.ts').DoctorFindingsPayloadV1>(
     {
       family_filter: null,
       entries: [

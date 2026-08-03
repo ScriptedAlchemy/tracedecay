@@ -22,7 +22,7 @@ import { ScopedBrain } from './ScopedBrain.tsx';
 import {
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 
 /** Brain. Two surfaces, because the question genuinely changes when a project
  * is selected.

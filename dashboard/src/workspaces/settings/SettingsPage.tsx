@@ -1,11 +1,11 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { Search, X } from 'lucide-react';
 import {
-  EnvelopeSchema,
+  DashboardEnvelopeV1Schema,
   SettingsPayloadV1Schema,
   type SettingsPayloadV1,
-  type WireLegalActionRef,
-} from '../../contracts/wire.ts';
+  type DashboardLegalActionRefV1,
+} from '../../contracts/generated.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   scopeWritable,
@@ -54,7 +54,7 @@ export function SettingsPage() {
   const settings = useLegacy(
     ['settings'],
     '/api/settings',
-    EnvelopeSchema(SettingsPayloadV1Schema),
+    DashboardEnvelopeV1Schema(SettingsPayloadV1Schema),
   );
   const readUrl = scopedUrl(scope, '/api/settings');
   // Both patch routes are addressed through the project gateway, so whether
@@ -90,7 +90,7 @@ export function SettingsPage() {
  * anyway would put a control on screen whose only outcome is a 503.
  */
 function writableScopes(
-  legalActions: readonly WireLegalActionRef[],
+  legalActions: readonly DashboardLegalActionRefV1[],
   writability: ScopeWritability,
 ): WritableScopes {
   const authorizes = (operation: string) =>
