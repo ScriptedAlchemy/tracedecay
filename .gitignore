@@ -26,3 +26,4 @@ __pycache__/
 # transient Playwright/axe verification output (screenshots and findings).
 # Shipped-state baselines live in dashboard/audit-baselines/ and stay tracked.
 dashboard/.*-axe/
+.superpowers/

@@ -6,7 +6,7 @@ use tracedecay_store::{
     SessionRecord,
 };
 
-use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, Value, params};
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_sessions::compatibility::projected_content_hash;
 
 use super::apply::{derive_projection_with_alias, verify_provenance};
@@ -451,41 +451,6 @@ pub(super) async fn ensure_projection_output_state_cache(
     Ok(())
 }
 
-pub(super) async fn inherit_predecessor_output_state(
-    conn: &impl Executor,
-    observation_id: &str,
-    predecessor_version: &str,
-) -> ProjectionStoreResult<()> {
-    conn.execute(
-        "UPDATE temp.observation_projection_output_state AS state
-         SET projector_owned = 1,
-             canonical_observation_id = latest_observation_id
-         WHERE state.projector_version = ?1
-           AND EXISTS (
-                SELECT 1 FROM observation_projection_provenance AS current
-                WHERE current.projector_version = ?1
-                  AND current.observation_id = ?2
-                  AND current.output_provider = state.output_provider
-                  AND current.output_message_id = state.output_message_id
-           )
-           AND EXISTS (
-                SELECT 1 FROM observation_projection_provenance AS predecessor
-                WHERE predecessor.projector_version = ?3
-                  AND predecessor.output_provider = state.output_provider
-                  AND predecessor.output_message_id = state.output_message_id
-                  AND predecessor.message_created = 1
-           )",
-        params![
-            SESSION_MESSAGE_PROJECTOR_VERSION,
-            observation_id,
-            predecessor_version
-        ],
-    )
-    .await
-    .map_err(|error| storage("inherit predecessor projection output state", error))?;
-    Ok(())
-}
-
 pub(super) async fn read_output_state(
     conn: &impl QueryExecutor,
     projection: &SessionMessageProjection,
@@ -569,25 +534,6 @@ pub(super) async fn has_other_projector_output_owner(
             "SELECT 1 FROM observation_projection_provenance
              WHERE output_provider = ?1 AND output_message_id = ?2
                AND projector_version <> ?3
-               AND NOT EXISTS (
-                    SELECT 1 FROM observation_projection_migrations AS migration
-                    WHERE migration.source_projector_version =
-                          observation_projection_provenance.projector_version
-                      AND migration.target_projector_version = ?3
-                      AND migration.completed = 1
-                      AND EXISTS (
-                        SELECT 1 FROM observation_projection_provenance AS inherited
-                        WHERE inherited.projector_version = ?3
-                          AND inherited.observation_id =
-                              observation_projection_provenance.observation_id
-                          AND inherited.receipt_id =
-                              observation_projection_provenance.receipt_id
-                          AND inherited.output_provider =
-                              observation_projection_provenance.output_provider
-                          AND inherited.output_message_id =
-                              observation_projection_provenance.output_message_id
-                      )
-               )
              LIMIT 1",
             params![
                 message.provider.as_str(),
@@ -692,23 +638,7 @@ pub(in super::super) async fn verify_output_authority(
     let message = projection.message();
     let mut rows = conn
         .query(
-            "SELECT MAX(message_created), COUNT(*), EXISTS (
-                SELECT 1
-                FROM observation_projection_migrations AS migration
-                JOIN observation_projection_provenance AS predecessor
-                  ON predecessor.projector_version = migration.source_projector_version
-                JOIN observation_projection_provenance AS current
-                  ON current.projector_version = migration.target_projector_version
-                 AND current.observation_id = predecessor.observation_id
-                 AND current.receipt_id = predecessor.receipt_id
-                 AND current.output_provider = predecessor.output_provider
-                 AND current.output_message_id = predecessor.output_message_id
-                WHERE migration.target_projector_version = ?1
-                  AND migration.completed = 1
-                  AND predecessor.output_provider = ?2
-                  AND predecessor.output_message_id = ?3
-                  AND predecessor.message_created = 1
-             )
+            "SELECT MAX(message_created), COUNT(*)
              FROM observation_projection_provenance
                   INDEXED BY idx_observation_projection_provenance_global_output
              WHERE projector_version = ?1
@@ -730,11 +660,7 @@ pub(in super::super) async fn verify_output_authority(
         .get::<Option<i64>>(0)
         .map_err(|error| storage("read projection output authority", error))?
         .ok_or(ProjectionStoreError::ProvenanceCollision)?
-        != 0
-        || row
-            .get::<i64>(2)
-            .map_err(|error| storage("read projection output authority", error))?
-            != 0;
+        != 0;
     let owner_count = row
         .get::<i64>(1)
         .map_err(|error| storage("read projection output authority", error))?;
@@ -807,72 +733,6 @@ pub(super) fn canonicalize_session_project_paths(session: &SessionRecord) -> Ses
     }
     normalized.project_path = canonical;
     normalized
-}
-
-/// Converge path spellings persisted before ingest-side canonicalization.
-///
-/// Distinct paths are resolved before any write, then each verified alias is
-/// updated idempotently. Updating `project_key` only when it matched the old
-/// path preserves provider-native keys while keeping path-shaped keys aligned.
-pub async fn converge_session_project_paths(conn: &impl Executor) -> ProjectionStoreResult<()> {
-    let mut rows = conn
-        .query("SELECT DISTINCT project_path FROM sessions", ())
-        .await
-        .map_err(|error| storage("list session project paths", error))?;
-    let mut repairs = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage("read session project paths", error))?
-    {
-        let project_path = row
-            .get::<String>(0)
-            .map_err(|error| storage("decode session project path", error))?;
-        if let Some(canonical) = canonical_project_path(&project_path) {
-            repairs.push((project_path, canonical));
-        }
-    }
-    drop(rows);
-
-    // Batch every distinct drifted path into one statement per chunk via a
-    // `VALUES` CTE, rather than one `UPDATE ... WHERE project_path = ?1` per
-    // path. The old_path -> canonical mapping still varies per row (unlike
-    // the retention passes' shared marker), so each chunk binds the mapping
-    // as a small `repair` table and resolves it with a correlated subquery
-    // keyed on `sessions.project_path`, which is exactly the old loop's
-    // per-path `WHERE`/`SET` pairing collapsed into one pass. Chunked at 400
-    // paths (2 params each) to stay under SQLite's default bound-parameter
-    // limit (999).
-    const CONVERGE_CHUNK: usize = 400;
-    for chunk in repairs.chunks(CONVERGE_CHUNK) {
-        let values_clause = vec!["(?, ?)"; chunk.len()].join(",");
-        let sql = format!(
-            "WITH repair(old_path, canonical_path) AS (VALUES {values_clause})
-             UPDATE sessions
-             SET project_key = CASE
-                     WHEN project_key = (
-                         SELECT old_path FROM repair WHERE old_path = sessions.project_path
-                     )
-                     THEN (
-                         SELECT canonical_path FROM repair WHERE old_path = sessions.project_path
-                     )
-                     ELSE project_key
-                 END,
-                 project_path = (
-                     SELECT canonical_path FROM repair WHERE old_path = sessions.project_path
-                 )
-             WHERE project_path IN (SELECT old_path FROM repair)"
-        );
-        let mut values = Vec::with_capacity(chunk.len() * 2);
-        for (project_path, canonical) in chunk {
-            values.push(Value::Text(project_path.clone()));
-            values.push(Value::Text(canonical.clone()));
-        }
-        conn.execute(&sql, values)
-            .await
-            .map_err(|error| storage("converge session project path", error))?;
-    }
-    Ok(())
 }
 
 /// Resolve a project-path string to its canonical on-disk form, returning
@@ -1142,11 +1002,9 @@ pub(super) async fn protected_message_rows_compatible(
 mod reconcile_tests {
     use tracedecay_store::SessionRecord;
 
+    #[cfg(unix)]
+    use super::canonicalize_session_project_paths;
     use super::reconcile_session_rows;
-    #[cfg(unix)]
-    use super::{canonicalize_session_project_paths, converge_session_project_paths};
-    #[cfg(unix)]
-    use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, TestConnection};
 
     fn record(project_path: &str) -> SessionRecord {
         SessionRecord {
@@ -1207,140 +1065,6 @@ mod reconcile_tests {
             )
             .is_none(),
             "reconcile must not canonicalize; family identity is an ingest concern"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn legacy_session_paths_converge_without_rewriting_native_keys() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let real = tmp.path().join("fast-projects").join("repo");
-        std::fs::create_dir_all(&real).unwrap();
-        let alias_parent = tmp.path().join("home-projects");
-        std::os::unix::fs::symlink(tmp.path().join("fast-projects"), &alias_parent).unwrap();
-        let aliased = alias_parent.join("repo");
-        let connection = TestConnection::open(&tmp.path().join("sessions.db"));
-        connection
-            .execute_batch(
-                "CREATE TABLE sessions (
-                    provider TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    project_key TEXT NOT NULL,
-                    project_path TEXT NOT NULL
-                 );",
-            )
-            .await
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO sessions (provider, session_id, project_key, project_path)
-                 VALUES ('codex', 'path-key', ?1, ?1),
-                        ('codex', 'native-key', 'project-id', ?1)",
-                (aliased.to_string_lossy().as_ref(),),
-            )
-            .await
-            .unwrap();
-
-        converge_session_project_paths(&connection).await.unwrap();
-
-        let mut rows = connection
-            .query(
-                "SELECT session_id, project_key, project_path
-                 FROM sessions ORDER BY session_id",
-                (),
-            )
-            .await
-            .unwrap();
-        let native = rows.next().await.unwrap().unwrap();
-        assert_eq!(native.get::<String>(0).unwrap(), "native-key");
-        assert_eq!(native.get::<String>(1).unwrap(), "project-id");
-        assert_eq!(
-            native.get::<String>(2).unwrap(),
-            real.to_string_lossy().as_ref()
-        );
-        let path = rows.next().await.unwrap().unwrap();
-        assert_eq!(path.get::<String>(0).unwrap(), "path-key");
-        assert_eq!(
-            path.get::<String>(1).unwrap(),
-            real.to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            path.get::<String>(2).unwrap(),
-            real.to_string_lossy().as_ref()
-        );
-    }
-
-    /// The batched `WITH repair(...) AS (VALUES ...)` statement maps each
-    /// distinct drifted `project_path` to its own canonical target within one
-    /// chunked pass. Two independent families in the same batch must each
-    /// resolve to their own canonical spelling, not cross-contaminate.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn independent_families_converge_to_distinct_canonical_paths_in_one_batch() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let real_a = tmp.path().join("fast-projects").join("repo-a");
-        let real_b = tmp.path().join("fast-projects").join("repo-b");
-        std::fs::create_dir_all(&real_a).unwrap();
-        std::fs::create_dir_all(&real_b).unwrap();
-        let alias_parent = tmp.path().join("home-projects");
-        std::os::unix::fs::symlink(tmp.path().join("fast-projects"), &alias_parent).unwrap();
-        let aliased_a = alias_parent.join("repo-a");
-        let aliased_b = alias_parent.join("repo-b");
-
-        let connection = TestConnection::open(&tmp.path().join("sessions.db"));
-        connection
-            .execute_batch(
-                "CREATE TABLE sessions (
-                    provider TEXT NOT NULL,
-                    session_id TEXT NOT NULL,
-                    project_key TEXT NOT NULL,
-                    project_path TEXT NOT NULL
-                 );",
-            )
-            .await
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO sessions (provider, session_id, project_key, project_path)
-                 VALUES ('codex', 'session-a', ?1, ?1),
-                        ('codex', 'session-b', ?2, ?2)",
-                (
-                    aliased_a.to_string_lossy().as_ref(),
-                    aliased_b.to_string_lossy().as_ref(),
-                ),
-            )
-            .await
-            .unwrap();
-
-        converge_session_project_paths(&connection).await.unwrap();
-
-        let mut rows = connection
-            .query(
-                "SELECT session_id, project_key, project_path
-                 FROM sessions ORDER BY session_id",
-                (),
-            )
-            .await
-            .unwrap();
-        let session_a = rows.next().await.unwrap().unwrap();
-        assert_eq!(session_a.get::<String>(0).unwrap(), "session-a");
-        assert_eq!(
-            session_a.get::<String>(1).unwrap(),
-            real_a.to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            session_a.get::<String>(2).unwrap(),
-            real_a.to_string_lossy().as_ref()
-        );
-        let session_b = rows.next().await.unwrap().unwrap();
-        assert_eq!(session_b.get::<String>(0).unwrap(), "session-b");
-        assert_eq!(
-            session_b.get::<String>(1).unwrap(),
-            real_b.to_string_lossy().as_ref()
-        );
-        assert_eq!(
-            session_b.get::<String>(2).unwrap(),
-            real_b.to_string_lossy().as_ref()
         );
     }
 

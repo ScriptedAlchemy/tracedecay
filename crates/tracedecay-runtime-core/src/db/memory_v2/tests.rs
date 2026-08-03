@@ -1,20 +1,93 @@
 use tempfile::TempDir;
 use tracedecay_domain::{
-    Confidence, FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1,
-    FactLineageEventV1, LegacyFactMappingV1, LegacyHistoryCoverageV1, ProvenanceId,
+    FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
+    LegacyFactMappingV1, LegacyHistoryCoverageV1, ProvenanceId, UtcMicros,
 };
 
 use crate::db::engine::{Connection, TestConnection, params};
 
-use super::backfill::backfill_feedback_batch;
-use super::backfill::facts::ensure_legacy_identity;
-use super::repair::repair_memory_v2_feedback_history_batch;
-use super::schema::{proposal_schema_is_v22, table_exists, table_has_column};
-use super::writers::{
-    ensure_current, insert_event, insert_fact_identity, insert_mapping, purge_payload_rows,
-    update_current,
-};
+use super::schema::{table_exists, table_has_column};
+use super::writers::insert_event;
 use super::*;
+
+// Identity, legacy-mapping, and current-projection rows used to be written by
+// the V1→V2 backfill writer layer. That layer had no production writer left
+// after the fresh-store cutover and was removed, so these tests seed the same
+// rows directly. `insert_event` is *not* duplicated here: it is still a live
+// production writer (the legacy-payload purge path appends through it), so the
+// tests keep exercising the real function.
+
+async fn seed_fact_identity(
+    conn: &impl MemoryV2Executor,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    identity_json: &str,
+    created_at: i64,
+) {
+    conn.execute(
+        "INSERT INTO memory_v2_facts(
+            fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+            identity_json,
+            created_at
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_legacy_mapping(
+    conn: &impl MemoryV2Executor,
+    owner: &OwnerKey,
+    mapping: &LegacyFactMappingV1,
+) {
+    conn.execute(
+        "INSERT INTO memory_v2_legacy_map(
+            owner_kind, project_id, owner_json, source_store_id,
+            legacy_fact_id, fact_id, mapping_json
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+            mapping.source_store_id().as_str(),
+            mapping.legacy_fact_id(),
+            mapping.fact_id().as_str(),
+            json_text(mapping).unwrap()
+        ],
+    )
+    .await
+    .unwrap();
+}
+
+async fn seed_current_fact(
+    conn: &impl MemoryV2Executor,
+    owner: &OwnerKey,
+    fact_id: &FactId,
+    event_id: &tracedecay_domain::FactEventId,
+    updated_at: i64,
+) {
+    conn.execute(
+        "INSERT INTO memory_v2_current_facts(
+            fact_id, owner_kind, project_id, payload_access, trust_score,
+            active_assertion_id, last_event_id, updated_at
+         ) VALUES(?1, ?2, ?3, 'unavailable', NULL, NULL, ?4, ?5)",
+        params![
+            fact_id.as_str(),
+            owner.kind,
+            owner.project_id.as_str(),
+            event_id.as_str(),
+            updated_at
+        ],
+    )
+    .await
+    .unwrap();
+}
 
 async fn database() -> (TestConnection, TempDir) {
     let dir = tempfile::tempdir().unwrap();
@@ -29,25 +102,6 @@ async fn database() -> (TestConnection, TempDir) {
     (conn, dir)
 }
 
-async fn pre_v22_database() -> (TestConnection, TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("memory-v2-pre-v22.db");
-    let conn = TestConnection::open(&path);
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
-        .await
-        .unwrap();
-    create_schema(&*conn, "memory_v2_pre_v22_test")
-        .await
-        .unwrap();
-    upgrade_v20_schema(&*conn, "memory_v2_pre_v22_test")
-        .await
-        .unwrap();
-    upgrade_v21_schema(&*conn, "memory_v2_pre_v22_test")
-        .await
-        .unwrap();
-    (conn, dir)
-}
-
 fn owner() -> FactOwnerV1 {
     FactOwnerV1::Project {
         project_id: tracedecay_domain::ProjectId::new("project.memory-v2-test").unwrap(),
@@ -56,25 +110,6 @@ fn owner() -> FactOwnerV1 {
 
 fn source_store_id() -> SourceStoreId {
     SourceStoreId::new(V1_COMPATIBILITY_SOURCE_STORE).unwrap()
-}
-
-async fn run_to_frontier(
-    conn: &Connection,
-    owner: &FactOwnerV1,
-    source: &SourceStoreId,
-    frontiers: CapturedMemoryV2Frontiers,
-    batch_size: i64,
-) {
-    for _ in 0..32 {
-        if backfill_memory_v2_batch(conn, owner, source, frontiers, batch_size)
-            .await
-            .unwrap()
-            == MemoryV2BackfillBatchOutcome::AwaitingCutover
-        {
-            return;
-        }
-    }
-    panic!("backfill did not reach captured frontier");
 }
 
 async fn scalar(conn: &Connection, sql: &str) -> i64 {
@@ -105,209 +140,9 @@ async fn schema_install_does_not_start_unowned_backfill() {
 }
 
 #[tokio::test]
-async fn v20_and_v21_installers_do_not_leak_v22_or_v23_schema() {
-    let (runtime, _dir) = pre_v22_database().await;
+async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
+    let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_operation_receipts")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_feedback_history_repair_progress")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_fact_relations")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(!proposal_schema_is_v22(&conn).await.unwrap());
-
-    install_v22_fresh_schema(&conn, "memory_v2_v22_fresh_test")
-        .await
-        .unwrap();
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_operation_receipts")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_feedback_history_repair_progress")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_fact_relations")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(
-        !table_has_column(
-            &conn,
-            "memory_v2_fact_relations",
-            "provenance_json",
-            "memory_v2_v22_fresh_test",
-        )
-        .await
-        .unwrap()
-    );
-    assert!(proposal_schema_is_v22(&conn).await.unwrap());
-
-    install_v23_fresh_schema(&conn, "memory_v2_v23_fresh_test")
-        .await
-        .unwrap();
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_banks")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_exists(&conn, "memory_v2_compatibility_bank_dirty")
-            .await
-            .unwrap()
-    );
-    assert!(
-        table_has_column(
-            &conn,
-            "memory_v2_fact_relations",
-            "provenance_json",
-            "memory_v2_v23_fresh_test",
-        )
-        .await
-        .unwrap()
-    );
-}
-
-#[tokio::test]
-async fn v20_scrubs_more_assertion_headers_than_the_engine_row_limit() {
-    const ASSERTION_COUNT: i64 = 10_001;
-    const SEED_BATCH_SIZE: i64 = 1_000;
-
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("memory-v2-v20-large-scrub.db");
-    let runtime = TestConnection::open(&path);
-    let conn = (*runtime).clone();
-    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA secure_delete = ON;")
-        .await
-        .unwrap();
-    create_schema(&conn, "memory_v2_v20_large_scrub_test")
-        .await
-        .unwrap();
-    let owner = owner_key(&owner()).unwrap();
-    let mut first = 1_i64;
-    while first <= ASSERTION_COUNT {
-        let last = (first + SEED_BATCH_SIZE - 1).min(ASSERTION_COUNT);
-        conn.execute(
-            "WITH RECURSIVE sequence(value) AS (
-                SELECT ?1
-                UNION ALL
-                SELECT value + 1 FROM sequence WHERE value < ?2
-             )
-             INSERT INTO memory_v2_facts(
-                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
-             )
-             SELECT printf('large-scrub.fact.%05d', value), ?3, ?4, ?5, '{}', value
-             FROM sequence",
-            params![
-                first,
-                last,
-                owner.kind,
-                owner.project_id.as_str(),
-                owner.json.as_str()
-            ],
-        )
-        .await
-        .unwrap();
-        conn.execute(
-            "WITH RECURSIVE sequence(value) AS (
-                SELECT ?1
-                UNION ALL
-                SELECT value + 1 FROM sequence WHERE value < ?2
-             )
-             INSERT INTO memory_v2_assertions(
-                assertion_id, fact_id, owner_kind, project_id, owner_json,
-                assertion_header_json, kind_json, payload_reference_json,
-                receipt_json, asserted_at, actor_id
-             )
-             SELECT printf('large-scrub.assertion.%05d', value),
-                    printf('large-scrub.fact.%05d', value),
-                    ?3, ?4, ?5,
-                    json_object(
-                        'assertion_id', printf('large-scrub.assertion.%05d', value),
-                        'payload', 'must-be-removed'
-                    ),
-                    '{}', '{}', '{}', value, NULL
-             FROM sequence",
-            params![
-                first,
-                last,
-                owner.kind,
-                owner.project_id.as_str(),
-                owner.json.as_str()
-            ],
-        )
-        .await
-        .unwrap();
-        first = last + 1;
-    }
-
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertions
-             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL",
-        )
-        .await,
-        ASSERTION_COUNT
-    );
-    upgrade_v20_schema(&conn, "memory_v2_v20_large_scrub_test")
-        .await
-        .unwrap();
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertions
-             WHERE json_type(assertion_header_json, '$.payload') IS NOT NULL
-                OR json_type(assertion_header_json, '$.content') IS NOT NULL",
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertions").await,
-        ASSERTION_COUNT
-    );
-}
-
-#[tokio::test]
-async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
-    let (runtime, _dir) = pre_v22_database().await;
-    let conn = (*runtime).clone();
-    install_v22_fresh_schema(&conn, "memory_v2_v23_relation_upgrade_test")
-        .await
-        .unwrap();
     let owner = owner_key(&owner()).unwrap();
     conn.execute_batch(&format!(
         "INSERT INTO memory_v2_facts(
@@ -318,10 +153,11 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
             ('v23.relation.evidence', '{kind}', '{project_id}', '{owner_json}', '{{}}', 1);
          INSERT INTO memory_v2_fact_relations(
             owner_kind, project_id, source_fact_id, target_fact_id, relation,
-            confidence, source_label, evidence_fact_ids_json, occurred_at, updated_at
+            confidence, source_label, provenance_json, evidence_fact_ids_json,
+            occurred_at, updated_at
          ) VALUES(
             '{kind}', '{project_id}', 'v23.relation.source', 'v23.relation.target',
-            'supports', 0.8, 'fixture', '[\"v23.relation.evidence\"]', 1, 1
+            'supports', 0.8, 'fixture', '{{}}', '[\"v23.relation.evidence\"]', 1, 1
          );",
         kind = owner.kind,
         project_id = owner.project_id,
@@ -330,17 +166,11 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
     .await
     .unwrap();
 
-    conn.execute("PRAGMA user_version = 22", ()).await.unwrap();
-    assert!(
-        super::super::migrations::migrate_connection(&conn)
-            .await
-            .expect("V22 relation fixture must migrate to V23")
-    );
     assert_eq!(
         optional_i64(&conn, "PRAGMA user_version", ())
             .await
             .unwrap(),
-        Some(i64::from(super::super::migrations::LATEST_VERSION))
+        Some(i64::from(super::super::migrations::SCHEMA_VERSION))
     );
     assert!(
         table_exists(&conn, "memory_v2_compatibility_banks")
@@ -397,988 +227,6 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
 }
 
 #[tokio::test]
-async fn v20_v21_feedback_backfill_does_not_require_v22_history_tables() {
-    let (runtime, _dir) = pre_v22_database().await;
-    let conn = (*runtime).clone();
-    conn.execute_batch(
-        "CREATE TABLE memory_feedback_events (
-            event_id INTEGER PRIMARY KEY,
-            fact_id INTEGER NOT NULL,
-            action TEXT NOT NULL,
-            old_trust REAL NOT NULL,
-            new_trust REAL NOT NULL,
-            created_at INTEGER NOT NULL,
-            source TEXT,
-            note TEXT
-         );
-         INSERT INTO memory_feedback_events(
-            event_id, fact_id, action, old_trust, new_trust, created_at, source, note
-         ) VALUES(1, 7, 'helpful', 0.5, 0.6, 10, 'mcp', 'legacy note');",
-    )
-    .await
-    .unwrap();
-    let owner = owner();
-    let source = source_store_id();
-    let owner_key = owner_key(&owner).unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_backfill_progress(
-            owner_kind, project_id, owner_json, source_store_id, phase,
-            feedback_frontier, oplog_frontier, fact_frontier, started_at, updated_at
-         ) VALUES(?1, ?2, ?3, ?4, 'feedback', 1, 0, 0, 1, 1)",
-        params![
-            owner_key.kind,
-            owner_key.project_id.as_str(),
-            owner_key.json.as_str(),
-            source.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-    let progress = Progress {
-        phase: "feedback".to_owned(),
-        feedback_frontier: 1,
-        oplog_frontier: 0,
-        fact_frontier: 0,
-        feedback_cursor: 0,
-        oplog_cursor: 0,
-        fact_cursor: 0,
-        started_at: 1,
-    };
-
-    assert_eq!(
-        backfill_feedback_batch(&conn, &owner, &owner_key, &source, &progress, 1)
-            .await
-            .unwrap(),
-        MemoryV2BackfillBatchOutcome::Advanced { processed: 1 }
-    );
-    assert!(
-        !table_exists(&conn, "memory_v2_legacy_feedback_event_map")
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_lineage_events").await,
-        2,
-        "V20/V21 retain their original typed import and trust lineage"
-    );
-}
-
-#[tokio::test]
-async fn v22_feedback_history_repair_is_bounded_idempotent_and_redactable() {
-    let (runtime, _dir) = pre_v22_database().await;
-    let conn = (*runtime).clone();
-    conn.execute_batch(
-        "CREATE TABLE memory_facts (
-            fact_id INTEGER PRIMARY KEY,
-            content TEXT NOT NULL
-         );
-         CREATE TABLE memory_feedback_events (
-            event_id INTEGER PRIMARY KEY,
-            fact_id INTEGER NOT NULL,
-            action TEXT NOT NULL,
-            old_trust REAL NOT NULL,
-            new_trust REAL NOT NULL,
-            created_at INTEGER NOT NULL,
-            source TEXT,
-            note TEXT
-         );
-         INSERT INTO memory_facts(fact_id, content) VALUES(7, 'legacy feedback fact');
-         INSERT INTO memory_feedback_events(
-            event_id, fact_id, action, old_trust, new_trust, created_at, source, note
-         ) VALUES
-            (9, 7, 'helpful', 0.5, 0.55, 10, 'mcp', 'safe note'),
-            (10, 7, 'unhelpful', 0.55, 0.45, 11, NULL, NULL),
-            (11, 7, 'helpful', 0.5, 0.55, 10, 'mcp', 'duplicate');",
-    )
-    .await
-    .unwrap();
-
-    let owner = owner();
-    let source = source_store_id();
-    let owner_key = owner_key(&owner).unwrap();
-    let material = FactIdentityMaterialV1::new(
-        owner.clone(),
-        FactIdentitySourceV1::Legacy {
-            source_store_id: source.clone(),
-            legacy_fact_id: 7,
-        },
-    )
-    .unwrap();
-    let fact_id = FactId::derive(&material).unwrap();
-    insert_fact_identity(
-        &conn,
-        &owner_key,
-        &fact_id,
-        &json_text(&material).unwrap(),
-        1,
-    )
-    .await
-    .unwrap();
-    let mapping = LegacyFactMappingV1::new(
-        owner.clone(),
-        source.clone(),
-        7,
-        fact_id.clone(),
-        LegacyHistoryCoverageV1::Unknown,
-        UtcMicros(1),
-    )
-    .unwrap();
-    insert_mapping(&conn, &owner_key, &mapping).await.unwrap();
-    let imported = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::LegacyImported { mapping },
-        UtcMicros(1),
-        None,
-    )
-    .unwrap();
-    insert_event(&conn, &owner_key, &imported, 1).await.unwrap();
-    ensure_current(&conn, &owner_key, &fact_id, imported.event_id(), 1)
-        .await
-        .unwrap();
-    let first = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::TrustChanged {
-            previous: Confidence::new(0.5).unwrap(),
-            current: Confidence::new(0.55).unwrap(),
-            evidence_ids: Vec::new(),
-        },
-        UtcMicros(10_000_000),
-        None,
-    )
-    .unwrap();
-    insert_event(&conn, &owner_key, &first, 1).await.unwrap();
-    update_current(
-        &conn,
-        &owner_key,
-        &fact_id,
-        None,
-        Some(0.55),
-        first.event_id(),
-        10_000_000,
-    )
-    .await
-    .unwrap();
-    let second = FactLineageEventV1::new(
-        fact_id.clone(),
-        owner.clone(),
-        FactLineageEventKindV1::TrustChanged {
-            previous: Confidence::new(0.55).unwrap(),
-            current: Confidence::new(0.45).unwrap(),
-            evidence_ids: Vec::new(),
-        },
-        UtcMicros(11_000_000),
-        None,
-    )
-    .unwrap();
-    insert_event(&conn, &owner_key, &second, 1).await.unwrap();
-    update_current(
-        &conn,
-        &owner_key,
-        &fact_id,
-        None,
-        Some(0.45),
-        second.event_id(),
-        11_000_000,
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_backfill_progress(
-            owner_kind, project_id, owner_json, source_store_id, phase,
-            feedback_frontier, oplog_frontier, fact_frontier,
-            feedback_cursor, oplog_cursor, fact_cursor,
-            started_at, updated_at, cutover_completed_at, cutover_receipt_json
-         ) VALUES(?1, ?2, ?3, ?4, 'cutover_complete', 11, 0, 0, 11, 0, 0, 1, 1, 1, '{}')",
-        params![
-            owner_key.kind,
-            owner_key.project_id.as_str(),
-            owner_key.json.as_str(),
-            source.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-
-    upgrade_v22_schema(&conn, "memory_v2_v22_repair_test")
-        .await
-        .unwrap();
-    assert_eq!(
-        feedback_history_repair_progress(&conn, &owner, &source)
-            .await
-            .unwrap(),
-        Some(MemoryV2FeedbackHistoryRepairProgress {
-            feedback_frontier: 11,
-            feedback_cursor: 0,
-            complete: false,
-        })
-    );
-    let transaction = conn.transaction().await.unwrap();
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch_in_transaction(&transaction, &owner, &source, 1,)
-            .await
-            .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Advanced { processed: 1 }
-    );
-    transaction.rollback().await.unwrap();
-    assert_eq!(
-        feedback_history_repair_progress(&conn, &owner, &source)
-            .await
-            .unwrap(),
-        Some(MemoryV2FeedbackHistoryRepairProgress {
-            feedback_frontier: 11,
-            feedback_cursor: 0,
-            complete: false,
-        }),
-        "an enclosing receipt transaction must roll back the repair cursor too"
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_legacy_feedback_event_map",
-        )
-        .await,
-        0,
-        "an enclosing receipt transaction must roll back repair projections"
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(&conn, &owner, &source, 1)
-            .await
-            .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Advanced { processed: 1 }
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(&conn, &owner, &source, 1)
-            .await
-            .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Advanced { processed: 1 }
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(&conn, &owner, &source, 1)
-            .await
-            .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Complete { processed: 1 }
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(&conn, &owner, &source, 1)
-            .await
-            .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Complete { processed: 0 }
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_legacy_feedback_event_map"
-        )
-        .await,
-        2
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_feedback_history").await,
-        2
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_feedback_history
-             WHERE details_availability = 'available' AND source = 'mcp' AND note = 'safe note'",
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_legacy_quarantine
-             WHERE reason_code = 'feedback_event_duplicate'",
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_feedback_history
-             WHERE details_availability = 'unknown' AND source IS NULL AND note IS NULL",
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_legacy_quarantine
-             WHERE reason_code = 'feedback_details_unknown'",
-        )
-        .await,
-        1
-    );
-    purge_payload_rows(&conn, &owner_key, &fact_id)
-        .await
-        .unwrap();
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_feedback_history
-             WHERE details_availability = 'legacy_redacted'
-               AND source IS NULL AND note IS NULL",
-        )
-        .await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_feedback_history
-             WHERE details_availability = 'unknown'
-               AND source IS NULL AND note IS NULL",
-        )
-        .await,
-        1
-    );
-}
-
-#[tokio::test]
-async fn v22_feedback_history_repair_skips_foreign_rows_and_yields_after_a_bounded_slice() {
-    let (runtime, _dir) = pre_v22_database().await;
-    let conn = (*runtime).clone();
-    let owner = owner();
-    let source = source_store_id();
-    let primary_owner_key = owner_key(&owner).unwrap();
-    ensure_legacy_identity(&conn, &owner, &primary_owner_key, &source, 1, 1)
-        .await
-        .unwrap();
-    let foreign_owner = FactOwnerV1::Project {
-        project_id: tracedecay_domain::ProjectId::new("project.memory-v2-foreign").unwrap(),
-    };
-    let foreign_owner_key = owner_key(&foreign_owner).unwrap();
-    ensure_legacy_identity(&conn, &foreign_owner, &foreign_owner_key, &source, 2, 1)
-        .await
-        .unwrap();
-    conn.execute_batch(
-        "CREATE TABLE memory_feedback_events (
-            event_id INTEGER PRIMARY KEY,
-            fact_id INTEGER NOT NULL,
-            action TEXT NOT NULL,
-            old_trust REAL NOT NULL,
-            new_trust REAL NOT NULL,
-            created_at INTEGER NOT NULL,
-            source TEXT,
-            note TEXT
-         );
-         WITH RECURSIVE ids(event_id) AS (
-            VALUES(1)
-            UNION ALL
-            SELECT event_id + 1 FROM ids WHERE event_id < 514
-         )
-         INSERT INTO memory_feedback_events(
-            event_id, fact_id, action, old_trust, new_trust, created_at, source, note
-         )
-         SELECT event_id,
-                CASE WHEN event_id = 1 THEN 2 ELSE 1 END,
-                'unsupported', 0.5, 0.5, event_id, NULL, NULL
-         FROM ids;",
-    )
-    .await
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memory_v2_backfill_progress(
-            owner_kind, project_id, owner_json, source_store_id, phase,
-            feedback_frontier, oplog_frontier, fact_frontier,
-            feedback_cursor, oplog_cursor, fact_cursor,
-            started_at, updated_at, cutover_completed_at, cutover_receipt_json
-        ) VALUES(?1, ?2, ?3, ?4, 'cutover_complete',
-            514, 0, 0, 514, 0, 0, 1, 1, 1, '{}')",
-        params![
-            primary_owner_key.kind,
-            primary_owner_key.project_id.as_str(),
-            primary_owner_key.json.as_str(),
-            source.as_str()
-        ],
-    )
-    .await
-    .unwrap();
-
-    upgrade_v22_schema(&conn, "memory_v2_v22_bounded_repair_test")
-        .await
-        .unwrap();
-    assert!(
-        repair_memory_v2_feedback_history_batch(
-            &conn,
-            &owner,
-            &source,
-            MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE + 1,
-        )
-        .await
-        .is_err(),
-        "repair must reject a slice larger than the fixed V22 bound"
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(
-            &conn,
-            &owner,
-            &source,
-            MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE,
-        )
-        .await
-        .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Advanced { processed: 512 }
-    );
-    assert_eq!(
-        feedback_history_repair_progress(&conn, &owner, &source)
-            .await
-            .unwrap(),
-        Some(MemoryV2FeedbackHistoryRepairProgress {
-            feedback_frontier: 514,
-            feedback_cursor: 513,
-            complete: false,
-        })
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(
-            &conn,
-            &owner,
-            &source,
-            MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE,
-        )
-        .await
-        .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Complete { processed: 1 }
-    );
-    assert_eq!(
-        feedback_history_repair_progress(&conn, &owner, &source)
-            .await
-            .unwrap(),
-        Some(MemoryV2FeedbackHistoryRepairProgress {
-            feedback_frontier: 514,
-            feedback_cursor: 514,
-            complete: true,
-        })
-    );
-    assert_eq!(
-        repair_memory_v2_feedback_history_batch(
-            &conn,
-            &owner,
-            &source,
-            MAX_FEEDBACK_HISTORY_REPAIR_BATCH_SIZE,
-        )
-        .await
-        .unwrap(),
-        MemoryV2FeedbackHistoryRepairBatchOutcome::Complete { processed: 0 }
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_legacy_quarantine
-             WHERE source_table = 'memory_feedback_events'
-               AND reason_code = 'unknown_feedback_action'",
-        )
-        .await,
-        513
-    );
-}
-
-#[tokio::test]
-async fn bounded_backfill_resumes_with_fixed_frontiers_and_unknown_history() {
-    let (runtime, dir) = database().await;
-    let path = dir.path().join("memory-v2.db");
-    let conn = (*runtime).clone();
-    for id in 1..=3 {
-        conn.execute(
-            "INSERT INTO memory_facts(
-                fact_id, content, category, tags, trust_score, source,
-                metadata, hrr_vector, created_at, updated_at
-             ) VALUES(?1, ?2, 'project', '[]', 0.5, 'manual', '{}', x'0102', 10, 10)",
-            params![id, format!("bounded fact {id}")],
-        )
-        .await
-        .unwrap();
-    }
-    let owner = owner();
-    let source = source_store_id();
-    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
-        .await
-        .unwrap();
-    assert_eq!(
-        backfill_memory_v2_batch(&conn, &owner, &source, frontiers, 1)
-            .await
-            .unwrap(),
-        MemoryV2BackfillBatchOutcome::Advanced { processed: 0 }
-    );
-    drop(conn);
-    drop(runtime);
-    let restarted_runtime = TestConnection::open(&path);
-    let restarted = (*restarted_runtime).clone();
-    restarted
-        .execute_batch("PRAGMA foreign_keys = ON")
-        .await
-        .unwrap();
-    run_to_frontier(&restarted, &owner, &source, frontiers, 1).await;
-    assert_eq!(
-        scalar(&restarted, "SELECT COUNT(*) FROM memory_v2_legacy_map").await,
-        3
-    );
-    let mut rows = restarted
-        .query(
-            "SELECT mapping_json FROM memory_v2_legacy_map ORDER BY legacy_fact_id",
-            (),
-        )
-        .await
-        .unwrap();
-    while let Some(row) = rows.next().await.unwrap() {
-        let mapping: LegacyFactMappingV1 =
-            serde_json::from_str(&row.get::<String>(0).unwrap()).unwrap();
-        assert_eq!(mapping.history_coverage(), LegacyHistoryCoverageV1::Unknown);
-    }
-    let phase = optional_string(
-        &restarted,
-        "SELECT phase FROM memory_v2_backfill_progress",
-        (),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(phase, "awaiting_cutover");
-    assert_eq!(
-        scalar(
-            &restarted,
-            "SELECT COUNT(*) FROM memory_v2_lineage_events WHERE json_valid(event_json)"
-        )
-        .await,
-        9
-    );
-}
-
-#[tokio::test]
-async fn cutover_replay_preserves_first_completion_time_but_binds_frontier() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    conn.execute(
-        "INSERT INTO memory_facts(
-            fact_id, content, category, tags, trust_score, source, metadata,
-            hrr_vector, created_at, updated_at
-         ) VALUES(1, 'cutover replay fact', 'project', '[]', 0.5, 'manual', '{}',
-                  x'0102', 10, 10)",
-        (),
-    )
-    .await
-    .unwrap();
-    let owner = owner();
-    let source = source_store_id();
-    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
-        .await
-        .unwrap();
-    run_to_frontier(&conn, &owner, &source, frontiers, 1).await;
-    let receipt_id = ProvenanceId::new("memory-v2.cutover-replay".to_owned()).unwrap();
-    let first = MemoryV2CutoverReceipt::new(
-        receipt_id.clone(),
-        owner.clone(),
-        source.clone(),
-        frontiers,
-        UtcMicros(1_000),
-    )
-    .unwrap();
-    assert_eq!(
-        finalize_memory_v2_cutover(&conn, &first).await.unwrap(),
-        MemoryV2CutoverOutcome::Complete
-    );
-    let stored_receipt = optional_string(
-        &conn,
-        "SELECT cutover_receipt_json FROM memory_v2_backfill_progress",
-        (),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT cutover_completed_at FROM memory_v2_backfill_progress"
-        )
-        .await,
-        1_000
-    );
-
-    let replay = MemoryV2CutoverReceipt::new(
-        receipt_id.clone(),
-        owner.clone(),
-        source.clone(),
-        frontiers,
-        UtcMicros(2_000),
-    )
-    .unwrap();
-    assert_eq!(
-        finalize_memory_v2_cutover(&conn, &replay).await.unwrap(),
-        MemoryV2CutoverOutcome::Complete,
-        "a retry must retain the first durable completion timestamp"
-    );
-    assert_eq!(
-        optional_string(
-            &conn,
-            "SELECT cutover_receipt_json FROM memory_v2_backfill_progress",
-            (),
-        )
-        .await
-        .unwrap()
-        .unwrap(),
-        stored_receipt
-    );
-    let mut source_mismatch: Value = serde_json::from_str(&stored_receipt).unwrap();
-    source_mismatch["source_store_id"] = Value::String("foreign-source".to_owned());
-    assert!(
-        canonical_cutover_replay(
-            stored_receipt.clone(),
-            &json_text(&source_mismatch).unwrap()
-        )
-        .is_err(),
-        "cutover replay must retain the source store in its identity"
-    );
-    assert!(
-        finalize_memory_v2_cutover(
-            &conn,
-            &MemoryV2CutoverReceipt::new(
-                receipt_id,
-                owner,
-                source,
-                CapturedMemoryV2Frontiers {
-                    facts: frontiers.facts + 1,
-                    ..frontiers
-                },
-                UtcMicros(3_000),
-            )
-            .unwrap(),
-        )
-        .await
-        .is_err(),
-        "the same receipt id must still reject a different drained frontier"
-    );
-}
-
-#[tokio::test]
-async fn completed_cutover_reopens_for_a_project_legacy_union() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    conn.execute(
-        "INSERT INTO memory_facts(
-             fact_id, content, category, tags, trust_score, source, metadata,
-             created_at, updated_at
-         ) VALUES(1, 'original', 'project', '[]', 0.5, 'manual', '{}', 10, 10)",
-        (),
-    )
-    .await
-    .unwrap();
-    let owner = owner();
-    let source = source_store_id();
-    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
-        .await
-        .unwrap();
-    run_to_frontier(&conn, &owner, &source, frontiers, 8).await;
-    let receipt = MemoryV2CutoverReceipt::new(
-        ProvenanceId::new("memory-v2.initial-union".to_owned()).unwrap(),
-        owner.clone(),
-        source.clone(),
-        frontiers,
-        UtcMicros(1_000),
-    )
-    .unwrap();
-    assert_eq!(
-        finalize_memory_v2_cutover(&conn, &receipt).await.unwrap(),
-        MemoryV2CutoverOutcome::Complete
-    );
-
-    conn.execute(
-        "INSERT INTO memory_facts(
-             fact_id, content, category, tags, trust_score, source, metadata,
-             created_at, updated_at
-         ) VALUES(2, 'branch exclusive', 'decision', '[]', 0.9, 'branch', '{}', 20, 20)",
-        (),
-    )
-    .await
-    .unwrap();
-    assert!(
-        reopen_memory_v2_cutover_for_legacy_union(&conn, &owner, &source)
-            .await
-            .unwrap()
-    );
-    let mut rows = conn
-        .query(
-            "SELECT phase, fact_frontier, fact_cursor, cutover_completed_at,
-                    cutover_receipt_json
-             FROM memory_v2_backfill_progress",
-            (),
-        )
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    assert_eq!(row.get::<String>(0).unwrap(), "feedback");
-    assert_eq!(row.get::<i64>(1).unwrap(), 2);
-    assert_eq!(row.get::<i64>(2).unwrap(), 0);
-    assert!(row.get::<Option<i64>>(3).unwrap().is_none());
-    assert!(row.get::<Option<String>>(4).unwrap().is_none());
-}
-
-#[tokio::test]
-async fn completed_cutover_replays_duplicate_fact_updates_from_a_project_union() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    conn.execute(
-        "INSERT INTO memory_facts(
-             fact_id, content, category, tags, trust_score, access_count,
-             source, metadata, created_at, updated_at
-         ) VALUES(
-             1, 'shared duplicate', 'project', '[]', 0.5, 1,
-             'manual', '{}', 10, 10
-         )",
-        (),
-    )
-    .await
-    .unwrap();
-    let owner = owner();
-    let source = source_store_id();
-    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
-        .await
-        .unwrap();
-    run_to_frontier(&conn, &owner, &source, frontiers, 8).await;
-    let receipt = MemoryV2CutoverReceipt::new(
-        ProvenanceId::new("memory-v2.duplicate-union".to_owned()).unwrap(),
-        owner.clone(),
-        source.clone(),
-        frontiers,
-        UtcMicros(1_000),
-    )
-    .unwrap();
-    assert_eq!(
-        finalize_memory_v2_cutover(&conn, &receipt).await.unwrap(),
-        MemoryV2CutoverOutcome::Complete
-    );
-
-    conn.execute(
-        "UPDATE memory_facts
-         SET trust_score = 0.9, access_count = 7, updated_at = 20
-         WHERE fact_id = 1",
-        (),
-    )
-    .await
-    .unwrap();
-    assert!(
-        reopen_memory_v2_cutover_for_legacy_union(&conn, &owner, &source)
-            .await
-            .unwrap(),
-        "a duplicate-only union still changes canonical fact state"
-    );
-    assert_eq!(
-        optional_string(&conn, "SELECT phase FROM memory_v2_backfill_progress", ())
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("feedback")
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT fact_cursor FROM memory_v2_backfill_progress").await,
-        0
-    );
-}
-
-#[tokio::test]
-async fn malformed_and_secret_rows_quarantine_and_advance_without_raw_payload() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    conn.execute(
-        "INSERT INTO memory_facts(
-            fact_id, content, category, tags, trust_score, source, metadata,
-            created_at, updated_at
-         ) VALUES
-            (1, 'malformed canary', 'project', 'not-json', 0.5, 'manual', '{}', 10, 10),
-            (2, 'secret canary', 'project', '[]', 0.5, 'manual',
-             '{\"sk-test-123456\":\"raw-quarantine-canary\"}', 10, 10),
-            (3, 'survivor', 'project', '[]', 0.5, 'manual', '{}', 10, 10)",
-        (),
-    )
-    .await
-    .unwrap();
-    let owner = owner();
-    let source = source_store_id();
-    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
-        .await
-        .unwrap();
-    run_to_frontier(&conn, &owner, &source, frontiers, 1).await;
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_legacy_quarantine").await,
-        2
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_facts").await,
-        3,
-        "quarantine must preserve the raw compatibility rows for repair/export"
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
-             WHERE memory_v2_assertion_payloads_fts MATCH '\"raw-quarantine-canary\"'"
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_current_facts
-             WHERE payload_access = 'quarantined'"
-        )
-        .await,
-        2
-    );
-}
-
-#[tokio::test]
-async fn purge_is_owner_store_fact_scoped_and_clears_payload_fts_and_vectors() {
-    let (runtime, _dir) = database().await;
-    let conn = (*runtime).clone();
-    conn.execute(
-        "INSERT INTO memory_facts(
-            fact_id, content, category, tags, trust_score, source, metadata,
-            hrr_vector, created_at, updated_at
-         ) VALUES(9, 'purgeable canary', 'project', '[]', 0.5, 'manual', '{}',
-                  x'010203', 10, 10)",
-        (),
-    )
-    .await
-    .unwrap();
-    let owner = owner();
-    let source = source_store_id();
-    let frontiers = load_or_capture_memory_v2_frontiers(&conn, &owner, &source)
-        .await
-        .unwrap();
-    run_to_frontier(&conn, &owner, &source, frontiers, 4).await;
-    let fact_id = FactId::derive(
-        &FactIdentityMaterialV1::new(
-            owner.clone(),
-            FactIdentitySourceV1::Legacy {
-                source_store_id: source.clone(),
-                legacy_fact_id: 9,
-            },
-        )
-        .unwrap(),
-    )
-    .unwrap();
-    let owner_key = owner_key(&owner).unwrap();
-    let expected = current_fact_state(&conn, &owner_key, &fact_id)
-        .await
-        .unwrap()
-        .last_event_id;
-    assert!(
-        purge_memory_v2_fact(
-            &conn,
-            &owner,
-            &source,
-            &fact_id,
-            &expected,
-            UtcMicros(20_000_000),
-        )
-        .await
-        .is_err(),
-        "legacy payload purge must wait for a verified completed backfill"
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_facts WHERE fact_id = 9").await,
-        1
-    );
-    let receipt = MemoryV2CutoverReceipt::new(
-        ProvenanceId::new("memory-v2.purge-gate".to_owned()).unwrap(),
-        owner.clone(),
-        source.clone(),
-        frontiers,
-        UtcMicros(19_000_000),
-    )
-    .unwrap();
-    assert_eq!(
-        finalize_memory_v2_cutover(&conn, &receipt).await.unwrap(),
-        MemoryV2CutoverOutcome::Complete
-    );
-    assert!(
-        purge_memory_v2_fact(
-            &conn,
-            &owner,
-            &source,
-            &fact_id,
-            &expected,
-            UtcMicros(20_000_000),
-        )
-        .await
-        .unwrap()
-        .payload_purged()
-    );
-    assert!(
-        purge_memory_v2_fact(
-            &conn,
-            &owner,
-            &source,
-            &fact_id,
-            &expected,
-            UtcMicros(20_000_000),
-        )
-        .await
-        .is_err()
-    );
-    let deleted = current_fact_state(&conn, &owner_key, &fact_id)
-        .await
-        .unwrap()
-        .last_event_id;
-    assert!(
-        !purge_memory_v2_fact(
-            &conn,
-            &owner,
-            &source,
-            &fact_id,
-            &deleted,
-            UtcMicros(20_000_000),
-        )
-        .await
-        .unwrap()
-        .payload_purged()
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_payloads").await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_vectors").await,
-        0
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_assertion_payloads_fts
-             WHERE memory_v2_assertion_payloads_fts MATCH 'purgeable'"
-        )
-        .await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_facts WHERE fact_id = 9").await,
-        0
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertions").await,
-        1
-    );
-    assert_eq!(
-        scalar(&conn, "SELECT COUNT(*) FROM memory_v2_legacy_map").await,
-        1
-    );
-    assert_eq!(
-        scalar(
-            &conn,
-            "SELECT COUNT(*) FROM memory_v2_current_facts WHERE payload_access = 'deleted'"
-        )
-        .await,
-        1
-    );
-}
-
-#[tokio::test]
 async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
     let (runtime, _dir) = database().await;
     let conn = (*runtime).clone();
@@ -1393,9 +241,7 @@ async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
     .unwrap();
     let fact_id = FactId::derive(&material).unwrap();
     let identity_json = json_text(&material).unwrap();
-    insert_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10)
-        .await
-        .unwrap();
+    seed_fact_identity(&conn, &owner_key, &fact_id, &identity_json, 10).await;
     let initial = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -1408,9 +254,7 @@ async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
     )
     .unwrap();
     insert_event(&conn, &owner_key, &initial, 10).await.unwrap();
-    ensure_current(&conn, &owner_key, &fact_id, initial.event_id(), 10)
-        .await
-        .unwrap();
+    seed_current_fact(&conn, &owner_key, &fact_id, initial.event_id(), 10).await;
     conn.execute(
         "INSERT INTO memory_v2_assertions(
             assertion_id, fact_id, owner_kind, project_id, owner_json,
@@ -1517,15 +361,14 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
     )
     .unwrap();
     let fact_id = FactId::derive(&material).unwrap();
-    insert_fact_identity(
+    seed_fact_identity(
         &source_conn,
         &owner_key,
         &fact_id,
         &json_text(&material).unwrap(),
         100,
     )
-    .await
-    .unwrap();
+    .await;
     let mapping = LegacyFactMappingV1::new(
         owner.clone(),
         source_store,
@@ -1535,9 +378,7 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
         UtcMicros(100),
     )
     .unwrap();
-    insert_mapping(&source_conn, &owner_key, &mapping)
-        .await
-        .unwrap();
+    seed_legacy_mapping(&source_conn, &owner_key, &mapping).await;
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -1549,9 +390,7 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
     insert_event(&source_conn, &owner_key, &event, 100)
         .await
         .unwrap();
-    ensure_current(&source_conn, &owner_key, &fact_id, event.event_id(), 100)
-        .await
-        .unwrap();
+    seed_current_fact(&source_conn, &owner_key, &fact_id, event.event_id(), 100).await;
 
     let archive =
         export_memory_v2_owner_archive(&source_conn, MemoryV2ArchiveDatabase::Main, &owner)

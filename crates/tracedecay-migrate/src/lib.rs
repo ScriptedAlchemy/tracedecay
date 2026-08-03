@@ -8,9 +8,6 @@
 //!   whether a failure touching it may block an upgrade or must stay
 //!   opportunistic.
 //! - [`inventory`] carries the planning vocabulary a preflight scan produces.
-//! - [`manifest`] is the durable plan plus the forward-only crash checkpoint
-//!   that lets an interrupted migration resume from where it stopped.
-//!
 //! The one-shot crate split moved the rest of the migration subsystem here as
 //! well — the preflight scanners ([`inventory`]), the consolidation runtime
 //! ([`consolidate`]), legacy Hermes import ([`hermes`]), memory cutover
@@ -25,10 +22,8 @@
 pub mod consolidate;
 pub mod durability;
 pub mod final_v2;
-pub mod final_v2_executor;
 pub mod hermes;
 pub mod inventory;
-pub mod manifest;
 pub mod memory_cutover;
 pub mod profile_backup;
 mod profile_identity;
@@ -37,4 +32,3 @@ pub mod root_seam;
 mod session_runtime;
 
 pub use final_v2::*;
-pub use final_v2_executor::*;

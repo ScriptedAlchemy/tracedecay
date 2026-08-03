@@ -331,7 +331,7 @@ async fn test_unresolved_refs() {
 /// than the `SQLite` runtime will materialize for a single query, and the
 /// runtime rejects an oversized query outright instead of truncating it.
 /// Reading them back must page, or branch sync fails with
-/// "migration SQL query materialization exceeded its limit".
+/// "exact SQL query materialization exceeded its limit".
 #[tokio::test]
 async fn unresolved_refs_read_back_beyond_the_runtime_query_limit() {
     /// The `SQLite` runtime refuses a single query over this many rows.
@@ -557,17 +557,16 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
 }
 
 #[tokio::test]
-async fn test_migrate_is_idempotent_at_latest() {
-    // After Database::initialize creates the latest schema, calling migrate
-    // again must be a no-op (returns None) — guards against accidental
-    // re-runs of v7's ALTER TABLE on an already-migrated DB.
+async fn schema_identity_check_is_idempotent_on_a_created_store() {
+    // After Database::initialize creates the schema, verifying it again must
+    // succeed without touching the store: the check is an identity assertion,
+    // not an upgrade step.
     let dir = TempDir::new().expect("tempdir");
     let db_path = dir.path().join("idem.db");
     let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("initialize");
-    let migrated = tracedecay::db::migrations::migrate(&db)
+    tracedecay::db::migrations::ensure_schema_current(&db)
         .await
-        .expect("migrate");
-    assert!(migrated.is_none(), "second migrate should be a no-op");
+        .expect("a freshly created store is already current");
 }

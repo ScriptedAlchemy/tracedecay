@@ -11,7 +11,7 @@
 A historical defect from the delivery snapshot (not recorded in-repo) claims
 code-index **restore** — loading an already-built index at project open, not
 initial indexing — costs about **488.8 s wall / 7.8 GiB peak RSS**. The
-dogfood readiness gate requires this to be disproven or fixed.
+release-readiness investigation requires this to be disproven or fixed.
 
 ## Verdict: DISPROVEN at repo-scale workload
 
@@ -27,8 +27,8 @@ repository's own code tree measured:
 That is ~140–230x faster and ~50–80x less peak memory than the historical
 defect figures. Caveat: the historical baseline's workload identity is not
 recorded in-repo, so an exact same-workload replay is impossible; this
-evidence uses the natural dogfood workload (the TraceDecay repository code
-tree itself). At that scale no restore pathology exists. If the historical
+evidence uses the TraceDecay repository code tree itself. At that scale no
+restore pathology exists. If the historical
 figure came from a radically larger profile, that workload would need to be
 reconstructed to compare; nothing in-repo identifies one.
 

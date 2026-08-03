@@ -1,12 +1,9 @@
 //! Store durability classification for the upgrade/migration path.
 //!
-//! Diagnosed failure: `cargo dogfood` on a real 91GB profile failed because
-//! the post-update health pass tried to mount and repair a 15GB
-//! `sessions.db`, which triggered a full-table rewrite of the `observations`
-//! table mid-migration. That rewrite was interrupted, the mount failed, and
-//! because the health pass's `--strict` gate treated *every* warning as
-//! fatal, the whole upgrade failed -- recording
-//! `outcome=forward-recovery-required` and disabling the daemon.
+//! A large profile update tried to mount and repair a 15GB `sessions.db`,
+//! triggering a full-table rewrite of the `observations` table mid-migration.
+//! The rewrite was interrupted and the mount failed, even though the store's
+//! bulk transcript and evidence data could be safely retried later.
 //!
 //! The root cause: the upgrade path treated every store as equally precious.
 //! It is not. This module gives the migration path a typed vocabulary for
@@ -56,19 +53,6 @@ pub enum StoreDurabilityClass {
     /// migrate this opportunistically -- best effort -- but a failure or
     /// interruption here must never block or fail the upgrade.
     Recoverable,
-}
-
-impl StoreDurabilityClass {
-    /// Whether a failure to migrate/mount/repair data of this class is
-    /// worth failing a `--strict` upgrade over. Only [`Self::Durable`] data
-    /// qualifies -- it is the only class this model treats as irreplaceable.
-    ///
-    /// Every other class may be handled best-effort: skipped, retried later,
-    /// or (for [`Self::Derived`]) dropped and rebuilt outright, without
-    /// operator intervention.
-    pub const fn may_block_upgrade(self) -> bool {
-        matches!(self, Self::Durable)
-    }
 }
 
 /// Mirrors [`tracedecay_store::StoreShardScopeV1`]'s cases without carrying
@@ -258,13 +242,6 @@ mod tests {
     }
 
     #[test]
-    fn only_durable_may_block_an_upgrade() {
-        assert!(StoreDurabilityClass::Durable.may_block_upgrade());
-        assert!(!StoreDurabilityClass::Derived.may_block_upgrade());
-        assert!(!StoreDurabilityClass::Recoverable.may_block_upgrade());
-    }
-
-    #[test]
     fn profile_and_profile_memory_and_project_are_durable() {
         assert_eq!(
             shard_kind_durability_class(StoreShardKind::Profile),
@@ -290,9 +267,6 @@ mod tests {
             shard_kind_durability_class(StoreShardKind::ProjectSessions),
             StoreDurabilityClass::Recoverable
         );
-        // The diagnosed bug: mounting/migrating a sessions store must never
-        // be able to block a strict upgrade.
-        assert!(!shard_kind_durability_class(StoreShardKind::ProjectSessions).may_block_upgrade());
     }
 
     #[test]

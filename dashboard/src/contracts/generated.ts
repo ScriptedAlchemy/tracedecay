@@ -1814,7 +1814,6 @@ export const MemoryStatusSchema = z.object({
   feedback_funnel: z.lazy(() => MemoryFeedbackFunnelSchema),
   helpful_count: z.number().int(),
   hrr_dim: z.number().int(),
-  legacy_backfill_complete: z.boolean(),
   missing_vector_count: z.number().int(),
   repair: z.lazy(() => MemoryRepairStatsSchema),
   trust_025_050_count: z.number().int(),

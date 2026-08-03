@@ -605,7 +605,7 @@ fn storage_telemetry_context(state: &DashboardState) -> Option<RequestContext> {
 
 fn storage_telemetry_port(
     path: &str,
-    handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
     context: &RequestContext,
 ) -> Option<(
     StoreKeyV1,
@@ -641,7 +641,7 @@ async fn push_or_merge_role(
     seen: &mut HashMap<String, usize>,
     role: &str,
     path: &str,
-    handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
     context: &RequestContext,
     include_table_growth: bool,
 ) {
@@ -732,7 +732,7 @@ fn store_identity(path: &str) -> String {
 async fn sample_store(
     role: &str,
     path: &str,
-    handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    handle: Option<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>,
     context: &RequestContext,
     include_table_growth: bool,
 ) -> SampledStoreV1 {

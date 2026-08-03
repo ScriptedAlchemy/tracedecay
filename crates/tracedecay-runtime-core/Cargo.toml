@@ -89,7 +89,4 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     # Gates the one db::coverage test that drives a real graph query; the
     # `GraphQueryManager` it needs lives above this kernel.
     "cfg(tracedecay_graph_query_tests)",
-    # Gates the two store::memory cutover tests that drive `MemoryApplication`,
-    # which also lives above this kernel.
-    "cfg(tracedecay_memory_application_tests)",
 ] }

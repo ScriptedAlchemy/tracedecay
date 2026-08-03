@@ -254,8 +254,8 @@ path = "tests/host_lifecycle_cli_acceptance.rs"
 required-features = ["test-transport"]
 
 [[test]]
-name = "migration_reindex_status_test"
-path = "tests/migration_reindex_status_test.rs"
+name = "graph_rebuild_status_test"
+path = "tests/graph_rebuild_status_test.rs"
 required-features = ["test-transport"]
 
 [[test]]
@@ -275,6 +275,7 @@ path = "tests/live_daemon_suite.rs"
 axum = "0.8"
 tower = "0.5"
 tree-sitter = "0.26"
+constant_time_eq = "0.5.0"
 tracedecay-agent-hosts = { path = "crates/tracedecay-agent-hosts", version = "0.1.0" }
 tracedecay-api = { path = "crates/tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "crates/tracedecay-application", version = "0.1.0", features = ["native-git"] }

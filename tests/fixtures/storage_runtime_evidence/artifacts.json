@@ -4,10 +4,6 @@
       "bytes": 53248,
       "sha256": "950a0ec2f085610929d969b66552835e38595ac23bac5fc36cbb65dd4f159d41"
     },
-    "crash-after-repair-commit.sqlite3": {
-      "bytes": 10240,
-      "sha256": "ce1e5c56ce792f7e1085ed4980c9c5cd2bbd9aef995d41c52f4fa423442b91e9"
-    },
     "fts-stale.sqlite3": {
       "bytes": 6144,
       "sha256": "1203c0e30a31c8465096ca8ea019aa85a1e98f5dc7c33d6a1bc513db3f3c129a"

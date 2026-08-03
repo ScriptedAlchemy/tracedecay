@@ -41,8 +41,8 @@ use crate::{
         CheckpointResult, CheckpointStatus, MaintenanceCheckpointMode, RusqliteCheckpointError,
     },
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
+    exact_sql::WriterCommand as ExactSqlWriterCommand,
     maintenance::ExclusiveMaintenancePermit,
-    migration_sql::WriterCommand as MigrationSqlWriterCommand,
     persistence::RuntimeWriterPersistence,
     telemetry::{WriterTelemetry, WriterTelemetrySnapshot},
     watermark::{CommitWatermarkSubscription, CommittedWatermarkPublisher},
@@ -517,7 +517,7 @@ pub struct PersistentWriter {
     state: Arc<AtomicU8>,
     shutdown_requested: Arc<AtomicBool>,
     sender: Mutex<Option<mpsc::Sender<AcceptedRequest>>>,
-    migration_sql_sender: Mutex<Option<mpsc::Sender<MigrationSqlWriterCommand>>>,
+    exact_sql_sender: Mutex<Option<mpsc::Sender<ExactSqlWriterCommand>>>,
     incremental_vacuum_sender: Mutex<Option<mpsc::Sender<IncrementalVacuumCommand>>>,
     online_backup_sender: Mutex<Option<mpsc::Sender<OnlineBackupCommand>>>,
     checkpoint_sender: Mutex<Option<mpsc::Sender<CheckpointCommand>>>,
@@ -573,11 +573,11 @@ impl PersistentWriter {
         let watermark_publisher = CommittedWatermarkPublisher::new(binding.clone());
         let watermark_source = watermark_publisher.subscribe();
         let (sender, receiver) = mpsc::channel(capacity);
-        // Migration-SQL transactions are serialized by the writer actor. Keep
+        // Exact-SQL transactions are serialized by the writer actor. Keep
         // the same bounded admission depth as ordinary writes so a second
         // transaction can queue behind the active one instead of observing a
         // spurious Busy error from the transport's single-slot channel.
-        let (migration_sql_sender, migration_sql_receiver) = mpsc::channel(capacity);
+        let (exact_sql_sender, exact_sql_receiver) = mpsc::channel(capacity);
         let (incremental_vacuum_sender, incremental_vacuum_receiver) = mpsc::channel(1);
         let (online_backup_sender, online_backup_receiver) = mpsc::channel(1);
         let (checkpoint_sender, checkpoint_receiver) = mpsc::channel(1);
@@ -595,7 +595,7 @@ impl PersistentWriter {
             binding: binding.clone(),
             config,
             receiver,
-            migration_sql_receiver,
+            exact_sql_receiver,
             incremental_vacuum_receiver,
             online_backup_receiver,
             checkpoint_receiver,
@@ -621,7 +621,7 @@ impl PersistentWriter {
                 state,
                 shutdown_requested,
                 sender: Mutex::new(Some(sender)),
-                migration_sql_sender: Mutex::new(Some(migration_sql_sender)),
+                exact_sql_sender: Mutex::new(Some(exact_sql_sender)),
                 incremental_vacuum_sender: Mutex::new(Some(incremental_vacuum_sender)),
                 online_backup_sender: Mutex::new(Some(online_backup_sender)),
                 checkpoint_sender: Mutex::new(Some(checkpoint_sender)),
@@ -651,11 +651,11 @@ impl PersistentWriter {
     pub(crate) fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
         &self.verified_locator
     }
-    pub(crate) fn migration_sql_sender(&self) -> Option<mpsc::Sender<MigrationSqlWriterCommand>> {
+    pub(crate) fn exact_sql_sender(&self) -> Option<mpsc::Sender<ExactSqlWriterCommand>> {
         if self.state() != WriterState::Ready {
             return None;
         }
-        self.migration_sql_sender
+        self.exact_sql_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -916,7 +916,7 @@ impl PersistentWriter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        self.migration_sql_sender
+        self.exact_sql_sender
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();

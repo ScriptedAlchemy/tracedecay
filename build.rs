@@ -72,7 +72,6 @@ fn build_and_embed_dashboard_app() {
     let stamp_path = app_dist.join(".source-stamp");
     println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT");
     println!("cargo::rerun-if-env-changed=TRACEDECAY_SKIP_DASHBOARD_BUILD");
-    println!("cargo::rerun-if-env-changed=TRACEDECAY_DOGFOOD_DASHBOARD_STAMP_PATH");
     let contract_schema_export =
         std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT").is_some();
     let fresh = dashboard_cache::dist_is_fresh(repository_root, &source_stamp);
@@ -109,15 +108,6 @@ fn build_and_embed_dashboard_app() {
         contract_schema_export || app_dist.join("index.html").exists(),
         "dashboard/app-dist/index.html is missing after build; the dashboard frontend build failed"
     );
-    if let Some(path) = std::env::var_os("TRACEDECAY_DOGFOOD_DASHBOARD_STAMP_PATH") {
-        fs::write(Path::new(&path), &source_stamp).unwrap_or_else(|e| {
-            panic!(
-                "failed to write dogfood dashboard source stamp {}: {e}",
-                Path::new(&path).display()
-            )
-        });
-    }
-
     // Generated manifest: one embedded entry per dist file.
     let mut code = String::from(
         "pub struct AppAsset { pub path: &'static str, pub contents: &'static [u8], pub content_type: &'static str }\n",
@@ -198,14 +188,8 @@ fn main() {
     // worktree was clean. Feeds the generated agent plugins' provenance header
     // (so a stale installed plugin is distinguishable from the binary that
     // should have generated it) and the SemVer build metadata the binary
-    // reports as its own version. Git metadata tracks commits and staging;
-    // dogfood supplies a refreshed stamp for unstaged and untracked changes.
+    // reports as its own version. Git metadata tracks commits and staging.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-    println!("cargo::rerun-if-env-changed=TRACEDECAY_DOGFOOD_BUILD_IDENTITY_STAMP");
-    println!("cargo::rerun-if-env-changed=TRACEDECAY_DOGFOOD_BUILD_IDENTITY_REFRESH");
-    if let Some(path) = std::env::var_os("TRACEDECAY_DOGFOOD_BUILD_IDENTITY_STAMP") {
-        println!("cargo::rerun-if-changed={}", Path::new(&path).display());
-    }
     let identity = resolve(Path::new(&manifest_dir));
     for path in watch_paths(Path::new(&manifest_dir)) {
         println!("cargo::rerun-if-changed={}", path.display());

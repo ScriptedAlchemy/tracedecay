@@ -476,12 +476,9 @@ fn build_fixture(setup: &Setup) -> Fixture {
 ///
 /// A cold daemon opens the project lazily on its first request, so without
 /// this probe the first scenario step silently absorbs the whole project-open
-/// cost. Seeded facts additionally land in the legacy `memory_facts` table
-/// while canonical search reads `memory_v2_current_facts`, which the
-/// daemon-owned legacy cutover populates asynchronously after the project
-/// first opens; the same probe waits for that cutover to import every seeded
-/// fact, so scenario steps observe a settled store instead of racing the
-/// daemon's repair scheduler.
+/// cost. Seeded facts are written straight into `memory_v2_current_facts` by
+/// the ordinary write path, so the probe only has to wait for every seeded
+/// fact to be visible through the tool route.
 fn wait_for_memory_ready(fixture: &Fixture, seeded: usize) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let last_memory = RefCell::new(Value::Null);
@@ -497,23 +494,16 @@ fn wait_for_memory_ready(fixture: &Fixture, seeded: usize) {
                 .unwrap_or_else(|e| panic!("memory_status output was not JSON: {e}"));
             let memory = status["memory"].clone();
             let fact_count = memory["fact_count"].as_u64().unwrap_or(0) as usize;
-            let backfill_complete = memory["legacy_backfill_complete"]
-                .as_bool()
-                .unwrap_or(false);
-            let done = fact_count >= seeded && backfill_complete;
+            let done = fact_count >= seeded;
             *last_memory.borrow_mut() = memory;
             done.then_some(())
         },
         || {
             let memory = last_memory.borrow().clone();
             let fact_count = memory["fact_count"].as_u64().unwrap_or(0);
-            let backfill_complete = memory["legacy_backfill_complete"]
-                .as_bool()
-                .unwrap_or(false);
             format!(
                 "fixture memory never settled through the daemon tool route \
-                 ({fact_count}/{seeded} canonical facts, backfill_complete={backfill_complete}); \
-                 last status: {memory}"
+                 ({fact_count}/{seeded} canonical facts); last status: {memory}"
             )
         },
     );

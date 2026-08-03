@@ -57,7 +57,11 @@ impl RegisteredGlobalDbTestRuntime {
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         crate::register_test_schema_installer();
-        std::fs::create_dir_all(profile_root)?;
+        // A profile root is a profile-identity root in production and must be
+        // mode 0700; creating it with the ambient umask (0775 under umask 0002)
+        // makes identity validation fail, so use the private-store helper
+        // production itself uses.
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile_root)?;
         let nonce = TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let scope = tracedecay_runtime_core::db::enter_daemon_database_scope(
             profile_root,
@@ -269,7 +273,9 @@ impl HostAdmissionTestRuntimeV1 {
         project: Option<(&std::path::Path, tracedecay_domain::ProjectId)>,
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         crate::register_test_schema_installer();
-        std::fs::create_dir_all(profile_root)?;
+        // See the note in `RegisteredGlobalDbTestRuntimeV1::open`: profile
+        // identity roots must be 0700 regardless of the ambient umask.
+        tracedecay_runtime_core::storage::PrivateStoreIo::create_dir_all(profile_root)?;
         if let Some((project_root, _)) = project.as_ref() {
             std::fs::create_dir_all(project_root)?;
         }
@@ -735,7 +741,7 @@ async fn open_registered_test_database(
     )
     .await?;
     // `Database::conn()` is the retained *reader*; schema DDL has to run on the
-    // serialized writer lane or the migration SQL channel reports
+    // serialized writer lane or the exact SQL channel reports
     // `WriterUnavailable`. Converging here (rather than relying solely on the
     // kernel's initialise-time port call) keeps the fixture correct for an
     // already-materialised store too.

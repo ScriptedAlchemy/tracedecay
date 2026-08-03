@@ -1203,7 +1203,7 @@ pub async fn collect_code_generation_retention_findings(
     if !permits_synchronous_generation_census(&code_index_store_root.join("code-generations-v1")) {
         return DoctorStorageFamilyReadV1::Unknown;
     }
-    let Ok(store) = DatabaseVectorGenerationStoreV1::open_legacy_migration(graph).await else {
+    let Ok(store) = DatabaseVectorGenerationStoreV1::open(graph).await else {
         return DoctorStorageFamilyReadV1::Unknown;
     };
     let Ok(inventory) = store.read_legacy_inventory().await else {
@@ -1416,7 +1416,7 @@ fn cached_store_telemetry_port<E>(
     cache: &Mutex<StoreTelemetryPortCache>,
     path: &Path,
     scope: &tracedecay_application::ResolvedScope,
-    open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, E>,
+    open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, E>,
 ) -> Option<(
     tracedecay_application::storage::StoreKeyV1,
     tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,

@@ -188,19 +188,15 @@ refuse a lock while a branch-admin mutation is unfinished.
 
 ### 6. Test coverage parked behind cfgs
 
-Two `cfg` flags were added (declared in the crate's `[lints.rust]
-unexpected_cfgs` check-cfg list) because the types they need live above the
-kernel. Nothing sets them, so these tests do not run anywhere right now:
+One `cfg` flag was added (declared in the crate's `[lints.rust]
+unexpected_cfgs` check-cfg list) because the types it needs live above the
+kernel. Nothing sets it, so this test does not run anywhere right now:
 
 - `tracedecay_graph_query_tests` — `db/coverage.rs`
   `temp_table_lifecycle_uses_the_database_writer` needs
   `graph::queries::GraphQueryManager`.
-- `tracedecay_memory_application_tests` — `store/memory/memory_cutover_test.rs`
-  `cutover_preserves_legacy_usage_telemetry_and_search_ranking` and
-  `dashboard_vector_points_report_v1_entity_link_connections` need
-  `application::memory::MemoryApplication` / `MemoryOperationContext`.
 
-Both should be re-homed into the crate that owns the missing type.
+It should be re-homed into the crate that owns the missing type.
 
 ### 7. Visibility promotion is now the kernel's public surface
 
@@ -227,7 +223,7 @@ re-exported across a crate boundary) and is re-exported at
 | `crate::application::host_admission::{sync_directory, DirectorySyncPolicy}` (db/access/owner_io.rs) | Repointed at the canonical `tracedecay_application::framed_log`. |
 | `crate::global_db::{RegisteredGlobalDb, StoreInstanceRecord}` (storage.rs) | `try_classify_project_storage_with_registry` and `classify_registry_storage` lifted to the root `src/storage.rs` shim over a newly `pub` `classify_registry_storage_fields`. No trait object was needed. |
 | `include_str!("../tests/fixtures/redundancy_eval_labeled.json")` (redundancy.rs) | Repointed at `../../../tests/fixtures/…`; the fixture stays in the repo-root `tests/`. |
-| `impl MigrationSqlWriteAuthority for DatabaseAuthority` (src/global_db/registered.rs) | Moved into `runtime_core::db::access`. Both the trait (`tracedecay_rusqlite_runtime`) and the type (kernel) became foreign to the root, so the orphan rule allows it only beside `DatabaseAuthority`. |
+| `impl ExactSqlWriteAuthority for DatabaseAuthority` (`src/db/access.rs`) | The trait belongs to `tracedecay_rusqlite_runtime`, so the orphan rule allows the implementation only beside `DatabaseAuthority`. |
 | `daemon::store_runtime::{graph_metadata, registry, resolver, rusqlite_parity, shard, telemetry}` | Moved into `runtime_core::store_runtime` (11.1K lines); root `src/daemon/store_runtime.rs` glob-re-exports. Closes seams 1 and 2. |
 | `branch::{sanitize_branch_name, detect_default_branch, resolve_branch_db_path}` | Moved into `runtime_core::branch`; root re-exports. All three are pure over `gix`, `branch::current_branch`, and `branch_meta::BranchMeta`. `tracedecay-migrate` consumes all three and could not reach the root. |
 | `config::{GENERATED_DIR_SEGMENTS, is_generated_dir_segment}` | Moved into `runtime_core::config`; root re-exports. Same reason — `tracedecay_migrate::inventory` prunes directories with it. |

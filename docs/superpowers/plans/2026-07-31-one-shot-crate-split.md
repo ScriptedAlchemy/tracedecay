@@ -45,7 +45,7 @@ dashboard/assets.rs, hooks/ daemon-side handlers (cycle with daemon), and thin
 - Lead octopus-merges all mover branches into the split landing, resolves
   Cargo.toml/lock unions, then runs the single mass fix-to-green campaign
   (fleet of fixer agents on compile errors, then whole-product validation:
-  build, dogfood, CI).
+  build, isolated release validation, CI).
 - Cycle edges break by moving shared pure-data types DOWN (never by adding
   upward deps). The architecture ratchet tests (compile_isolation + the new
   mcp/daemon direction guards) are the only per-move gates that must stay

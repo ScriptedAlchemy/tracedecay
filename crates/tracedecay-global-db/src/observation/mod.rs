@@ -5,9 +5,6 @@ pub mod retention;
 mod schema;
 
 pub use backfill::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION;
-pub(super) use backfill::{
-    converge_observation_repository_provenance, converge_observation_retrieval_anchors,
-};
 pub use schema::OBSERVATION_ANCHOR_SCHEMA_MIGRATION;
 pub(super) use schema::ensure_observation_schema;
 

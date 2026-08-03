@@ -20,9 +20,7 @@ use tracedecay_store::{
 
 use super::{ExistingReaderLocator, ReaderQueryExecutor, ReaderStartError, worker};
 use crate::CheckpointPressure;
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
-};
+use crate::exact_sql::{ExactSqlError, ExactSqlReadSnapshot, ExactSqlRows, ExactSqlStatement};
 
 mod lease;
 mod outcome;
@@ -384,52 +382,52 @@ impl<E: ReaderQueryExecutor> ReaderPool<E> {
         }
     }
 
-    /// Run one migration-SQL query under the caller's declared priority.
+    /// Run one exact-SQL query under the caller's declared priority.
     ///
     /// The priority is the caller's, not a pool default: a bulk sweep that
     /// declares `Background` admits against the unreserved slice of the
     /// general lane and cannot displace interactive reads.
-    pub(crate) fn execute_migration_query(
+    pub(crate) fn execute_exact_sql_query(
         &self,
-        statement: MigrationSqlStatement,
+        statement: ExactSqlStatement,
         priority: OperationPriorityV1,
         max_wait: Duration,
-    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
-        lease.execute_migration_query(statement)
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        lease.execute_exact_sql_query(statement)
     }
 
-    pub(crate) fn begin_migration_snapshot(
+    pub(crate) fn begin_exact_sql_snapshot(
         &self,
         priority: OperationPriorityV1,
         max_wait: Duration,
-    ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
+    ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         let mut lease = self
             .acquire_lane(LaneAdmission::for_priority(priority), max_wait, || None)
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
-        lease.begin_migration_snapshot()?;
-        Ok(MigrationSqlReadSnapshot::new(move |statement| {
-            lease.execute_active_migration_query(statement)
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
+        lease.begin_exact_sql_snapshot()?;
+        Ok(ExactSqlReadSnapshot::new(move |statement| {
+            lease.execute_active_exact_sql_query(statement)
         }))
     }
 
-    pub(crate) fn begin_migration_health_snapshot(
+    pub(crate) fn begin_exact_sql_health_snapshot(
         &self,
         max_wait: Duration,
-    ) -> Result<MigrationSqlReadSnapshot, MigrationSqlError> {
+    ) -> Result<ExactSqlReadSnapshot, ExactSqlError> {
         let mut lease = self
             .acquire_lane(
                 LaneAdmission::interactive(ReaderLane::ReservedHealth),
                 max_wait,
                 || None,
             )
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         lease.retire_after_snapshot();
-        lease.begin_migration_snapshot()?;
-        Ok(MigrationSqlReadSnapshot::new(move |statement| {
-            lease.execute_active_migration_query(statement)
+        lease.begin_exact_sql_snapshot()?;
+        Ok(ExactSqlReadSnapshot::new(move |statement| {
+            lease.execute_active_exact_sql_query(statement)
         }))
     }
 

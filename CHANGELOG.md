@@ -116,13 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.0.59](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.58...v0.0.59) - 2026-07-12
 
-### Added
-
-- *(dev)* add stable dogfood install workflow
-
 ### Fixed
 
-- *(dev)* launch dogfood without nested cargo
 - *(hermes)* correlate turns across project scopes
 - *(hermes)* resolve session projects through registry
 - *(hermes)* route projectless compression to user store

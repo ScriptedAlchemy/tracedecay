@@ -66,18 +66,6 @@ impl TraceDecay {
         MemoryOperationContext::generated(&owner, action, None).map_err(memory_application_error)
     }
 
-    #[cfg_attr(not(unix), allow(dead_code))] // driven by the unix-only daemon cutover path
-    fn daemon_memory_cutover_operation(&self) -> Result<MemoryOperationContext> {
-        let owner = self.project_memory_owner()?;
-        MemoryOperationContext::from_trusted_request_id(
-            &owner,
-            "daemon legacy memory cutover",
-            "v1-cutover",
-            None,
-        )
-        .map_err(memory_application_error)
-    }
-
     /// Resolves the project-memory owner and database into one owner-bound
     /// application over a fact store that owns its resolved handle. Every
     /// project-memory route builds its application through this accessor.
@@ -235,21 +223,6 @@ impl TraceDecay {
         self.project_memory_application()
             .await?
             .dashboard_repair_v1(context)
-            .await
-            .map_err(memory_application_error)
-    }
-
-    /// Advances exactly one persisted V1 raw-memory cutover batch. The stable
-    /// receipt identity makes daemon restarts replay a completed cutover rather
-    /// than creating a second import job.
-    #[cfg_attr(not(unix), allow(dead_code))] // driven by the unix-only daemon cutover path
-    pub(crate) async fn advance_project_memory_cutover_once(
-        &self,
-    ) -> Result<tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1> {
-        let context = self.daemon_memory_cutover_operation()?;
-        self.project_memory_application()
-            .await?
-            .daemon_legacy_memory_cutover_v1(context)
             .await
             .map_err(memory_application_error)
     }

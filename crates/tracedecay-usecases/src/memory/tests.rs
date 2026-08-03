@@ -399,17 +399,6 @@ impl FactCompatibilityStore for FakeAuthority {
         Ok(CompatibilityMemoryRepairStatsV1::default())
     }
 
-    async fn advance_compatibility_legacy_memory_cutover(
-        &self,
-        _request: CompatibilityLegacyMemoryCutoverCommandV1,
-    ) -> Result<CompatibilityLegacyMemoryCutoverProgressV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("legacy-cutover");
-        Ok(CompatibilityLegacyMemoryCutoverProgressV1::Complete)
-    }
-
     async fn dashboard_compatibility_memory_overview(
         &self,
         _query: CompatibilityDashboardMemoryOverviewQueryV1,
@@ -584,7 +573,6 @@ fn compatibility_memory_status(
         0,
         0,
         0,
-        true,
         tracedecay_store::CompatibilityProjectionStateV1::Ready,
         tracedecay_store::CompatibilityMemoryRepairStatsV1::default(),
         tracedecay_store::CompatibilityMemoryFeedbackFunnelV1::new(0, 0, 0, 0, 0),

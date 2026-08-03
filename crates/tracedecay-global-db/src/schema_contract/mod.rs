@@ -12,12 +12,9 @@ fn normalize_trigger_sql(sql: &str) -> String {
 }
 
 pub(super) use invariants::{
-    SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS, authority_invariant_triggers_intact,
-    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
-    suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
-    validate_session_temporal_effect_authority_page_with_limit,
-    validate_session_temporal_receipt_authority_page_with_limit,
-    validate_session_temporal_repair_authority_audit,
+    authority_invariant_triggers_intact, restore_immutability_after_canonical_repair,
+    suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
+    validate_authority_rows_exhaustive,
 };
 pub use invariants::{
     ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,

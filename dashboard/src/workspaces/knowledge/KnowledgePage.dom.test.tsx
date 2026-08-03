@@ -94,7 +94,6 @@ function memoryStatus(memory: Record<string, unknown> = {}) {
       fact_count: 0,
       below_default_recall_threshold_count: 0,
       missing_vector_count: 0,
-      legacy_backfill_complete: true,
       repair: { banks_rebuilt: 0, missing_vectors_repaired: 0 },
       trust_0_025_count: 0,
       trust_025_050_count: 0,

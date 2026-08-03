@@ -2,7 +2,7 @@
 //! (plan 38 §3, final clause).
 //!
 //! The observation store keeps three append-only, forever-growing evidence
-//! tables that dominated one dogfood `sessions.db`:
+//! tables that dominated one observed `sessions.db`:
 //!
 //! * `observations` — the durable observation payload (`observation_json`,
 //!   1.8 GB measured).

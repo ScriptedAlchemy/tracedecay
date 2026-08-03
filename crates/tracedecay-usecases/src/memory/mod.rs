@@ -59,7 +59,6 @@ use tracedecay_store::{
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
     FactCompatibilityStore, FactCompatibilityStoreError, FactCurrentQuery, FactLineageQuery,

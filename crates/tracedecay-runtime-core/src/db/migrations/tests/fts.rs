@@ -2,14 +2,14 @@
 
 use super::*;
 
-/// FTS triggers exist after migration from v0.
+/// FTS triggers exist on a freshly created store.
 #[tokio::test]
-async fn test_fts_triggers_exist_after_migration() {
+async fn test_fts_triggers_exist_after_creation() {
     let (conn, _dir) = create_raw_db().await;
 
-    migrate_connection(&conn)
+    ensure_schema_current_connection(&conn)
         .await
-        .expect("migrate from v0 should succeed");
+        .expect("creating the schema on an empty file should succeed");
 
     let triggers = ["nodes_fts_insert", "nodes_fts_delete", "nodes_fts_update"];
     for trigger in &triggers {
@@ -25,13 +25,13 @@ async fn test_fts_triggers_exist_after_migration() {
                 .await
                 .expect("failed to read trigger row")
                 .is_some(),
-            "trigger '{trigger}' should exist after migration"
+            "trigger '{trigger}' should exist after creation"
         );
     }
 }
 
 #[tokio::test]
-async fn test_v11_memory_facts_fts_triggers_track_insert_update_delete() {
+async fn memory_facts_fts_triggers_track_insert_update_delete() {
     let (conn, _dir) = create_schema_db().await;
 
     conn.execute(

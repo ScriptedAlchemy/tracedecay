@@ -65,10 +65,6 @@ impl DoctorTestRuntime {
     pub(crate) fn database(&self) -> &crate::global_db::RegisteredGlobalDb {
         self.database.as_ref()
     }
-
-    pub(crate) fn database_arc(&self) -> std::sync::Arc<crate::global_db::RegisteredGlobalDb> {
-        std::sync::Arc::clone(&self.database)
-    }
 }
 
 pub mod heal;
@@ -1485,7 +1481,7 @@ fn check_stale_stores(dc: &mut DoctorCounters, status: Option<&serde_json::Value
     } else {
         dc.warn("Registry diagnostics unavailable because the daemon owner did not answer; doctor did not open the global DB");
     }
-    dc.info("Use `tracedecay projects list` for daemon-backed registry inspection and `tracedecay migrate registry-gc --json` to preview explicit offline cleanup.");
+    dc.info("Use `tracedecay projects list` for daemon-backed registry inspection.");
 }
 
 #[cfg(test)]

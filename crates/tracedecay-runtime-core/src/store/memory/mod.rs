@@ -26,7 +26,6 @@ use tracedecay_store::{
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
     CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityLegacyMemoryCutoverCommandV1, CompatibilityLegacyMemoryCutoverProgressV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
     CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
     FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
@@ -48,7 +47,6 @@ use crud::{
     update_compatibility_fact_tx,
 };
 use curation::{apply_compatibility_fact_curation_tx, merge_compatibility_facts_tx};
-use cutover::{advance_compatibility_legacy_memory_cutover_tx, compatibility_memory_status_tx};
 use dashboard::{
     dashboard_compatibility_fact_detail_tx, dashboard_compatibility_memory_oplog_tx,
     dashboard_compatibility_memory_overview_tx, dashboard_compatibility_vector_points_tx,
@@ -67,10 +65,10 @@ use search::{
     reason_compatibility_facts_tx, record_compatibility_fact_retrieval_tx,
     related_compatibility_facts_tx, search_compatibility_facts_tx,
 };
+use status::compatibility_memory_status_tx;
 
 mod crud;
 mod curation;
-mod cutover;
 mod dashboard;
 mod envelope;
 mod primitives;
@@ -80,25 +78,12 @@ mod repair;
 mod runtime;
 mod scoring;
 mod search;
+mod status;
 
-#[cfg(test)]
-use crate::db::MemoryV2FeedbackHistoryRepairBatchOutcome;
 #[cfg(test)]
 use crate::db::engine::params;
 #[cfg(test)]
-use envelope::compatibility_lookup_operation_receipt_tx;
-#[cfg(test)]
-use primitives::{
-    COMPATIBILITY_WRITE_OPERATION, OwnerKey, compatibility_source_store_id, storage_message,
-};
-#[cfg(test)]
-use repair::{compatibility_receipt_feedback_history_repair, compatibility_repair_request_digest};
-#[cfg(test)]
-use tracedecay_domain::SourceStoreId;
-#[cfg(test)]
-use tracedecay_store::{
-    CompatibilityFactMappingV1, CompatibilityFeedbackRepairProgressV1, FactCompatibilityStoreError,
-};
+use primitives::OwnerKey;
 
 /// Canonical fact authority over one already-open, authority-bound database.
 ///
@@ -589,13 +574,6 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn advance_compatibility_legacy_memory_cutover(
-        &self,
-        request: CompatibilityLegacyMemoryCutoverCommandV1,
-    ) -> FactCompatibilityResult<CompatibilityLegacyMemoryCutoverProgressV1> {
-        advance_compatibility_legacy_memory_cutover_tx(self.db, &request).await
-    }
-
     async fn dashboard_compatibility_memory_overview(
         &self,
         query: CompatibilityDashboardMemoryOverviewQueryV1,
@@ -950,9 +928,6 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
         fn repair_compatibility_memory(
             request: CompatibilityMemoryRepairCommandV1,
         ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>;
-        fn advance_compatibility_legacy_memory_cutover(
-            request: CompatibilityLegacyMemoryCutoverCommandV1,
-        ) -> FactCompatibilityResult<CompatibilityLegacyMemoryCutoverProgressV1>;
         fn dashboard_compatibility_memory_overview(
             query: CompatibilityDashboardMemoryOverviewQueryV1,
         ) -> FactCompatibilityResult<CompatibilityDashboardMemoryOverviewV1>;
@@ -1008,11 +983,3 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
 #[cfg(test)]
 #[path = "fact_response_metadata_test.rs"]
 mod fact_response_metadata_test;
-
-#[cfg(test)]
-#[path = "memory_repair_test.rs"]
-mod memory_repair_test;
-
-#[cfg(test)]
-#[path = "memory_cutover_test.rs"]
-mod memory_cutover_test;

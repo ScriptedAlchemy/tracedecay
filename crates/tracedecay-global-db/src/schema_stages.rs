@@ -221,8 +221,10 @@ const TRANSCRIPT_SCHEMA: &str = "
         END;
 ";
 
-/// Installs and migrates the global/session schema through the exact
-/// registered runtime connection. No database path is resolved or reopened.
+/// Installs the global/session schema at its final shape through the exact
+/// registered runtime connection, or verifies that an existing store already
+/// carries it. No database path is resolved or reopened, and no store is
+/// stepped forward from an older shape.
 pub async fn ensure_registered_schema(
     conn: &Connection,
 ) -> tracedecay_runtime_core::errors::Result<()> {
@@ -361,32 +363,20 @@ pub async fn ensure_registered_schema_for_admission(
     })
 }
 
-/// Completes resumable historical convergence after the registered runtime is
+/// Completes resumable authority convergence after the registered runtime is
 /// available. Every stage retains its existing durable checkpoint semantics.
+///
+/// Stores are created at the final schema by
+/// [`ensure_registered_schema_for_admission`], so there is nothing here to step
+/// an older shape forward: the historical projection-anchor binding, retrieval
+/// anchor, repository provenance, projector version migration, and session
+/// project-path passes were all one-time legacy upgrades and have been removed.
+/// Only the authority invariant audit remains, and it stays out of line because
+/// it pages real authority rows on a large store.
 pub async fn converge_registered_schema(
     conn: &Connection,
     convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    observation_projection::converge_v4_projection_anchor_bindings(conn)
-        .await
-        .map_err(|error| {
-            global_db_operation_error("backfill observation projection anchors", error)
-        })?;
-
-    // Both of these page their own progress through individually committed
-    // transactions. They must stay outside the schema-upgrade transaction
-    // above so an interrupted open (the project warmup cancels in-flight
-    // statements once its deadline passes) keeps the pages it already
-    // committed instead of rolling a whole-table scan back and re-arming it.
-    observation::converge_observation_retrieval_anchors(conn).await?;
-    observation::converge_observation_repository_provenance(conn).await?;
-    observation_projection::prepare_projection_version_migration_with_engine(conn)
-        .await
-        .map_err(|error| global_db_operation_error("prepare observation projection", error))?;
-    observation_projection::converge_session_project_paths(conn)
-        .await
-        .map_err(|error| global_db_operation_error("converge session project paths", error))?;
-
     // The invariant pass pages historical authority rows and can legitimately
     // outlive an ordinary open on a large store. The admission phase has
     // already installed and validated its guard triggers, so daemon reads and

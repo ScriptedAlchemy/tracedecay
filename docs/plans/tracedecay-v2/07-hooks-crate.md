@@ -11,18 +11,18 @@ coordination.
 
 PR6 artifact names, inventories, matrices, packets, and intermediate file
 layouts are historical implementation evidence, not prerequisites or
-requirements to recreate. Only an artifact that remains a published or
-persisted compatibility contract is retained by name; current and future
-audits assess the host behavior, wire compatibility, migration, safety, and
+requirements to recreate. Only an artifact that remains a published public
+wire/API compatibility contract is retained by name; current and future audits
+assess the host behavior, wire compatibility, fresh-store reset, safety, and
 regressions specified here.
 
 The V1 envelope is the initial final wire format, not evidence for a V2
-sibling. Pure source-only/internal pre-admission helpers may change in place.
-Any wire-visible host DTO potentially deployed through dogfood retains
-negotiation/decoding until an authorized installed-client/host census proves
-absence. Once an envelope, provider record, replay item, checkpoint, or receipt
-can enter a spool/file, it is potentially live; migration/replay recovery
-remains until the installed-host and spool census proves absence. Fixture
+sibling. Pure source-only/internal pre-admission helpers and branch-local V2
+host DTOs change in place. Every persisted spool/file projection accepts only
+its exact final shape; any other shape returns typed `ResetRequired` and
+requires explicit reset or recreation. No storage decoder, migration,
+backfill, dual write, or census path survives. An actually independently
+released public envelope may retain separate protocol negotiation. Fixture
 revisions alone remain insufficient evidence.
 
 ## PR13 user outcome
@@ -90,17 +90,13 @@ Wire compatibility remains normative on this production path:
   unknown versions are quarantined with bounded content-free reason and digest
   metadata; they are never admitted, projected, acknowledged as accepted, or
   replayed through a known decoder.
-- When release or live-spool evidence establishes a prior revision, the
-  declared migration window lets the current daemon decode the current and
-  explicitly retained prior revision, while each writer emits only its
-  configured negotiated revision. Pure pre-admission branch-local DTOs are
-  replaced in place; any revision that may have entered a dogfood spool stays
-  in the migration window until the authorized installed-host/spool census
-  proves absence. There is no heuristic downgrade,
-  reinterpretation, or dual-write. Receipts preserve the decoded and emitted
-  revision, mixed-version replay remains idempotent, and expiry of the window
-  converts the retired revision to the same reject-and-quarantine path without
-  rewriting accepted history.
+- An actually independently released public envelope may negotiate its
+  documented protocol revision at the host boundary. That compatibility never
+  makes an old spool readable: a non-final persisted spool returns
+  `ResetRequired` before interpretation and requires explicit reset or
+  recreation. There is no migration window, compatibility decoder, backfill,
+  dual write, or census path for stored events. Final-shape replay remains
+  idempotent and preserves the emitted revision in its receipt.
 
 Host capability remains versioned and evidence-backed:
 
@@ -215,9 +211,10 @@ state; it never contains the result of work started by that hook.
   event.
 - Wire fixtures prove bounded V1 decoding, exhaustive enum handling,
   `deny_unknown_fields` on closed V1 structures, older-decoder rejection of
-  every newer revision, unknown-version quarantine, current/prior decoding
-  during the declared migration window, single-revision writes, and
-  reject-and-quarantine after window expiry without duplicate admission.
+  every newer revision, unknown-version quarantine, release-proven protocol
+  negotiation at the host boundary, final-shape spool writes, and typed
+  `ResetRequired` rejection of every non-final spool without duplicate
+  admission.
 - A daemon outage leaves the host responsive; eligible events replay later,
   while unbound, oversized, expired, or full-spool cases rely on authoritative
   host/Git catch-up and never create another writer.
