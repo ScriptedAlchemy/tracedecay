@@ -1,8 +1,9 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
+//! Root-owned automation backend composition over leaf-owned contracts and policy.
+
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
+
+use serde_json::Value;
 
 use crate::errors::{Result, TraceDecayError};
 use crate::sessions::codex_app_server::{
@@ -11,400 +12,35 @@ use crate::sessions::codex_app_server::{
 
 use super::config::{AutomationBackend, AutomationConfig};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskKind {
-    MemoryCurator,
-    SessionReflector,
-    SkillWriter,
-    /// One backend call covering both the session reflector and the skill
-    /// writer when the scheduler finds both due in the same tick. The
-    /// response must carry both a `facts` and a `skills` array; each array is
-    /// validated and applied by the existing per-task pipelines.
-    CombinedReview,
-    /// User-defined scheduled job (Hermes cron parity). The backend response
-    /// is plain content to deliver, not a structured proposal set.
-    UserJob,
-}
+pub use tracedecay_automation::backend::{
+    AGENT_TASK_MAX_ATTEMPTS, AGENT_TASK_RETRY_BACKOFFS, AgentBackendAvailability,
+    AgentTaskContract, AgentTaskFailureClass, AgentTaskFailureDisposition, AgentTaskKind,
+    AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy, agent_task_contract,
+    agent_task_failure_disposition, classify_agent_task_error_message, prompt_version, task_key,
+};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentTaskContract {
-    pub task_key: String,
-    pub prompt_version: String,
-    pub response_schema: Value,
-    pub strict_json: bool,
-}
-
-impl Default for AgentTaskContract {
-    fn default() -> Self {
-        agent_task_contract(AgentTaskKind::MemoryCurator)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentTaskRequest {
-    pub run_id: String,
-    pub task: AgentTaskKind,
-    #[serde(default)]
-    pub contract: AgentTaskContract,
-    pub prompt: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence_hash: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub input_hash: String,
-    #[serde(default)]
-    pub context: Value,
-}
-
-impl AgentTaskRequest {
-    pub fn new(
-        run_id: String,
-        task: AgentTaskKind,
-        prompt: String,
-        evidence_hash: Option<String>,
-        context: Value,
-    ) -> Self {
-        let contract = agent_task_contract(task);
-        let input_hash =
-            request_input_hash(task, &contract, &prompt, evidence_hash.as_deref(), &context);
-        Self {
-            run_id,
-            task,
-            contract,
-            prompt,
-            evidence_hash,
-            input_hash,
-            context,
-        }
-    }
-
-    #[must_use]
-    pub fn with_strict_json(mut self, strict_json: bool) -> Self {
-        self.contract.strict_json = strict_json;
-        self.input_hash = request_input_hash(
-            self.task,
-            &self.contract,
-            &self.prompt,
-            self.evidence_hash.as_deref(),
-            &self.context,
-        );
-        self
-    }
-
-    pub fn backend_message(&self) -> Result<String> {
-        serde_json::to_string_pretty(&serde_json::json!({
-            "run_id": self.run_id,
-            "task": self.task,
-            "contract": self.contract,
-            "prompt": self.prompt,
-            "evidence_hash": self.evidence_hash,
-            "input_hash": self.input_hash,
-            "context": self.context,
-        }))
-        .map_err(|err| TraceDecayError::Config {
-            message: format!("failed to encode automation backend request: {err}"),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentTaskResponse {
-    pub run_id: String,
-    pub task: AgentTaskKind,
-    pub output_text: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_json: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentTaskFailureClass {
-    Retryable,
-    Permanent,
-    Timeout,
-    Unavailable,
-    MalformedOutput,
-}
-
-impl AgentTaskFailureClass {
-    pub fn is_retryable(self) -> bool {
-        matches!(self, Self::Retryable | Self::Timeout | Self::Unavailable)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AgentTaskFailureDisposition {
-    pub classification: Option<AgentTaskFailureClass>,
-    pub retryable: Option<bool>,
-}
-
-impl AgentTaskFailureDisposition {
-    pub fn is_non_retryable(self) -> bool {
-        self.retryable == Some(false)
-    }
-}
-
-pub fn agent_task_failure_disposition(
-    recorded_classification: Option<AgentTaskFailureClass>,
-    recorded_retryable: Option<bool>,
-    error: Option<&str>,
-) -> AgentTaskFailureDisposition {
-    let classification = error
-        .map(|message| {
-            if is_oversized_backend_input(message) {
-                // The next scheduled run rebuilds its request from current
-                // evidence and code, so an old oversize ledger must not block
-                // a now-bounded or otherwise changed input forever.
-                AgentTaskFailureClass::Retryable
-            } else {
-                classify_agent_task_error_message(message)
-            }
-        })
-        .or(recorded_classification);
-    let retryable = classification
-        .map(AgentTaskFailureClass::is_retryable)
-        .or(recorded_retryable);
-
-    AgentTaskFailureDisposition {
-        classification,
-        retryable,
-    }
-}
-
-pub fn classify_agent_task_error_message(message: &str) -> AgentTaskFailureClass {
-    let normalized = message.to_ascii_lowercase();
-    if normalized.contains("timed out") || normalized.contains("timeout") {
-        return AgentTaskFailureClass::Timeout;
-    }
-    if normalized.contains("not found")
-        || normalized.contains("no such file")
-        || normalized.contains("failed to spawn")
-        || normalized.contains("failed to start")
-        || normalized.contains("executable")
-        || normalized.contains("connection refused")
-        || normalized.contains("connection reset")
-        || normalized.contains("broken pipe")
-        || normalized.contains("closed stdout")
-    {
-        return AgentTaskFailureClass::Unavailable;
-    }
-    if normalized.contains("json error")
-        || normalized.contains("expected value")
-        || normalized.contains("expected ident")
-        || normalized.contains("trailing characters")
-        || normalized.contains("backend output")
-        || normalized.contains("json fence")
-        || normalized.contains("empty summary")
-        || normalized.contains("empty output")
-        || normalized.contains("output must include")
-    {
-        return AgentTaskFailureClass::MalformedOutput;
-    }
-    if normalized.contains("temporarily unavailable")
-        || normalized.contains("rate limit")
-        || normalized.contains("429")
-        || normalized.contains("503")
-        || normalized.contains("try again")
-    {
-        return AgentTaskFailureClass::Retryable;
-    }
-    AgentTaskFailureClass::Permanent
-}
-
-fn is_oversized_backend_input(message: &str) -> bool {
-    let normalized = message.to_ascii_lowercase();
-    normalized.contains("input_too_large")
-        || normalized.contains("input exceeds the maximum length")
-}
-
-pub fn agent_task_contract(task: AgentTaskKind) -> AgentTaskContract {
-    AgentTaskContract {
-        task_key: task_key(task).to_string(),
-        prompt_version: prompt_version(task).to_string(),
-        response_schema: response_schema(task),
-        // User jobs deliver free-form content, so their output is not forced
-        // through the strict-JSON extraction path.
-        strict_json: task != AgentTaskKind::UserJob,
-    }
-}
-
-pub fn task_key(task: AgentTaskKind) -> &'static str {
-    match task {
-        AgentTaskKind::MemoryCurator => "memory_curator",
-        AgentTaskKind::SessionReflector => "session_reflector",
-        AgentTaskKind::SkillWriter => "skill_writer",
-        AgentTaskKind::CombinedReview => "combined_review",
-        AgentTaskKind::UserJob => "user_job",
-    }
-}
-
-pub fn prompt_version(task: AgentTaskKind) -> &'static str {
-    match task {
-        AgentTaskKind::MemoryCurator => "memory_curator:v1",
-        AgentTaskKind::SessionReflector => "session_reflector:v2",
-        AgentTaskKind::SkillWriter => "skill_writer:v2",
-        AgentTaskKind::CombinedReview => "combined_review:v1",
-        AgentTaskKind::UserJob => "user_job:v1",
-    }
-}
-
-fn response_schema(task: AgentTaskKind) -> Value {
-    match task {
-        AgentTaskKind::MemoryCurator => json_schema_for_array_properties(&["ops"]),
-        AgentTaskKind::SessionReflector => json_schema_for_array_properties(&["facts"]),
-        AgentTaskKind::SkillWriter => json_schema_for_array_properties(&["skills"]),
-        AgentTaskKind::CombinedReview => json_schema_for_array_properties(&["facts", "skills"]),
-        AgentTaskKind::UserJob => serde_json::json!({
-            "type": "object",
-            "additionalProperties": true
-        }),
-    }
-}
-
-fn json_schema_for_array_properties(properties: &[&str]) -> Value {
-    let schema_properties: serde_json::Map<String, Value> = properties
-        .iter()
-        .map(|property| {
-            (
-                (*property).to_string(),
-                serde_json::json!({ "type": "array" }),
-            )
-        })
-        .collect();
-    serde_json::json!({
-        "type": "object",
-        "required": properties,
-        "properties": schema_properties,
-        "additionalProperties": true
-    })
-}
-
-fn request_input_hash(
-    task: AgentTaskKind,
-    contract: &AgentTaskContract,
-    prompt: &str,
-    evidence_hash: Option<&str>,
-    context: &Value,
-) -> String {
-    let payload = serde_json::json!({
-        "task": task,
-        "task_key": contract.task_key,
-        "prompt_version": contract.prompt_version,
-        "strict_json": contract.strict_json,
-        "response_schema": contract.response_schema,
-        "evidence_hash": evidence_hash,
-        "prompt": prompt,
-        "context": context,
-    });
-    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
-    format!("sha256:{}", hex::encode(Sha256::digest(&bytes)))
-}
-
+/// Root operation adapter for a concrete automation backend.
 pub trait AgentTaskBackend: Send + Sync {
     fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse>;
 }
 
-/// Default cap on total backend attempts for a single task: the first try plus
-/// two bounded retries for transient codex app-server failures.
-pub const AGENT_TASK_MAX_ATTEMPTS: u32 = 3;
-
-/// Backoff before the 2nd and 3rd attempts. Kept short so retries stay inside
-/// the automation job's `timeout_secs` budget.
-pub const AGENT_TASK_RETRY_BACKOFFS: [Duration; 2] =
-    [Duration::from_secs(2), Duration::from_secs(5)];
-
-/// Bounded retry policy for a single backend task invocation.
-///
-/// Only transient app-server failures are retried — the ones the ledger already
-/// classifies as retryable via [`classify_agent_task_error_message`] /
-/// [`AgentTaskFailureClass::is_retryable`] (`Timeout`, `Unavailable`,
-/// `Retryable`). This covers the observed transient shapes:
-/// `"timed out waiting for codex app-server"` (→ `Timeout`) and
-/// `"closed stdout before completing"` (→ `Unavailable`). Permanent and
-/// malformed-output failures fail immediately.
-///
-/// Accumulated backoff never pushes total wall time past `budget` (the job
-/// `timeout_secs`); on the final failure the original error propagates
-/// unchanged so existing fallback/classification behavior is preserved.
-#[derive(Debug, Clone)]
-pub struct BackendRetryPolicy {
-    max_attempts: u32,
-    backoffs: Vec<Duration>,
-    budget: Duration,
-}
-
-impl BackendRetryPolicy {
-    /// Production policy derived from the automation job timeout: up to
-    /// [`AGENT_TASK_MAX_ATTEMPTS`] attempts with [`AGENT_TASK_RETRY_BACKOFFS`]
-    /// backoff, bounded by the job `timeout_secs` budget.
-    #[must_use]
-    pub fn from_timeout_secs(timeout_secs: u64) -> Self {
-        Self {
-            max_attempts: AGENT_TASK_MAX_ATTEMPTS,
-            backoffs: AGENT_TASK_RETRY_BACKOFFS.to_vec(),
-            budget: Duration::from_secs(timeout_secs.max(1)),
-        }
-    }
-
-    /// Explicit policy, primarily for tests that need deterministic (zero)
-    /// backoff and precise budgets. `max_attempts` is clamped to at least 1.
-    #[must_use]
-    pub fn new(max_attempts: u32, backoffs: Vec<Duration>, budget: Duration) -> Self {
-        Self {
-            max_attempts: max_attempts.max(1),
-            backoffs,
-            budget,
-        }
-    }
-
-    /// Backoff to wait before making `next_attempt` (1-based). The pause before
-    /// attempt N uses `backoffs[N - 2]`, saturating on the last configured value.
-    fn backoff_before_attempt(&self, next_attempt: u32) -> Duration {
-        let idx = (next_attempt.saturating_sub(2)) as usize;
-        self.backoffs
-            .get(idx)
-            .or_else(|| self.backoffs.last())
-            .copied()
-            .unwrap_or_default()
-    }
-}
-
-/// Run a backend task with bounded, transient-only retries.
-///
-/// This is the single choke point every automation job funnels through instead
-/// of calling [`AgentTaskBackend::run_task`] directly, so the retry lives in one
-/// place rather than being duplicated per job. See [`BackendRetryPolicy`].
+/// Runs a root backend operation using the leaf retry policy.
 pub async fn run_agent_task_with_retry(
     backend: &dyn AgentTaskBackend,
     request: &AgentTaskRequest,
     policy: &BackendRetryPolicy,
 ) -> Result<AgentTaskResponse> {
     let start = Instant::now();
-    let max_attempts = policy.max_attempts.max(1);
     let mut attempt: u32 = 1;
     loop {
         match backend.run_task(request) {
             Ok(response) => return Ok(response),
             Err(err) => {
-                // Out of attempts: propagate the final error unchanged.
-                if attempt >= max_attempts {
+                let Some(backoff) =
+                    policy.retry_backoff_after_failure(attempt, start.elapsed(), &err.to_string())
+                else {
                     return Err(err);
-                }
-                // Only transient app-server failures are worth retrying.
-                if !classify_agent_task_error_message(&err.to_string()).is_retryable() {
-                    return Err(err);
-                }
-                let backoff = policy.backoff_before_attempt(attempt + 1);
-                // Respect the overall job timeout: never sleep/retry past budget.
-                if start.elapsed().saturating_add(backoff) >= policy.budget {
-                    return Err(err);
-                }
+                };
                 if !backoff.is_zero() {
                     tokio::time::sleep(backoff).await;
                 }
@@ -414,52 +50,18 @@ pub async fn run_agent_task_with_retry(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentBackendAvailability {
-    pub backend: AutomationBackend,
-    pub available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executable: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
 pub fn backend_availability(config: &AutomationConfig) -> AgentBackendAvailability {
-    match config.backend {
-        AutomationBackend::Disabled => AgentBackendAvailability {
-            backend: AutomationBackend::Disabled,
-            available: false,
-            executable: None,
-            reason: Some("automation backend is disabled".to_string()),
-        },
-        AutomationBackend::ExternalCommand => AgentBackendAvailability {
-            backend: AutomationBackend::ExternalCommand,
-            available: false,
-            executable: None,
-            reason: Some("external_command backend is not implemented".to_string()),
-        },
-        AutomationBackend::CodexAppServer => {
-            let summary_config = CodexAppServerSummaryConfig::from_env();
-            let executable = summary_config.codex_bin.clone();
-            if executable_is_resolvable(&executable) {
-                AgentBackendAvailability {
-                    backend: AutomationBackend::CodexAppServer,
-                    available: true,
-                    executable: Some(executable),
-                    reason: None,
-                }
-            } else {
-                AgentBackendAvailability {
-                    backend: AutomationBackend::CodexAppServer,
-                    available: false,
-                    executable: Some(executable.clone()),
-                    reason: Some(format!(
-                        "codex app-server backend executable '{executable}' was not found"
-                    )),
-                }
-            }
-        }
+    if config.backend != AutomationBackend::CodexAppServer {
+        return tracedecay_automation::backend::backend_availability(config, "", false);
     }
+
+    let summary_config = CodexAppServerSummaryConfig::from_env();
+    let executable = summary_config.codex_bin;
+    tracedecay_automation::backend::backend_availability(
+        config,
+        &executable,
+        executable_is_resolvable(&executable),
+    )
 }
 
 fn executable_is_resolvable(bin: &str) -> bool {
@@ -486,7 +88,7 @@ impl CodexAppServerBackend {
         if let Some(model) = model.filter(|model| !model.trim().is_empty()) {
             config.model = Some(model);
         }
-        config.timeout = Duration::from_secs(timeout_secs.clamp(5, 300));
+        config.timeout = std::time::Duration::from_secs(timeout_secs.clamp(5, 300));
         Self { config }
     }
 
@@ -497,7 +99,7 @@ impl CodexAppServerBackend {
 
 impl AgentTaskBackend for CodexAppServerBackend {
     fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
-        let backend_message = request.backend_message()?;
+        let backend_message = request.backend_message().map_err(automation_error)?;
         let summary = run_prompt_with_codex_app_server(
             &backend_message,
             &self.config,
@@ -506,8 +108,14 @@ impl AgentTaskBackend for CodexAppServerBackend {
         let output_json = request
             .contract
             .strict_json
-            .then(|| extract_response_json_object(&summary.text, &request.contract))
-            .transpose()?;
+            .then(|| {
+                tracedecay_automation::backend::extract_response_json_object(
+                    &summary.text,
+                    &request.contract,
+                )
+            })
+            .transpose()
+            .map_err(automation_error)?;
         Ok(AgentTaskResponse {
             run_id: request.run_id.clone(),
             task: request.task,
@@ -521,95 +129,11 @@ impl AgentTaskBackend for CodexAppServerBackend {
 }
 
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
-    let candidate = strip_optional_json_fence(text)?;
-    parse_json_object_prefix(candidate)
+    tracedecay_automation::backend::extract_json_object_prefix(text).map_err(automation_error)
 }
 
-fn extract_response_json_object(text: &str, contract: &AgentTaskContract) -> Result<Value> {
-    let mut schema_error = None;
-    for (start, _) in text.char_indices().filter(|(_, ch)| *ch == '{') {
-        if !is_json_object_candidate_boundary(&text[..start]) {
-            continue;
-        }
-        let Ok(value) = parse_json_object_prefix(&text[start..]) else {
-            continue;
-        };
-        if let Err(err) = validate_response_schema(&value, contract) {
-            if schema_error.is_none() {
-                schema_error = Some(err);
-            }
-            continue;
-        }
-
-        return Ok(value);
+fn automation_error(error: tracedecay_automation::AutomationError) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: error.to_string(),
     }
-
-    if let Some(err) = schema_error {
-        return Err(err);
-    }
-
-    let value = extract_json_object_prefix(text)?;
-    validate_response_schema(&value, contract)?;
-    Ok(value)
-}
-
-fn is_json_object_candidate_boundary(prefix: &str) -> bool {
-    prefix
-        .chars()
-        .rev()
-        .find(|ch| !ch.is_whitespace())
-        .is_none_or(|ch| matches!(ch, '}' | ']'))
-}
-
-fn parse_json_object_prefix(candidate: &str) -> Result<Value> {
-    let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
-    let value = match stream.next() {
-        Some(value) => value?,
-        None => return config_error("automation backend output must be a JSON object"),
-    };
-    if !value.is_object() {
-        return config_error("automation backend output must be a JSON object");
-    }
-    Ok(value)
-}
-
-fn validate_response_schema(value: &Value, contract: &AgentTaskContract) -> Result<()> {
-    let Some(required) = contract
-        .response_schema
-        .get("required")
-        .and_then(Value::as_array)
-    else {
-        return Ok(());
-    };
-    for property in required.iter().filter_map(Value::as_str) {
-        if value.get(property).and_then(Value::as_array).is_none() {
-            return config_error(format!(
-                "automation backend output must include a {property} array"
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn strip_optional_json_fence(text: &str) -> Result<&str> {
-    let trimmed = text.trim();
-    let Some(after_opening) = trimmed.strip_prefix("```") else {
-        return Ok(trimmed);
-    };
-    let Some(closing_start) = after_opening.rfind("```") else {
-        return config_error("automation backend JSON fence is missing closing fence");
-    };
-    let mut inner = &after_opening[..closing_start];
-    if let Some(rest) = inner.strip_prefix("json") {
-        inner = rest;
-    }
-    let inner = inner
-        .strip_prefix('\n')
-        .or_else(|| inner.strip_prefix("\r\n"))
-        .unwrap_or(inner);
-    Ok(inner.trim())
-}
-
-fn config_error<T>(message: impl Into<String>) -> Result<T> {
-    Err(super::config_error(message))
 }

@@ -1,5 +1,8 @@
 //! Root-free automation parsing primitives.
 
+pub mod apply_policy;
+pub mod artifact_policy;
+pub mod backend;
 pub mod config;
 mod error;
 pub mod managed_skill_format;
