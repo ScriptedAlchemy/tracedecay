@@ -124,6 +124,7 @@ use super::binding::{
 use super::{LegacyToolCompatibilityOwner, ToolResult};
 #[cfg(test)]
 use dispatch_groups::dispatch_memory_operation;
+pub(crate) use dispatch_groups::tool_dispatch_ceiling;
 use dispatch_groups::{
     dispatch_admin_tools, dispatch_analysis_tools, dispatch_application_surface_tools,
     dispatch_edit_tools, dispatch_git_tools, dispatch_graph_tools, dispatch_health_tools,
@@ -131,9 +132,8 @@ use dispatch_groups::{
     dispatch_session_workflow_tools,
 };
 use retained_catalog::dispatch_profile_retained_application_tool;
-use tool_call_support::{
-    INTERNAL_DAEMON_TOOL_NAMES, boxed_send, rejected_tool_project_selector_present,
-};
+pub(crate) use tool_call_support::INTERNAL_DAEMON_TOOL_NAMES;
+use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 
 /// Dispatches a tool call to the appropriate handler.
 ///
@@ -400,6 +400,30 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name)
         {
             return Err(unknown_tool_error(tool_name));
+        }
+        if !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
+            let contract = super::mcp_dispatch_contract(tool_name).map_err(|error| {
+                TraceDecayError::Config {
+                    message: error.to_string(),
+                }
+            })?;
+            if let tracedecay_tool_catalog::McpDispatchAvailability::Unavailable {
+                reason,
+                retryable,
+            } = contract.availability()
+            {
+                return Err(TraceDecayError::project_route(
+                    match reason {
+                        tracedecay_tool_catalog::McpDispatchUnavailableReason::EffectJourneyUnverified => {
+                            "mcp_dispatch_effect_journey_unverified"
+                        }
+                    },
+                    *retryable,
+                    format!(
+                        "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
+                    ),
+                ));
+            }
         }
         // The universal ceiling. Every dispatch group below runs inside this one
         // bound, so a group added later inherits it without opting in and no

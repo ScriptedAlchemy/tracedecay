@@ -136,12 +136,7 @@ fn is_controlled_read_tool(tool_name: &str) -> bool {
 }
 
 pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
-    crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
-        || is_source_edit_tool(tool_name)
-        || matches!(
-            tool_name,
-            "tracedecay_search" | "tracedecay_run_affected_tests"
-        )
+    crate::mcp::tools::tool_supports_live_cancellation(tool_name)
 }
 
 fn dispatch_deadline_horizon_micros(
