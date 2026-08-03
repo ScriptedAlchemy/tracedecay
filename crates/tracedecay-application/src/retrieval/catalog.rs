@@ -268,6 +268,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
             pagination: Some(PaginationContract::new(10, 1_000, 60_000)?),
             idempotency: IdempotencyContract::NotRequired,
+            inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
             authority_revalidation: RevalidationContract::required(vec![
                 RevalidationPoint::Authority,
                 RevalidationPoint::Scope,
@@ -386,6 +387,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         deadline: DeadlineContract::new(10_000, DeadlineBehavior::ReturnOperationReceipt)?,
         pagination: Some(PaginationContract::new(10, 100, 60_000)?),
         idempotency: IdempotencyContract::NotRequired,
+        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
