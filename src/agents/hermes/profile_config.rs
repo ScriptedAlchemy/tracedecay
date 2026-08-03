@@ -9,11 +9,20 @@ use std::path::{Path, PathBuf};
 
 use crate::agents::backup_config_file;
 use crate::errors::{Result, TraceDecayError};
-
-pub use tracedecay_agent_hosts::agents::hermes::profile_config::read_config_pinned_project_root;
 use tracedecay_agent_hosts::agents::hermes::profile_config::{
     disable_plugin_config, enable_plugin_config,
+    read_config_pinned_project_root as parse_config_pinned_project_root,
 };
+
+/// Reads the removed `plugins.tracedecay.project_root` setting solely as
+/// provenance for one-time data migration and transcript import.
+///
+/// Keep this path-based façade in the root crate so filesystem and error policy
+/// do not leak into the reusable Hermes profile kernel.
+pub(crate) fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(config_path).ok()?;
+    parse_config_pinned_project_root(&config)
+}
 
 pub(super) fn enable_plugin(config_path: &Path) -> Result<bool> {
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
@@ -112,5 +121,20 @@ mod tests {
         let backup = dir.path().join("config.yaml.bak");
         assert!(backup.exists());
         assert_eq!(read(&backup), original);
+    }
+
+    #[test]
+    fn read_project_pin_decodes_yaml_scalars() {
+        let dir = TempDir::new().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(
+            &config,
+            "plugins:\n  tracedecay:\n    project_root: '/repo/it''s-ok'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_config_pinned_project_root(&config).as_deref(),
+            Some("/repo/it's-ok")
+        );
     }
 }

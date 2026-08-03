@@ -1,20 +1,16 @@
-//! Hermes profile config manipulation helpers.
+//! Hermes profile config parsing and deterministic transformation helpers.
 //!
-//! This module owns the read/patch/write path for Hermes profile `config.yaml`
-//! files. The parent integration module is responsible for plugin artifacts;
-//! config changes stay behind these focused helpers so install/update/uninstall
-//! flows have explicit inputs and preserve the historical error messages.
+//! Filesystem and error policy stay in the composition-root façade. This module
+//! accepts profile text and returns deterministic edits so the kernel remains
+//! root-free and reusable.
 
-use std::path::Path;
-
-/// Reads the removed `plugins.tracedecay.project_root` setting solely as
+/// Parses the removed `plugins.tracedecay.project_root` setting solely as
 /// provenance for one-time data migration and transcript import.
 ///
 /// This is the single source of truth for the pin (the same
 /// `plugins.<name>` block bundled Hermes plugins use): install writes it,
 /// reinstalls preserve it, and the generated Python resolves it at runtime.
-pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
-    let config = std::fs::read_to_string(config_path).ok()?;
+pub fn read_config_pinned_project_root(config: &str) -> Option<String> {
     let lines: Vec<&str> = config.lines().collect();
     let (plugins_start, plugins_end) = find_top_level_section_in(&lines, "plugins")?;
     read_pinned_project_root_from_block(&lines, plugins_start, plugins_end, "tracedecay")
@@ -634,8 +630,6 @@ fn join_lines(lines: &[String], had_trailing_newline: bool) -> String {
 mod tests {
     use super::*;
 
-    use tempfile::TempDir;
-
     #[test]
     fn enable_plugin_creates_missing_profile_config() {
         let updated = enable_plugin_config("").unwrap();
@@ -699,15 +693,11 @@ mod tests {
 
     #[test]
     fn read_project_pin_decodes_yaml_scalars() {
-        let dir = TempDir::new().unwrap();
-        let config = dir.path().join("config.yaml");
-        std::fs::write(
-            &config,
-            "plugins:\n  tracedecay:\n    project_root: '/repo/it''s-ok'\n",
-        )
-        .unwrap();
         assert_eq!(
-            read_config_pinned_project_root(&config).as_deref(),
+            read_config_pinned_project_root(
+                "plugins:\n  tracedecay:\n    project_root: '/repo/it''s-ok'\n",
+            )
+            .as_deref(),
             Some("/repo/it's-ok")
         );
     }
