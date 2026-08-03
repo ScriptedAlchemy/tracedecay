@@ -14,22 +14,13 @@ use crate::sessions::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerSummaryConfig, run_work_with_codex_app_server,
 };
 
-use super::native_cli::{NativeCliCancellation, NativeCliKind, NativeCliWorkRun};
-
-pub(crate) const CLAUDE_PROVIDER_ID: &str = "provider.work.claude-code-cli";
-const CLAUDE_ROUTE_ID: &str = "route.work.claude-code-cli.v1";
 pub(crate) const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
 const CODEX_ROUTE_ID: &str = "route.work.codex-app-server.v1";
-pub(crate) const CODEX_CLI_PROVIDER_ID: &str = "provider.work.codex-cli";
-const CODEX_CLI_ROUTE_ID: &str = "route.work.codex-cli.v1";
 const CODEX_THREAD_SOURCE: &str = "tracedecay_work";
 
 #[derive(Clone, Debug)]
 pub(crate) struct NativeWorkProviderConfigV1 {
     codex_app_server: CodexAppServerSummaryConfig,
-    claude_bin: String,
-    codex_cli_bin: String,
-    allow_codex_cli_fallback: bool,
     configuration_digest: ManifestDigest,
     project_root: PathBuf,
 }
@@ -40,17 +31,8 @@ impl NativeWorkProviderConfigV1 {
         configuration_digest: ManifestDigest,
         project_root: PathBuf,
     ) -> Self {
-        let claude_bin =
-            configured_executable("TRACEDECAY_CLAUDE_BIN").unwrap_or_else(|| "claude".to_owned());
-        let codex_cli_bin = configured_executable("TRACEDECAY_CODEX_CLI_BIN")
-            .unwrap_or_else(|| codex_app_server.codex_bin.clone());
-        let allow_codex_cli_fallback = std::env::var("TRACEDECAY_WORK_CODEX_CLI_FALLBACK")
-            .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"));
         Self {
             codex_app_server,
-            claude_bin,
-            codex_cli_bin,
-            allow_codex_cli_fallback,
             configuration_digest,
             project_root,
         }
@@ -86,20 +68,9 @@ where
         route(CODEX_PROVIDER_ID, CODEX_ROUTE_ID)
     }
 
-    pub(crate) fn claude_route() -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
-        route(CLAUDE_PROVIDER_ID, CLAUDE_ROUTE_ID)
-    }
-
-    pub(crate) fn codex_cli_route() -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
-        route(CODEX_CLI_PROVIDER_ID, CODEX_CLI_ROUTE_ID)
-    }
-
     #[cfg(all(test, unix))]
     pub(crate) fn is_ready(&self) -> bool {
         executable_is_resolvable(&self.config.codex_app_server.codex_bin)
-            || executable_is_resolvable(&self.config.claude_bin)
-            || (self.config.allow_codex_cli_fallback
-                && executable_is_resolvable(&self.config.codex_cli_bin))
     }
 
     fn validate_execution(
@@ -170,9 +141,7 @@ where
         &self,
         requested: &WorkProviderRouteV1,
     ) -> Result<bool, WorkProviderExecutionError> {
-        Ok(requested == &Self::codex_app_server_route()?
-            || requested == &Self::claude_route()?
-            || (self.config.allow_codex_cli_fallback && requested == &Self::codex_cli_route()?))
+        Ok(requested == &Self::codex_app_server_route()?)
     }
 
     fn prepare(&self, attempt: &WorkAttemptV1) -> Result<Self::Run, WorkProviderExecutionError> {
@@ -182,55 +151,22 @@ where
         let prompt = self.prompt(&projection, attempt);
         let timeout =
             remaining_timeout(execution.deadline(), self.config.codex_app_server.timeout)?;
-        match execution.backend() {
-            WorkProviderBackendV1::CodexAppServer => {
-                require_exact_route(execution.route(), &Self::codex_app_server_route()?)?;
-                require_executable(&self.config.codex_app_server.codex_bin, "Codex app-server")?;
-                let mut config = self.config.codex_app_server.clone();
-                config.model = Some(execution.model().to_owned());
-                Ok(NativeWorkRunV1::CodexAppServer(CodexAppServerWorkRunV1 {
-                    prompt,
-                    config,
-                    cwd: self.config.project_root.clone(),
-                    timeout,
-                    cancellation: CodexAppServerCancellation::default(),
-                }))
-            }
-            WorkProviderBackendV1::ClaudeCodeCli => {
-                require_exact_route(execution.route(), &Self::claude_route()?)?;
-                require_executable(&self.config.claude_bin, "Claude Code")?;
-                Ok(NativeWorkRunV1::NativeCli(NativeCliWorkRun {
-                    executable: self.config.claude_bin.clone(),
-                    kind: NativeCliKind::ClaudeCode,
-                    model: execution.model().to_owned(),
-                    prompt,
-                    cwd: self.config.project_root.clone(),
-                    timeout,
-                    budget: execution.budget(),
-                    cancellation: NativeCliCancellation::default(),
-                }))
-            }
-            WorkProviderBackendV1::CodexCli => {
-                if !self.config.allow_codex_cli_fallback {
-                    return Err(WorkProviderExecutionError::Rejected(
-                        "Codex CLI fallback is not authorized by the pinned configuration"
-                            .to_owned(),
-                    ));
-                }
-                require_exact_route(execution.route(), &Self::codex_cli_route()?)?;
-                require_executable(&self.config.codex_cli_bin, "Codex CLI")?;
-                Ok(NativeWorkRunV1::NativeCli(NativeCliWorkRun {
-                    executable: self.config.codex_cli_bin.clone(),
-                    kind: NativeCliKind::Codex,
-                    model: execution.model().to_owned(),
-                    prompt,
-                    cwd: self.config.project_root.clone(),
-                    timeout,
-                    budget: execution.budget(),
-                    cancellation: NativeCliCancellation::default(),
-                }))
-            }
+        if execution.backend() != WorkProviderBackendV1::CodexAppServer {
+            return Err(WorkProviderExecutionError::Unavailable(
+                "requested Work provider backend is not registered".to_owned(),
+            ));
         }
+        require_exact_route(execution.route(), &Self::codex_app_server_route()?)?;
+        require_executable(&self.config.codex_app_server.codex_bin, "Codex app-server")?;
+        let mut config = self.config.codex_app_server.clone();
+        config.model = Some(execution.model().to_owned());
+        Ok(NativeWorkRunV1(CodexAppServerWorkRunV1 {
+            prompt,
+            config,
+            cwd: self.config.project_root.clone(),
+            timeout,
+            cancellation: CodexAppServerCancellation::default(),
+        }))
     }
 }
 
@@ -248,24 +184,15 @@ fn route(provider: &str, route: &str) -> Result<WorkProviderRouteV1, WorkProvide
     })
 }
 
-pub(crate) enum NativeWorkRunV1 {
-    CodexAppServer(CodexAppServerWorkRunV1),
-    NativeCli(NativeCliWorkRun),
-}
+pub(crate) struct NativeWorkRunV1(CodexAppServerWorkRunV1);
 
 impl WorkProviderRun for NativeWorkRunV1 {
     fn execute(&self) -> WorkProviderSettlementV1 {
-        match self {
-            Self::CodexAppServer(run) => run.execute(),
-            Self::NativeCli(run) => run.execute(),
-        }
+        self.0.execute()
     }
 
     fn cancel(&self) {
-        match self {
-            Self::CodexAppServer(run) => run.cancel(),
-            Self::NativeCli(run) => run.cancel(),
-        }
+        self.0.cancel();
     }
 }
 
@@ -342,12 +269,6 @@ fn remaining_timeout(
         Duration::from_micros(u64::try_from(remaining_micros).unwrap_or(u64::MAX))
             .min(configured_ceiling),
     )
-}
-
-fn configured_executable(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
 }
 
 fn map_work_storage_error(error: WorkStorageError) -> WorkProviderExecutionError {
