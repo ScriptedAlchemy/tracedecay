@@ -33,12 +33,14 @@ import type { DomainStateKind } from '../../ui/StateChip.tsx';
  * Named for the operation id the backend registers (`operation.work.snapshot`
  * and so on) so a route here can be checked against
  * `src/dashboard/work_api.rs` by eye. */
-export interface WorkRoute<Request, Response> {
+export interface ApplicationRoute<Request, Response> {
   readonly operation: string;
   readonly path: string;
   readonly request: z.ZodType<Request>;
   readonly response: z.ZodType<Response>;
 }
+
+export type WorkRoute<Request, Response> = ApplicationRoute<Request, Response>;
 
 /** What a Work call produced: the contract, or a reason there is no contract.
  *
@@ -128,8 +130,8 @@ export function workPayload(body: unknown): { found: true; payload: unknown } | 
  * before it is returned, so nothing downstream can receive a value this build's
  * contracts do not describe.
  */
-export async function callWork<Request, Response>(
-  route: WorkRoute<Request, Response>,
+export async function callApplication<Request, Response>(
+  route: ApplicationRoute<Request, Response>,
   request: Request,
   url: string,
   init?: RequestInit,
@@ -196,6 +198,15 @@ export async function callWork<Request, Response>(
     };
   }
   return { outcome: 'value', value: parsed.data };
+}
+
+export function callWork<Request, Response>(
+  route: WorkRoute<Request, Response>,
+  request: Request,
+  url: string,
+  init?: RequestInit,
+): Promise<WorkResult<Response>> {
+  return callApplication(route, request, url, init);
 }
 
 /** Aliased so the `Response` type is not shadowed by the generic parameter. */

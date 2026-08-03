@@ -16,7 +16,6 @@ import { generateContracts, type JsonSchema } from "./generate.ts";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = resolve(HERE, "..", "..");
 const REPOSITORY_ROOT = resolve(DASHBOARD_ROOT, "..");
-const SCHEMA_OUTPUT_ENV = "TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT";
 const RUST_SCHEMA_FILE = "codegen/schemas/dashboard-contracts.schema.json";
 
 function exportRustBundle(): { bundle: JsonSchema; source: string } {
@@ -26,21 +25,20 @@ function exportRustBundle(): { bundle: JsonSchema; source: string } {
     const result = spawnSync(
       "cargo",
       [
-        "test",
+        "run",
         "--quiet",
-        "--test",
+        "-p",
+        "tracedecay-dashboard-api",
+        "--example",
         "dashboard_contract_schema_export",
         "--",
-        "--ignored",
-        "--exact",
-        "writes_dashboard_contract_schema",
+        output,
       ],
       {
         cwd: REPOSITORY_ROOT,
         env: {
           ...process.env,
           TRACEDECAY_SKIP_DASHBOARD_BUILD: "1",
-          [SCHEMA_OUTPUT_ENV]: output,
         },
         stdio: "inherit",
       },

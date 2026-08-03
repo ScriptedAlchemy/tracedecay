@@ -8,9 +8,15 @@ use tracedecay_application::{
     AuthorizedScopeSet, CostsReadModelV1, CreateWorkCommand, MultiRootExecuteRequestV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1,
     ObservatoryReadModelV1, ReplanDependenciesCommand, ReviewProposalCommand,
-    ReviewProposalRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    ReviewProposalRequestV1, TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
+    TaskHandoffRedeemed, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowFanOutRequest,
 };
-use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
+use tracedecay_domain::{
+    WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1, WorkflowDefinition,
+    WorkflowRunProjection,
+};
 
 use super::analytics_api::AnalyticsOverviewPayloadV1;
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
@@ -99,6 +105,16 @@ struct DashboardContractCatalogV1 {
     work_attach_runtime_evidence_command: AttachRuntimeEvidenceCommand,
     work_accept_task_command: AcceptTaskCommand,
     work_projection: WorkProjection,
+    workflow_definition_register_request: WorkflowDefinitionRegisterRequest,
+    workflow_definition: WorkflowDefinition,
+    workflow_definition_activate_request: WorkflowDefinitionActivateRequest,
+    workflow_activation: WorkflowActivation,
+    workflow_fan_out_request: WorkflowFanOutRequest,
+    workflow_run_projection: WorkflowRunProjection,
+    task_handoff_issue_request: TaskHandoffIssueRequest,
+    task_handoff_grant: TaskHandoffGrant,
+    task_handoff_redeem_request: TaskHandoffRedeemRequest,
+    task_handoff_redeemed: TaskHandoffRedeemed,
     multi_root_capability: MultiRootCapabilityV1,
     multi_root_scope_set_read_request: MultiRootScopeSetReadRequestV1,
     multi_root_scope_set: Option<AuthorizedScopeSet>,
@@ -214,6 +230,46 @@ mod tests {
             assert!(
                 definitions.contains_key(contract),
                 "canonical Work contract {contract} is absent from the dashboard catalog"
+            );
+            assert_eq!(
+                schema["properties"][field]["$ref"],
+                format!("#/$defs/{contract}"),
+                "dashboard catalog field {field} must directly register {contract}"
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_workflow_contracts_are_registered() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        for (field, contract) in [
+            (
+                "workflow_definition_register_request",
+                "WorkflowDefinitionRegisterRequest",
+            ),
+            ("workflow_definition", "WorkflowDefinition"),
+            (
+                "workflow_definition_activate_request",
+                "WorkflowDefinitionActivateRequest",
+            ),
+            ("workflow_activation", "WorkflowActivation"),
+            ("workflow_fan_out_request", "WorkflowFanOutRequest"),
+            ("workflow_run_projection", "WorkflowRunProjection"),
+            ("task_handoff_issue_request", "TaskHandoffIssueRequest"),
+            ("task_handoff_grant", "TaskHandoffGrant"),
+            ("task_handoff_redeem_request", "TaskHandoffRedeemRequest"),
+            ("task_handoff_redeemed", "TaskHandoffRedeemed"),
+        ] {
+            assert!(
+                definitions.contains_key(contract),
+                "canonical Workflow contract {contract} is absent from the dashboard catalog"
             );
             assert_eq!(
                 schema["properties"][field]["$ref"],
