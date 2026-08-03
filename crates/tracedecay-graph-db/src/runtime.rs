@@ -209,6 +209,11 @@ impl GraphDb {
             return Err(GraphDbError::Cancelled);
         }
         let mut cached = self.state_write_guard()?;
+        let retained_entities: BTreeSet<_> = replacement
+            .entities
+            .iter()
+            .map(|entity| entity.identity.clone())
+            .collect();
         let mut mutations = Vec::new();
         for (_, stored) in cached.relations.values() {
             if stored.namespace == replacement.namespace
@@ -222,6 +227,7 @@ impl GraphDb {
         for (_, stored) in cached.entities.values() {
             if stored.namespace == replacement.namespace
                 && stored.projection == replacement.projection
+                && !retained_entities.contains(&stored.entity.identity)
             {
                 mutations.push(GraphMutation::DeleteEntity(stored.entity.identity.clone()));
             }
@@ -425,18 +431,24 @@ impl GraphDb {
 
     fn read_guard(&self) -> Result<RwLockReadGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
-        self.inner
+        let guard = self
+            .inner
             .database
             .read()
-            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))
+            .map_err(|_| GraphDbError::unavailable("graph database read lock is poisoned"))?;
+        self.ensure_available()?;
+        Ok(guard)
     }
 
     fn write_guard(&self) -> Result<RwLockWriteGuard<'_, Option<GrafeoDB>>, GraphDbError> {
         self.ensure_available()?;
-        self.inner
+        let guard = self
+            .inner
             .database
             .write()
-            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))
+            .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))?;
+        self.ensure_available()?;
+        Ok(guard)
     }
 
     fn state_read_guard(&self) -> Result<RwLockReadGuard<'_, StateCache>, GraphDbError> {
@@ -955,3 +967,6 @@ fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {
         _ => GraphDbError::unavailable(error.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests;
