@@ -301,6 +301,14 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             }
             match storage_scope {
                 "user" => {
+                    // User-scoped retained/LCM calls return before the root
+                    // dispatch guard below. Keep the canonical availability
+                    // decision ahead of every profile handler and store effect.
+                    if RetainedSurfaceOperation::from_name(tool_name).is_some()
+                        || tool_name == "tracedecay_message_search"
+                    {
+                        ensure_mcp_dispatch_available(tool_name)?;
+                    }
                     let profile_root = match options.profile_root {
                         Some(profile_root) => profile_root.to_path_buf(),
                         None => support::profile_root_for_global_db(
@@ -405,6 +413,10 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
             options.application_invocation_executor.is_some(),
         );
         if dispatch_group == Some(McpToolDispatchGroup::ApplicationSurface) {
+            // Application-surface tools return before the root guard below.
+            // Reject unavailable effects before parsing, routing, or invoking
+            // the canonical application handler.
+            ensure_mcp_dispatch_available(tool_name)?;
             return boxed_send(dispatch_application_surface_tools(
                 tool_name,
                 cg,
