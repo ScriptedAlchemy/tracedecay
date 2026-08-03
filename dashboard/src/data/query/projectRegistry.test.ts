@@ -25,7 +25,7 @@ import {
   registryAnnotation,
   registryReading,
 } from './projectRegistry.ts';
-import type { ProjectContextPayload } from '../../contracts/wire.ts';
+import type { ProjectContextPayloadV1 } from '../../contracts/generated.ts';
 
 /**
  * React Query's default key matching: a query is invalidated when the
@@ -132,7 +132,7 @@ describe('project registry query keys', () => {
   });
 });
 
-function context(overrides: Partial<ProjectContextPayload>): ProjectContextPayload {
+function context(overrides: Partial<ProjectContextPayloadV1>): ProjectContextPayloadV1 {
   return {
     status: 'ok',
     is_active: false,
@@ -140,7 +140,7 @@ function context(overrides: Partial<ProjectContextPayload>): ProjectContextPaylo
     aliases: [],
     stores: [],
     ...overrides,
-  } as ProjectContextPayload;
+  } as ProjectContextPayloadV1;
 }
 
 function project(label: string) {

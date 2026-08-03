@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
 use crate::id::{BindingId, CapabilityId, ContributionId, ProfileId, RetrieverId, UseCaseId};
-use crate::manifest::{CapabilityManifestV1, EffectClass};
+use crate::manifest::{CapabilityManifestV1, EffectClass, InverseContract};
 use crate::profile::{ProfileDefinition, RoutingFixtureExpectation};
 use crate::retrieval::RetrievalPrimitiveManifestV1;
 use crate::snapshot::{ApplicationHandlerDescriptorV1, CatalogContributionV1};
@@ -43,6 +43,11 @@ pub enum CatalogValidationError {
     MissingHandler {
         capability_id: CapabilityId,
         use_case_id: UseCaseId,
+    },
+    #[error("capability {capability_id} references missing inverse capability {inverse_id}")]
+    MissingInverseCapability {
+        capability_id: CapabilityId,
+        inverse_id: CapabilityId,
     },
     #[error("capability {capability_id} and its application handler use incompatible schemas")]
     HandlerSchemaMismatch { capability_id: CapabilityId },
@@ -163,10 +168,28 @@ pub(crate) fn validate_catalog(
     let profiles = index_profiles(profiles, &capabilities)?;
     let handlers = index_handlers(handlers)?;
 
+    validate_inverse_contracts(&capabilities)?;
     validate_handler_contracts(&capabilities, &handlers)?;
     validate_profile_membership(&capabilities, &profiles)?;
     validate_retrieval_contracts(&retrievals, &capabilities)?;
     validate_profiles(&profiles, &capabilities, &bindings)?;
+    Ok(())
+}
+
+fn validate_inverse_contracts(
+    capabilities: &BTreeMap<CapabilityId, &CapabilityManifestV1>,
+) -> Result<(), CatalogValidationError> {
+    for capability in capabilities.values() {
+        let InverseContract::Capability { capability_id } = capability.inverse() else {
+            continue;
+        };
+        if !capabilities.contains_key(capability_id) {
+            return Err(CatalogValidationError::MissingInverseCapability {
+                capability_id: capability.capability_id().clone(),
+                inverse_id: capability_id.clone(),
+            });
+        }
+    }
     Ok(())
 }
 

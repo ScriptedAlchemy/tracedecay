@@ -71,6 +71,7 @@ pub enum ProjectionSkipReason {
     /// binder keeps the output; this observation converges as a durable,
     /// auditable skip instead of wedging the projection queue.
     OutputCollision,
+    InvalidContract,
 }
 
 impl ProjectionSkipReason {
@@ -78,6 +79,16 @@ impl ProjectionSkipReason {
         match self {
             Self::NonConversationalRecord => "non_conversational_record",
             Self::OutputCollision => "output_collision",
+            Self::InvalidContract => "invalid_contract",
+        }
+    }
+
+    pub fn from_durable_str(value: &str) -> Option<Self> {
+        match value {
+            "non_conversational_record" => Some(Self::NonConversationalRecord),
+            "output_collision" => Some(Self::OutputCollision),
+            "invalid_contract" => Some(Self::InvalidContract),
+            _ => None,
         }
     }
 }
@@ -551,6 +562,30 @@ pub enum ProjectionStoreError {
         #[source]
         source: Box<dyn Error + Send + Sync>,
     },
+    #[error(
+        "projection retry is deferred after attempt {attempt_count} until {next_retry_at_micros}"
+    )]
+    RetryDeferred {
+        attempt_count: u32,
+        next_retry_at_micros: i64,
+        last_error: String,
+    },
+}
+
+impl ProjectionStoreError {
+    pub fn durable_detail(&self) -> String {
+        let mut detail = self.to_string();
+        let mut source = self.source();
+        while let Some(current) = source {
+            let message = current.to_string();
+            if !detail.ends_with(&message) {
+                detail.push_str(": ");
+                detail.push_str(&message);
+            }
+            source = current.source();
+        }
+        detail
+    }
 }
 
 pub type ProjectionStoreResult<T> = Result<T, ProjectionStoreError>;

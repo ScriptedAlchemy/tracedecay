@@ -42,7 +42,7 @@ import {
   type TouchTargetReport,
   type Viewport,
 } from './responsive.ts';
-import { ExplorerQueryRunSchema } from '../src/contracts/wire.ts';
+import { ExplorerQueryRunV1Schema } from '../src/contracts/generated.ts';
 
 const LABEL = process.argv[2] ?? 'current';
 const OUT = path.join(process.cwd(), '.explorer-axe', LABEL);
@@ -281,9 +281,9 @@ const EXPLORER_FIXTURES: [RegExp, unknown][] = [
  * before any scanning starts.
  */
 function assertFixtureParses(label: string, body: unknown): void {
-  const parsed = ExplorerQueryRunSchema.safeParse((body as { payload?: unknown }).payload);
+  const parsed = ExplorerQueryRunV1Schema.safeParse((body as { payload?: unknown }).payload);
   if (!parsed.success) {
-    throw new Error(`fixture ${label} fails ExplorerQueryRunSchema: ${parsed.error.message}`);
+    throw new Error(`fixture ${label} fails ExplorerQueryRunV1Schema: ${parsed.error.message}`);
   }
 }
 

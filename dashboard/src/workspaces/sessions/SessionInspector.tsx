@@ -28,11 +28,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
-  LcmSessionPayloadSchema,
+  LcmSessionPayloadV1Schema,
   type LcmMessageV1,
   type LcmSessionPayloadV1,
   type LcmSummaryNodeV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary } from '../../ui/ReadSection.tsx';
@@ -75,7 +75,7 @@ export function SessionInspector({
   const session = useLegacy(
     ['lcm', 'session', sessionId, offset, order],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}`,
-    LcmSessionPayloadSchema,
+    LcmSessionPayloadV1Schema,
   );
 
   return (

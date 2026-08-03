@@ -15,7 +15,7 @@ import {
   Workflow,
 } from 'lucide-react';
 import { NavLink } from 'react-router';
-import type { StorageFindingKindStatus } from '../../contracts/wire.ts';
+import type { StorageFindingKindStatusV1 } from '../../contracts/generated.ts';
 import { useStorageFindings } from '../../data/query/storageFindings.ts';
 import { cn } from '../../ui/cn';
 import { CHANNELS, channelNumber } from '../channels.ts';
@@ -83,7 +83,7 @@ const DOCTOR_HEALTH: Record<
  * — established nothing either way, and reporting "no evidence" as a clean bill
  * of health is the whole defect this dot exists to avoid.
  */
-function kindHealth(status: StorageFindingKindStatus): DoctorHealth {
+function kindHealth(status: StorageFindingKindStatusV1): DoctorHealth {
   if (status.observed_entries > 0) return 'attention';
   switch (status.state) {
     case 'real':
