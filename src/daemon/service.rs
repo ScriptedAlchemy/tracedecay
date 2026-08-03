@@ -28,8 +28,8 @@ use probe::{
 };
 use runner::ServiceRunner;
 use unit_file::{
-    launchd_plist_env_value, read_service_unit, remove_service_unit, service_unit_exists,
-    service_unit_path, socket_path_from_unit_text, write_service_unit,
+    read_service_unit, remove_service_unit, service_unit_exists, service_unit_path,
+    socket_path_from_unit_text, write_service_unit,
 };
 
 const LAUNCHD_LABEL: &str = "com.tracedecay.daemon";
@@ -109,70 +109,6 @@ impl QuiescedDaemonLifecycle {
                 combine_operation_and_restore(operation, Err(operation_error), restore_result)
             }
         }
-    }
-
-    /// Publishes and reloads any installed service definition before stopping
-    /// the old process and acquiring an exclusive maintenance lease. Failures
-    /// never restore the captured pre-migration definition or running state.
-    pub fn acquire_forward_only(operation: &str, spec: &DaemonServiceSpec) -> Result<Self> {
-        Self::acquire_forward_only_with(operation, spec, || {
-            crate::lifecycle_lease::acquire_exclusive(operation)
-        })
-    }
-
-    /// Forward-only acquisition that allows short-lived readers to drain
-    /// after the managed daemon has stopped.
-    pub fn acquire_forward_only_with_timeout(
-        operation: &str,
-        spec: &DaemonServiceSpec,
-        timeout: Duration,
-    ) -> Result<Self> {
-        Self::acquire_forward_only_with(operation, spec, || {
-            crate::lifecycle_lease::acquire_exclusive_with_timeout(operation, timeout)
-        })
-    }
-
-    fn acquire_forward_only_with(
-        operation: &str,
-        spec: &DaemonServiceSpec,
-        acquire: impl FnOnce() -> Result<crate::lifecycle_lease::LifecycleLease>,
-    ) -> Result<Self> {
-        let previous_state = match prepare_forward_only_service_before_lease(spec) {
-            Ok(state) => state,
-            Err(operation_error) => {
-                let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);
-                return combine_operation_and_restore(
-                    operation,
-                    Err(operation_error),
-                    recovery_result,
-                );
-            }
-        };
-
-        let lifecycle_lease = match acquire() {
-            Ok(lease) => lease,
-            Err(operation_error) => {
-                let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);
-                return combine_operation_and_restore(
-                    operation,
-                    Err(operation_error),
-                    recovery_result,
-                );
-            }
-        };
-        let guard = Self {
-            previous_state,
-            lifecycle_lease: Some(lifecycle_lease),
-            // Forward-only guards must never restore the pre-migration state,
-            // including from Drop during unwinding or signal-driven teardown.
-            restored: true,
-        };
-        if let Err(operation_error) = verify_installed_service_quiesced_under_lease() {
-            guard.finish_without_restore();
-            let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);
-            return combine_operation_and_restore(operation, Err(operation_error), recovery_result);
-        }
-        Ok(guard)
     }
 
     pub fn lifecycle_lease(&self) -> Result<&crate::lifecycle_lease::LifecycleLease> {
@@ -583,9 +519,9 @@ pub fn install_service(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf>
 }
 
 /// Install the managed service unit while the caller already holds the
-/// quiesced daemon lifecycle lease (forward-only post-update). The public
-/// [`install_service`] wrapper acquires that lease itself and would deadlock
-/// if called from a lease-holding context.
+/// quiesced daemon lifecycle lease. The public [`install_service`] wrapper
+/// acquires that lease itself and would deadlock if called from a
+/// lease-holding context.
 pub fn install_service_under_lease(spec: &DaemonServiceSpec, start: bool) -> Result<PathBuf> {
     let runner = ServiceRunner::current()?;
     #[cfg(windows)]
@@ -820,135 +756,6 @@ fn restore_installed_service_after_failed_acquire(
     }
     let _lifecycle_lease = crate::lifecycle_lease::acquire_shared_blocking("daemon state restore")?;
     restore_installed_service_after_update(previous_state)
-}
-
-fn forward_only_service_spec(
-    spec: &DaemonServiceSpec,
-    service_path: &Path,
-) -> Result<DaemonServiceSpec> {
-    let service_is_symlink = std::fs::symlink_metadata(service_path)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink());
-    let existing_unit = if service_is_symlink {
-        String::new()
-    } else {
-        read_service_unit(service_path)?
-    };
-    let mut recovered_spec = spec.clone();
-    if let Some(socket_path) = socket_path_from_unit_text(&existing_unit) {
-        recovered_spec.socket_path = socket_path;
-    }
-    if cfg!(target_os = "macos") {
-        recovered_spec.data_dir_override =
-            launchd_plist_env_value(&existing_unit, crate::config::USER_DATA_DIR_ENV)
-                .map(PathBuf::from);
-    } else if cfg!(windows) {
-        recovered_spec.data_dir_override = windows_task::profile_root_from_task_xml(&existing_unit);
-    }
-    Ok(recovered_spec)
-}
-
-fn commit_forward_only_definition_with(
-    write: impl FnOnce() -> Result<PathBuf>,
-    reload: impl FnOnce(&Path) -> Result<()>,
-    quiesce: impl FnOnce() -> Result<DaemonServiceState>,
-) -> Result<(PathBuf, DaemonServiceState)> {
-    let service_path = write()?;
-    reload(&service_path)?;
-    let previous_state = quiesce()?;
-    Ok((service_path, previous_state))
-}
-
-fn recover_forward_only_definition_with(
-    write: impl FnOnce() -> Result<PathBuf>,
-    reload: impl FnOnce(&Path) -> Result<()>,
-    deactivate: impl FnOnce() -> Result<()>,
-) -> Result<(PathBuf, Option<TraceDecayError>)> {
-    let service_path = write()?;
-    reload(&service_path)?;
-    let deactivate_error = deactivate().err();
-    Ok((service_path, deactivate_error))
-}
-
-fn prepare_forward_only_service_before_lease(
-    spec: &DaemonServiceSpec,
-) -> Result<DaemonServiceState> {
-    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
-        return quiesce_installed_service_before_lease();
-    }
-    let service_path = service_unit_path()?;
-    if !service_unit_exists(&service_path)? {
-        return quiesce_installed_service_before_lease();
-    }
-    let recovered_spec = forward_only_service_spec(spec, &service_path)?;
-    let runner = ServiceRunner::current()?;
-    if matches!(runner, ServiceRunner::WindowsTask) {
-        let previous_state = quiesce_installed_service_before_lease()?;
-        let recovered_spec =
-            windows_task::materialize_service_spec_after_quiescence(&recovered_spec)?;
-        write_service_unit(&recovered_spec)?;
-        runner.reload_forward_recovery_unit(&service_path)?;
-        return Ok(previous_state);
-    }
-    commit_forward_only_definition_with(
-        || write_service_unit(&recovered_spec),
-        |path| runner.reload_forward_recovery_unit(path),
-        quiesce_installed_service_before_lease,
-    )
-    .map(|(_, state)| state)
-}
-
-/// Rewrites an installed managed-service definition to `spec`, forces it
-/// inactive, and verifies that neither the service nor its socket is live.
-///
-/// This is the failure sink for forward-only migrations: it never restores a
-/// prior unit or running state.
-#[doc(hidden)]
-pub fn enforce_forward_only_service_recovery(spec: &DaemonServiceSpec) -> Result<Option<PathBuf>> {
-    if !cfg!(any(target_os = "linux", target_os = "macos", windows)) {
-        return Ok(None);
-    }
-    let service_path = service_unit_path()?;
-    if !service_unit_exists(&service_path)? {
-        let socket_state = daemon_socket_state(&spec.socket_path);
-        if socket_state.is_proven_quiesced() {
-            return Ok(None);
-        }
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "forward-only recovery could not prove unmanaged daemon socket '{}' inactive: {socket_state}",
-                spec.socket_path.display()
-            ),
-        });
-    }
-
-    let mut recovered_spec = forward_only_service_spec(spec, &service_path)?;
-    let runner = ServiceRunner::current()?;
-    if matches!(runner, ServiceRunner::WindowsTask) {
-        quiesce_installed_service_before_lease()?;
-        recovered_spec = windows_task::materialize_service_spec_after_quiescence(&recovered_spec)?;
-    }
-    let (service_path, deactivate_error) = recover_forward_only_definition_with(
-        || write_service_unit(&recovered_spec),
-        |path| runner.reload_forward_recovery_unit(path),
-        || runner.deactivate_for_forward_recovery(),
-    )?;
-
-    let state = runner.service_state(&recovered_spec.socket_path)?;
-    let socket_state = daemon_socket_state(&recovered_spec.socket_path);
-    if state.is_running() || !socket_state.is_proven_quiesced() {
-        let command_failure = deactivate_error
-            .map(|error| format!("; service deactivation also failed: {error}"))
-            .unwrap_or_default();
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "forward-only recovery retained the new service unit at '{}' but could not prove the managed daemon inactive: service {state:?}, socket '{}' {socket_state}{command_failure}",
-                service_path.display(),
-                recovered_spec.socket_path.display(),
-            ),
-        });
-    }
-
-    Ok(Some(service_path))
 }
 
 pub fn uninstall_service(stop: bool) -> Result<PathBuf> {
