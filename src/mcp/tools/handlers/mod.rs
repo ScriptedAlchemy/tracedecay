@@ -140,6 +140,32 @@ use tool_call_support::{boxed_send, rejected_tool_project_selector_present};
 /// Returns the tool result and touched file paths, or an error if the tool
 /// name is unknown or the handler fails. The optional `server_stats` value
 /// is included in `tracedecay_status` responses when provided.
+fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
+    if INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
+        return Ok(());
+    }
+    let contract =
+        super::mcp_dispatch_contract(tool_name).map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    if let tracedecay_tool_catalog::McpDispatchAvailability::Unavailable { reason, retryable } =
+        contract.availability()
+    {
+        return Err(TraceDecayError::project_route(
+            match reason {
+                tracedecay_tool_catalog::McpDispatchUnavailableReason::EffectJourneyUnverified => {
+                    "mcp_dispatch_effect_journey_unverified"
+                }
+            },
+            *retryable,
+            format!(
+                "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn handle_tool_call(
     cg: &TraceDecay,
     tool_name: &str,
@@ -401,30 +427,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
         {
             return Err(unknown_tool_error(tool_name));
         }
-        if !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) {
-            let contract = super::mcp_dispatch_contract(tool_name).map_err(|error| {
-                TraceDecayError::Config {
-                    message: error.to_string(),
-                }
-            })?;
-            if let tracedecay_tool_catalog::McpDispatchAvailability::Unavailable {
-                reason,
-                retryable,
-            } = contract.availability()
-            {
-                return Err(TraceDecayError::project_route(
-                    match reason {
-                        tracedecay_tool_catalog::McpDispatchUnavailableReason::EffectJourneyUnverified => {
-                            "mcp_dispatch_effect_journey_unverified"
-                        }
-                    },
-                    *retryable,
-                    format!(
-                        "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
-                    ),
-                ));
-            }
-        }
+        ensure_mcp_dispatch_available(tool_name)?;
         // The universal ceiling. Every dispatch group below runs inside this one
         // bound, so a group added later inherits it without opting in and no
         // handler can be reached unbounded. Per-group wraps (git, memory) stay:
