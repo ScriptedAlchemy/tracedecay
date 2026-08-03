@@ -90,3 +90,70 @@ impl ProviderScope {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PROVIDERS: [SessionProvider; 9] = [
+        SessionProvider::Cursor,
+        SessionProvider::Claude,
+        SessionProvider::Codex,
+        SessionProvider::Vibe,
+        SessionProvider::Cline,
+        SessionProvider::RooCode,
+        SessionProvider::Kilo,
+        SessionProvider::Kiro,
+        SessionProvider::Hermes,
+    ];
+
+    #[test]
+    fn provider_ids_round_trip_in_search_order() {
+        assert_eq!(MESSAGE_SEARCH_PROVIDER_IDS.first(), Some(&"all"));
+        assert_eq!(MESSAGE_SEARCH_PROVIDER_IDS.len(), PROVIDERS.len() + 1);
+
+        for provider in PROVIDERS {
+            let id = provider.id();
+            assert_eq!(SessionProvider::parse(id), Some(provider));
+            assert!(MESSAGE_SEARCH_PROVIDER_IDS.contains(&id));
+        }
+
+        assert_eq!(SessionProvider::parse("all"), None);
+        assert_eq!(SessionProvider::parse(" Codex "), None);
+        assert_eq!(SessionProvider::parse("CODEX"), None);
+    }
+
+    #[test]
+    fn provider_scope_parses_optional_values_and_reports_labels() {
+        assert_eq!(ProviderScope::parse_optional(None), Ok(ProviderScope::All));
+        assert_eq!(
+            ProviderScope::parse_optional(Some(" \t")),
+            Ok(ProviderScope::All)
+        );
+        assert_eq!(
+            ProviderScope::parse_optional(Some(" all ")),
+            Ok(ProviderScope::All)
+        );
+
+        let scope = ProviderScope::parse_optional(Some(" roo-code ")).unwrap();
+        assert_eq!(scope, ProviderScope::One(SessionProvider::RooCode));
+        assert_eq!(scope.provider(), Some(SessionProvider::RooCode));
+        assert_eq!(scope.provider_id(), Some("roo-code"));
+        assert_eq!(scope.response_label(), "roo-code");
+
+        assert_eq!(ProviderScope::All.provider(), None);
+        assert_eq!(ProviderScope::All.provider_id(), None);
+        assert_eq!(ProviderScope::All.response_label(), "all");
+    }
+
+    #[test]
+    fn provider_scope_rejects_unknown_ids_with_expected_values() {
+        let error = ProviderScope::parse_optional(Some("open-code")).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "unknown session provider 'open-code' (expected {EXPECTED_MESSAGE_SEARCH_PROVIDER})"
+            )
+        );
+    }
+}
