@@ -372,6 +372,29 @@ fn idempotency_for_tool(tool_name: &str) -> McpIdempotencyContract {
     }
 }
 
+fn cancellation_for_tool(
+    tool_name: &str,
+    application_capability: Option<&tracedecay_tool_catalog::CapabilityManifestV1>,
+) -> Result<CancellationContract, tracedecay_tool_catalog::CatalogValidationError> {
+    if let Some(capability) = application_capability
+        && tool_supports_live_cancellation(tool_name)
+    {
+        return Ok(capability.cancellation().clone());
+    }
+    let points = match direct_effect(tool_name) {
+        EffectClass::SourceEdit => vec![
+            CancellationPoint::BeforeEffect,
+            CancellationPoint::EffectInFlight,
+        ],
+        _ if tool_name == "tracedecay_search" => vec![CancellationPoint::DuringRead],
+        _ if tool_name == "tracedecay_run_affected_tests" => {
+            vec![CancellationPoint::EffectInFlight]
+        }
+        _ => return Ok(CancellationContract::NotCancellable),
+    };
+    CancellationContract::cooperative(points)
+}
+
 fn build_mcp_dispatch_catalog()
 -> Result<McpDispatchCatalogV1, super::dispatch::McpDispatchMetadataError> {
     let mut contracts = Vec::new();
@@ -390,11 +413,7 @@ fn build_mcp_dispatch_catalog()
             )
         };
         let available = effect.is_read_only() || verified_effect_journey(binding.name);
-        let cancellation = if tool_supports_live_cancellation(binding.name) {
-            CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission])?
-        } else {
-            CancellationContract::NotCancellable
-        };
+        let cancellation = cancellation_for_tool(binding.name, application_capability)?;
         let mut terminal_states = vec![
             McpTerminalState::Completed,
             McpTerminalState::DeadlineExceeded,
@@ -547,6 +566,27 @@ mod tests {
                 McpInverseContract::Unavailable { .. }
             ));
         }
+    }
+
+    #[test]
+    fn direct_cancellation_contracts_name_observed_handler_stages() {
+        let catalog = mcp_dispatch_catalog().unwrap();
+        assert_eq!(
+            catalog
+                .contract("tracedecay_search")
+                .unwrap()
+                .cancellation()
+                .points(),
+            &[CancellationPoint::DuringRead]
+        );
+        assert_eq!(
+            catalog
+                .contract("tracedecay_run_affected_tests")
+                .unwrap()
+                .cancellation()
+                .points(),
+            &[CancellationPoint::EffectInFlight]
+        );
     }
 
     /// Reads that resolve their own authority stay on the active project. A
