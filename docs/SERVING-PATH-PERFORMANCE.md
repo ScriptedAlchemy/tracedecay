@@ -439,7 +439,7 @@ at eight, which is the digest-equality proof that splitting moves no identity.
 *Superseded.* At 150,000 chunks every batch committed and the publication then
 failed with `SQLite execute failed: interrupted` — not the document ceiling (the
 document is still ~3KB) but the publication transaction running past a runtime
-guard: `MIGRATION_SQL_EXECUTION_LIMIT` bounds one guarded execution at 30
+guard: `EXACT_SQL_EXECUTION_LIMIT` bounds one guarded execution at 30
 seconds, and the batch progress handler also trips on a repeated authority
 check.
 
@@ -447,7 +447,7 @@ The dominant writer that pushed publication past that bound — the inline-vecto
 payload migration, which rewrote the whole corpus inside the same guarded
 transaction — no longer exists: stores are born row-per-vector and the migration
 was removed with the rest of the branch's migration machinery. The guard itself
-(`MIGRATION_SQL_EXECUTION_LIMIT`) is unchanged, so a large enough single
+(`EXACT_SQL_EXECUTION_LIMIT`) is unchanged, so a large enough single
 publication could still trip it; the two mitigations below were never landed and
 are recorded as options, not as pending work.
 

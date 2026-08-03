@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn deferred_transaction_is_available_for_default_sqlite_semantics() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE deferred (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -11,7 +11,7 @@ fn deferred_transaction_is_available_for_default_sqlite_semantics() {
     transaction
         .execute(statement(
             "INSERT INTO deferred VALUES (?)",
-            vec![MigrationSqlValue::Integer(1)],
+            vec![ExactSqlValue::Integer(1)],
         ))
         .unwrap();
 
@@ -23,13 +23,13 @@ fn deferred_transaction_is_available_for_default_sqlite_semantics() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(1)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
 }
 
 #[test]
 fn immediate_transaction_commit_reports_only_after_commit() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE committed (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -37,14 +37,14 @@ fn immediate_transaction_commit_reports_only_after_commit() {
     transaction
         .execute(statement(
             "INSERT INTO committed VALUES (?)",
-            vec![MigrationSqlValue::Integer(41)],
+            vec![ExactSqlValue::Integer(41)],
         ))
         .unwrap();
     let inside = transaction
         .query(statement("SELECT value FROM committed", vec![]))
         .unwrap();
 
-    assert_eq!(inside.rows[0].values, vec![MigrationSqlValue::Integer(41)]);
+    assert_eq!(inside.rows[0].values, vec![ExactSqlValue::Integer(41)]);
     let receipt = transaction.commit().unwrap();
     assert_eq!(receipt.changed_rows, 1);
     let committed = channel
@@ -53,10 +53,7 @@ fn immediate_transaction_commit_reports_only_after_commit() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(
-        committed.rows[0].values,
-        vec![MigrationSqlValue::Integer(41)]
-    );
+    assert_eq!(committed.rows[0].values, vec![ExactSqlValue::Integer(41)]);
 }
 
 #[test]
@@ -70,9 +67,9 @@ fn transaction_attachment_is_exact_and_auto_detached() {
                  INSERT INTO source_rows VALUES (7);",
         )
         .unwrap();
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let attachment =
-        || MigrationSqlAttachment::new(source_path.to_string_lossy(), "source_input").unwrap();
+        || ExactSqlAttachment::new(source_path.to_string_lossy(), "source_input").unwrap();
 
     let transaction = channel.begin_immediate().unwrap();
     transaction.attach_database(attachment()).unwrap();
@@ -82,7 +79,7 @@ fn transaction_attachment_is_exact_and_auto_detached() {
             vec![],
         ))
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(7)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(7)]);
     transaction.commit().unwrap();
 
     let transaction = channel.begin_immediate().unwrap();
@@ -107,12 +104,12 @@ fn transaction_attachment_is_exact_and_auto_detached() {
 #[test]
 fn caller_sql_cannot_attach_database() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     channel
         .execute(statement(
             "ATTACH DATABASE ?1 AS caller_input",
-            vec![MigrationSqlValue::Text(":memory:".to_owned())],
+            vec![ExactSqlValue::Text(":memory:".to_owned())],
         ))
         .unwrap_err();
     let databases = channel
@@ -124,7 +121,7 @@ fn caller_sql_cannot_attach_database() {
     assert!(databases.rows.iter().all(|row| {
         !matches!(
             row.values.get(1),
-            Some(MigrationSqlValue::Text(name)) if name == "caller_input"
+            Some(ExactSqlValue::Text(name)) if name == "caller_input"
         )
     }));
 }
@@ -132,7 +129,7 @@ fn caller_sql_cannot_attach_database() {
 #[test]
 fn immediate_transaction_rollback_reports_after_rollback_and_discards_rows() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE rolled_back (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -140,7 +137,7 @@ fn immediate_transaction_rollback_reports_after_rollback_and_discards_rows() {
     transaction
         .execute(statement(
             "INSERT INTO rolled_back VALUES (?)",
-            vec![MigrationSqlValue::Integer(99)],
+            vec![ExactSqlValue::Integer(99)],
         ))
         .unwrap();
 
@@ -153,47 +150,47 @@ fn immediate_transaction_rollback_reports_after_rollback_and_discards_rows() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(0)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }
 
 #[test]
 fn pinned_batch_rejects_transaction_control() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let transaction = channel.begin_immediate().unwrap();
 
     let error = transaction
         .execute_batch("COMMIT; BEGIN IMMEDIATE".to_owned())
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::TransactionControlDenied));
+    assert!(matches!(error, ExactSqlError::TransactionControlDenied));
     transaction.rollback().unwrap();
 }
 
 #[test]
 fn pinned_execute_rejects_transaction_control_before_commit_receipt() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let transaction = channel.begin_immediate().unwrap();
 
     let error = transaction
         .execute(statement("COMMIT", vec![]))
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::TransactionControlDenied));
+    assert!(matches!(error, ExactSqlError::TransactionControlDenied));
     transaction.rollback().unwrap();
 }
 
 #[test]
 fn unpinned_batch_rejects_transaction_control_and_releases_writer() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
     let error = channel
         .execute_batch("BEGIN IMMEDIATE".to_owned())
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::TransactionControlDenied));
+    assert!(matches!(error, ExactSqlError::TransactionControlDenied));
     channel
         .execute_batch("CREATE TABLE after_denied_begin (value INTEGER)".to_owned())
         .unwrap();

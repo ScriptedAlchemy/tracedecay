@@ -12,7 +12,7 @@ use tracedecay_domain::{
     ActorId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
     ScopeSetRevision, UtcMicros, WorktreeId,
 };
-use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
+use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
 use tracedecay_rusqlite_runtime::repository::{
     AUTHORIZED_SCOPE_SET_SCHEMA_V1, AuthorizedScopeSetExecutor, AuthorizedScopeSetSqliteStorage,
@@ -38,7 +38,7 @@ impl StorageOperationExecutor for NoTypedWrites {
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
-        unreachable!("scope sets use only the registered migration SQL channel")
+        unreachable!("scope sets use only the registered exact SQL channel")
     }
 }
 
@@ -51,7 +51,7 @@ impl ReaderQueryExecutor for NoTypedReads {
         _snapshot: &rusqlite::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        unreachable!("scope sets use only the registered migration SQL channel")
+        unreachable!("scope sets use only the registered exact SQL channel")
     }
 }
 
@@ -89,7 +89,7 @@ impl RegisteredScopeSetStore {
             NoTypedReads,
         )
         .unwrap();
-        let handle = MigrationSqlHandle::attach(&writer, &readers).unwrap();
+        let handle = ExactSqlHandle::attach(&writer, &readers).unwrap();
         Self {
             storage: AuthorizedScopeSetSqliteStorage::from_registered(handle),
             path,
