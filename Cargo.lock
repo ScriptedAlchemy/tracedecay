@@ -832,6 +832,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "constant_time_eq"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a1ec0cfec728a79a5109075543131387f911cb4d07716436d7ae20533657a96"
+
+[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4586,15 +4592,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "rustls-pki-types"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5482,27 +5479,23 @@ checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 name = "tracedecay"
 version = "0.0.67"
 dependencies = [
- "amari-holographic",
  "axum",
  "bincode",
  "cap-fs-ext",
  "cap-std",
  "clap",
+ "constant_time_eq",
  "criterion",
  "crossterm",
  "dirs",
  "filetime",
  "flate2",
  "fs2",
- "fsys",
  "futures-util",
  "getrandom 0.2.17",
  "gix",
  "glob",
  "hex",
- "hmac 0.13.0",
- "hyper",
- "hyper-util",
  "ignore",
  "jsonschema",
  "keyring",
@@ -5513,12 +5506,9 @@ dependencies = [
  "notify",
  "open",
  "rayon",
- "reflink-copy",
  "regex",
  "rmcp",
  "rusqlite",
- "rustls",
- "rustls-pemfile",
  "same-file",
  "schemars",
  "self-replace",
@@ -5527,23 +5517,19 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "shell-words",
- "static_assertions",
  "sysinfo",
  "tar",
  "tempfile",
  "thiserror",
  "tiktoken-rs",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "toml",
- "toml_edit",
  "tower",
  "tracedecay-agent-hosts",
  "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation",
- "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-dashboard-api",
@@ -5573,11 +5559,8 @@ dependencies = [
  "ureq",
  "url",
  "walkdir",
- "webpki-roots",
  "windows 0.62.2",
- "windows-sys 0.61.2",
  "xattr",
- "yaml-edit",
  "zeroize",
  "zip",
 ]
@@ -5702,13 +5685,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "static_assertions",
  "tempfile",
  "thiserror",
  "tracedecay-code-extraction",
  "tracedecay-domain",
- "tree-sitter",
- "tree-sitter-language",
 ]
 
 [[package]]
@@ -5822,6 +5802,7 @@ dependencies = [
 name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
+ "constant_time_eq",
  "lsp-types",
  "serde",
  "serde_json",
@@ -6045,7 +6026,6 @@ dependencies = [
  "tracedecay-rusqlite-runtime",
  "tracedecay-store",
  "tracedecay-temporal-query",
- "tracedecay-tool-catalog",
  "tracing",
  "url",
 ]
@@ -6109,7 +6089,6 @@ dependencies = [
  "hex",
  "ignore",
  "regex",
- "rusqlite",
  "same-file",
  "schemars",
  "serde",
@@ -6121,7 +6100,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
- "tracedecay-api",
  "tracedecay-application",
  "tracedecay-automation",
  "tracedecay-code-index",
