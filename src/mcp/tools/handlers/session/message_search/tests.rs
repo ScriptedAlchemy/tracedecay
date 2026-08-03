@@ -13,12 +13,18 @@ use super::{
     SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
     SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
     SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
-    handle_message_search_with_service, render_temporal_message_search_md,
+    handle_message_search_with_registry, handle_message_search_with_service,
+    render_temporal_message_search_md,
 };
 use crate::application::session::{
     SessionDataFreshness, SessionFreshnessPolicy, SessionRetrievalScope,
 };
 use crate::errors::TraceDecayError;
+use crate::mcp::tools::handlers::project_registry::{
+    ProjectRegistryContextCommand, ProjectRegistryContextFuture, ProjectRegistryContextOutcome,
+    ProjectRegistryListingCommand, ProjectRegistryListingFuture, ProjectRegistryListingOutcome,
+    ProjectRegistryListingView, ProjectRegistryReadPort,
+};
 use crate::sessions::{SessionMessageRecord, SessionMessageSearchResult, SessionRecord};
 use tracedecay_temporal_query::ports::{TemporalMessageTypeFilterV1, TemporalSessionScopeFilterV1};
 
@@ -55,6 +61,59 @@ impl SessionRetrievalServicePort for RecordingService {
             },
         );
         Box::pin(async move { outcome })
+    }
+}
+
+struct StubProjectRegistry {
+    projects: Vec<crate::project_registry::PublicCodeProject>,
+}
+
+impl StubProjectRegistry {
+    fn with_projects(ids: &[&str]) -> Self {
+        Self {
+            projects: ids
+                .iter()
+                .map(|id| crate::project_registry::PublicCodeProject {
+                    project_id: (*id).to_string(),
+                    label: (*id).to_string(),
+                    project_root: format!("/registered/{id}"),
+                    display_root: format!("/registered/{id}"),
+                    canonical_root: format!("/registered/{id}"),
+                    git_common_dir: None,
+                    default_branch: None,
+                    created_at: 0,
+                    last_seen_at: 0,
+                    is_active: None,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ProjectRegistryReadPort for StubProjectRegistry {
+    fn list(&self, _command: ProjectRegistryListingCommand) -> ProjectRegistryListingFuture<'_> {
+        let projects = self.projects.clone();
+        Box::pin(async move {
+            Ok(ProjectRegistryListingOutcome::Listing(
+                ProjectRegistryListingView {
+                    registry_path: std::path::PathBuf::from("/registry"),
+                    truncated: false,
+                    view: crate::project_registry::ProjectRegistryView {
+                        summary: crate::project_registry::ProjectRegistrySummary {
+                            project_count: projects.len(),
+                            repo_count: projects.len(),
+                            truncated: false,
+                        },
+                        project_tree: Vec::new(),
+                    },
+                    projects,
+                },
+            ))
+        })
+    }
+
+    fn context(&self, _command: ProjectRegistryContextCommand) -> ProjectRegistryContextFuture<'_> {
+        Box::pin(async move { Ok(ProjectRegistryContextOutcome::RegistryUnavailable) })
     }
 }
 
@@ -578,9 +637,10 @@ async fn fresh_partial_outcome_uses_cursor_without_requesting_refresh() {
 }
 
 #[tokio::test]
-async fn all_registered_defers_without_invoking_retrieval() {
+async fn all_registered_searches_each_registry_project() {
     let service = RecordingService::default();
-    let result = handle_message_search_with_service(
+    let registry = StubProjectRegistry::with_projects(&["project.one", "project.two"]);
+    let result = handle_message_search_with_registry(
         Some(Path::new("/repo")),
         SessionRetrievalStoreScope::Project,
         json!({
@@ -589,20 +649,25 @@ async fn all_registered_defers_without_invoking_retrieval() {
             "format": "json"
         }),
         Some(&service),
+        Some(&registry),
     )
     .await
     .unwrap();
     let payload = response_payload(&result);
 
-    assert_eq!(service.calls(), 0);
-    assert_eq!(payload["status"], "deferred");
-    assert_eq!(payload["outcome"], "deferred");
+    assert_eq!(service.calls(), 2);
+    assert_eq!(payload["outcome"], "complete_zero");
     assert_eq!(payload["project_scope"], "all_registered");
-    assert_eq!(
-        payload["error"]["code"],
-        "session_retrieval_multi_root_deferred"
-    );
-    assert_eq!(payload["error"]["retryable"], false);
+    assert_eq!(payload["searched_project_count"], 2);
+    assert_eq!(payload["skipped_project_count"], 0);
+    let selected = service
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|command| command.project_selector()?.project_id.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(selected, vec!["project.one", "project.two"]);
 }
 
 #[tokio::test]

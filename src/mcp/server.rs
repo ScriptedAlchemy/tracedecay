@@ -818,7 +818,24 @@ impl McpServer {
                     project_session_refresh_wake.clone(),
                 ),
             })
-            .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
+            .map(|service| {
+                match (
+                    registry_db.as_ref(),
+                    retained_project_graph_resolver.as_ref(),
+                    profile_identity.as_ref(),
+                ) {
+                    (Some(registry), Some(resolver), Some(profile_identity)) => {
+                        Arc::new(DaemonProjectSessionRetrievalRouter::new(
+                            service,
+                            Arc::clone(registry),
+                            Arc::clone(resolver),
+                            profile_identity.clone(),
+                            Arc::clone(&project_session_retrieval_calls),
+                        )) as Arc<dyn SessionRetrievalServicePort>
+                    }
+                    _ => Arc::new(service) as Arc<dyn SessionRetrievalServicePort>,
+                }
+            });
         let user_session_retrieval_service = user_session_db
             .as_ref()
             .zip(profile_session_retrieval_root)
