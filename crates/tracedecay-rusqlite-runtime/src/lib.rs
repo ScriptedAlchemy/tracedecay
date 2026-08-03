@@ -28,7 +28,6 @@ mod test_support;
 pub mod watermark;
 pub mod work;
 pub mod workflow;
-mod workflow_state;
 mod writer;
 
 pub use authority::{

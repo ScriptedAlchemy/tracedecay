@@ -81,10 +81,7 @@ impl WorkflowSqliteAuthority {
 
     fn install_schema(&self) -> Result<(), WorkflowSqliteAuthorityBuildError> {
         self.handle
-            .execute_batch(format!(
-                "{WORKFLOW_SCHEMA_V1}\n{}",
-                crate::workflow_state::WORKFLOW_STATE_SCHEMA_V1
-            ))
+            .execute_batch(WORKFLOW_SCHEMA_V1)
             .map(|_| ())
             .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)
     }

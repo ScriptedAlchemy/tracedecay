@@ -48,7 +48,6 @@ pub mod workflow_coordination;
 pub mod workflow_provider;
 pub mod workflow_run;
 pub mod workflow_runtime;
-pub mod workflow_state;
 
 mod error;
 mod surface_binding;
@@ -246,4 +245,3 @@ pub use workflow_coordination::*;
 pub use workflow_provider::*;
 pub use workflow_run::*;
 pub use workflow_runtime::*;
-pub use workflow_state::*;
