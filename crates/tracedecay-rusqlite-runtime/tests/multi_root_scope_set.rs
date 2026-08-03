@@ -5,12 +5,13 @@ use std::path::PathBuf;
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_application::{
-    AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, RequestContext, RequestId, ResolvedScope,
+    AuthorizedRootAdmission, AuthorizedScopeSet, AuthorizedScopeSetAuthority, CancellationContext,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, RegisteredRootLocatorV1, RequestContext,
+    RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, ScopeSetId,
-    ScopeSetRevision, UtcMicros, WorktreeId,
+    ScopeSetRevision, UserProfileId, UtcMicros, WorktreeId,
 };
 use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
@@ -179,13 +180,31 @@ fn scope_set_for_actor(revision: u64, actor: &str) -> AuthorizedScopeSet {
 }
 
 fn scope_set_for_id_actor(revision: u64, scope_set_id: &str, actor: &str) -> AuthorizedScopeSet {
-    AuthorizedScopeSetAuthority::authorize(
+    let roots = [
+        context_for_actor("worktree.main", &format!("main.{revision}"), actor),
+        context_for_actor("worktree.linked", &format!("linked.{revision}"), actor),
+    ]
+    .into_iter()
+    .map(|context| {
+        let project_id = context.scope().project_id.clone();
+        let worktree_id = context.scope().worktree_id.clone();
+        AuthorizedRootAdmission::new(
+            context,
+            RegisteredRootLocatorV1::new(
+                project_id,
+                UserProfileId::new("profile.fixture").unwrap(),
+                "store.fixture".to_owned(),
+                format!("/workspace/{}", worktree_id.as_str()),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    })
+    .collect();
+    AuthorizedScopeSetAuthority::authorize_registered(
         ScopeSetId::new(scope_set_id).unwrap(),
         ScopeSetRevision::new(revision).unwrap(),
-        vec![
-            context_for_actor("worktree.main", &format!("main.{revision}"), actor),
-            context_for_actor("worktree.linked", &format!("linked.{revision}"), actor),
-        ],
+        roots,
         &CapabilityId::new(CAPABILITY).unwrap(),
         &UseCaseId::new(USE_CASE).unwrap(),
         UtcMicros(10),
@@ -235,6 +254,23 @@ fn scope_set_cas_rejects_stale_revision_and_survives_restart() {
         .unwrap()
         .unwrap();
     assert_eq!(restored, second);
+    assert_eq!(
+        restored.roots()[0]
+            .locator()
+            .unwrap()
+            .profile
+            .profile_id
+            .as_str(),
+        "profile.fixture"
+    );
+    assert_eq!(
+        restored.roots()[1]
+            .locator()
+            .unwrap()
+            .canonical_root
+            .as_path(),
+        std::path::Path::new("/workspace/worktree.main")
+    );
 }
 
 #[test]

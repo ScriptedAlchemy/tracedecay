@@ -276,7 +276,7 @@ impl DaemonInvocationState {
             scope_set
                 .roots()
                 .iter()
-                .map(|scope| &scope.scope_digest)
+                .map(|root| &root.scope().scope_digest)
                 .collect::<Vec<_>>(),
         )) else {
             return DaemonInvocationResponse::problem(
@@ -296,7 +296,8 @@ impl DaemonInvocationState {
         let mut contexts = Vec::new();
         let mut generations = Vec::with_capacity(scope_set.roots().len());
         let mut outcomes = BTreeMap::new();
-        for (ordinal, scope) in scope_set.roots().iter().enumerate() {
+        for (ordinal, root) in scope_set.roots().iter().enumerate() {
+            let scope = root.scope();
             let registry_context = match database
                 .project_registry_context_by_id(scope.project_id.as_str())
                 .await
