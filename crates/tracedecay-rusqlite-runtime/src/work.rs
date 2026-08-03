@@ -17,9 +17,8 @@ use tracedecay_domain::{
     WorkProjectionSnapshotV1, WorkProjectionStateV1, WorkVersion, canonical_sha256,
 };
 
-use crate::migration_sql::{
-    MigrationSqlHandle, MigrationSqlRows, MigrationSqlStatement, MigrationSqlTransaction,
-    MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction, ExactSqlValue,
 };
 
 mod attempts;
@@ -33,7 +32,7 @@ pub use schema::{WORK_SCHEMA_V1, install_work_schema};
 pub(crate) use projection::*;
 pub(crate) use sql::*;
 
-/// Work persistence over the registered migration-SQL channel.
+/// Work persistence over the registered exact-SQL channel.
 ///
 /// This is the only transaction implementation Work has: every append,
 /// attempt write, and projection read goes through the same registered
@@ -41,11 +40,11 @@ pub(crate) use sql::*;
 /// different transaction or authority behaviour.
 #[derive(Clone)]
 pub struct WorkSqliteStorage {
-    pub(crate) handle: MigrationSqlHandle,
+    pub(crate) handle: ExactSqlHandle,
 }
 
 impl WorkSqliteStorage {
-    pub fn from_registered(handle: MigrationSqlHandle) -> Self {
+    pub fn from_registered(handle: ExactSqlHandle) -> Self {
         Self { handle }
     }
 

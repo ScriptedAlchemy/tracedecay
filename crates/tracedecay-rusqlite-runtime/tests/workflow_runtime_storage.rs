@@ -1,4 +1,4 @@
-//! Durable workflow authority over the registered Work migration-SQL channel.
+//! Durable workflow authority over the registered Work exact-SQL channel.
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,

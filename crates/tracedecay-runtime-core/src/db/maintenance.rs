@@ -5,7 +5,7 @@ use crate::errors::{Result, TraceDecayError};
 impl Database {
     pub fn storage_telemetry_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle> {
         self.retained_runtime()
             .telemetry_read_handle()
             .map_err(|error| TraceDecayError::Database {

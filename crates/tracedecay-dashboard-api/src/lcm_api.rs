@@ -206,7 +206,7 @@ pub async fn overview(
         // Supplementary enrichment only: a failed probe must degrade to a
         // typed-unavailable field, never take down the otherwise-valid
         // overview. This exact coupling 500'd the whole Loom workspace when
-        // the probe hit the migration-SQL materialization limit on a large
+        // the probe hit the exact-SQL materialization limit on a large
         // profile.
         match db
             .lcm_payload_health_detail(
