@@ -34,7 +34,7 @@ use tracedecay_application::{
     WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
     WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
     WorkProjectionSnapshotRequestV1, WorkflowActivationV1, WorkflowDefinitionActivateRequestV1,
-    WorkflowDefinitionRegisterRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
+    WorkflowDefinitionRegisterRequestV1, WorkflowFanOutRequestV1,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -1866,6 +1866,7 @@ pub(crate) enum DaemonInvocationProblem {
     InvalidRequest,
     UnsupportedRevision,
     NotFoundOrNotAuthorized,
+    ResetRequired,
     Unavailable,
 }
 
@@ -2258,7 +2259,7 @@ pub(crate) enum WorkApplicationOutcomeV1 {
 pub(crate) enum WorkflowApplicationOutcomeV1 {
     RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinitionV1>),
     ActivateDefinition(ApplicationOutcome<WorkflowActivationV1>),
-    ExecuteFanOut(ApplicationOutcome<WorkflowExecutionTruthV1>),
+    ExecuteFanOut(ApplicationOutcome<tracedecay_domain::WorkflowRunProjectionV1>),
     HandoffIssue(ApplicationOutcome<TaskHandoffGrantV1>),
     HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemedV1>),
 }
