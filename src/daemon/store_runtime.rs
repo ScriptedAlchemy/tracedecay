@@ -26,9 +26,12 @@ pub(crate) mod session_registry;
 /// port fails closed, so every path that can initialise a profile- or
 /// session-scoped shard must call this first. Idempotent.
 pub(crate) fn register_registered_schema_installer() {
-    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
-        Box::pin(crate::global_db::ensure_registered_schema(connection))
-    });
+    tracedecay_runtime_core::ports::registered_schema::register(
+        |connection| {
+            Box::pin(crate::global_db::schema_contract::install_final_registered_schema(connection))
+        },
+        crate::global_db::schema_contract::final_registered_schema_contract,
+    );
 }
 
 #[cfg(test)]

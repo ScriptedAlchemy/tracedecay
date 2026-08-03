@@ -357,6 +357,7 @@ impl OpenAttemptGuard {
         match outcome {
             Ok((published, locator, database_authority)) => {
                 let schema_migrated = published.schema_migrated();
+                let exact_schema = published.exact_schema().cloned();
                 let opened_file_identity = match published.opened_file_identity() {
                     Ok(identity) => identity,
                     Err(message) => {
@@ -382,6 +383,7 @@ impl OpenAttemptGuard {
                                 locator,
                                 opened_file_identity,
                                 schema_migrated,
+                                exact_schema,
                                 database_authority,
                             }),
                         };

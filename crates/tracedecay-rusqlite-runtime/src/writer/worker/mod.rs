@@ -36,7 +36,7 @@ use crate::{
         CheckpointOutcome, CheckpointPressure, CheckpointResult, CheckpointStatus, CheckpointWal,
         MaintenanceCheckpointMode, RusqliteCheckpointDriver, WriterCheckpointController,
     },
-    connection::{self, OpenedDatabaseFile},
+    connection::{self, OpenedDatabaseFile, file_family::SqliteFamilyGuard},
     migration_sql::{
         WriterCommand as MigrationSqlWriterCommand, reject_writer_command, run_writer_command,
     },
@@ -51,7 +51,7 @@ use super::{
         AcceptedRequest, CheckpointCommand, CheckpointCommandKind, ExecutionBatch,
         IncrementalVacuumCommand,
     },
-    transaction::process_batch,
+    transaction::{BatchExecutionContext, process_batch},
 };
 
 mod ingress;
@@ -74,6 +74,7 @@ pub(super) struct Worker {
     pub(super) canonical_path: PathBuf,
     pub(super) expected_file_identity: Option<u64>,
     pub(super) _opened_database: Option<Arc<OpenedDatabaseFile>>,
+    pub(super) family_guard: Option<Arc<SqliteFamilyGuard>>,
     pub(super) binding: StoreRuntimeBindingV1,
     pub(super) config: AdmissionConfigV1,
     pub(super) receiver: mpsc::Receiver<AcceptedRequest>,
@@ -185,6 +186,13 @@ impl Worker {
             Ok(checkpoint) => checkpoint,
             Err(_) => return self.fail_start(WriterStartError::CheckpointSetupFailed),
         };
+        if let Some(guard) = self.family_guard.as_deref()
+            && let Err(error) = guard
+                .observe_visible_sidecars()
+                .and_then(|()| guard.probe())
+        {
+            return self.fail_start(WriterStartError::SqliteFamily(error));
+        }
         let runtime = match tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()
@@ -265,6 +273,14 @@ impl Worker {
                 &mut online_backup_queue,
                 &mut online_backup_closed,
             );
+            if self
+                .family_guard
+                .as_deref()
+                .is_some_and(|guard| guard.probe().is_err())
+            {
+                self.state
+                    .store(WriterState::Faulted as u8, Ordering::Release);
+            }
             if self.shutdown_requested.load(Ordering::Acquire)
                 && queue.is_empty()
                 && migration_sql_queue.is_empty()
@@ -341,6 +357,7 @@ impl Worker {
                                 checkpoint.connection_mut(),
                                 command,
                                 &self.shutdown_requested,
+                                self.family_guard.as_deref(),
                             );
                         } else {
                             reject_writer_command(command);
@@ -438,14 +455,19 @@ impl Worker {
                 );
                 process_execution_batch(
                     checkpoint.connection_mut(),
-                    &self.binding,
                     batch,
                     self.persistence.as_mut(),
-                    &self.telemetry,
-                    &self.state,
-                    &self.watermark_publisher,
+                    BatchExecutionContext {
+                        binding: &self.binding,
+                        telemetry: &self.telemetry,
+                        state: &self.state,
+                        watermark_publisher: &self.watermark_publisher,
+                        family_guard: self.family_guard.as_deref(),
+                    },
                 );
-                self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
+                if self.state.load(Ordering::Acquire) != WriterState::Faulted as u8 {
+                    self.run_scheduled_checkpoint(&mut checkpoint, latest_blockers.clone());
+                }
                 if self.state.load(Ordering::Acquire) == WriterState::Faulted as u8 {
                     break;
                 }
@@ -564,25 +586,14 @@ pub(super) fn checkpoint_pressure_signal(result: &CheckpointResult) -> Option<Ch
 
 pub(super) fn process_execution_batch(
     connection: &mut rusqlite::Connection,
-    binding: &StoreRuntimeBindingV1,
     batch: ExecutionBatch,
     persistence: &mut dyn WriterPersistence,
-    telemetry: &WriterTelemetry,
-    state: &AtomicU8,
-    watermark_publisher: &CommittedWatermarkPublisher,
+    context: BatchExecutionContext<'_>,
 ) {
     // Cancellation is checked for each request before and after its savepoint
     // work. Aggregating probes into one SQLite progress handler lets a
     // cancelled request interrupt unrelated requests in the same transaction.
-    process_batch(
-        connection,
-        binding,
-        batch,
-        persistence,
-        telemetry,
-        state,
-        watermark_publisher,
-    );
+    process_batch(connection, batch, persistence, context);
 }
 
 fn run_incremental_vacuum(

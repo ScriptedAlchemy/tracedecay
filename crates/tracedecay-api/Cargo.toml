@@ -23,3 +23,4 @@ tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
+tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }

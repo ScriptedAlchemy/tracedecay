@@ -5,7 +5,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::path::PathBuf;
 
 use crate::common::fixture::{ClosedRegisteredProject, GitFixture, TestProfile};
 use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
@@ -247,68 +246,60 @@ async fn open_repairs_missing_tracked_branch_db_before_diagnostics() {
 }
 
 #[tokio::test]
-async fn branch_serving_instance_writes_facts_to_the_project_wide_store() {
+async fn linked_worktrees_share_one_project_fact_authority() {
     let fixture = BranchDriftProject::indexed().await;
-    // A tracked non-default branch resolves to its own shard database; the
-    // default branch serves the project store directly.
-    fixture.repo.run(&["checkout", "-b", "feature"]);
-    TraceDecay::add_branch_tracking_with_options(fixture.root(), "feature", fixture.open_options())
+    let first_worktree = fixture.repo.linked_worktree(
+        &fixture.project.profile().scratch().join("first-worktree"),
+        "feature/first",
+    );
+    let second_worktree = fixture.repo.linked_worktree(
+        &fixture.project.profile().scratch().join("second-worktree"),
+        "feature/second",
+    );
+    for branch in ["feature/first", "feature/second"] {
+        TraceDecay::add_branch_tracking_with_options(
+            fixture.root(),
+            branch,
+            fixture.open_options(),
+        )
         .await
         .unwrap();
+    }
 
-    let cg = fixture.reopen().await;
-    assert_eq!(cg.serving_branch(), Some("feature"));
-    let branch_db_path = cg.db_path();
-    let project_db_path = cg.store_layout().graph_db_path.clone();
-    assert_ne!(
-        branch_db_path, project_db_path,
-        "fixture must serve a branch shard distinct from the project store"
-    );
-
-    // Project facts are project-wide: writing through a branch-serving
-    // instance must land in the shared project store, not the branch shard.
-    let outcome = cg
+    let first = TraceDecay::open_with_options(&first_worktree, fixture.open_options())
+        .await
+        .unwrap();
+    assert_eq!(first.serving_branch(), Some("feature/first"));
+    let created = first
         .add_fact(tracedecay::memory::types::AddFactRequest {
-            content: "Branch shards must not fork the project fact store".to_string(),
+            content: "Linked worktrees share one project fact authority".to_string(),
             category: tracedecay::memory::types::MemoryCategory::Project,
-            source: Some("branch-shard-regression".to_string()),
+            source: Some("linked-worktree-regression".to_string()),
             tags: Vec::new(),
             entities: Vec::new(),
             trust: Some(0.8),
             metadata: serde_json::json!({}),
         })
         .await
-        .unwrap();
-    assert!(outcome.fact.is_some(), "fact must be accepted");
-    let facts = cg
-        .search_facts(tracedecay::memory::types::SearchFactsRequest {
-            query: "project fact store".to_string(),
-            category: None,
-            limit: Some(5),
-            min_trust: None,
-            include_why: false,
-        })
+        .unwrap()
+        .fact
+        .expect("fact must be accepted");
+    close_graph(first).await;
+
+    let second = TraceDecay::open_with_options(&second_worktree, fixture.open_options())
         .await
         .unwrap();
-    assert_eq!(facts.len(), 1, "branch-serving search must see the fact");
-    close_graph(cg).await;
-
-    let count = |path: PathBuf| async move {
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM memory_v2_current_facts", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .unwrap()
-    };
-    assert_eq!(
-        count(project_db_path).await,
-        1,
-        "the canonical fact must live in the project-wide store"
-    );
-    assert_eq!(
-        count(branch_db_path).await,
-        0,
-        "the branch shard must not fork the project fact store"
-    );
+    assert_eq!(second.serving_branch(), Some("feature/second"));
+    let observed = second
+        .get_fact(created.fact_id)
+        .await
+        .unwrap()
+        .expect("the second linked worktree must see the project fact");
+    assert_eq!(observed.fact_id, created.fact_id);
+    assert_eq!(observed.content, created.content);
+    assert_eq!(observed.category, created.category);
+    assert_eq!(observed.trust_score, created.trust_score);
+    assert_eq!(observed.source, created.source);
+    assert_eq!(observed.metadata, created.metadata);
+    close_graph(second).await;
 }

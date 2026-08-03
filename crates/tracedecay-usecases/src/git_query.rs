@@ -121,6 +121,9 @@ impl GitQueryBounds {
 /// Errors from the generation-aware Git query layer.
 #[derive(Debug, Error)]
 pub enum GitQueryError {
+    /// Hunk enumeration was not bound to a daemon-captured preview input.
+    #[error("git hunk query lacks daemon preview binding")]
+    DaemonPreviewBindingAbsent,
     /// The underlying read-only adapter failed.
     #[error(transparent)]
     Adapter(#[from] GitIntelligenceError),

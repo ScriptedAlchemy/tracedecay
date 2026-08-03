@@ -2,8 +2,8 @@ use rusqlite::{Savepoint, Transaction};
 use tracedecay_store::{
     AnchoredObservationWrite, DiagnosticGenerationSupersessionV1, EvidenceAssemblyWriteV1,
     FactWriteBatch, ObservationCursorAdvance, ProjectReadOperationV1, ProjectReadResultV1,
-    RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,
-    SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
+    RemoteObservationReplayWriteV1, RetrievalAnchorDerivativeV1,
+    RetrievalAnchorDispositionRecordV1, SanitizedCleanDiagnosticSnapshotV1, SourceCommitV1,
 };
 
 use super::{
@@ -48,6 +48,14 @@ impl ProjectExecutor {
             rusqlite::Error::InvalidParameterName(format!("{operation}: {detail}"))
         })?;
         Ok(())
+    }
+
+    pub fn execute_remote_observation_write(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        write: &RemoteObservationReplayWriteV1,
+    ) -> rusqlite::Result<()> {
+        self.observation.execute_remote_write(savepoint, write)
     }
 
     pub fn execute_observation_cursor_advance(

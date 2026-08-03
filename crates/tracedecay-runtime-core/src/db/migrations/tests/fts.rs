@@ -7,7 +7,7 @@ use super::*;
 async fn test_fts_triggers_exist_after_creation() {
     let (conn, _dir) = create_raw_db().await;
 
-    ensure_schema_current_connection(&conn)
+    create_schema_connection(&conn)
         .await
         .expect("creating the schema on an empty file should succeed");
 

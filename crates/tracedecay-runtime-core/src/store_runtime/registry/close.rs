@@ -188,10 +188,10 @@ impl StoreRuntimeRegistry {
                     .to_owned(),
             });
         }
-        if let Err(failure) = ready
-            .handle
-            .validate_database_write_authority(authority, "reserve exact registered runtime close")
-        {
+        if let Err(failure) = ready.handle.validate_database_write_authority_for_close(
+            authority,
+            "reserve exact registered runtime close",
+        ) {
             state.entries.insert(key, RegistryEntry::Ready(ready));
             return Err(failure);
         }
@@ -361,14 +361,15 @@ mod tests {
     }
 
     struct FixtureResolver {
-        path: PathBuf,
+        profile_path: PathBuf,
+        graph_path: PathBuf,
     }
 
     impl StoreRuntimeResolver for FixtureResolver {
         fn resolve<'a>(
             &'a self,
             key: &'a StoreRuntimeKey,
-            _mode: StoreRuntimeOpenMode,
+            mode: StoreRuntimeOpenMode,
             _database_authority: Option<&'a DatabaseAuthority>,
         ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
         {
@@ -377,30 +378,48 @@ mod tests {
                 key.incarnation(),
                 LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
             );
-            let path = self.path.clone();
-            Box::pin(async move { Ok(ResolvedStoreLocator::new(verified, path)) })
+            let path = if matches!(key.shard_id().scope, StoreShardScopeV1::Code { .. }) {
+                self.graph_path.clone()
+            } else {
+                self.profile_path.clone()
+            };
+            Box::pin(async move {
+                if mode == StoreRuntimeOpenMode::Initialize && !path.exists() {
+                    Ok(ResolvedStoreLocator::prospective(verified, path))
+                } else {
+                    Ok(ResolvedStoreLocator::new(verified, path))
+                }
+            })
         }
     }
 
     async fn mount_graph(
-        path: PathBuf,
+        graph_path: PathBuf,
     ) -> (
         StoreRuntimeRegistry,
         StoreRuntimeHandle,
         StoreRuntimeHandle,
         DatabaseAuthority,
     ) {
-        let authority = DatabaseAuthority::for_runtime(&path, "mount exact-close graph").unwrap();
+        let profile_path = graph_path.with_file_name("profile.db");
+        let profile_authority =
+            DatabaseAuthority::for_runtime(&profile_path, "mount exact-close profile").unwrap();
+        let authority =
+            DatabaseAuthority::for_runtime(&graph_path, "mount exact-close graph").unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver {
+                profile_path,
+                graph_path,
+            }),
             Arc::new(LifecycleShardRuntimePublisher),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
         let profile = match registry
-            .open(StoreRuntimeOpenRequest::new(
+            .open(StoreRuntimeOpenRequest::new_initialize_authorized(
                 profile_shard(),
                 incarnation,
                 None,
+                profile_authority,
             ))
             .await
         {
@@ -414,7 +433,7 @@ mod tests {
             other => panic!("profile pin failed: {other:?}"),
         };
         let code = match registry
-            .open(StoreRuntimeOpenRequest::new_authorized(
+            .open(StoreRuntimeOpenRequest::new_initialize_authorized(
                 code_shard(),
                 incarnation,
                 Some(pin),
@@ -445,8 +464,6 @@ mod tests {
     async fn exact_close_refuses_facades_runtime_references_and_leases_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
         let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
-        let path = path.canonicalize().unwrap();
         let (registry, profile, code, authority) = mount_graph(path.clone()).await;
         let binding = code.binding().clone();
 
@@ -588,7 +605,10 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount cancellation-safe exact-close").unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver {
+                profile_path: path.clone(),
+                graph_path: path,
+            }),
             Arc::new(BlockingClosePublisher {
                 attachment: Arc::clone(&attachment),
             }),
@@ -728,7 +748,10 @@ mod tests {
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
         let registry = StoreRuntimeRegistry::with_config(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver {
+                profile_path: path.clone(),
+                graph_path: path,
+            }),
             Arc::new(FailingPublisher),
             StoreRuntimeRegistryConfig::default(),
         )

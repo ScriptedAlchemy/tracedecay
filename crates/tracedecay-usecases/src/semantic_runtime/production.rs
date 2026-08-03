@@ -41,9 +41,9 @@ use tracedecay_query::retrieval::ports::{
 use tracedecay_query::retrieval::rerank::RerankExecutionControlV1;
 use tracedecay_query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
-    SemanticAbstentionDispositionV1, SemanticCalibrationProfileV1, SemanticCodeRetriever,
-    SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever,
-    SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
+    SemanticAbstentionDispositionV1, SemanticAbstentionV1, SemanticCalibrationProfileV1,
+    SemanticCodeRetriever, SemanticExecutionControl, SemanticIndexStateV1, SemanticLaneReadinessV1,
+    SemanticLaneRetriever, SemanticQueryDecisionV1, SemanticQueryModeV1, SemanticQueryServiceError,
     SemanticQueryServiceOutcomeV1, SemanticRetrievalRequestV1, SemanticSearchKindV1,
     SemanticVectorReadPort, SemanticVectorReadRequestV1, SemanticVectorRecordV1,
     SemanticVectorScanSummaryV1,
@@ -955,6 +955,8 @@ impl ProductionSemanticRuntimeV1 {
         let commit_lease = fair_lease.clone();
         let commit_database = Arc::clone(&database);
         let stage_state = Arc::clone(&commit_state);
+        let cleanup_state = Arc::clone(&commit_state);
+        let cleanup_database = Arc::clone(&database);
         let _ = self.lifecycle.mark_loading();
         let _ = self.lifecycle.mark_indexing(0, total_units);
         let request = match FastEmbedSemanticGenerationRequestV1::new(
@@ -1080,6 +1082,28 @@ impl ProductionSemanticRuntimeV1 {
                             }
                             let _ = lifecycle
                                 .mark_runtime_failed(format!("semantic runtime {reason:?}"), true);
+                            if let Some(build) = cleanup_state.lock().await.build.clone()
+                                && let Ok(store) =
+                                    DatabaseVectorGenerationStoreV1::open(cleanup_database.as_ref())
+                                        .await
+                                && matches!(store.cancel_generation(&build).await, Ok(true))
+                            {
+                                loop {
+                                    match store.reclaim_retired_generation_page(128).await {
+                                        Ok(true) => tokio::task::yield_now().await,
+                                        Ok(false) => break,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                event = "semantic_vector_reclamation",
+                                                outcome = "deferred",
+                                                error = %error,
+                                                "retired semantic vector generation reclamation deferred"
+                                            );
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             break;
                         }
                         SemanticRuntimeScheduleStatusV1::Unavailable => break,
@@ -1106,26 +1130,34 @@ impl ProductionSemanticRuntimeV1 {
     where
         C: SemanticExecutionControl + Sync,
     {
+        if control.is_cancelled() {
+            return cancelled_semantic_outcome(mode, fallback);
+        }
         let source_manifest_digest =
             semantic_source_manifest_digest(code_generation.projection().request());
-        let mut active = match DatabaseVectorGenerationStoreV1::read_active_generation_for(
-            self.database.as_ref(),
-            request.projection,
-            &code_generation.manifest().generation_id,
-            source_manifest_digest,
-        )
-        .await
-        {
-            Ok(active) => active,
-            Err(_) => {
-                return execute_calibrated_semantic_query(
-                    &NeverCalledSemanticLane,
-                    SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
-                    mode,
-                    fallback,
-                );
-            }
-        };
+        let mut active =
+            match DatabaseVectorGenerationStoreV1::read_active_generation_for_with_control(
+                self.database.as_ref(),
+                request.projection,
+                &code_generation.manifest().generation_id,
+                source_manifest_digest,
+                &|| control.is_cancelled(),
+            )
+            .await
+            {
+                Ok(active) => active,
+                Err(crate::store::vector_generations::VectorGenerationStoreErrorV1::Cancelled) => {
+                    return cancelled_semantic_outcome(mode, fallback);
+                }
+                Err(_) => {
+                    return execute_calibrated_semantic_query(
+                        &NeverCalledSemanticLane,
+                        SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
+                        mode,
+                        fallback,
+                    );
+                }
+            };
         if active.is_none() {
             let replay_digest =
                 semantic_projection_request(code_generation, request.projection, None)
@@ -1133,14 +1165,22 @@ impl ProductionSemanticRuntimeV1 {
                     .changes
                     .manifest_digest;
             if &replay_digest != source_manifest_digest {
-                active = DatabaseVectorGenerationStoreV1::read_active_generation_for(
-                    self.database.as_ref(),
-                    request.projection,
-                    &code_generation.manifest().generation_id,
-                    &replay_digest,
-                )
-                .await
-                .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+                active =
+                    match DatabaseVectorGenerationStoreV1::read_active_generation_for_with_control(
+                        self.database.as_ref(),
+                        request.projection,
+                        &code_generation.manifest().generation_id,
+                        &replay_digest,
+                        &|| control.is_cancelled(),
+                    )
+                    .await
+                    {
+                        Ok(active) => active,
+                        Err(
+                            crate::store::vector_generations::VectorGenerationStoreErrorV1::Cancelled,
+                        ) => return cancelled_semantic_outcome(mode, fallback),
+                        Err(_) => return Err(SemanticQueryServiceError::InvalidFallback),
+                    };
             }
         }
         let Some(active) = active else {
@@ -1748,10 +1788,14 @@ impl PublishedSemanticVectorReadPortV1 {
             .iter()
             .map(|chunk| (&chunk.id, chunk))
             .collect::<BTreeMap<_, _>>();
-        let mut rows = Vec::with_capacity(vectors.vectors().len());
-        for (ordinal, (chunk_id, vector)) in vectors.vectors().iter().enumerate() {
+        let generation = vectors.generation_id().clone();
+        let projection_key = vectors.projection_key().clone();
+        let source_generation = vectors.source_generation().clone();
+        let vector_rows = vectors.into_vectors();
+        let mut rows = Vec::with_capacity(vector_rows.len());
+        for (ordinal, (chunk_id, vector)) in vector_rows.into_iter().enumerate() {
             let chunk = chunks
-                .get(chunk_id)
+                .get(&chunk_id)
                 .ok_or(RetrievalPortError::GenerationMismatch)?;
             let (anchor_id, logical_evidence_id, source_occurrence) =
                 semantic_candidate_identity(chunk)?;
@@ -1782,9 +1826,9 @@ impl PublishedSemanticVectorReadPortV1 {
                 freshness: freshness.clone(),
             };
             rows.push(SemanticVectorRecordV1 {
-                vector_generation: vectors.generation_id().clone(),
-                projection_key: vectors.projection_key().clone(),
-                source_generation: vectors.source_generation().clone(),
+                vector_generation: generation.clone(),
+                projection_key: projection_key.clone(),
+                source_generation: source_generation.clone(),
                 chunk_id: chunk_id.clone(),
                 candidate,
                 binding: CodeCandidateBindingV1 {
@@ -1799,14 +1843,14 @@ impl PublishedSemanticVectorReadPortV1 {
                     matched_term_kinds: Vec::new(),
                     source_occurrence,
                 },
-                values: vector.values.clone(),
+                values: vector.values,
             });
         }
         Ok(Self {
-            generation: vectors.generation_id().clone(),
-            projection_key: vectors.projection_key().clone(),
+            generation,
+            projection_key,
             search_index_key,
-            source_generation: vectors.source_generation().clone(),
+            source_generation,
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
         })
@@ -2065,6 +2109,21 @@ where
         RetrievalSelectionV1::Unavailable => SemanticQueryDecisionV1::RejectUnavailable,
     };
     CalibratedSemanticQueryService::new(lane).execute(readiness, decision, fallback)
+}
+
+fn cancelled_semantic_outcome(
+    mode: SemanticQueryModeV1,
+    fallback: Arc<QueryFallbackSubpayload>,
+) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError> {
+    match mode {
+        SemanticQueryModeV1::FallbackAllowed => Ok(SemanticQueryServiceOutcomeV1::Fallback {
+            abstention: SemanticAbstentionV1::Cancelled,
+            fallback,
+        }),
+        SemanticQueryModeV1::StrictSemantic => Err(SemanticQueryServiceError::StrictUnavailable(
+            SemanticAbstentionV1::Cancelled,
+        )),
+    }
 }
 
 /// Complete input set for one application semantic-search composition.

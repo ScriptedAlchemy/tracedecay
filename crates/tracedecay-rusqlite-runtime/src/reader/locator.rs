@@ -7,7 +7,9 @@ use std::{
 
 use tracedecay_store::{StoreRuntimeBindingV1, VerifiedStoreLocatorV1};
 
-use crate::connection::{OpenedDatabaseFile, OpenedDatabaseFileError};
+use crate::connection::{
+    OpenedDatabaseFile, OpenedDatabaseFileError, file_family::SqliteFamilyGuard,
+};
 
 /// An existing file whose canonical identity was verified by the daemon.
 ///
@@ -60,6 +62,11 @@ impl ExistingReaderLocator {
             .as_deref()
             .map(OpenedDatabaseFile::identity)
     }
+    pub(crate) fn family_guard(&self) -> Option<Arc<SqliteFamilyGuard>> {
+        self.opened_database
+            .as_ref()
+            .map(|opened| Arc::clone(opened.family_guard()))
+    }
     pub(crate) fn verify_connection(
         &self,
         connection: &rusqlite::Connection,
@@ -97,6 +104,7 @@ pub enum ReaderStartError {
     OpenFailed,
     ReadOnlySetupFailed,
     OpenedDatabaseIdentity(OpenedDatabaseFileError),
+    SqliteFamily(crate::SqliteFamilyIntegrityError),
     OpenedDatabaseIdentityMismatch { expected: u64, actual: u64 },
 }
 
@@ -123,6 +131,7 @@ impl fmt::Display for ReaderStartError {
             Self::OpenedDatabaseIdentity(error) => {
                 write!(f, "failed to identify opened SQLite reader file: {error}")
             }
+            Self::SqliteFamily(error) => write!(f, "SQLite reader family is unavailable: {error}"),
             Self::OpenedDatabaseIdentityMismatch { expected, actual } => write!(
                 f,
                 "SQLite reader opened file identity {actual}, expected {expected}"
@@ -137,6 +146,7 @@ impl Error for ReaderStartError {
             Self::InvalidReaderBudget(error) => Some(error),
             Self::ThreadSpawn(error) => Some(error),
             Self::OpenedDatabaseIdentity(error) => Some(error),
+            Self::SqliteFamily(error) => Some(error),
             _ => None,
         }
     }

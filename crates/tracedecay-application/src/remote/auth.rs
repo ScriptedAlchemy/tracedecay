@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::hint::black_box;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -22,9 +23,9 @@ use crate::{
 };
 
 use super::protocol::{
-    EnrollmentRequestV1, REMOTE_ENROLLMENT_USE_CASE_ID_V1, RemoteEnrollmentProtocolPortV1,
-    RemoteProtocolFailureV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    remote_enrollment_result_contract_v1, remote_protocol_problem,
+    REMOTE_ENROLLMENT_USE_CASE_ID_V1, RemoteClockPortV1, RemoteEnrollmentProtocolPortV1,
+    RemoteEnrollmentProtocolRequestV1, RemoteProtocolExecutionErrorV1, RemoteProtocolFailureV1,
+    RemoteProtocolResponseV1, remote_enrollment_result_contract_v1, remote_protocol_problem,
 };
 
 /// Opaque credential accepted only at an application boundary.
@@ -371,6 +372,11 @@ pub struct RemoteEnrollmentEffectOutcomeV1 {
 /// consume the exact loaded grant while persisting the issued fingerprint-only
 /// enrollment record.
 pub trait RemoteEnrollmentAuthorityPortV1: Send + Sync {
+    fn current_authority(
+        &self,
+        brain_id: &BrainId,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteEnrollmentAuthorityErrorV1>;
+
     fn load_grant(
         &self,
         grant_id: &EntityId,
@@ -413,6 +419,8 @@ pub trait RemoteEnrollmentCredentialLookupPortV1: Send + Sync {
 pub enum RemoteEnrollmentServiceErrorV1 {
     #[error("remote enrollment request is invalid")]
     InvalidRequest,
+    #[error("remote server clock is unavailable")]
+    ClockUnavailable,
     #[error(transparent)]
     Authentication(#[from] RemoteAuthenticationError),
     #[error(transparent)]
@@ -421,28 +429,33 @@ pub enum RemoteEnrollmentServiceErrorV1 {
 
 pub struct RemoteEnrollmentServiceV1<A> {
     authority: A,
+    clock: Arc<dyn RemoteClockPortV1>,
 }
 
 impl<A> RemoteEnrollmentServiceV1<A>
 where
     A: RemoteEnrollmentAuthorityPortV1,
 {
-    pub const fn new(authority: A) -> Self {
-        Self { authority }
+    pub fn new(authority: A, clock: Arc<dyn RemoteClockPortV1>) -> Self {
+        Self { authority, clock }
     }
 
     pub fn enroll(
         &self,
-        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentProtocolRequestV1,
         grant_credential: &OpaqueRemoteCredential,
         enrollment_credential: &OpaqueRemoteCredential,
     ) -> Result<RemoteEnrollmentEffectOutcomeV1, RemoteEnrollmentServiceErrorV1> {
+        let observed_at = self
+            .clock
+            .now()
+            .map_err(|_| RemoteEnrollmentServiceErrorV1::ClockUnavailable)?;
         request
             .validate_initial_enrollment_metadata()
             .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
         request
             .body
-            .validate(request.sent_at)
+            .validate(observed_at)
             .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
         if request.brain_id != request.body.brain_id
             || request.caller_node_id != request.body.node_id
@@ -458,10 +471,7 @@ where
         admission
             .validate_for(&grant)
             .map_err(|_| RemoteEnrollmentServiceErrorV1::InvalidRequest)?;
-        if admission
-            .effective_deadline()
-            .is_elapsed_at(request.sent_at)
-        {
+        if admission.effective_deadline().is_elapsed_at(observed_at) {
             return Err(RemoteEnrollmentServiceErrorV1::InvalidRequest);
         }
         let issue = EnrollmentIssueRequestV1 {
@@ -470,18 +480,15 @@ where
             enrollment_id: request.body.enrollment_id,
             brain_id: request.body.brain_id,
             node_id: request.body.node_id,
-            issued_at: request.sent_at,
+            issued_at: observed_at,
             expires_at: request.body.expires_at,
             capabilities: request.body.capabilities,
             scope: request.body.scope,
         };
         let enrollment = issue_enrollment(&grant, grant_credential, issue, enrollment_credential)?;
-        let receipt = self.authority.commit_enrollment(
-            &grant,
-            &enrollment,
-            &input_digest,
-            request.sent_at,
-        )?;
+        let receipt =
+            self.authority
+                .commit_enrollment(&grant, &enrollment, &input_digest, observed_at)?;
         receipt.validate().map_err(|_| {
             RemoteEnrollmentServiceErrorV1::Authority(
                 RemoteEnrollmentAuthorityErrorV1::IdentityConflict,
@@ -500,7 +507,7 @@ where
             ));
         }
         let execution = OperationReceipt::completed(
-            request.sent_at,
+            observed_at,
             receipt.consumed_at,
             admission.effective_deadline().clone(),
             receipt.budget,
@@ -551,9 +558,9 @@ impl<A> RemoteEnrollmentProtocolAdapterV1<A>
 where
     A: RemoteEnrollmentAuthorityPortV1,
 {
-    pub fn new(authority: A) -> Self {
+    pub fn new(authority: A, clock: Arc<dyn RemoteClockPortV1>) -> Self {
         Self {
-            service: RemoteEnrollmentServiceV1::new(authority),
+            service: RemoteEnrollmentServiceV1::new(authority, clock),
         }
     }
 }
@@ -564,12 +571,16 @@ where
 {
     fn execute_enrollment(
         &self,
-        request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentProtocolRequestV1,
         grant_credential: OpaqueRemoteCredential,
         enrollment_credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+    ) -> Result<
+        RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+        RemoteProtocolExecutionErrorV1,
+    > {
         let request_id = request.request_id.clone();
-        let observed_at = request.sent_at;
+        let brain_id = request.brain_id.clone();
+        let observed_at = self.service.clock.now()?;
         let result = match self
             .service
             .enroll(request, &grant_credential, &enrollment_credential)
@@ -593,21 +604,34 @@ where
                 enrollment_protocol_failure(error),
             )),
         };
-        RemoteProtocolResponseV1::new(
-            request_id,
+        let conceals_authority = matches!(
+            &result,
+            Err(problem)
+                if problem.problem.kind()
+                    == crate::ApplicationProblemKind::NotFoundOrNotAuthorized
+        );
+        let authority = if conceals_authority {
             CurrentRemoteAuthorityStateV1::Unavailable {
                 reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
                 observed_at,
-            },
-            result,
-        )
-        .expect("validated enrollment response identities are preserved")
+            }
+        } else {
+            self.service
+                .authority
+                .current_authority(&brain_id)
+                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)?
+        };
+        RemoteProtocolResponseV1::new(request_id, authority, result)
+            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
     }
 }
 
 fn enrollment_protocol_failure(error: RemoteEnrollmentServiceErrorV1) -> RemoteProtocolFailureV1 {
     match error {
         RemoteEnrollmentServiceErrorV1::InvalidRequest => RemoteProtocolFailureV1::ScopeMismatch,
+        RemoteEnrollmentServiceErrorV1::ClockUnavailable => {
+            RemoteProtocolFailureV1::AuthorityUnavailable
+        }
         RemoteEnrollmentServiceErrorV1::Authentication(authentication) => match authentication {
             RemoteAuthenticationError::Expired => RemoteProtocolFailureV1::EnrollmentExpired,
             RemoteAuthenticationError::Revoked => RemoteProtocolFailureV1::EnrollmentRevoked,
@@ -716,7 +740,7 @@ pub fn issue_enrollment(
 /// Authority authentication is delegated to the concrete network boundary.
 /// An HTTP/rustls adapter must verify the connected authority peer; the
 /// application never accepts a caller-supplied boolean or trust-root claim.
-pub trait RemoteAuthorityAuthenticationPort {
+pub trait RemoteAuthorityAuthenticationPort: Send + Sync {
     fn authenticate_connected_authority(
         &self,
         expected_authority: &CurrentRemoteAuthorityV1,
@@ -942,6 +966,7 @@ mod tests {
     use crate::{CapabilityGrantId, DisclosureClass, PolicyDecisionRef, RequestId};
 
     use super::*;
+    use crate::remote::protocol::EnrollmentRequestV1;
     use tracedecay_domain::{
         AuthorityEpoch, ComponentVersion, ProjectId, ProjectionGenerationId, RefId,
         RemotePlacementRevisionV1, RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId,
@@ -1008,7 +1033,35 @@ mod tests {
         committed: Mutex<Option<EnrollmentCredentialRecordV1>>,
     }
 
+    struct TestClock(UtcMicros);
+
+    impl RemoteClockPortV1 for TestClock {
+        fn now(&self) -> Result<UtcMicros, RemoteProtocolExecutionErrorV1> {
+            Ok(self.0)
+        }
+    }
+
     impl RemoteEnrollmentAuthorityPortV1 for TestEnrollmentAuthority {
+        fn current_authority(
+            &self,
+            brain_id: &BrainId,
+        ) -> Result<CurrentRemoteAuthorityStateV1, RemoteEnrollmentAuthorityErrorV1> {
+            Ok(CurrentRemoteAuthorityStateV1::Available(
+                CurrentRemoteAuthorityV1 {
+                    fence: RemoteWriterFenceV1 {
+                        brain_id: brain_id.clone(),
+                        shard_id: ShardId::new("shard.remote").unwrap(),
+                        generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
+                        placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+                        authority_epoch: AuthorityEpoch(1),
+                        authority_node_id: BrainNodeId::new("node.authority").unwrap(),
+                    },
+                    credential_revision: 1,
+                    observed_at: UtcMicros(10),
+                },
+            ))
+        }
+
         fn load_grant(
             &self,
             grant_id: &EntityId,
@@ -1115,11 +1168,14 @@ mod tests {
             Deadline::new(UtcMicros(100)).unwrap(),
         )
         .unwrap();
-        RemoteEnrollmentServiceV1::new(TestEnrollmentAuthority {
-            admission,
-            grant,
-            committed: Mutex::new(None),
-        })
+        RemoteEnrollmentServiceV1::new(
+            TestEnrollmentAuthority {
+                admission,
+                grant,
+                committed: Mutex::new(None),
+            },
+            Arc::new(TestClock(UtcMicros(10))),
+        )
     }
 
     fn refresh_test_admission(service: &mut RemoteEnrollmentServiceV1<TestEnrollmentAuthority>) {
@@ -1128,9 +1184,9 @@ mod tests {
         service.authority.admission.authority.policy.digest = digest;
     }
 
-    fn protocol_enrollment_request(node_id: &str) -> RemoteProtocolRequestV1<EnrollmentRequestV1> {
+    fn protocol_enrollment_request(node_id: &str) -> RemoteEnrollmentProtocolRequestV1 {
         let brain_id = BrainId::new("brain.remote").unwrap();
-        RemoteProtocolRequestV1::new_initial_enrollment(
+        RemoteEnrollmentProtocolRequestV1::new_initial_enrollment(
             RequestId::new("request.remote.enrollment").unwrap(),
             brain_id.clone(),
             BrainNodeId::new(node_id).unwrap(),
@@ -1179,6 +1235,24 @@ mod tests {
         let persisted = service.authority.committed.lock().unwrap();
         assert_eq!(persisted.as_ref(), outcome.effect.payload.as_ref());
         assert!(!format!("{persisted:?}").contains(&"e".repeat(32)));
+    }
+
+    #[test]
+    fn enrollment_expiry_uses_server_clock_not_client_timestamp() {
+        let grant_credential = credential(b'g');
+        let enrollment_credential = credential(b'e');
+        let service = enrollment_service(&grant_credential);
+        let mut request = protocol_enrollment_request("node.remote");
+        request.sent_at = UtcMicros(200);
+
+        let outcome = service
+            .enroll(request, &grant_credential, &enrollment_credential)
+            .unwrap();
+        assert_eq!(
+            outcome.effect.execution.started_at,
+            UtcMicros(10),
+            "server clock must own enrollment time"
+        );
     }
 
     #[test]
@@ -1290,19 +1364,20 @@ mod tests {
     fn enrollment_protocol_success_binds_effect_receipt_request_and_scope() {
         let grant_credential = credential(b'g');
         let service = enrollment_service(&grant_credential);
-        let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority);
+        let adapter = RemoteEnrollmentProtocolAdapterV1::new(
+            service.authority,
+            Arc::new(TestClock(UtcMicros(10))),
+        );
         let response = adapter.execute_enrollment(
             protocol_enrollment_request("node.remote"),
             grant_credential,
             credential(b'e'),
         );
 
+        let response = response.unwrap();
         assert!(matches!(
             response.authority,
-            CurrentRemoteAuthorityStateV1::Unavailable {
-                reason: RemoteAuthorityUnavailableReasonV1::PlacementUnknown,
-                ..
-            }
+            CurrentRemoteAuthorityStateV1::Available(_)
         ));
         let envelope = response.result.unwrap();
         assert_eq!(envelope.request_id.as_str(), "request.remote.enrollment");
@@ -1328,17 +1403,23 @@ mod tests {
     fn enrollment_protocol_maps_replayed_grant_to_stale_problem() {
         let grant_credential = credential(b'g');
         let service = enrollment_service(&grant_credential);
-        let adapter = RemoteEnrollmentProtocolAdapterV1::new(service.authority);
-        adapter.execute_enrollment(
-            protocol_enrollment_request("node.remote"),
-            grant_credential,
-            credential(b'e'),
+        let adapter = RemoteEnrollmentProtocolAdapterV1::new(
+            service.authority,
+            Arc::new(TestClock(UtcMicros(10))),
         );
+        adapter
+            .execute_enrollment(
+                protocol_enrollment_request("node.remote"),
+                grant_credential,
+                credential(b'e'),
+            )
+            .unwrap();
         let replay = adapter.execute_enrollment(
             protocol_enrollment_request("node.remote"),
             credential(b'g'),
             credential(b'e'),
         );
+        let replay = replay.unwrap();
         assert!(matches!(
             replay.result.unwrap_err().problem.source(),
             crate::ApplicationProblem::Stale { .. }

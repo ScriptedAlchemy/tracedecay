@@ -313,18 +313,27 @@ impl Database {
             DatabaseAccessMode::ReadWrite
         };
         let database = Self::publish_runtime(runtime, access).await?;
-        // Writable GRAPH test runtimes assert the store already carries the
-        // schema this binary creates; there is no ladder to step, so nothing
-        // is ever reported as migrated. Registered (global/session) shards are
-        // a different schema family: they carry their own installer and sit at
-        // user_version 0 by design, so the graph identity check must not run
-        // against them.
+        // Publication already issued the exact-final proof before exposing the
+        // database facade. No second version-marker authority runs here.
         let graph_shard = graph_shard_check;
         match mode {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
                 if graph_shard =>
             {
-                crate::db::migrations::ensure_schema_current(&database).await?;
+                let exact = database.retained_runtime().exact_schema().map_err(|error| {
+                    test_runtime_error(
+                        "require exact final test schema",
+                        format!("{error:?}"),
+                    )
+                })?;
+                if exact.contract().kind()
+                    != crate::store_runtime::schema::StoreSchemaKindV2::GraphMemory
+                {
+                    return Err(test_runtime_error(
+                        "require exact final test schema",
+                        "runtime carries the wrong exact final schema kind".to_owned(),
+                    ));
+                }
             }
             _ => {}
         }

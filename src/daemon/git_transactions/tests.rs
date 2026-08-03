@@ -11,15 +11,16 @@ use tracedecay_application::{
     GitIndexTransactionPortError, OperationTermination,
 };
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewV1,
-    GitIndexReceiptOutcomeV1, GitIndexTransactionId, GitIndexTransactionJournalV1,
-    GitIndexTransactionReceiptV1, GitOperationStateV1, ProjectId, RepositoryId,
-    RepositoryIndexStateV1, UtcMicros,
+    GitIndexIdempotencyKey, GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1,
+    GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, GitOperationStateV1, ProjectId,
+    RepositoryId, RepositoryIndexStateV1, UtcMicros,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectClassifierV1};
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
-    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
+    GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
+    GitIndexTransactionStoreResult,
     GitIndexTransactionTerminalWriteV1,
 };
 use tracedecay_tool_catalog::CapabilityId;
@@ -211,6 +212,29 @@ fn daemon_policy_recheck_rejects_a_capability_revoked_after_preview() {
 struct StartupUnavailableStore(DaemonGitIndexTransactionStore);
 
 impl GitIndexTransactionStore for StartupUnavailableStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.0.save_preview_input(input)
+    }
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        self.0.read_preview_input(preview_id, observed_at)
+    }
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        self.0.purge_expired_preview_inputs(observed_at, limit)
+    }
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         self.0.save_preview(preview)
     }

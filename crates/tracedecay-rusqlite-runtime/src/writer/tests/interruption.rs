@@ -88,12 +88,15 @@ fn cancelled_request_does_not_interrupt_an_unrelated_request_in_the_same_batch()
 
     worker::process_execution_batch(
         &mut connection,
-        &binding,
         batch,
         &mut persistence,
-        &telemetry,
-        &state,
-        &watermark,
+        crate::writer::transaction::BatchExecutionContext {
+            binding: &binding,
+            telemetry: &telemetry,
+            state: &state,
+            watermark_publisher: &watermark,
+            family_guard: None,
+        },
     );
 
     assert!(matches!(
@@ -157,12 +160,15 @@ fn active_long_running_request_remains_interruptible() {
 
     worker::process_execution_batch(
         &mut connection,
-        &binding,
         batch,
         &mut LongRunningPersistence,
-        &telemetry,
-        &state,
-        &watermark,
+        crate::writer::transaction::BatchExecutionContext {
+            binding: &binding,
+            telemetry: &telemetry,
+            state: &state,
+            watermark_publisher: &watermark,
+            family_guard: None,
+        },
     );
 
     assert!(matches!(

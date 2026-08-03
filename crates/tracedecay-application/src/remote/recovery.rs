@@ -4,7 +4,6 @@
 //! may present these records but cannot infer confirmation or promotion.
 
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::UtcMicros;
 
 use crate::error::ApplicationContractError;
 
@@ -51,9 +50,14 @@ pub struct BackupRequestV1 {
 }
 
 impl BackupRequestV1 {
-    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
+    pub fn validate_shape(&self) -> Result<(), ApplicationContractError> {
         validate_identifier("backup operation id", &self.operation_id)?;
         self.expected.validate()?;
+        Ok(())
+    }
+
+    pub fn validate(&self, now_micros: i64) -> Result<(), ApplicationContractError> {
+        self.validate_shape()?;
         if now_micros >= self.expires_at_micros {
             return Err(ApplicationContractError::InvalidRange {
                 field: "backup request expiry",
@@ -64,11 +68,8 @@ impl BackupRequestV1 {
 }
 
 impl RemoteProtocolBodyV1 for BackupRequestV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
-        self.validate(sent_at.0)
+    fn validate_remote_protocol_body(&self) -> Result<(), ApplicationContractError> {
+        self.validate_shape()
     }
 }
 
@@ -145,10 +146,7 @@ impl StagedRestoreConfirmationV1 {
 }
 
 impl RemoteProtocolBodyV1 for StagedRestoreConfirmationV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        _sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
+    fn validate_remote_protocol_body(&self) -> Result<(), ApplicationContractError> {
         self.validate()
     }
 }
@@ -236,10 +234,7 @@ impl PromotionConfirmationV1 {
 }
 
 impl RemoteProtocolBodyV1 for PromotionConfirmationV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        _sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
+    fn validate_remote_protocol_body(&self) -> Result<(), ApplicationContractError> {
         self.validate()
     }
 }

@@ -246,7 +246,86 @@ pub(super) async fn execute_git_read(
         cancel: Some(Arc::new(AtomicBool::new(false))),
     };
     let selected_scope = initial.scope.clone();
-    let read_request = request.request.clone();
+    let mut read_request = request.request.clone();
+    let hunk_capture = if let crate::application::git_reads::GitReadRequestV1::Hunks {
+        scope,
+        daemon_binding,
+    } = &mut read_request
+    {
+        let operation = match scope {
+            tracedecay_domain::GitDiffScopeV1::WorkingTree => {
+                GitIndexTransactionOperationV1::StageHunks
+            }
+            tracedecay_domain::GitDiffScopeV1::Staged => {
+                GitIndexTransactionOperationV1::UnstageHunks
+            }
+            tracedecay_domain::GitDiffScopeV1::CommitRange { .. } => {
+                return application_problem(wire_request_id, invalid_git_request());
+            }
+        };
+        let preview_id = match mint_git_preview_id() {
+            Ok(preview_id) => preview_id,
+            Err(problem) => return application_problem(wire_request_id, problem),
+        };
+        let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
+        let root = project_root.clone();
+        let project_id = selected_scope.project_id.clone();
+        let repository_id = selected_scope.repository_id.clone();
+        let worktree_id = selected_scope.worktree_id.clone();
+        let snapshot = match tokio::task::spawn_blocking(move || {
+            capture_exact_snapshot(
+                &root,
+                project_id,
+                repository_id,
+                worktree_id,
+                observed_at,
+            )
+        })
+        .await
+        {
+            Ok(Ok(snapshot)) => snapshot,
+            Ok(Err(error)) => {
+                return application_problem(wire_request_id, map_git_port_problem(error));
+            }
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    wire_request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            }
+        };
+        if cancellation.is_cancelled() {
+            return application_problem(
+                wire_request_id,
+                ApplicationProblem::cancelled_before_admission(),
+            );
+        }
+        if deadline.is_elapsed_at(current_micros()) {
+            return application_problem(
+                wire_request_id,
+                ApplicationProblem::timed_out_before_admission(),
+            );
+        }
+        let snapshot_digest = match GitIndexPreviewV1::repository_snapshot_digest(&snapshot) {
+            Ok(digest) => digest,
+            Err(_) => {
+                return DaemonInvocationResponse::problem(
+                    wire_request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            }
+        };
+        *daemon_binding = Some(
+            crate::application::git_reads::DaemonGitHunkPreviewBindingV1 {
+                preview_id,
+                snapshot_digest,
+                expires_at,
+            },
+        );
+        Some((operation, snapshot))
+    } else {
+        None
+    };
     let authority = crate::application::git_reads::GitReadAuthorityV1::new(
         project_root,
         selected_scope.clone(),
@@ -286,6 +365,41 @@ pub(super) async fn execute_git_read(
         crate::application::git_reads::GitReadOutcomeV1::Complete { scope, result }
             if scope == terminal.scope =>
         {
+            if let (
+                Some((operation, snapshot)),
+                crate::application::git_reads::GitReadResultV1::Hunks(envelope),
+            ) = (&hunk_capture, &result)
+            {
+                let input = match GitIndexPreviewInputV1::new_hunk_selection(
+                    envelope.value.preview_input_id.clone(),
+                    *operation,
+                    snapshot.clone(),
+                    envelope.value.hunks.clone(),
+                    observed_at,
+                    envelope.value.expires_at,
+                ) {
+                    Ok(input) => input,
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            wire_request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        );
+                    }
+                };
+                let service = Arc::clone(&owner.service);
+                match tokio::task::spawn_blocking(move || service.save_preview_input(input)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        return application_problem(wire_request_id, map_git_port_problem(error));
+                    }
+                    Err(_) => {
+                        return DaemonInvocationResponse::problem(
+                            wire_request_id,
+                            DaemonInvocationProblem::Unavailable,
+                        );
+                    }
+                }
+            }
             let packet = match git_read_evidence_packet(
                 &wire_request_id,
                 &request.request,
@@ -337,13 +451,11 @@ pub(super) async fn execute_git_preview(
     let Some(owner) = owner else {
         return concealed_application_problem(wire_request_id);
     };
-    if request.repository_snapshot.project_id != owner.project_id {
-        return concealed_application_problem(wire_request_id);
-    }
     let service = Arc::clone(&owner.service);
     let operation = request.operation;
+    let authority_owner = owner.clone();
     let authority =
-        match tokio::task::spawn_blocking(move || owner.current_authority(operation)).await {
+        match tokio::task::spawn_blocking(move || authority_owner.current_authority(operation)).await {
             Ok(Ok(authority)) => authority,
             Ok(Err(error)) => {
                 return application_problem(wire_request_id, map_git_port_problem(error));
@@ -355,9 +467,108 @@ pub(super) async fn execute_git_preview(
                 );
             }
         };
+    let preview_input = match operation {
+        GitIndexTransactionOperationV1::CommitIndex => {
+            if request.preview_input_id.is_some()
+                || !request.selected_hunk_digests.is_empty()
+                || request.commit_intent.is_none()
+            {
+                return application_problem(wire_request_id, invalid_git_request());
+            }
+            let preview_id = match mint_git_preview_id() {
+                Ok(preview_id) => preview_id,
+                Err(problem) => return application_problem(wire_request_id, problem),
+            };
+            let root = owner.repository_root.clone();
+            let scope = authority.scope.clone();
+            let captured_at = authority.evaluated_at;
+            let snapshot = match tokio::task::spawn_blocking(move || {
+                capture_exact_snapshot(
+                    &root,
+                    scope.project_id,
+                    scope.repository_id,
+                    scope.worktree_id,
+                    captured_at,
+                )
+            })
+            .await
+            {
+                Ok(Ok(snapshot)) => snapshot,
+                Ok(Err(error)) => {
+                    return application_problem(wire_request_id, map_git_port_problem(error));
+                }
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        wire_request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                }
+            };
+            let input = match GitIndexPreviewInputV1::new_commit(
+                preview_id,
+                snapshot,
+                request.commit_intent.clone().expect("validated commit intent"),
+                authority.evaluated_at,
+                UtcMicros(authority.evaluated_at.0.saturating_add(30_000_000)),
+            ) {
+                Ok(input) => input,
+                Err(_) => return application_problem(wire_request_id, invalid_git_request()),
+            };
+            let input_for_store = input.clone();
+            let input_store = Arc::clone(&service);
+            match tokio::task::spawn_blocking(move || {
+                input_store.save_preview_input(input_for_store)
+            })
+            .await
+            {
+                Ok(Ok(())) => input,
+                Ok(Err(error)) => {
+                    return application_problem(wire_request_id, map_git_port_problem(error));
+                }
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        wire_request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                }
+            }
+        }
+        GitIndexTransactionOperationV1::StageHunks
+        | GitIndexTransactionOperationV1::UnstageHunks => {
+            if request.commit_intent.is_some() || request.selected_hunk_digests.is_empty() {
+                return application_problem(wire_request_id, invalid_git_request());
+            }
+            let Some(preview_input_id) = request.preview_input_id.clone() else {
+                return application_problem(wire_request_id, invalid_git_request());
+            };
+            let input_store = Arc::clone(&service);
+            let observed_at = authority.evaluated_at;
+            match tokio::task::spawn_blocking(move || {
+                input_store.read_preview_input(&preview_input_id, observed_at)
+            })
+            .await
+            {
+                Ok(Ok(input)) if input.operation == operation => input,
+                Ok(Ok(_)) => return concealed_application_problem(wire_request_id),
+                Ok(Err(error)) => {
+                    return application_problem(wire_request_id, map_git_port_problem(error));
+                }
+                Err(_) => {
+                    return DaemonInvocationResponse::problem(
+                        wire_request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                }
+            }
+        }
+    };
+    if preview_input.repository_snapshot.project_id != owner.project_id {
+        return concealed_application_problem(wire_request_id);
+    }
     let request = match build_git_preview_request(
         &wire_request_id,
         request,
+        preview_input,
         &authority,
         deadline,
         cancellation,
@@ -535,19 +746,35 @@ fn invocation_operation_receipt(response: &DaemonInvocationResponse) -> Option<O
 fn build_git_preview_request(
     request_id: &str,
     request: GitPreviewSurfaceRequest,
+    input: GitIndexPreviewInputV1,
     current: &DaemonGitAuthorityStateV1,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> Result<GitIndexPreviewRequestV1, ApplicationProblem> {
     let observed_at = current.evaluated_at;
-    let preview_id = mint_git_preview_id()?;
-    let mut selected_hunks = request.selected_hunks;
-    for hunk in &mut selected_hunks {
-        preview_id.as_str().clone_into(&mut hunk.preview_id);
+    if input.operation != request.operation
+        || request
+            .selected_hunk_digests
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(invalid_git_request());
     }
+    let selected_hunks = request
+        .selected_hunk_digests
+        .iter()
+        .map(|digest| {
+            input
+                .hunks
+                .iter()
+                .find(|hunk| hunk.compute_digest().is_ok_and(|candidate| candidate == *digest))
+                .cloned()
+                .ok_or_else(invalid_git_request)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let (context, authority, binding) = git_request_authority(
         request_id,
-        &request.repository_snapshot,
+        &input.repository_snapshot,
         request.operation,
         current,
         deadline,
@@ -558,10 +785,10 @@ fn build_git_preview_request(
         context,
         authority,
         binding,
-        preview_id,
-        repository_snapshot: request.repository_snapshot,
+        preview_id: input.preview_id,
+        repository_snapshot: input.repository_snapshot,
         selected_hunks,
-        commit_intent: request.commit_intent,
+        commit_intent: input.commit_intent,
         observed_at,
     })
 }

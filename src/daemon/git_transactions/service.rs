@@ -10,9 +10,10 @@ use tracedecay_application::{
 #[cfg(test)]
 use tracedecay_domain::GitIndexIdempotencyKey;
 use tracedecay_domain::{
-    GitIndexJournalPhaseV1, GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1,
-    GitIndexTransactionId, GitIndexTransactionJournalV1, GitIndexTransactionOperationV1,
-    GitIndexTransactionReceiptV1, ManifestDigest, canonical_sha256,
+    GitIndexJournalPhaseV1, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexTransactionId,
+    GitIndexTransactionJournalV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{
     GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassificationInputV1,
@@ -20,8 +21,8 @@ use tracedecay_policy::{
     GitRepositoryStateFactV1,
 };
 use tracedecay_store::{
-    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1, GitIndexTransactionStore,
-    GitIndexTransactionStoreError,
+    GitIndexPreviewInputReadV1, GitIndexTransactionBeginRequestV1,
+    GitIndexTransactionBeginResultV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
 };
 
 use super::{
@@ -85,6 +86,7 @@ pub(crate) trait GitIndexNativeExecutor {
         &self,
         transaction_id: &GitIndexTransactionId,
         preview: &GitIndexPreviewV1,
+        input: &GitIndexPreviewInputV1,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError>;
 
@@ -121,6 +123,41 @@ impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
 where
     S: GitIndexTransactionStore,
 {
+    pub(crate) fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> Result<(), GitIndexTransactionPortError> {
+        self.store.save_preview_input(input).map_err(map_store_error)
+    }
+
+    pub(crate) fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> Result<GitIndexPreviewInputV1, GitIndexTransactionPortError> {
+        match self
+            .store
+            .read_preview_input(preview_id, observed_at)
+            .map_err(map_store_error)?
+        {
+            GitIndexPreviewInputReadV1::Available(input) => Ok(*input),
+            GitIndexPreviewInputReadV1::Expired { .. } => {
+                Err(GitIndexTransactionPortError::ExpiredPreview)
+            }
+            GitIndexPreviewInputReadV1::Missing => Err(GitIndexTransactionPortError::StalePreview),
+        }
+    }
+
+    pub(crate) fn read_preview(
+        &self,
+        preview_id: &GitIndexPreviewId,
+    ) -> Result<GitIndexPreviewV1, GitIndexTransactionPortError> {
+        self.store
+            .read_preview(preview_id)
+            .map_err(map_store_error)?
+            .ok_or(GitIndexTransactionPortError::StalePreview)
+    }
+
     #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
     pub(crate) fn quarantine_preview_for_test(
         &self,
@@ -249,6 +286,13 @@ where
             self.native.discard_preview(&request.preview_id);
             return Err(GitIndexTransactionPortError::StalePreview);
         }
+        let input = self.read_preview_input(&request.preview_id, request.observed_at)?;
+        if input.operation != preview.operation
+            || input.repository_snapshot != preview.repository_snapshot
+            || input.repository_snapshot_digest != preview.repository_snapshot_digest
+        {
+            return Err(GitIndexTransactionPortError::StalePreview);
+        }
         let repository_id = preview.repository_snapshot.repository_id.clone();
         let result = self
             .queue
@@ -259,6 +303,7 @@ where
                     self.apply_serialized(
                         request,
                         &preview,
+                        &input,
                         cancellation_observed,
                         &cancellation_requested,
                     )
@@ -283,6 +328,7 @@ where
         &self,
         request: &GitIndexApplyRequestV1,
         preview: &GitIndexPreviewV1,
+        input: &GitIndexPreviewInputV1,
         cancellation_observed_while_queued: Option<tracedecay_domain::UtcMicros>,
         cancellation_requested: &impl Fn() -> Option<tracedecay_domain::UtcMicros>,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
@@ -411,7 +457,7 @@ where
                 Some(cancelled_at),
             );
         }
-        match self.native.apply(&transaction_id, preview, request) {
+        match self.native.apply(&transaction_id, preview, input, request) {
             Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation) => finish_aborted_no_change(
                 &self.store,
                 &durable,

@@ -1,0 +1,18 @@
+[package]
+name = "vector-publication-ab"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+lancedb = "=0.31.0"
+libc = "0.2"
+protoc-bin-vendored = "3"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

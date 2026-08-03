@@ -1,105 +1,13 @@
-use std::{error::Error, fmt::Write as _};
-
-use serde_json::Value as JsonValue;
+use std::error::Error;
 
 use super::{ParseOffset, RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction, TranscriptBatch};
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
-use tracedecay_sessions::runtime::{
-    SessionMessageRecord, SessionRecord,
-    lcm::{LcmSourceRef, LcmSummaryNodeDraft},
-};
-
-struct TranscriptSummarySources {
-    refs: Vec<LcmSourceRef>,
-    source_token_count: i64,
-    source_time_start: Option<i64>,
-    source_time_end: Option<i64>,
-    excerpts: Vec<TranscriptSummaryExcerpt>,
-}
-
-struct TranscriptSummaryExcerpt {
-    role: String,
-    text: String,
-}
-
-fn estimated_tokens_from_chars(char_count: i64) -> i64 {
-    ((char_count.max(0) + 3) / 4).max(1)
-}
-
-fn estimate_summary_tokens(text: &str) -> i64 {
-    i64::from(crate::estimate_tokens(text))
-}
-
-fn transcript_summary_text(
-    message: &SessionMessageRecord,
-    metadata: &JsonValue,
-    sources: &TranscriptSummarySources,
-) -> String {
-    if metadata.get("summary_body").and_then(JsonValue::as_str) == Some("plaintext") {
-        return message.text.clone();
-    }
-    let Some(source_summary) = extractive_transcript_summary(&sources.excerpts) else {
-        return message.text.clone();
-    };
-    let codex_body = metadata
-        .get("summary_body")
-        .and_then(JsonValue::as_str)
-        .unwrap_or("unavailable");
-    format!(
-        "TraceDecay-generated Codex compaction summary from visible transcript messages. Codex's own compaction body is {codex_body} in the rollout.\n\n{source_summary}"
-    )
-}
-
-fn extractive_transcript_summary(excerpts: &[TranscriptSummaryExcerpt]) -> Option<String> {
-    let meaningful = excerpts
-        .iter()
-        .filter_map(|excerpt| {
-            let text = normalize_summary_excerpt(&excerpt.text);
-            if text.is_empty() {
-                None
-            } else {
-                Some((&excerpt.role, text))
-            }
-        })
-        .collect::<Vec<_>>();
-    if meaningful.is_empty() {
-        return None;
-    }
-
-    let mut selected = Vec::new();
-    if meaningful.len() <= 12 {
-        selected.extend(meaningful.iter());
-    } else {
-        selected.extend(meaningful.iter().take(4));
-        selected.extend(meaningful.iter().skip(meaningful.len().saturating_sub(8)));
-    }
-
-    let mut summary = String::from("Visible source highlights:");
-    for (role, text) in selected {
-        let role = role.trim();
-        let role = if role.is_empty() { "unknown" } else { role };
-        let line = truncate_summary_excerpt(text, 320);
-        let _ = write!(summary, "\n- {role}: {line}");
-    }
-    Some(summary)
-}
-
-fn normalize_summary_excerpt(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn truncate_summary_excerpt(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let keep = max_chars.saturating_sub(3);
-    format!("{}...", text.chars().take(keep).collect::<String>())
-}
+use tracedecay_sessions::runtime::{SessionMessageRecord, SessionRecord};
 
 #[derive(Debug, Clone, Copy)]
 enum TranscriptWritePolicy {
-    Full { expected_offset: ParseOffset },
-    ProjectionOnly,
+    CheckedOffset { expected_offset: ParseOffset },
+    MonotonicOffset,
 }
 
 #[derive(Debug)]
@@ -391,27 +299,15 @@ impl RegisteredGlobalDb {
         &self,
         conn: &impl Executor,
         message: &SessionMessageRecord,
-        payload_rollback: &mut tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback,
     ) -> Result<(), TranscriptPersistenceError> {
         let mut canonical_message = message.clone();
         canonical_message.timestamp = Self::normalize_session_message_timestamp(message.timestamp);
-        let storage_root = self
-            .db_path()
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let raw = tracedecay_sessions::runtime::lcm::raw::upsert_raw_message_with_payload_tracked(
-            conn,
-            storage_root,
-            &canonical_message,
-            payload_rollback,
-        )
-        .await
-        .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
         if !Self::upsert_session_message_projection(
             conn,
             &canonical_message,
-            &raw.projection_text,
-            raw.projection_metadata_json.as_deref(),
+            None,
+            &canonical_message.text,
+            canonical_message.metadata_json.as_deref(),
         )
         .await
         {
@@ -420,219 +316,54 @@ impl RegisteredGlobalDb {
                 "database write failed",
             ));
         }
-        Self::upsert_lcm_summary_for_transcript_summary(conn, &canonical_message).await
-    }
-
-    async fn upsert_lcm_summary_for_transcript_summary(
-        conn: &impl Executor,
-        message: &SessionMessageRecord,
-    ) -> Result<(), TranscriptPersistenceError> {
-        if message.kind.as_deref() != Some("summary") {
-            return Ok(());
-        }
-        let Some(metadata_json) = message.metadata_json.as_deref() else {
-            return Ok(());
-        };
-        let Ok(metadata) = serde_json::from_str::<JsonValue>(metadata_json) else {
-            return Ok(());
-        };
-        if metadata.get("source").and_then(JsonValue::as_str) != Some("codex_context_compacted") {
-            return Ok(());
-        }
-        let sources = Self::transcript_summary_sources(conn, message).await?;
-        if sources.refs.is_empty() {
-            return Ok(());
-        }
-        let depth = metadata
-            .get("codex_compaction_depth")
-            .and_then(JsonValue::as_i64)
-            .unwrap_or(1)
-            .max(1);
-        let summary_text = transcript_summary_text(message, &metadata, &sources);
-        let mut summary_metadata = metadata.as_object().cloned().unwrap_or_default();
-        if summary_metadata
-            .get("summary_body")
-            .and_then(JsonValue::as_str)
-            == Some("encrypted")
-            && !sources.excerpts.is_empty()
-        {
-            summary_metadata.insert(
-                "tracedecay_summary_source".to_string(),
-                JsonValue::String("visible_transcript_source_messages".to_string()),
-            );
-            summary_metadata.insert(
-                "codex_summary_body".to_string(),
-                JsonValue::String("encrypted".to_string()),
-            );
-        }
-        let summary_metadata_json =
-            serde_json::to_string(&JsonValue::Object(summary_metadata)).ok();
-        let draft = LcmSummaryNodeDraft {
-            provider: message.provider.clone(),
-            conversation_id: message.session_id.clone(),
-            session_id: message.session_id.clone(),
-            depth,
-            summary_text: summary_text.clone(),
-            source_refs: sources.refs,
-            summary_token_count: estimate_summary_tokens(&summary_text),
-            source_token_count: sources.source_token_count,
-            source_time_start: sources.source_time_start,
-            source_time_end: sources.source_time_end.or(message.timestamp),
-            expand_hint: Some("Codex context compaction boundary".to_string()),
-            metadata_json: summary_metadata_json.or_else(|| Some(metadata_json.to_string())),
-        };
-        let publisher =
-            crate::session_temporal_operations::GlobalDbLcmSummaryPublication::new(conn);
-        tracedecay_sessions::runtime::lcm::dag::insert_summary_node(&publisher, draft)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                TranscriptPersistenceError::storage("upsert transcript summary projection", error)
-            })
-    }
-
-    async fn transcript_summary_sources(
-        conn: &impl Executor,
-        message: &SessionMessageRecord,
-    ) -> Result<TranscriptSummarySources, TranscriptPersistenceError> {
-        let mut rows = conn
-            .query(
-                "SELECT r.store_id, r.timestamp,
-                        length(COALESCE(r.content, r.snippet_text, '')),
-                        r.role,
-                        substr(COALESCE(r.content, r.snippet_text, ''), 1, 4000)
-                 FROM lcm_raw_messages r
-                 JOIN session_messages m
-                   ON m.provider = r.provider
-                  AND m.message_id = r.message_id
-                 WHERE r.provider = ?1
-                   AND r.session_id = ?2
-                   AND r.ordinal < ?3
-                   AND r.ordinal > COALESCE((
-                       SELECT MAX(prev.ordinal)
-                       FROM session_messages prev
-                       WHERE prev.provider = ?1
-                         AND prev.session_id = ?2
-                         AND prev.ordinal < ?3
-                         AND COALESCE(prev.kind, 'message') = 'summary'
-                   ), -9223372036854775808)
-                   AND COALESCE(m.kind, 'message') <> 'summary'
-                 ORDER BY r.store_id",
-                params![
-                    message.provider.as_str(),
-                    message.session_id.as_str(),
-                    message.ordinal,
-                ],
-            )
-            .await
-            .map_err(|error| {
-                TranscriptPersistenceError::storage(
-                    "load transcript compaction summary sources",
-                    error,
-                )
-            })?;
-        let mut refs = Vec::new();
-        let mut source_token_count = 0_i64;
-        let mut source_time_start = None;
-        let mut source_time_end = None;
-        let mut excerpts = Vec::new();
-        while let Some(row) = rows.next().await.map_err(|error| {
-            TranscriptPersistenceError::storage("load transcript compaction summary sources", error)
-        })? {
-            let store_id = row.get::<i64>(0).map_err(|error| {
-                TranscriptPersistenceError::storage(
-                    "decode transcript compaction summary source",
-                    error,
-                )
-            })?;
-            let timestamp = row.get::<Option<i64>>(1).map_err(|error| {
-                TranscriptPersistenceError::storage(
-                    "decode transcript compaction summary timestamp",
-                    error,
-                )
-            })?;
-            let char_count = row.get::<i64>(2).map_err(|error| {
-                TranscriptPersistenceError::storage(
-                    "decode transcript compaction summary character count",
-                    error,
-                )
-            })?;
-            let role = row.get::<String>(3).map_err(|error| {
-                TranscriptPersistenceError::storage(
-                    "decode transcript compaction summary role",
-                    error,
-                )
-            })?;
-            let excerpt_text = row.get::<String>(4).map_err(|error| {
-                TranscriptPersistenceError::storage(
-                    "decode transcript compaction summary excerpt",
-                    error,
-                )
-            })?;
-            refs.push(LcmSourceRef::RawMessage { store_id });
-            source_token_count =
-                source_token_count.saturating_add(estimated_tokens_from_chars(char_count));
-            if !excerpt_text.trim().is_empty() {
-                excerpts.push(TranscriptSummaryExcerpt {
-                    role,
-                    text: excerpt_text,
-                });
-            }
-            if let Some(timestamp) = timestamp {
-                source_time_start = Some(
-                    source_time_start
-                        .map_or(timestamp, |start: i64| std::cmp::min(start, timestamp)),
-                );
-                source_time_end = Some(
-                    source_time_end.map_or(timestamp, |end: i64| std::cmp::max(end, timestamp)),
-                );
-            }
-        }
-
-        Ok(TranscriptSummarySources {
-            refs,
-            source_token_count,
-            source_time_start,
-            source_time_end,
-            excerpts,
-        })
+        Ok(())
     }
 
     async fn upsert_session_message_projection(
         conn: &impl Executor,
         message: &SessionMessageRecord,
+        occurrence_id: Option<&str>,
         text: &str,
         metadata_json: Option<&str>,
     ) -> bool {
+        let snippet_text = tracedecay_sessions::compatibility::derived_text_for_snippet(text);
+        let index_text = tracedecay_sessions::compatibility::derived_text_for_index(text);
         conn.execute(
             "INSERT INTO session_messages
-                 (provider, message_id, session_id, role, timestamp, ordinal, text, kind, model,
-                  tool_names, source_path, source_offset, metadata_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 (provider, message_id, session_id, role, timestamp, ordinal, occurrence_id,
+                  snippet_text, index_text, kind, model, tool_names, source_path, source_offset,
+                  metadata_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
              ON CONFLICT(provider, message_id) DO UPDATE SET
                 session_id = excluded.session_id,
                 role = excluded.role,
                 timestamp = excluded.timestamp,
                 ordinal = excluded.ordinal,
-                text = excluded.text,
+                occurrence_id = excluded.occurrence_id,
+                snippet_text = excluded.snippet_text,
+                index_text = excluded.index_text,
                 kind = excluded.kind,
                 model = excluded.model,
                 tool_names = excluded.tool_names,
                 source_path = excluded.source_path,
                 source_offset = excluded.source_offset,
-                metadata_json = excluded.metadata_json",
+                metadata_json = excluded.metadata_json
+             WHERE session_messages.occurrence_id IS NULL
+                OR excluded.occurrence_id IS NOT NULL",
             params![
-                message.provider.clone(),
-                message.message_id.clone(),
-                message.session_id.clone(),
-                message.role.clone(),
+                message.provider.as_str(),
+                message.message_id.as_str(),
+                message.session_id.as_str(),
+                message.role.as_str(),
                 message.timestamp,
                 message.ordinal,
-                text,
-                message.kind.clone(),
-                message.model.clone(),
-                message.tool_names.clone(),
-                message.source_path.clone(),
+                occurrence_id,
+                snippet_text.as_str(),
+                index_text.as_str(),
+                message.kind.as_deref(),
+                message.model.as_deref(),
+                message.tool_names.as_deref(),
+                message.source_path.as_deref(),
                 message.source_offset,
                 metadata_json,
             ],
@@ -641,9 +372,8 @@ impl RegisteredGlobalDb {
         .is_ok()
     }
 
-    /// Atomically upserts one transcript session + all parsed messages and then
-    /// advances the parse cursor. Any failure rolls back the entire batch so a
-    /// follow-up ingest can safely replay from the previous offset.
+    /// Atomically upserts bounded provisional projections and advances the
+    /// parse cursor. Canonical bodies arrive only through observation admission.
     pub async fn upsert_transcript_batch(
         &self,
         session: &SessionRecord,
@@ -703,7 +433,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| TranscriptPersistenceError::storage("commit transcript batch", error))
     }
 
-    /// Atomically persists transcript rows, direct commit evidence, and the
+    /// Atomically persists bounded projections, direct commit evidence, and the
     /// parse cursor so a failed attribution write is replayed on the next sync.
     pub async fn persist_transcript_batch_with_git_evidence_result(
         &self,
@@ -720,7 +450,7 @@ impl RegisteredGlobalDb {
             span_observations,
             parse_offset_path,
             parse_offset,
-            TranscriptWritePolicy::Full { expected_offset },
+            TranscriptWritePolicy::CheckedOffset { expected_offset },
         )
         .await
     }
@@ -740,7 +470,7 @@ impl RegisteredGlobalDb {
             &[],
             parse_offset_path,
             parse_offset,
-            TranscriptWritePolicy::ProjectionOnly,
+            TranscriptWritePolicy::MonotonicOffset,
         )
         .await
         .map_err(|error| error.to_string())
@@ -756,17 +486,9 @@ impl RegisteredGlobalDb {
         policy: TranscriptWritePolicy,
     ) -> Result<(), TranscriptPersistenceError> {
         let transaction = self.begin_transcript_transaction().await?;
-        let storage_root = self
-            .db_path()
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
-        let mut payload_rollback =
-            tracedecay_sessions::runtime::lcm::payload::PayloadFileRollback::begin_cancellation_safe(
-                storage_root,
-            );
 
         let write_result: Result<(), TranscriptPersistenceError> = async {
-            if let TranscriptWritePolicy::Full { expected_offset } = policy {
+            if let TranscriptWritePolicy::CheckedOffset { expected_offset } = policy {
                 require_expected_offset(&transaction, parse_offset_path, expected_offset).await?;
             }
             for batch in batches {
@@ -777,35 +499,8 @@ impl RegisteredGlobalDb {
                     ));
                 }
                 for message in &batch.messages {
-                    match policy {
-                        TranscriptWritePolicy::Full { .. } => {
-                            self.upsert_session_message_in_existing_tx(
-                                &transaction,
-                                message,
-                                &mut payload_rollback,
-                            )
-                            .await?;
-                        }
-                        TranscriptWritePolicy::ProjectionOnly => {
-                            let text =
-                                tracedecay_sessions::compatibility::derived_text_for_index(
-                                    &message.text,
-                                );
-                            if !Self::upsert_session_message_projection(
-                                &transaction,
-                                message,
-                                &text,
-                                message.metadata_json.as_deref(),
-                            )
-                            .await
-                            {
-                                return Err(TranscriptPersistenceError::message(
-                                    "upsert session message projection",
-                                    "database write failed",
-                                ));
-                            }
-                        }
-                    }
+                    self.upsert_session_message_in_existing_tx(&transaction, message)
+                        .await?;
                 }
             }
             for record in commit_records {
@@ -826,7 +521,7 @@ impl RegisteredGlobalDb {
                     TranscriptPersistenceError::storage("upsert span evidence", error)
                 })?;
             }
-            if matches!(policy, TranscriptWritePolicy::Full { .. }) {
+            if matches!(policy, TranscriptWritePolicy::CheckedOffset { .. }) {
                 set_parse_offset(&transaction, parse_offset_path, parse_offset).await?;
             } else {
                 Self::set_parse_offset_monotonic_in_existing_tx(
@@ -847,7 +542,6 @@ impl RegisteredGlobalDb {
         transaction.commit().await.map_err(|error| {
             TranscriptPersistenceError::storage("commit transcript batch", error)
         })?;
-        payload_rollback.disarm();
         Ok(())
     }
 

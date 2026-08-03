@@ -2,11 +2,77 @@ use tempfile::TempDir;
 
 use crate::runtime::SessionMessageRecord;
 use crate::runtime::lcm::{raw, schema};
+use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::db::engine::{TestConnection, TransactionBehavior};
 
 use super::{
-    ExternalPayloadWrite, PayloadFileRollback, payload_dir, write_external_payload_tracked,
+    CanonicalContentFileWrite, ExternalPayloadWrite, PayloadFileRollback, payload_dir,
+    read_canonical_content_file, write_canonical_content_file_tracked,
+    write_external_payload_tracked,
 };
+
+#[test]
+fn canonical_content_reuses_one_owner_hashed_durable_file() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tracedecay");
+    std::fs::create_dir(&storage_root).unwrap();
+    let content = "one canonical redacted body";
+    let digest = ContentDigest::of_bytes(content.as_bytes());
+    let mut first_rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
+    let first = write_canonical_content_file_tracked(
+        &storage_root,
+        CanonicalContentFileWrite {
+            content_digest: &digest,
+            content,
+        },
+        &mut first_rollback,
+    )
+    .unwrap();
+    first_rollback.disarm();
+    let mut second_rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
+    let second = write_canonical_content_file_tracked(
+        &storage_root,
+        CanonicalContentFileWrite {
+            content_digest: &digest,
+            content,
+        },
+        &mut second_rollback,
+    )
+    .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(
+        std::fs::read_dir(payload_dir(&storage_root))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert_eq!(
+        read_canonical_content_file(&storage_root, &first).unwrap(),
+        content
+    );
+}
+
+#[test]
+fn canonical_content_rejects_claimed_digest_mismatch_before_writing() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tracedecay");
+    std::fs::create_dir(&storage_root).unwrap();
+    let mut rollback = PayloadFileRollback::begin_cancellation_safe(&storage_root);
+
+    assert!(
+        write_canonical_content_file_tracked(
+            &storage_root,
+            CanonicalContentFileWrite {
+                content_digest: &ContentDigest::new(format!("sha256:{}", "0".repeat(64))).unwrap(),
+                content: "different bytes",
+            },
+            &mut rollback,
+        )
+        .is_err()
+    );
+    assert!(!payload_dir(&storage_root).exists());
+}
 
 #[tokio::test]
 async fn cancellation_guard_removes_new_file_on_drop() {

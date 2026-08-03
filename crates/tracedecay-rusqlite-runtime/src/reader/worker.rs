@@ -15,9 +15,12 @@ use tracedecay_store::{
     StorageRuntimeErrorV1, UnavailableReasonV1,
 };
 
-use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
 use crate::migration_sql::{
     MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, execute_query,
+};
+use crate::{
+    SqliteFamilyIntegrityError,
+    connection::{self, ConnectionMode, OpenedDatabaseFile, file_family::SqliteFamilyGuard},
 };
 
 use super::{ExistingReaderLocator, ReaderStartError};
@@ -54,6 +57,7 @@ pub enum ReaderWorkerError {
     SnapshotAlreadyActive,
     SnapshotNotActive,
     Interrupted { reason: UnavailableReasonV1 },
+    SqliteFamily(SqliteFamilyIntegrityError),
     Storage(StorageRuntimeErrorV1),
 }
 
@@ -66,6 +70,7 @@ impl fmt::Display for ReaderWorkerError {
             Self::Interrupted { reason } => {
                 write!(f, "SQLite reader query interrupted: {reason:?}")
             }
+            Self::SqliteFamily(error) => write!(f, "SQLite reader quarantined: {error}"),
             Self::Storage(error) => write!(f, "SQLite reader failed: {error}"),
         }
     }
@@ -74,6 +79,7 @@ impl fmt::Display for ReaderWorkerError {
 impl Error for ReaderWorkerError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::SqliteFamily(error) => Some(error),
             Self::Storage(error) => Some(error),
             _ => None,
         }
@@ -157,7 +163,7 @@ impl WorkerClient {
             .map_err(|_| {
                 MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
             })?
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))
+            .map_err(map_reader_migration_error)
     }
 
     pub fn execute(
@@ -281,6 +287,7 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
     mut executor: E,
 ) -> Result<SpawnedWorker, ReaderStartError> {
     let worker_open_path = locator.worker_open_path()?;
+    let family_guard = locator.family_guard();
     let (sender, receiver) = mpsc::channel();
     let snapshot_sender = Arc::new(Mutex::new(None));
     let worker_snapshot_sender = Arc::clone(&snapshot_sender);
@@ -303,6 +310,14 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
                 let _ = started.send(Err(error));
                 return;
             }
+            if let Some(guard) = family_guard.as_deref()
+                && let Err(error) = guard
+                    .observe_visible_sidecars()
+                    .and_then(|()| guard.probe())
+            {
+                let _ = started.send(Err(ReaderStartError::SqliteFamily(error)));
+                return;
+            }
             let opened_file_identity = match OpenedDatabaseFile::pin(&worker_open_path) {
                 Ok(opened) => opened.identity(),
                 Err(error) => {
@@ -318,7 +333,13 @@ pub(crate) fn spawn<E: ReaderQueryExecutor>(
             {
                 return;
             }
-            run(connection, receiver, worker_snapshot_sender, &mut executor);
+            run(
+                connection,
+                receiver,
+                worker_snapshot_sender,
+                &mut executor,
+                family_guard.as_deref(),
+            );
         })
         .map_err(ReaderStartError::ThreadSpawn)?;
     let (interrupt, opened_file_identity) = startup
@@ -340,11 +361,16 @@ fn run<E: ReaderQueryExecutor>(
     receiver: Receiver<WorkerCommand>,
     published: Arc<Mutex<Option<Sender<SnapshotCommand>>>>,
     executor: &mut E,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) {
     while let Ok(command) = receiver.recv() {
         match command {
             WorkerCommand::Shutdown => break,
             WorkerCommand::Begin { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let transaction = connection
                     .transaction_with_behavior(TransactionBehavior::Deferred)
                     .map_err(|error| {
@@ -354,6 +380,10 @@ fn run<E: ReaderQueryExecutor>(
                     });
                 match transaction {
                     Ok(transaction) => {
+                        if let Err(error) = probe_family(family_guard) {
+                            let _ = reply.send(Err(error));
+                            continue;
+                        }
                         let (sender, commands) = mpsc::channel();
                         *published
                             .lock()
@@ -361,12 +391,12 @@ fn run<E: ReaderQueryExecutor>(
                         if reply.send(Ok(())).is_err() {
                             return;
                         }
-                        if run_snapshot(transaction, commands, executor) {
+                        if run_snapshot(transaction, commands, executor, family_guard) {
                             return;
                         }
                     }
                     Err(error) => {
-                        let _ = reply.send(Err(error));
+                        let _ = reply.send(finish_reader_result(Err(error), family_guard));
                     }
                 }
                 *published
@@ -381,10 +411,15 @@ fn run_snapshot<E: ReaderQueryExecutor>(
     transaction: Transaction<'_>,
     commands: Receiver<SnapshotCommand>,
     executor: &mut E,
+    family_guard: Option<&SqliteFamilyGuard>,
 ) -> bool {
     while let Ok(command) = commands.recv() {
         match command {
             SnapshotCommand::Pin { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let result = transaction
                     .query_row("SELECT count(*) FROM sqlite_schema", [], |row| {
                         row.get::<_, i64>(0)
@@ -395,18 +430,31 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                             operation: format!("pin retained reader snapshot: {error}"),
                         })
                     });
-                let _ = reply.send(result);
+                let _ = reply.send(finish_reader_result(result, family_guard));
             }
             SnapshotCommand::Execute { request, reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let result = executor
                     .execute_read(&transaction, &request)
                     .map_err(ReaderWorkerError::Storage);
-                let _ = reply.send(result);
+                let _ = reply.send(finish_reader_result(result, family_guard));
             }
             SnapshotCommand::MigrationQuery { request, reply } => {
-                let _ = reply.send(execute_query(&transaction, request));
+                if let Err(error) = probe_family_integrity(family_guard) {
+                    let _ = reply.send(Err(MigrationSqlError::SqliteFamily(error)));
+                    continue;
+                }
+                let result = execute_query(&transaction, request);
+                let _ = reply.send(finish_migration_result(result, family_guard));
             }
             SnapshotCommand::StoreSize { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let read = || -> Result<StoreSizeTelemetrySample, rusqlite::Error> {
                     let page_size = transaction
                         .pragma_query_value(None, "page_size", |row| row.get::<_, i64>(0))?;
@@ -433,9 +481,13 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                         operation: format!("read store size telemetry: {error}"),
                     })
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(finish_reader_result(result, family_guard));
             }
             SnapshotCommand::TableSizes { reply } => {
+                if let Err(error) = probe_family(family_guard) {
+                    let _ = reply.send(Err(error));
+                    continue;
+                }
                 let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
                     let mut statement = transaction.prepare(
                         "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
@@ -463,7 +515,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                         operation: format!("read table size telemetry: {error}"),
                     })
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(finish_reader_result(result, family_guard));
             }
             SnapshotCommand::End { reply } => {
                 let result = transaction.rollback().map_err(|error| {
@@ -471,13 +523,46 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                         operation: format!("close reader snapshot: {error}"),
                     })
                 });
-                let _ = reply.send(result);
+                let _ = reply.send(finish_reader_result(result, family_guard));
                 return false;
             }
             SnapshotCommand::Shutdown => return true,
         }
     }
     false
+}
+
+fn probe_family(family_guard: Option<&SqliteFamilyGuard>) -> Result<(), ReaderWorkerError> {
+    probe_family_integrity(family_guard).map_err(ReaderWorkerError::SqliteFamily)
+}
+
+fn probe_family_integrity(
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<(), SqliteFamilyIntegrityError> {
+    family_guard.map_or(Ok(()), SqliteFamilyGuard::probe)
+}
+
+fn finish_reader_result<T>(
+    result: Result<T, ReaderWorkerError>,
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<T, ReaderWorkerError> {
+    probe_family(family_guard)?;
+    result
+}
+
+fn finish_migration_result<T>(
+    result: Result<T, MigrationSqlError>,
+    family_guard: Option<&SqliteFamilyGuard>,
+) -> Result<T, MigrationSqlError> {
+    probe_family_integrity(family_guard).map_err(MigrationSqlError::SqliteFamily)?;
+    result
+}
+
+fn map_reader_migration_error(error: ReaderWorkerError) -> MigrationSqlError {
+    match error {
+        ReaderWorkerError::SqliteFamily(error) => MigrationSqlError::SqliteFamily(error),
+        error => MigrationSqlError::ReaderUnavailable(error.to_string()),
+    }
 }
 
 fn interruption(probe: &dyn RuntimeRequestProbeV1) -> Option<UnavailableReasonV1> {

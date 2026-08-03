@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub use crate::lcm::contracts::validate_payload_ref;
+use tracedecay_domain::ContentDigest;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 use tracedecay_runtime_core::tracedecay::current_timestamp;
 
@@ -95,6 +96,76 @@ pub struct ExternalPayloadWrite<'a> {
     pub kind: &'a str,
     pub content: &'a str,
     pub metadata_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanonicalContentFileRef {
+    pub locator: String,
+    pub content_digest: ContentDigest,
+    pub byte_count: u64,
+    pub char_count: u64,
+}
+
+pub struct CanonicalContentFileWrite<'a> {
+    pub content_digest: &'a ContentDigest,
+    pub content: &'a str,
+}
+
+/// Writes canonical content through the existing durable payload-file authority.
+///
+/// This is a storage primitive, not read authorization. Callers must persist and
+/// later authorize an occurrence or summary reference before hydrating this file.
+pub fn write_canonical_content_file_tracked(
+    storage_root: &Path,
+    write: CanonicalContentFileWrite<'_>,
+    rollback: &mut PayloadFileRollback,
+) -> Result<CanonicalContentFileRef, LcmError> {
+    if &ContentDigest::of_bytes(write.content.as_bytes()) != write.content_digest {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
+    let payload = write_external_payload_tracked(
+        storage_root,
+        ExternalPayloadWrite {
+            provider: "tracedecay-content",
+            session_id: write.content_digest.as_str(),
+            message_id: write.content_digest.as_str(),
+            kind: "canonical-content",
+            content: write.content,
+            metadata_json: None,
+        },
+        rollback,
+    )?;
+    Ok(CanonicalContentFileRef {
+        locator: payload.payload_ref,
+        content_digest: write.content_digest.clone(),
+        byte_count: payload.byte_count,
+        char_count: payload.char_count,
+    })
+}
+
+/// Reads bytes already authorized by an occurrence or summary reference.
+///
+/// A locator or digest alone is never sufficient authority to call this helper.
+pub fn read_canonical_content_file(
+    storage_root: &Path,
+    content_ref: &CanonicalContentFileRef,
+) -> Result<String, LcmError> {
+    let raw_hash = content_ref
+        .content_digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or(LcmError::PayloadIntegrityMismatch)?;
+    let byte_count =
+        usize::try_from(content_ref.byte_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    let char_count =
+        usize::try_from(content_ref.char_count).map_err(|_| LcmError::PayloadIntegrityMismatch)?;
+    read_verified_payload_content(
+        storage_root,
+        &content_ref.locator,
+        raw_hash,
+        byte_count,
+        char_count,
+    )
 }
 
 pub fn write_external_payload_tracked(

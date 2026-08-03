@@ -1,16 +1,19 @@
 use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::{
-    ComponentVersion, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+    AuthorityEpoch, BrainId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityV1, EntityId,
+    ManifestDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
     ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
     ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
-    ProjectionGenerationId, ProviderId, RetentionClass, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
-    SessionId, UtcMicros,
+    ProjectionGenerationId, ProviderId, RefId, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
+    RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
+    SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1,
+    SensitivityV1, SessionId, ShardId, UtcMicros, WorktreeId,
 };
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationCoverageReason, ObservationCursorAdvance,
     ObservationReadOperationV1, ObservationReadResultV1, ObservationWrite,
+    RemoteObservationReplayPartsV1, RemoteObservationReplayWriteV1,
     SESSION_MESSAGE_PROJECTOR_VERSION, build_observation_resolution_authorization_v1,
     build_observation_retrieval_anchor_v2,
 };
@@ -113,8 +116,24 @@ fn connection() -> Connection {
                     observation_id TEXT NOT NULL UNIQUE,
                     payload_digest TEXT NOT NULL,
                     receipt_id TEXT NOT NULL,
-                    observation_json TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
                     committed_cursor_json TEXT NOT NULL
+                 );
+                 CREATE TABLE session_content_objects (
+                    content_digest TEXT PRIMARY KEY,
+                    inline_bytes BLOB,
+                    durable_file_locator TEXT,
+                    byte_count INTEGER NOT NULL,
+                    char_count INTEGER NOT NULL
+                 );
+                 CREATE TABLE session_content_references (
+                    owner_kind TEXT NOT NULL,
+                    owner_id TEXT NOT NULL,
+                    content_kind TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    sanitization_receipt_id TEXT,
+                    retrieval_anchor_id TEXT,
+                    PRIMARY KEY(owner_kind, owner_id)
                  );
                  CREATE TABLE source_cursors (
                     source_json TEXT NOT NULL,
@@ -176,12 +195,70 @@ fn connection() -> Connection {
         )
         .unwrap();
     connection
+        .execute_batch(crate::remote::REMOTE_OBSERVATION_EVENTS_SCHEMA)
+        .unwrap();
+    connection
 }
 
 fn execute(connection: &mut Connection, write: &AnchoredObservationWrite) -> rusqlite::Result<()> {
     let mut transaction = connection.transaction()?;
     let savepoint = transaction.savepoint()?;
     ObservationExecutor.execute_write(&savepoint, write)?;
+    savepoint.commit()?;
+    transaction.commit()
+}
+
+fn remote_write(
+    anchored_write: AnchoredObservationWrite,
+    digest_byte: char,
+    capture_sequence: u64,
+    previous_event_id: Option<String>,
+) -> RemoteObservationReplayWriteV1 {
+    let digest_hex = std::iter::repeat_n(digest_byte, 64).collect::<String>();
+    RemoteObservationReplayWriteV1::new(
+        RemoteObservationReplayPartsV1 {
+            event_id: format!("remote.event.{digest_hex}"),
+            frame_digest: ManifestDigest::new(format!("sha256:{digest_hex}")).unwrap(),
+            enrollment_id: EntityId::new("enrollment.fixture").unwrap(),
+            enrollment_revision: 1,
+            node_id: BrainNodeId::new("node.fixture").unwrap(),
+            policy_revision: 1,
+            capture_sequence,
+            previous_event_id,
+            writer_project_id: ProjectId::new("project.fixture").unwrap(),
+            writer_scope: RemoteRepositoryScopeV1 {
+                project_id: ProjectId::new("project.fixture").unwrap(),
+                repository_id: RepositoryId::new("repository.fixture").unwrap(),
+                worktree_id: WorktreeId::new("worktree.fixture").unwrap(),
+                reference: Some(RefId::new("refs/heads/main").unwrap()),
+                snapshot_id: RepositoryStateSnapshotId::new("snapshot.fixture").unwrap(),
+            },
+            current_writer: CurrentRemoteAuthorityV1 {
+                fence: RemoteWriterFenceV1 {
+                    brain_id: BrainId::new("brain.fixture").unwrap(),
+                    shard_id: ShardId::new("shard.fixture").unwrap(),
+                    generation_id: ProjectionGenerationId::new("generation.fixture").unwrap(),
+                    placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+                    authority_epoch: AuthorityEpoch(1),
+                    authority_node_id: BrainNodeId::new("node.authority").unwrap(),
+                },
+                credential_revision: 1,
+                observed_at: UtcMicros(1),
+            },
+            captured_at: UtcMicros(2),
+        },
+        anchored_write,
+    )
+    .unwrap()
+}
+
+fn execute_remote(
+    connection: &mut Connection,
+    write: &RemoteObservationReplayWriteV1,
+) -> rusqlite::Result<()> {
+    let mut transaction = connection.transaction()?;
+    let savepoint = transaction.savepoint()?;
+    ObservationExecutor.execute_remote_write(&savepoint, write)?;
     savepoint.commit()?;
     transaction.commit()
 }
@@ -212,6 +289,17 @@ fn anchored_write_persists_all_authority_rows_atomically() {
 
     execute(&mut connection, &write).unwrap();
 
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_xinfo('observations')
+                 WHERE name = 'observation_json'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
     for table in [
         "observations",
         "sanitization_receipts",
@@ -221,6 +309,8 @@ fn anchored_write_persists_all_authority_rows_atomically() {
         "observation_repository_provenance",
         "source_cursors",
         "projection_queue",
+        "session_content_objects",
+        "session_content_references",
     ] {
         let count = connection
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -228,6 +318,103 @@ fn anchored_write_persists_all_authority_rows_atomically() {
             })
             .unwrap();
         assert!(count > 0, "{table} was not persisted");
+    }
+}
+
+#[test]
+fn remote_write_commits_canonical_effect_and_event_atomically() {
+    let mut connection = connection();
+    let write = remote_write(
+        anchored_observation_write("remote fixture", "receipt.remote"),
+        'a',
+        1,
+        None,
+    );
+
+    execute_remote(&mut connection, &write).unwrap();
+    execute_remote(&mut connection, &write).unwrap();
+
+    for table in [
+        "observations",
+        "sanitization_receipts",
+        "retrieval_anchors",
+        "observation_retrieval_anchors",
+        "observation_repository_provenance",
+        "source_cursors",
+        "projection_queue",
+        "remote_observation_events",
+    ] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1,
+            "{table} was not committed exactly once"
+        );
+    }
+}
+
+#[test]
+fn remote_event_identity_conflict_rolls_back_without_partial_effect() {
+    let mut connection = connection();
+    let anchored = anchored_observation_write("remote fixture", "receipt.remote");
+    let first = remote_write(anchored.clone(), 'a', 1, None);
+    let conflict = remote_write(anchored, 'b', 1, None);
+    execute_remote(&mut connection, &first).unwrap();
+
+    assert!(execute_remote(&mut connection, &conflict).is_err());
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM remote_observation_events",
+                [],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM observations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn remote_sequence_gap_rolls_back_every_canonical_effect() {
+    let mut connection = connection();
+    let missing_predecessor =
+        "remote.event.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let write = remote_write(
+        anchored_observation_write("remote gap", "receipt.remote-gap"),
+        'b',
+        2,
+        Some(missing_predecessor.to_owned()),
+    );
+
+    assert!(execute_remote(&mut connection, &write).is_err());
+    for table in [
+        "observations",
+        "sanitization_receipts",
+        "retrieval_anchors",
+        "source_cursors",
+        "projection_queue",
+        "remote_observation_events",
+    ] {
+        assert_eq!(
+            connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0,
+            "{table} changed after sequence rejection"
+        );
     }
 }
 
@@ -322,6 +509,26 @@ fn exact_replay_is_a_no_op_after_the_source_cursor_advanced() {
         connection
             .query_row("SELECT COUNT(*) FROM projection_queue", [], |row| row
                 .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM session_content_objects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM session_content_references
+                 WHERE owner_kind = 'projection'
+                   AND content_kind = 'observation_json'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
             .unwrap(),
         1
     );
@@ -690,4 +897,32 @@ fn point_and_replay_reads_reject_incomplete_observation_authority() {
                 .contains("observation retrieval anchor is missing")
         );
     }
+}
+
+#[test]
+fn point_read_rejects_missing_projection_content_authority() {
+    let mut connection = connection();
+    let write = anchored_observation_write("fixture", "receipt.fixture");
+    execute(&mut connection, &write).unwrap();
+    connection
+        .execute(
+            "DELETE FROM session_content_references
+             WHERE owner_kind = 'projection'",
+            [],
+        )
+        .unwrap();
+
+    let error = read(
+        &mut connection,
+        &ObservationReadOperationV1::Observation {
+            observation_id: write.observation().observation_id().clone(),
+        },
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("observation content authorization is missing")
+    );
 }

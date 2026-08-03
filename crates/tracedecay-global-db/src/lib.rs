@@ -17,7 +17,7 @@ mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
 mod support;
-pub use observation_adapter::GlobalDbObservationStore;
+pub use observation_adapter::{GlobalDbObservationStore, RegisteredRemoteReplayTransactionV1};
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 mod observation_store;
 mod project_registry;
@@ -46,9 +46,10 @@ pub use schema_stages::ensure_registered_schema;
 /// gains a registrar and the port stays fail-closed when nothing registers.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn register_test_schema_installer() {
-    tracedecay_runtime_core::ports::registered_schema::register(|connection| {
-        Box::pin(ensure_registered_schema(connection))
-    });
+    tracedecay_runtime_core::ports::registered_schema::register(
+        |connection| Box::pin(schema_contract::install_final_registered_schema(connection)),
+        schema_contract::final_registered_schema_contract,
+    );
 }
 
 pub mod session_temporal;

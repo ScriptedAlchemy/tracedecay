@@ -12,7 +12,24 @@ pub async fn ensure_git_index_transaction_schema(
 ) -> tracedecay_runtime_core::errors::Result<()> {
     connection
         .execute_batch(
-            "CREATE TABLE IF NOT EXISTS git_index_preview_commitments (
+            "CREATE TABLE IF NOT EXISTS git_index_preview_inputs (
+                preview_id TEXT PRIMARY KEY,
+                input_digest TEXT NOT NULL UNIQUE,
+                project_id TEXT NOT NULL,
+                repository_id TEXT NOT NULL,
+                worktree_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                repository_snapshot_digest TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                input_json TEXT,
+                purged_at INTEGER,
+                CHECK(
+                    (input_json IS NOT NULL AND purged_at IS NULL)
+                    OR (input_json IS NULL AND purged_at IS NOT NULL)
+                )
+            );
+            CREATE TABLE IF NOT EXISTS git_index_preview_commitments (
                 preview_id TEXT PRIMARY KEY,
                 preview_digest TEXT NOT NULL UNIQUE,
                 repository_id TEXT NOT NULL,
@@ -90,6 +107,8 @@ pub async fn ensure_git_index_transaction_schema(
                     ON DELETE RESTRICT
             );
 
+            CREATE INDEX IF NOT EXISTS idx_git_index_preview_inputs_expiry
+                ON git_index_preview_inputs(purged_at, expires_at, preview_id);
             CREATE INDEX IF NOT EXISTS idx_git_index_preview_commitments_repository
                 ON git_index_preview_commitments(repository_id, created_at, preview_id);
             CREATE INDEX IF NOT EXISTS idx_git_index_transaction_inputs_repository
@@ -102,6 +121,30 @@ pub async fn ensure_git_index_transaction_schema(
                 ON git_index_repository_quarantines(repository_id, transaction_id)
                 WHERE active = 1;
 
+            CREATE TRIGGER IF NOT EXISTS git_index_preview_inputs_purge_only
+            BEFORE UPDATE ON git_index_preview_inputs
+            WHEN OLD.preview_id != NEW.preview_id
+              OR OLD.input_digest != NEW.input_digest
+              OR OLD.project_id != NEW.project_id
+              OR OLD.repository_id != NEW.repository_id
+              OR OLD.worktree_id != NEW.worktree_id
+              OR OLD.operation != NEW.operation
+              OR OLD.repository_snapshot_digest != NEW.repository_snapshot_digest
+              OR OLD.created_at != NEW.created_at
+              OR OLD.expires_at != NEW.expires_at
+              OR OLD.input_json IS NULL
+              OR NEW.input_json IS NOT NULL
+              OR OLD.purged_at IS NOT NULL
+              OR NEW.purged_at IS NULL
+              OR NEW.purged_at < OLD.expires_at
+            BEGIN
+                SELECT RAISE(ABORT, 'git index preview inputs permit only expired payload purge');
+            END;
+            CREATE TRIGGER IF NOT EXISTS git_index_preview_inputs_immutable_delete
+            BEFORE DELETE ON git_index_preview_inputs
+            BEGIN
+                SELECT RAISE(ABORT, 'git index preview input tombstones are retained');
+            END;
             CREATE TRIGGER IF NOT EXISTS git_index_preview_commitments_immutable_update
             BEFORE UPDATE ON git_index_preview_commitments
             BEGIN

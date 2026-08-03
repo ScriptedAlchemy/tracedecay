@@ -99,6 +99,7 @@ struct StoreRuntimeHandleInner {
     locator: RuntimeLocatorRecord,
     opened_file_identity: u64,
     schema_migrated: bool,
+    exact_schema: Option<crate::store_runtime::schema::ExactStoreSchemaV2>,
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
@@ -230,6 +231,18 @@ impl StoreRuntimeHandle {
 
     pub fn schema_migrated(&self) -> bool {
         self.inner.schema_migrated
+    }
+
+    pub fn exact_schema(
+        &self,
+    ) -> Result<&crate::store_runtime::schema::ExactStoreSchemaV2, StoreRuntimeRegistryFailure>
+    {
+        self.inner.exact_schema.as_ref().ok_or_else(|| {
+            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                operation: "require exact final SQLite schema",
+                message: "runtime publication has no exact-final schema proof".to_owned(),
+            }
+        })
     }
 
     pub fn database_authority(
@@ -501,6 +514,23 @@ impl StoreRuntimeHandle {
         authority: &crate::db::DatabaseAuthority,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        self.validate_database_write_authority_inner(authority, operation, true)
+    }
+
+    pub(super) fn validate_database_write_authority_for_close(
+        &self,
+        authority: &crate::db::DatabaseAuthority,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        self.validate_database_write_authority_inner(authority, operation, false)
+    }
+
+    fn validate_database_write_authority_inner(
+        &self,
+        authority: &crate::db::DatabaseAuthority,
+        operation: &'static str,
+        require_healthy: bool,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
         authority
             .require_active_write_scope(operation)
             .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
@@ -517,10 +547,28 @@ impl StoreRuntimeHandle {
                 ),
             });
         }
-        self.validate_opened_file_identity(operation)
+        if require_healthy {
+            self.validate_opened_file_identity(operation)
+        } else {
+            self.validate_opened_file_identity_only(operation)
+        }
     }
 
     fn validate_opened_file_identity(
+        &self,
+        operation: &'static str,
+    ) -> Result<u64, StoreRuntimeRegistryFailure> {
+        let physical = self.physical_snapshot();
+        if !physical.healthy && !physical.is_drained() {
+            return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeQuarantined {
+                operation,
+                snapshot: physical,
+            });
+        }
+        self.validate_opened_file_identity_only(operation)
+    }
+
+    fn validate_opened_file_identity_only(
         &self,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
@@ -593,6 +641,9 @@ impl fmt::Debug for StoreRuntimeHandle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreRuntimeRegistryFailure {
+    ResetRequired {
+        reset: Box<crate::store_runtime::schema::ResetRequiredV2>,
+    },
     InvalidProjectCodeBudget {
         requested: usize,
         maximum: usize,
@@ -640,6 +691,10 @@ pub enum StoreRuntimeRegistryFailure {
     PhysicalRuntimeFailed {
         operation: &'static str,
         message: String,
+    },
+    PhysicalRuntimeQuarantined {
+        operation: &'static str,
+        snapshot: PhysicalRuntimeSnapshot,
     },
     PhysicalRuntimeNotDrained {
         snapshot: PhysicalRuntimeSnapshot,

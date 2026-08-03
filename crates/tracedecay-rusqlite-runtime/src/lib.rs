@@ -5,8 +5,12 @@ mod authority;
 pub mod backup;
 mod checkpoint;
 mod connection;
+pub use connection::file_family::{
+    SqliteFamilyComponent, SqliteFamilyIntegrityError, SqliteFamilyViolation,
+};
 pub use connection::{
-    ConnectionPolicyError, OpenedDatabaseFileError, open_immutable_health_reader,
+    ConnectionPolicyError, OpenedDatabaseFileError, SqliteCatalogObject, SqliteSchemaInspection,
+    SqliteSchemaInspectionError, inspect_existing_schema, open_immutable_health_reader,
     open_immutable_reader,
 };
 mod content_digest;
@@ -20,6 +24,7 @@ mod operation;
 mod persistence;
 pub mod read_consistency;
 pub mod reader;
+pub mod remote;
 pub mod repository;
 pub mod runtime;
 mod telemetry;
@@ -49,3 +54,32 @@ pub use writer::{
     ExistingWriterLocator, MaintenanceCheckpointRequest, OnlineBackupReceipt, PersistentWriter,
     WriterActorError, WriterOnlineBackupError, WriterStartError, WriterState,
 };
+
+pub(crate) fn finalize_guarded_submit_outcome(
+    outcome: tracedecay_store::RuntimeSubmitOutcomeV1,
+    family_guard: &connection::file_family::SqliteFamilyGuard,
+) -> Result<tracedecay_store::RuntimeSubmitOutcomeV1, SqliteFamilyIntegrityError> {
+    if matches!(
+        outcome,
+        tracedecay_store::RuntimeSubmitOutcomeV1::CommitRecoveryRequired { .. }
+    ) {
+        return Ok(outcome);
+    }
+    match family_guard.probe() {
+        Ok(()) => Ok(outcome),
+        Err(_)
+            if matches!(
+                outcome,
+                tracedecay_store::RuntimeSubmitOutcomeV1::Committed { .. }
+                    | tracedecay_store::RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            ) =>
+        {
+            Ok(
+                tracedecay_store::RuntimeSubmitOutcomeV1::CommitRecoveryRequired {
+                    reason: tracedecay_store::RuntimeCommitRecoveryReasonV1::PhysicalStoreIdentityChanged,
+                },
+            )
+        }
+        Err(error) => Err(error),
+    }
+}

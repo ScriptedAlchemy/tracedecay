@@ -566,7 +566,12 @@ async fn schema_identity_check_is_idempotent_on_a_created_store() {
     let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
         .expect("initialize");
-    tracedecay::db::migrations::ensure_schema_current(&db)
-        .await
-        .expect("a freshly created store is already current");
+    let exact = db
+        .retained_runtime()
+        .exact_schema()
+        .expect("a freshly created store carries an exact-final proof");
+    assert_eq!(
+        exact.contract().kind(),
+        tracedecay::store_runtime::schema::StoreSchemaKindV2::GraphMemory
+    );
 }
