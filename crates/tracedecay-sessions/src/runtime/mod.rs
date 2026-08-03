@@ -7,6 +7,7 @@ pub mod cursor_agent;
 pub mod cursor_composer;
 pub mod git_correlation;
 pub mod hermes;
+pub mod ingest;
 pub mod kiro;
 pub mod lcm;
 pub mod shared;
