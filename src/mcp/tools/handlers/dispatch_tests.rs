@@ -1,7 +1,10 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -10,6 +13,55 @@ use super::super::get_tool_definitions;
 use super::dispatch_test_support::*;
 use super::*;
 use crate::config::lock_user_data_dir_test_env;
+
+#[derive(Default)]
+struct UnavailableEffectExecutor {
+    invocations: AtomicUsize,
+}
+
+impl tracedecay_application::ApplicationInvocationExecutor for UnavailableEffectExecutor {
+    fn invoke(
+        &self,
+        _invocation: tracedecay_application::ApplicationInvocation,
+    ) -> tracedecay_application::ApplicationInvocationFuture<
+        '_,
+        std::result::Result<
+            tracedecay_application::ApplicationResponse,
+            tracedecay_application::InvocationError,
+        >,
+    > {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(tracedecay_application::InvocationError::Unavailable) })
+    }
+}
+
+impl crate::daemon_client::DaemonInvocationExecutor for UnavailableEffectExecutor {
+    fn invoke_controlled(
+        &self,
+        _request: crate::daemon_contract::DaemonInvocationRequest,
+        _deadline: tracedecay_application::Deadline,
+        _cancellation: tracedecay_application::CancellationSignal,
+        _policy: crate::daemon_client::InvocationCancellationPolicy,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        '_,
+        std::result::Result<
+            crate::daemon_contract::DaemonInvocationResponse,
+            crate::daemon_client::DaemonInvocationError,
+        >,
+    > {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Err(crate::daemon_client::DaemonInvocationError::Unavailable) })
+    }
+
+    fn observe_plan26_feedback(
+        &self,
+        _subject_digest: tracedecay_domain::ManifestDigest,
+        _observed_at: tracedecay_domain::UtcMicros,
+        _event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+}
 
 /// `DiagnosticsRead` answers to two tool names, and the classifier only
 /// declines the surface for one of them. The deferred name must land on a
@@ -1442,4 +1494,107 @@ fn unavailable_effect_contract_fails_before_handler_dispatch() {
     );
     assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
     assert!(super::ensure_mcp_dispatch_available("tracedecay_search").is_ok());
+}
+
+#[tokio::test]
+async fn unavailable_application_effect_is_rejected_before_canonical_executor_invocation() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("unavailable-application-effect");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-unavailable-application-effect",
+    )
+    .await
+    .unwrap();
+    let executor = UnavailableEffectExecutor::default();
+    let request = serde_json::to_value(tracedecay_application::ConfigurationSetRequestV1 {
+        layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Default,
+        key: tracedecay_domain::configuration::SettingKey::new("mcp.tool_timings").unwrap(),
+        value: tracedecay_domain::configuration::ConfigurationValueV1::Boolean(true),
+        expected_revision: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "revision.mcp-unavailable-application-effect",
+        )
+        .unwrap(),
+    })
+    .unwrap();
+
+    let error = handle_tool_call_with_registry_and_implicit_project(
+        &cg,
+        "tracedecay_configuration_set",
+        request,
+        None,
+        None,
+        ToolCallRegistryOptions {
+            application_invocation_executor: Some(&executor),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "mcp_dispatch_effect_journey_unverified",
+            false,
+            "MCP tool 'tracedecay_configuration_set' is advertised but unavailable until its effect journey is verified",
+        ))
+    );
+    assert_eq!(executor.invocations.load(Ordering::SeqCst), 0);
+    cg.close();
+}
+
+#[tokio::test]
+async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("unavailable-user-lcm-effect");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn probe() {}\n").unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-unavailable-user-lcm-effect",
+    )
+    .await
+    .unwrap();
+    let profile_root = dir.path().join("unavailable-user-lcm-profile");
+    let sessions_db = crate::sessions::user_sessions_db_path(&profile_root);
+
+    let error = handle_tool_call_with_registry_and_implicit_project(
+        &cg,
+        "tracedecay_lcm_doctor",
+        json!({
+            "storage_scope": "user",
+            "provider": "codex",
+            "mode": "repair",
+            "apply": true,
+        }),
+        None,
+        None,
+        ToolCallRegistryOptions {
+            profile_root: Some(&profile_root),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        error.project_route_context(),
+        Some((
+            "mcp_dispatch_effect_journey_unverified",
+            false,
+            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
+        ))
+    );
+    assert!(
+        !sessions_db.exists(),
+        "unavailable LCM must not open its profile store"
+    );
+    cg.close();
 }
