@@ -154,8 +154,8 @@ async function tick(emit: () => void): Promise<void> {
 /** Open a canonical refresh with a revision gap and leave it in flight. */
 async function openRefreshWithGap(source: FakeEventSource): Promise<void> {
   await tick(() => {
-    source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, 1));
-    source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, 5));
+    source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 1));
+    source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 5));
   });
 }
 
@@ -211,7 +211,7 @@ describe('SSE canonical refresh — signals during the window', () => {
     // flag, so this signal only survives if the reducer remembers it as an
     // epoch the in-flight refresh cannot claim to have covered.
     await tick(() => {
-      source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, 20));
+      source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 20));
     });
     expect(refresh.spy).toHaveBeenCalledTimes(1);
 
@@ -226,7 +226,7 @@ describe('SSE canonical refresh — signals during the window', () => {
     // its commit ends the chain because no newer signal arrived.
     for (let revision = 21; revision <= 25; revision += 1) {
       await tick(() => {
-        source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, revision));
+        source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, revision));
       });
     }
     expect(refresh.spy).toHaveBeenCalledTimes(2);
@@ -234,7 +234,7 @@ describe('SSE canonical refresh — signals during the window', () => {
     await settleRefreshes(() => refresh.resolveAll());
     for (let revision = 26; revision <= 30; revision += 1) {
       await tick(() => {
-        source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, revision));
+        source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, revision));
       });
     }
     expect(refresh.spy).toHaveBeenCalledTimes(2);
@@ -254,7 +254,7 @@ describe('SSE canonical refresh — signals during the window', () => {
     // The queue overflows while that refresh is still in flight.
     await tick(() => {
       for (let revision = 6; revision <= 6 + MAX_QUEUED_EVENTS; revision += 1) {
-        source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, revision));
+        source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, revision));
       }
     });
     expect(reducerStats().stale).toBe(true);
@@ -281,7 +281,7 @@ describe('SSE canonical refresh — failure is not success', () => {
 
     await tick(() => {
       for (let revision = 1; revision <= MAX_QUEUED_EVENTS + 1; revision += 1) {
-        source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, revision));
+        source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, revision));
       }
     });
     expect(refresh.spy).toHaveBeenCalledTimes(1);
@@ -302,13 +302,13 @@ describe('SSE canonical refresh — failure is not success', () => {
     // Nor is a failure a retry trigger: re-issuing the identical refresh every
     // tick is the storm the coalescing clock exists to prevent.
     await tick(() => {
-      source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, MAX_QUEUED_EVENTS + 2));
+      source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, MAX_QUEUED_EVENTS + 2));
     });
     expect(refresh.spy).toHaveBeenCalledTimes(1);
 
     // A genuinely newer signal is a new attempt, though — here a reconnect.
     await tick(() => {
-      source.emit('code_index', frame('code_index', NEUTRAL_FAMILY, 1, RECONNECTED_RUN_ID));
+      source.emit('code_index_activity', frame('code_index_activity', NEUTRAL_FAMILY, 1, RECONNECTED_RUN_ID));
     });
     expect(refresh.spy).toHaveBeenCalledTimes(2);
     expect(refresh.spy).toHaveBeenLastCalledWith();

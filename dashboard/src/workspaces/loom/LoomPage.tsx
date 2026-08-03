@@ -142,8 +142,6 @@ export function LoomPage() {
                   span.provider === selected.host && span.session_id === selected.sessionId,
               )
             : [];
-          const deliveryStatus =
-            data.source_statuses.find((source) => source.id === 'delivery_outcomes') ?? null;
           const commitStatus =
             data.source_statuses.find((source) => source.id === 'session_commit') ?? null;
           const branchStatus =
@@ -276,7 +274,6 @@ export function LoomPage() {
                       branchSpans: selectedSpans,
                       commitStatus,
                       branchStatus,
-                      deliveryStatus,
                     }}
                   />
                 </aside>
