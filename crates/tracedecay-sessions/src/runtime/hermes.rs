@@ -85,42 +85,6 @@ const CHUNK_ROWS: usize = 2000;
 const CORRELATION_CURSOR_VERSION: &str = "turn-project-v2";
 const USER_CURSOR_VERSION: &str = "user-turn-v2";
 
-fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
-    let config = std::fs::read_to_string(config_path).ok()?;
-    let mut in_tracedecay = false;
-    for line in config.lines() {
-        let trimmed = line.trim();
-        if !line.starts_with(' ') && !line.starts_with('\t') && trimmed != "plugins:" {
-            in_tracedecay = false;
-        }
-        if trimmed == "tracedecay:" {
-            in_tracedecay = true;
-            continue;
-        }
-        if in_tracedecay {
-            if let Some(value) = trimmed.strip_prefix("project_root:") {
-                let value = value.trim().trim_matches('"').trim_matches('\'');
-                return (!value.is_empty()).then(|| value.to_string());
-            }
-        }
-    }
-    None
-}
-
-/// Ingests Hermes sessions proven to belong to `project_root` into `db`.
-///
-/// Discovery is bounded to the default user integration (`~/.hermes`) and its
-/// immediate named-profile children; environment overrides are ignored.
-pub async fn ingest_for_project(
-    db: &dyn HermesStore,
-    project_root: &Path,
-) -> TranscriptIngestStats {
-    let homes = super::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_homes(db, &homes, project_root).await
-}
-
 /// One project-store destination for a shared Hermes source sweep.
 #[derive(Clone, Copy)]
 pub struct ProjectIngestDestination<'a> {
@@ -129,25 +93,19 @@ pub struct ProjectIngestDestination<'a> {
 }
 
 /// Ingests Hermes history for several registered projects while opening and
-/// scanning each profile `state.db` only once. Every destination retains its
-/// own durable row cursor and advances it in the same transaction as its
-/// projection writes.
-pub async fn ingest_for_projects(
-    destinations: &[ProjectIngestDestination<'_>],
-) -> TranscriptIngestStats {
-    let homes = super::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_homes_for_projects(&homes, destinations).await
-}
-
-/// Test seam for [`ingest_for_projects`].
-pub async fn ingest_homes_for_projects(
+/// scanning each profile `state.db` only once. The caller resolves the legacy
+/// project pin for each profile, keeping agent-configuration parsing out of
+/// this reusable runtime crate.
+pub async fn ingest_homes_for_projects_with_project_pins<F>(
     hermes_homes: &[PathBuf],
     destinations: &[ProjectIngestDestination<'_>],
-) -> TranscriptIngestStats {
+    project_pin: F,
+) -> TranscriptIngestStats
+where
+    F: Fn(&Path) -> Option<PathBuf>,
+{
     let mut stats = TranscriptIngestStats::default();
-    for source in all_profile_sources(hermes_homes) {
+    for source in all_profile_sources(hermes_homes, &project_pin) {
         let eligible = destinations
             .iter()
             .copied()
@@ -170,16 +128,19 @@ pub async fn ingest_homes_for_projects(
     stats
 }
 
-/// [`ingest_for_project`] with explicit Hermes home directories — the test
-/// seam for pointing the sweep at a temporary home instead of the real
-/// `~/.hermes`.
-pub async fn ingest_homes(
+/// Ingests Hermes sessions from explicit home directories. The caller supplies
+/// the exact legacy profile-pin parser for its host configuration format.
+pub async fn ingest_homes_with_project_pins<F>(
     db: &dyn HermesStore,
     hermes_homes: &[PathBuf],
     project_root: &Path,
-) -> TranscriptIngestStats {
+    project_pin: F,
+) -> TranscriptIngestStats
+where
+    F: Fn(&Path) -> Option<PathBuf>,
+{
     let mut stats = TranscriptIngestStats::default();
-    for source in candidate_state_dbs(hermes_homes, project_root) {
+    for source in candidate_state_dbs(hermes_homes, project_root, &project_pin) {
         match try_ingest_state_db(db, &source, project_root).await {
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => tracing::debug!(
@@ -192,26 +153,19 @@ pub async fn ingest_homes(
     stats
 }
 
-/// Ingests the canonical historical Hermes conversation into the profile-level
-/// user session store. Project ingestion separately projects each turn into
-/// every registered project it touched using the same stable message IDs.
-pub async fn ingest_user_sessions(
-    db: &dyn HermesStore,
-    registered_roots: &[PathBuf],
-) -> TranscriptIngestStats {
-    let homes = super::home_dir()
-        .map(|home| vec![home.join(".hermes")])
-        .unwrap_or_default();
-    ingest_user_homes(db, &homes, registered_roots).await
-}
-
-pub async fn ingest_user_homes(
+/// Ingests canonical historical Hermes conversations into a profile-level
+/// session store. The caller supplies the exact legacy profile-pin parser.
+pub async fn ingest_user_homes_with_project_pins<F>(
     db: &dyn HermesStore,
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
-) -> TranscriptIngestStats {
+    project_pin: F,
+) -> TranscriptIngestStats
+where
+    F: Fn(&Path) -> Option<PathBuf>,
+{
     let mut stats = TranscriptIngestStats::default();
-    for source in all_profile_sources(hermes_homes) {
+    for source in all_profile_sources(hermes_homes, &project_pin) {
         match try_ingest_user_state_db(db, &source, registered_roots).await {
             Ok(source_stats) => stats = stats.merge(source_stats),
             Err(error) => tracing::debug!(
@@ -227,18 +181,17 @@ pub async fn ingest_user_homes(
 /// Strict one-time import for a legacy profile whose project pin was already
 /// resolved by the migration layer. Unlike the normal catch-up sweep, any
 /// open/query/write failure is returned so callers retain the pin and source.
-pub async fn ingest_legacy_pinned_profile(
+pub async fn ingest_legacy_pinned_profile_with_project_pin(
     db: &dyn HermesStore,
     profile_dir: &Path,
     project_root: &Path,
+    legacy_project_pin: Option<PathBuf>,
 ) -> Result<TranscriptIngestStats, String> {
     let state_db = profile_dir.join("state.db");
     if !state_db.is_file() {
         return Ok(TranscriptIngestStats::default());
     }
-    let legacy_project_pin = read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-        .map(PathBuf::from)
-        .ok_or_else(|| {
+    let legacy_project_pin = legacy_project_pin.ok_or_else(|| {
             format!(
                 "legacy Hermes state store '{}' has no project pin",
                 state_db.display()
@@ -272,7 +225,13 @@ struct HermesProfileSource {
     legacy_project_pin: Option<PathBuf>,
 }
 
-fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
+fn all_profile_sources<F>(
+    hermes_homes: &[PathBuf],
+    project_pin: &F,
+) -> Vec<HermesProfileSource>
+where
+    F: Fn(&Path) -> Option<PathBuf>,
+{
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for home in hermes_homes {
@@ -292,10 +251,7 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
                 out.push(HermesProfileSource {
                     state_db,
                     profile,
-                    legacy_project_pin: read_config_pinned_project_root(
-                        &profile_dir.join("config.yaml"),
-                    )
-                    .map(PathBuf::from),
+                    legacy_project_pin: project_pin(&profile_dir),
                 });
             }
         }
@@ -303,7 +259,14 @@ fn all_profile_sources(hermes_homes: &[PathBuf]) -> Vec<HermesProfileSource> {
     out
 }
 
-fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<HermesProfileSource> {
+fn candidate_state_dbs<F>(
+    hermes_homes: &[PathBuf],
+    project_root: &Path,
+    project_pin: &F,
+) -> Vec<HermesProfileSource>
+where
+    F: Fn(&Path) -> Option<PathBuf>,
+{
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     let project_is_real = tracedecay_runtime_core::worktree::git_worktree_root(project_root)
@@ -328,9 +291,7 @@ fn candidate_state_dbs(hermes_homes: &[PathBuf], project_root: &Path) -> Vec<Her
             }
         }
         for (profile_dir, profile_name) in candidates {
-            let legacy_project_pin =
-                read_config_pinned_project_root(&profile_dir.join("config.yaml"))
-                    .map(PathBuf::from);
+            let legacy_project_pin = project_pin(&profile_dir);
             if legacy_project_pin
                 .as_deref()
                 .is_some_and(|pin| !path_belongs_to_project(pin, project_root))
