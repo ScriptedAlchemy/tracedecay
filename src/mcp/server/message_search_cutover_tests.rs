@@ -77,7 +77,7 @@ pub(super) async fn server_with_authorities() -> (Arc<McpServer>, TempDir, Pinne
     server_with_project_refresh_wake(None).await
 }
 
-async fn server_with_project_refresh_wake(
+pub(super) async fn server_with_project_refresh_wake(
     project_refresh_wake: Option<SessionTemporalRefreshWake>,
 ) -> (Arc<McpServer>, TempDir, PinnedUserDataDir) {
     let (cg, runtime, dir, pin) = indexed_project().await;
@@ -232,7 +232,7 @@ async fn persist_fixture_observation(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn seed_temporal_message(
+pub(super) async fn seed_temporal_message(
     runtime: &HostAdmissionTestRuntimeV1,
     authority_scope: HostAdmissionScope,
     project_key: &str,
