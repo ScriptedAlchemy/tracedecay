@@ -90,21 +90,53 @@ impl TraceDecay {
             &self.db,
         )
         .await?;
-        let branch::BranchTrackingPreparation::Added(prepared) = prepared else {
-            return Ok(match prepared {
-                branch::BranchTrackingPreparation::AlreadyTracked => {
-                    branch::BranchAddOutcome::AlreadyTracked
+        let prepared = match prepared {
+            branch::BranchTrackingPreparation::Added(prepared) => prepared,
+            branch::BranchTrackingPreparation::AlreadyTracked => {
+                let (database_path, serving_branch, fallback) = Self::resolve_db_for_branch(
+                    worktree_root,
+                    &self.store_layout.data_root,
+                    Some(branch_name),
+                );
+                if serving_branch.as_deref() != Some(branch_name) || fallback.is_some() {
+                    return Err(TraceDecayError::Config {
+                        message: format!(
+                            "tracked branch '{branch_name}' has no exact branch database for \
+                             worktree {}",
+                            worktree_root.display()
+                        ),
+                    });
                 }
-                branch::BranchTrackingPreparation::Deferred => branch::BranchAddOutcome::Deferred,
-                branch::BranchTrackingPreparation::Added(_) => unreachable!(),
-            });
+                return match self
+                    .sync_retained_worktree_branch(worktree_root, branch_name, &database_path)
+                    .await
+                {
+                    Ok(_) => Ok(branch::BranchAddOutcome::AlreadyTracked),
+                    Err(TraceDecayError::SyncLock { .. }) => Ok(branch::BranchAddOutcome::Deferred),
+                    Err(error) => Err(error),
+                };
+            }
+            branch::BranchTrackingPreparation::Deferred => {
+                return Ok(branch::BranchAddOutcome::Deferred);
+            }
         };
 
         let sync_result = self
             .sync_retained_worktree_branch(worktree_root, branch_name, prepared.database_path())
             .await;
         if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
-            return Ok(branch::BranchAddOutcome::Deferred);
+            return match branch::rollback_prepared_branch_tracking(
+                &self.store_layout.data_root,
+                &prepared,
+            ) {
+                Ok(()) => Ok(branch::BranchAddOutcome::Deferred),
+                Err(rollback_error) => Err(TraceDecayError::Config {
+                    message: format!(
+                        "branch sync lock deferred catch-up, but prepared branch rollback failed: \
+                         {rollback_error}"
+                    ),
+                }),
+            };
         } else if let Err(error) = sync_result {
             return match branch::rollback_prepared_branch_tracking(
                 &self.store_layout.data_root,

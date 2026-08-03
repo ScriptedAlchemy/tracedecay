@@ -29,10 +29,10 @@
 
 #![cfg(unix)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -57,8 +57,12 @@ use generation::{
     GenerationDecision, ReservationError, SYNC_RETRY_INITIAL, SnapshotGeneration,
     snapshot_generation,
 };
-use generation::{GenerationGate, SYNC_RETRY_MAX};
 use planner::execute_plan;
+#[cfg(test)]
+use state::ProjectHealth;
+use state::{DirtyPlan, WatchState};
+
+mod state;
 
 /// Degraded watchers fall back to polling git metadata every 5 minutes.
 const DEGRADED_POLL_INTERVAL: Duration = Duration::from_mins(5);
@@ -71,341 +75,6 @@ const RESTART_BACKOFF_MAX: Duration = Duration::from_mins(1);
 /// A claimed sync lane is already progressing elsewhere; retry soon without
 /// spinning while preserving the coalesced plan.
 const IN_FLIGHT_RETRY_DELAY: Duration = Duration::from_millis(50);
-
-/// The truthful delivery mode for a registered project.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(u8)]
-pub enum ProjectWatchCoverage {
-    #[default]
-    Active = 0,
-    DegradedPoll = 1,
-}
-
-impl ProjectWatchCoverage {
-    fn from_raw(raw: u8) -> Self {
-        match raw {
-            1 => Self::DegradedPoll,
-            _ => Self::Active,
-        }
-    }
-}
-
-/// Per-project health, readable by the backstop and `tracedecay doctor`.
-///
-/// Timestamps are UNIX seconds (0 = never). `degraded` flips true when the
-/// inotify watcher could not be built / died (e.g. ENOSPC) and the task fell
-/// back to mtime polling.
-#[derive(Debug, Default)]
-struct ProjectHealth {
-    /// Last time the watch task completed a poll cycle (event drain or degraded
-    /// stat). Advances even when nothing needed syncing — it is a liveness
-    /// signal, not a sync signal.
-    last_heartbeat: AtomicU64,
-    /// Last time a watcher-triggered sync of this project succeeded.
-    last_sync: AtomicU64,
-    /// True while the project is on the degraded mtime-poll fallback.
-    degraded: std::sync::atomic::AtomicBool,
-    events_received: AtomicU64,
-    plans_drained: AtomicU64,
-    deduplicated_activations: AtomicU64,
-    unchanged_generation_skips: AtomicU64,
-    backoff_skips: AtomicU64,
-    worktree_generation_skips: AtomicU64,
-    coverage: AtomicU8,
-}
-
-impl ProjectHealth {
-    fn beat(&self) {
-        self.last_heartbeat.store(now_secs(), Ordering::Relaxed);
-    }
-    fn mark_synced(&self) {
-        self.last_sync.store(now_secs(), Ordering::Relaxed);
-    }
-    fn set_degraded(&self, degraded: bool) {
-        self.degraded.store(degraded, Ordering::Relaxed);
-    }
-    fn set_coverage(&self, coverage: ProjectWatchCoverage) {
-        self.coverage.store(coverage as u8, Ordering::Relaxed);
-    }
-    fn snapshot(&self) -> ProjectHealthSnapshot {
-        ProjectHealthSnapshot {
-            last_heartbeat: self.last_heartbeat.load(Ordering::Relaxed),
-            last_sync: self.last_sync.load(Ordering::Relaxed),
-            degraded: self.degraded.load(Ordering::Relaxed),
-            events_received: self.events_received.load(Ordering::Relaxed),
-            plans_drained: self.plans_drained.load(Ordering::Relaxed),
-            deduplicated_activations: self.deduplicated_activations.load(Ordering::Relaxed),
-            unchanged_generation_skips: self.unchanged_generation_skips.load(Ordering::Relaxed),
-            backoff_skips: self.backoff_skips.load(Ordering::Relaxed),
-            worktree_generation_skips: self.worktree_generation_skips.load(Ordering::Relaxed),
-            coverage: ProjectWatchCoverage::from_raw(self.coverage.load(Ordering::Relaxed)),
-            active_snapshot_roots: 0,
-        }
-    }
-}
-
-/// A point-in-time copy of a project's watch health, for the doctor section.
-// The doctor watcher-health section consumes this surface (follow-up wiring);
-// fields are populated by the watch loop today so the snapshot is truthful
-// the moment doctor reads it.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
-pub struct ProjectHealthSnapshot {
-    pub last_heartbeat: u64,
-    pub last_sync: u64,
-    pub degraded: bool,
-    pub events_received: u64,
-    pub plans_drained: u64,
-    pub deduplicated_activations: u64,
-    pub unchanged_generation_skips: u64,
-    pub backoff_skips: u64,
-    pub worktree_generation_skips: u64,
-    pub coverage: ProjectWatchCoverage,
-    pub active_snapshot_roots: usize,
-}
-
-impl ProjectHealthSnapshot {
-    /// True when the watcher has not reported a heartbeat within the staleness
-    /// window (or never has). The backstop uses this to decide coverage.
-    fn heartbeat_stale(&self) -> bool {
-        let hb = self.last_heartbeat;
-        hb == 0 || now_secs().saturating_sub(hb) > HEARTBEAT_STALE_SECS
-    }
-}
-
-/// Per-project watch state shared between the debounce task and the coordinator.
-struct WatchState {
-    project_root: PathBuf,
-    common_dir: Option<PathBuf>,
-    snapshot_roots: Mutex<HashSet<PathBuf>>,
-    sync_gates: Mutex<HashMap<PathBuf, GenerationGate>>,
-    worktree_gates: Mutex<HashMap<PathBuf, GenerationGate>>,
-    /// One bounded retry timer owns all skipped drained work for this project.
-    retry: Mutex<Option<ScheduledPlan>>,
-    retry_wake: Notify,
-    /// Dirty flag + affected-branch set. Coalesces a 50-commit rebase into a
-    /// single sync — an unbounded queue would fire 50 times.
-    dirty: Mutex<DirtySet>,
-    /// Set before every notify callback attempts the non-blocking dirty lock.
-    /// If that lock is contended, the debounce task turns this latch into one
-    /// bounded full reconciliation instead of dropping the event.
-    reconciliation_pending: AtomicBool,
-    /// Raised by the notify callback (or degraded poller) on every metadata
-    /// event; the debounce task waits on it instead of polling.
-    wake: Notify,
-    maintenance: MaintenanceCoordinator,
-    health: ProjectHealth,
-    /// Handle to the supervised task so drop cancels it on shutdown.
-    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Test-only: `debounce_loop` signals once before its first `wake` wait.
-    #[cfg(test)]
-    entered_debounce: Notify,
-    /// Test-only: count and signal completed dirty-set drains before plan I/O.
-    #[cfg(test)]
-    drained_plans: AtomicU64,
-    #[cfg(test)]
-    plan_drained: Notify,
-}
-
-impl WatchState {
-    fn new(
-        project_root: PathBuf,
-        common_dir: Option<PathBuf>,
-        maintenance: MaintenanceCoordinator,
-    ) -> Self {
-        Self {
-            snapshot_roots: Mutex::new(HashSet::from([project_root.clone()])),
-            project_root,
-            common_dir,
-            sync_gates: Mutex::new(HashMap::new()),
-            worktree_gates: Mutex::new(HashMap::new()),
-            retry: Mutex::new(None),
-            retry_wake: Notify::new(),
-            dirty: Mutex::new(DirtySet::default()),
-            reconciliation_pending: AtomicBool::new(false),
-            wake: Notify::new(),
-            maintenance,
-            health: ProjectHealth::default(),
-            task: Mutex::new(None),
-            #[cfg(test)]
-            entered_debounce: Notify::new(),
-            #[cfg(test)]
-            drained_plans: AtomicU64::new(0),
-            #[cfg(test)]
-            plan_drained: Notify::new(),
-        }
-    }
-
-    async fn roots(&self) -> Vec<PathBuf> {
-        let mut roots: Vec<_> = self.snapshot_roots.lock().await.iter().cloned().collect();
-        roots.sort();
-        roots
-    }
-
-    async fn register_snapshot_root(&self, root: &Path) {
-        let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        self.snapshot_roots.lock().await.insert(canonical);
-    }
-
-    async fn prune_missing_roots(&self) {
-        let roots = {
-            let mut roots = self.snapshot_roots.lock().await;
-            roots.retain(|root| root.is_dir());
-            roots.clone()
-        };
-        self.sync_gates
-            .lock()
-            .await
-            .retain(|root, _| roots.contains(root));
-        self.worktree_gates
-            .lock()
-            .await
-            .retain(|root, _| roots.contains(root));
-    }
-
-    async fn schedule_retry(&self, plan: DirtyPlan, delay: Duration) {
-        if plan.is_empty() {
-            return;
-        }
-        let not_before = Instant::now() + delay.min(SYNC_RETRY_MAX);
-        let mut retry = self.retry.lock().await;
-        match retry.as_mut() {
-            Some(pending) => {
-                pending.plan.merge(plan);
-                pending.not_before = pending.not_before.min(not_before);
-            }
-            None => {
-                *retry = Some(ScheduledPlan { plan, not_before });
-            }
-        }
-        drop(retry);
-        self.retry_wake.notify_one();
-    }
-
-    async fn retry_deadline(&self) -> Option<Instant> {
-        self.retry
-            .lock()
-            .await
-            .as_ref()
-            .map(|retry| retry.not_before)
-    }
-
-    async fn take_due_retry(&self) -> Option<DirtyPlan> {
-        let mut retry = self.retry.lock().await;
-        if retry
-            .as_ref()
-            .is_some_and(|pending| pending.not_before <= Instant::now())
-        {
-            return retry.take().map(|pending| pending.plan);
-        }
-        None
-    }
-}
-
-#[derive(Debug, Default)]
-struct DirtySet {
-    /// Any metadata event happened; the project needs at least a current-branch
-    /// freshness pass.
-    dirty: bool,
-    /// Branches whose `refs/heads/<b>` changed, for diff-scoped incremental
-    /// syncs. Empty + `dirty` => sync current branch only.
-    branches: HashSet<String>,
-    /// Worktree directories newly created under `worktrees/`, to proactively
-    /// track. Values are the `worktrees/<name>` leaf names.
-    new_worktrees: HashSet<String>,
-    /// A ref or worktree was deleted → GC is eligible on the next cycle.
-    gc_eligible: bool,
-    /// A linked worktree disappeared; stale generation receipts must be
-    /// discarded so recreating the same path is tracked again.
-    worktree_removed: bool,
-    /// Path-level event detail was lost to callback lock contention. The next
-    /// cycle must inventory linked worktrees and consider GC, not merely sync
-    /// the current branch.
-    reconcile_metadata: bool,
-    /// Instant of the first event since the last drain (for the hard cap).
-    first_event: Option<Instant>,
-    /// Instant of the most recent event (for the quiet-window deadline).
-    last_event: Option<Instant>,
-}
-
-impl DirtySet {
-    /// Test-only invariant probe; `cfg_attr` keeps the non-test lib build
-    /// from flagging it dead.
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn is_clean(&self) -> bool {
-        !self.dirty
-            && self.branches.is_empty()
-            && self.new_worktrees.is_empty()
-            && !self.gc_eligible
-            && !self.worktree_removed
-            && !self.reconcile_metadata
-    }
-    fn take(&mut self) -> DirtyPlan {
-        let plan = DirtyPlan {
-            dirty: self.dirty,
-            branches: std::mem::take(&mut self.branches),
-            new_worktrees: std::mem::take(&mut self.new_worktrees),
-            gc_eligible: self.gc_eligible,
-            worktree_removed: self.worktree_removed,
-            reconcile_metadata: self.reconcile_metadata,
-        };
-        self.dirty = false;
-        self.gc_eligible = false;
-        self.worktree_removed = false;
-        self.reconcile_metadata = false;
-        self.first_event = None;
-        self.last_event = None;
-        plan
-    }
-}
-
-/// The drained work for one debounce cycle.
-#[derive(Clone, Debug)]
-struct DirtyPlan {
-    dirty: bool,
-    branches: HashSet<String>,
-    new_worktrees: HashSet<String>,
-    gc_eligible: bool,
-    worktree_removed: bool,
-    reconcile_metadata: bool,
-}
-
-impl DirtyPlan {
-    fn sync() -> Self {
-        Self {
-            dirty: true,
-            branches: HashSet::new(),
-            new_worktrees: HashSet::new(),
-            gc_eligible: false,
-            worktree_removed: false,
-            reconcile_metadata: false,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        !self.dirty
-            && self.branches.is_empty()
-            && self.new_worktrees.is_empty()
-            && !self.gc_eligible
-            && !self.worktree_removed
-            && !self.reconcile_metadata
-    }
-
-    fn merge(&mut self, other: Self) {
-        self.dirty |= other.dirty;
-        self.branches.extend(other.branches);
-        self.new_worktrees.extend(other.new_worktrees);
-        self.gc_eligible |= other.gc_eligible;
-        self.worktree_removed |= other.worktree_removed;
-        self.reconcile_metadata |= other.reconcile_metadata;
-    }
-}
-
-#[derive(Debug)]
-struct ScheduledPlan {
-    plan: DirtyPlan,
-    not_before: Instant,
-}
 
 /// The daemon-held git-metadata watcher. Cheap to clone (all `Arc` inside), and
 /// [`Default`] so `DaemonEngine` can derive `Default`.
@@ -428,8 +97,10 @@ pub(super) struct GitWatcherInner {
     /// snapshot roots belonging to it.
     projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
     /// Bounded overflow coverage for projects that cannot receive another OS
-    /// metadata watcher. These run only the degraded poll/retry loop.
+    /// metadata watcher. A single shared poll/retry task covers every entry.
     degraded_projects: Mutex<HashMap<PathBuf, Arc<WatchState>>>,
+    overflow_wake: Arc<Notify>,
+    overflow_task: Mutex<Option<JoinHandle<()>>>,
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
     backstop_task: Mutex<Option<JoinHandle<()>>>,
     shutting_down: AtomicBool,
@@ -471,6 +142,8 @@ impl GitWatcher {
                 sync_semaphore: Arc::new(Semaphore::new(permits)),
                 projects: Mutex::new(HashMap::new()),
                 degraded_projects: Mutex::new(HashMap::new()),
+                overflow_wake: Arc::new(Notify::new()),
+                overflow_task: Mutex::new(None),
                 backstop_task: Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
             }),
@@ -543,10 +216,6 @@ impl GitWatcher {
         if let Some(state) = projects.get(&key).cloned() {
             drop(projects);
             state.register_snapshot_root(&canonical).await;
-            state
-                .health
-                .deduplicated_activations
-                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         if projects.len() >= self.inner.config.watch_max_projects {
@@ -560,6 +229,7 @@ impl GitWatcher {
             common_dir,
             self.inner.maintenance.clone(),
         ));
+        register_linked_snapshot_roots(&state).await;
         projects.insert(key.clone(), Arc::clone(&state));
         drop(projects);
 
@@ -577,53 +247,29 @@ impl GitWatcher {
     }
 
     async fn ensure_degraded_coverage(&self, key: PathBuf, canonical: PathBuf) {
-        let overflow_limit = self.inner.config.watch_max_projects;
-        if overflow_limit == 0 {
-            log_daemon_event(
-                "git_watch_degraded",
-                &[
-                    ("project", canonical.display().to_string()),
-                    ("reason", "watch_capacity_uncovered".to_string()),
-                ],
-            );
-            return;
-        }
         let mut degraded = self.inner.degraded_projects.lock().await;
         if let Some(state) = degraded.get(&key).cloned() {
             drop(degraded);
             state.register_snapshot_root(&canonical).await;
-            state
-                .health
-                .deduplicated_activations
-                .fetch_add(1, Ordering::Relaxed);
             return;
         }
-        if degraded.len() >= overflow_limit {
-            log_daemon_event(
-                "git_watch_degraded",
-                &[
-                    ("project", canonical.display().to_string()),
-                    ("reason", "watch_capacity_uncovered".to_string()),
-                ],
-            );
-            return;
-        }
-        let state = Arc::new(WatchState::new(
+        let state = Arc::new(WatchState::new_with_retry_wake(
             canonical.clone(),
             crate::worktree::git_common_dir(&canonical),
             self.inner.maintenance.clone(),
+            Some(Arc::clone(&self.inner.overflow_wake)),
         ));
-        state.health.set_degraded(true);
-        state
-            .health
-            .set_coverage(ProjectWatchCoverage::DegradedPoll);
+        register_linked_snapshot_roots(&state).await;
         degraded.insert(key.clone(), Arc::clone(&state));
         drop(degraded);
 
-        let inner = Arc::clone(&self.inner);
-        let task_state = Arc::clone(&state);
-        let handle = tokio::spawn(async move { degraded_poll_loop(&inner, &task_state).await });
-        *state.task.lock().await = Some(handle);
+        let mut overflow_task = self.inner.overflow_task.lock().await;
+        if overflow_task.is_none() {
+            let inner = Arc::clone(&self.inner);
+            *overflow_task = Some(tokio::spawn(async move { overflow_poll_loop(inner).await }));
+        }
+        drop(overflow_task);
+        self.inner.overflow_wake.notify_one();
         log_daemon_event(
             "git_watch_degraded",
             &[
@@ -641,6 +287,10 @@ impl GitWatcher {
         }
 
         if let Some(handle) = self.inner.backstop_task.lock().await.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
+        if let Some(handle) = self.inner.overflow_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;
         }
@@ -666,34 +316,16 @@ impl GitWatcher {
             }
         }
     }
+}
 
-    /// A doctor-facing snapshot of every registered project's watch health.
-    #[cfg(test)]
-    pub async fn health_report(&self) -> Vec<(PathBuf, ProjectHealthSnapshot)> {
-        let mut out: Vec<_> = self
-            .inner
-            .projects
-            .lock()
-            .await
-            .iter()
-            .map(|(root, state)| (root.clone(), Arc::clone(state)))
-            .collect();
-        out.extend(
-            self.inner
-                .degraded_projects
-                .lock()
-                .await
-                .iter()
-                .map(|(root, state)| (root.clone(), Arc::clone(state))),
-        );
-        let mut snapshots = Vec::with_capacity(out.len());
-        for (root, state) in out.drain(..) {
-            let mut snapshot = state.health.snapshot();
-            snapshot.active_snapshot_roots = state.snapshot_roots.lock().await.len();
-            snapshots.push((root, snapshot));
+async fn register_linked_snapshot_roots(state: &WatchState) {
+    let Some(common) = state.common_dir.as_deref() else {
+        return;
+    };
+    for name in store_maintenance::linked_worktree_names(common) {
+        if let Some((root, _branch)) = store_maintenance::resolve_worktree(common, &name) {
+            state.register_snapshot_root(&root).await;
         }
-        snapshots.sort_by(|a, b| a.0.cmp(&b.0));
-        snapshots
     }
 }
 
@@ -713,13 +345,24 @@ async fn retained_project_graph(
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
     let active_branch = crate::branch::current_branch(&canonical);
-    inner
-        .administration
-        .mounted_project_graphs()
-        .await
-        .into_iter()
+    let common_dir = crate::worktree::git_common_dir(&canonical);
+    let graphs = inner.administration.mounted_project_graphs().await;
+    graphs
+        .iter()
         .find(|graph| {
             graph.project_root() == canonical && graph.active_branch() == active_branch.as_deref()
+        })
+        .cloned()
+        .or_else(|| {
+            common_dir.as_ref().and_then(|common| {
+                graphs
+                    .iter()
+                    .find(|graph| {
+                        crate::worktree::git_common_dir(graph.project_root()).as_ref()
+                            == Some(common)
+                    })
+                    .cloned()
+            })
         })
 }
 
@@ -758,10 +401,6 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let Some(common_dir) = state.common_dir.clone() else {
         // Not a resolvable git repo (yet). Degrade to polling so a later `git
         // init` / clone is still eventually covered.
-        state.health.set_degraded(true);
-        state
-            .health
-            .set_coverage(ProjectWatchCoverage::DegradedPoll);
         degraded_poll_loop(&inner, &state).await;
         return;
     };
@@ -786,10 +425,6 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
                     ("error", e.to_string()),
                 ],
             );
-            state.health.set_degraded(true);
-            state
-                .health
-                .set_coverage(ProjectWatchCoverage::DegradedPoll);
             degraded_poll_loop(&inner, &state).await;
             return;
         }
@@ -804,19 +439,13 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
                 ("error", e.to_string()),
             ],
         );
-        state.health.set_degraded(true);
-        state
-            .health
-            .set_coverage(ProjectWatchCoverage::DegradedPoll);
         degraded_poll_loop(&inner, &state).await;
         return;
     }
 
-    state.health.set_degraded(false);
-    state.health.set_coverage(ProjectWatchCoverage::Active);
     state.health.beat();
 
-    Box::pin(debounce_loop(&inner, &state, &common_dir)).await;
+    Box::pin(debounce_loop(&inner, &state, &common_dir, &mut watcher)).await;
     // Keep the watcher alive for the whole loop.
     drop(watcher);
 }
@@ -825,6 +454,9 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
 /// operation markers (non-recursive per-file), and `refs/` + `worktrees/`
 /// (recursive). Never the working tree.
 fn install_watches(watcher: &mut notify::RecommendedWatcher, common: &Path) -> notify::Result<()> {
+    // A non-recursive parent watch notices the first `worktrees/` directory
+    // before it exists. It is still git metadata, never the working tree.
+    watcher.watch(common, RecursiveMode::NonRecursive)?;
     // Per-file, non-recursive. Missing files are fine (packed-refs / markers may
     // not exist yet); ignore their NotFound so a repo without packed-refs still
     // watches HEAD.
@@ -832,16 +464,21 @@ fn install_watches(watcher: &mut notify::RecommendedWatcher, common: &Path) -> n
         let path = common.join(file);
         let _ = watcher.watch(&path, RecursiveMode::NonRecursive);
     }
-    // Rebase markers are directories that appear/disappear; watch the common
-    // dir non-recursively so their creation/removal is observed even before
-    // they exist. (Watching a not-yet-existing dir fails, so we lean on the
-    // recursive refs/ + the common-dir file watches plus the debounce recheck.)
-    // Recursive watches for the ref namespaces.
-    for dir in ["refs", "worktrees"] {
-        let path = common.join(dir);
-        if path.is_dir() {
-            watcher.watch(&path, RecursiveMode::Recursive)?;
-        }
+    let refs = common.join("refs");
+    if refs.is_dir() {
+        watcher.watch(&refs, RecursiveMode::Recursive)?;
+    }
+    install_worktree_watch(watcher, common)
+}
+
+/// Adds the recursive git-worktree metadata watch once the directory exists.
+fn install_worktree_watch(
+    watcher: &mut notify::RecommendedWatcher,
+    common: &Path,
+) -> notify::Result<()> {
+    let worktrees = common.join("worktrees");
+    if worktrees.is_dir() {
+        watcher.watch(&worktrees, RecursiveMode::Recursive)?;
     }
     Ok(())
 }
@@ -852,8 +489,6 @@ fn install_watches(watcher: &mut notify::RecommendedWatcher, common: &Path) -> n
 fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
     let is_remove = matches!(event.kind, EventKind::Remove(_));
     let is_create = matches!(event.kind, EventKind::Create(_));
-    state.health.events_received.fetch_add(1, Ordering::Relaxed);
-
     // Cheap synchronous classification into the dirty set. We use `try_lock` to
     // stay non-blocking in the notify thread; on contention we still wake the
     // loop, which rechecks git state anyway, so no event is lost.
@@ -867,6 +502,15 @@ fn classify_and_mark(state: &Arc<WatchState>, event: &notify::Event) {
 
         for path in &event.paths {
             let s = path.to_string_lossy();
+            if s.ends_with("/worktrees") {
+                dirty.dirty = true;
+                dirty.reconcile_metadata = true;
+                if is_remove {
+                    dirty.gc_eligible = true;
+                    dirty.worktree_removed = true;
+                }
+                continue;
+            }
             if let Some(idx) = s.find("/refs/heads/") {
                 let branch = &s[idx + "/refs/heads/".len()..];
                 // Git creates `<ref>.lock` beside a branch ref while updating
@@ -921,7 +565,12 @@ async fn materialize_pending_reconciliation(state: &WatchState) {
 /// The debounce state machine for a healthy watcher. Wakes on events, sleeps
 /// until the quiet deadline or the hard cap (whichever comes first), then
 /// drains and syncs. No busy polling.
-async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, common: &Path) {
+async fn debounce_loop(
+    inner: &Arc<GitWatcherInner>,
+    state: &Arc<WatchState>,
+    common: &Path,
+    watcher: &mut notify::RecommendedWatcher,
+) {
     let quiet = Duration::from_millis(inner.config.watch_debounce_ms);
     let max_delay = Duration::from_millis(inner.config.watch_max_delay_ms);
 
@@ -981,11 +630,22 @@ async fn debounce_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState>, co
             dirty.take()
         };
         if !plan.is_empty() {
-            state.health.plans_drained.fetch_add(1, Ordering::Relaxed);
             #[cfg(test)]
             {
                 state.drained_plans.fetch_add(1, Ordering::Relaxed);
                 state.plan_drained.notify_one();
+            }
+            if plan.reconcile_metadata
+                && let Err(error) = install_worktree_watch(watcher, common)
+            {
+                log_daemon_event(
+                    "git_watch_degraded",
+                    &[
+                        ("project", state.project_root.display().to_string()),
+                        ("reason", "worktree_watch_install_failed".to_string()),
+                        ("error", error.to_string()),
+                    ],
+                );
             }
             execute_plan(inner, state, common, plan).await;
         }
@@ -1039,6 +699,56 @@ async fn degraded_poll_loop(inner: &Arc<GitWatcherInner>, state: &Arc<WatchState
                 .as_deref()
                 .unwrap_or(state.project_root.as_path());
             execute_plan(inner, state, common, plan).await;
+        }
+    }
+}
+
+/// Covers every capacity-overflow project with one bounded poll/retry task.
+/// This deliberately owns no OS watcher and never traverses source files.
+async fn overflow_poll_loop(inner: Arc<GitWatcherInner>) {
+    let mut next_poll = Instant::now();
+    loop {
+        let states: Vec<_> = inner
+            .degraded_projects
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect();
+        if states.is_empty() {
+            inner.overflow_wake.notified().await;
+            continue;
+        }
+
+        let poll_due = Instant::now() >= next_poll;
+        if poll_due {
+            next_poll = Instant::now() + DEGRADED_POLL_INTERVAL;
+        }
+        let mut next_retry = None;
+        for state in states {
+            if poll_due {
+                state.health.beat();
+                for root in state.roots().await {
+                    planner::sync_snapshot(&inner, &state, &root, "capacity_poll").await;
+                }
+            }
+            if let Some(plan) = state.take_due_retry().await {
+                let common = state
+                    .common_dir
+                    .clone()
+                    .unwrap_or_else(|| state.project_root.clone());
+                execute_plan(&inner, &state, &common, plan).await;
+            }
+            if let Some(deadline) = state.retry_deadline().await {
+                next_retry =
+                    Some(next_retry.map_or(deadline, |current: Instant| current.min(deadline)));
+            }
+        }
+
+        let wake_at = next_retry.map_or(next_poll, |retry| retry.min(next_poll));
+        tokio::select! {
+            () = inner.overflow_wake.notified() => {}
+            () = tokio::time::sleep_until(wake_at) => {}
         }
     }
 }
@@ -1131,14 +841,13 @@ mod backstop {
         let mut gc_retry_needed = false;
 
         for (_watch_identity, state) in &entries {
-            let snap = state.health.snapshot();
             for root in state.roots().await {
                 let retained_graph = retained_project_graph(&watcher.inner, &root).await;
                 let store_stale = match retained_graph.as_deref() {
                     Some(graph) => store_is_stale(graph, interval_secs).await,
                     None => false,
                 };
-                if snap.heartbeat_stale() && store_stale {
+                if state.health.heartbeat_stale() && store_stale {
                     planner::sync_snapshot(&watcher.inner, state, &root, "backstop").await;
                 }
 

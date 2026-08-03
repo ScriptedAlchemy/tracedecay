@@ -5,6 +5,8 @@ use notify::event::EventAttributes;
 use std::process::Command;
 use tokio::sync::oneshot;
 
+mod metadata_events;
+
 fn test_watch_state(project_root: impl Into<PathBuf>) -> Arc<WatchState> {
     let project_root = project_root.into();
     Arc::new(WatchState::new(
@@ -290,26 +292,16 @@ fn linked_worktree_inventory_ignores_non_directories() {
 
 #[test]
 fn heartbeat_staleness() {
-    let fresh = ProjectHealthSnapshot {
-        last_heartbeat: now_secs(),
-        last_sync: 0,
-        degraded: false,
-        ..ProjectHealthSnapshot::default()
-    };
+    let fresh = ProjectHealth::default();
+    fresh.last_heartbeat.store(now_secs(), Ordering::Relaxed);
     assert!(!fresh.heartbeat_stale());
-    let never = ProjectHealthSnapshot {
-        last_heartbeat: 0,
-        last_sync: 0,
-        degraded: false,
-        ..ProjectHealthSnapshot::default()
-    };
+    let never = ProjectHealth::default();
     assert!(never.heartbeat_stale());
-    let old = ProjectHealthSnapshot {
-        last_heartbeat: now_secs().saturating_sub(HEARTBEAT_STALE_SECS + 10),
-        last_sync: 0,
-        degraded: false,
-        ..ProjectHealthSnapshot::default()
-    };
+    let old = ProjectHealth::default();
+    old.last_heartbeat.store(
+        now_secs().saturating_sub(HEARTBEAT_STALE_SECS + 10),
+        Ordering::Relaxed,
+    );
     assert!(old.heartbeat_stale());
 }
 
@@ -522,58 +514,24 @@ fn currently_watch_limited(repo: &Path) -> bool {
 /// tests in this same suite register watches concurrently), so a probe taken
 /// before the real registration can pass while the real install — racing
 /// against those siblings a moment later — still fails. Instead, we let the
-/// real watch task run and race its readiness signal against a fast poll of
-/// `degraded`: as soon as EITHER fires we react, rather than always waiting
-/// out the full [`TEST_READY_TIMEOUT`] budget first. That matters here
-/// specifically because the contention is often a brief spike — confirming
-/// "is the OS out of watches" only *after* burning the whole timeout would
-/// check long after sibling tests released theirs, wrongly concluding the
-/// install was healthy. Once `degraded` flips we confirm the cause
-/// immediately (within one ~20ms poll tick of the real failure) with a fresh
-/// `install_watches` attempt on the same repo: `MaxFilesWatch` there means
-/// the OS is still (or again) out of watches, so we skip. Any other outcome —
-/// the [`TEST_READY_TIMEOUT`] budget elapsing with neither signal, or
-/// degraded for an unconfirmed reason — is treated as a real regression and
-/// panics, exactly as the unconditional wait did before.
+/// real watch task run and wait for the actual debounce-loop readiness signal.
+/// If that does not arrive in time, a fresh matching watch attempt proves an
+/// environmental inotify limit before the test is skipped; any other timeout
+/// remains a regression.
 async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Arc<WatchState>> {
-    enum Ready {
-        Debounce,
-        Degraded,
-    }
     watcher.ensure_watching(repo).await;
     let state = ready_registered_state(watcher, repo).await;
 
-    let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, async {
-        tokio::select! {
-            () = state.entered_debounce.notified() => Ready::Debounce,
-            () = poll_until_degraded(&state) => Ready::Degraded,
-        }
-    })
-    .await;
-
-    match outcome {
-        Ok(Ready::Debounce) => Some(state),
-        Ok(Ready::Degraded) if currently_watch_limited(repo) => {
+    match tokio::time::timeout(TEST_READY_TIMEOUT, state.entered_debounce.notified()).await {
+        Ok(()) => Some(state),
+        Err(_) if currently_watch_limited(repo) => {
             eprintln!(
                 "SKIP: OS inotify watch limit reached (fs.inotify.max_user_watches \
                  exhausted); raise it to exercise the real git_watch debounce path"
             );
             None
         }
-        Ok(Ready::Degraded) | Err(_) => panic!("watch task must reach debounce_loop"),
-    }
-}
-
-/// Resolves as soon as `state` is marked degraded, polling frequently so a
-/// real (but often brief) OS watch-limit failure is caught close to the
-/// moment it happens, rather than after some longer fixed wait has let
-/// sibling tests' transient contention clear.
-async fn poll_until_degraded(state: &Arc<WatchState>) {
-    loop {
-        if state.health.snapshot().degraded {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        Err(_) => panic!("watch task must reach debounce_loop"),
     }
 }
 
@@ -589,43 +547,16 @@ async fn ensure_watching_registers_dedups_and_caps() {
     assert!(watcher.is_enabled());
 
     watcher.ensure_watching(repo_a.path()).await;
-    assert_eq!(watcher.health_report().await.len(), 1);
+    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
 
     watcher.ensure_watching(repo_a.path()).await;
-    assert_eq!(watcher.health_report().await.len(), 1);
+    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
 
     watcher.ensure_watching(repo_b.path()).await;
-    assert_eq!(watcher.health_report().await.len(), 2);
+    assert_eq!(watcher.inner.projects.lock().await.len(), 2);
 
     watcher.ensure_watching(repo_c.path()).await;
-    assert_eq!(watcher.health_report().await.len(), 3);
     assert_eq!(watcher.inner.projects.lock().await.len(), 2);
-    assert_eq!(watcher.inner.degraded_projects.lock().await.len(), 1);
-    watcher.shutdown().await;
-}
-
-#[tokio::test]
-async fn capacity_rejected_project_has_bounded_degraded_coverage() {
-    let repo_a = temp_repo();
-    let repo_b = temp_repo();
-    let mut config = fast_watch_config();
-    config.watch_max_projects = 1;
-    let watcher = GitWatcher::new(config);
-
-    watcher.ensure_watching(repo_a.path()).await;
-    watcher.ensure_watching(repo_b.path()).await;
-
-    let report = watcher.health_report().await;
-    assert_eq!(report.len(), 2);
-    assert_eq!(
-        report
-            .iter()
-            .find(|(root, _)| *root == watcher_key(repo_b.path()))
-            .map(|(_, health)| health.coverage),
-        Some(ProjectWatchCoverage::DegradedPoll),
-        "a project beyond the OS watcher cap must retain bounded degraded coverage"
-    );
-    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
     assert_eq!(watcher.inner.degraded_projects.lock().await.len(), 1);
     watcher.shutdown().await;
 }
@@ -648,15 +579,12 @@ async fn common_dir_collapses_aliases_but_retains_worktree_snapshots() {
     watcher.ensure_watching(&alias).await;
     watcher.ensure_watching(&linked_root).await;
 
-    let report = watcher.health_report().await;
-    assert_eq!(report.len(), 1, "one git common dir owns one OS watcher");
+    let state = ready_registered_state(&watcher, repo.path()).await;
+    assert_eq!(watcher.inner.projects.lock().await.len(), 1);
     assert_eq!(
-        report[0].1.active_snapshot_roots, 2,
+        state.roots().await.len(),
+        2,
         "canonical aliases collapse while linked worktree snapshots remain distinct"
-    );
-    assert_eq!(
-        report[0].1.deduplicated_activations, 2,
-        "both the alias and linked worktree reuse the common-dir watcher"
     );
     watcher.shutdown().await;
 }
@@ -948,7 +876,8 @@ async fn disabled_watcher_never_registers() {
     let watcher = GitWatcher::new(config);
     assert!(!watcher.is_enabled());
     watcher.ensure_watching(repo.path()).await;
-    assert!(watcher.health_report().await.is_empty());
+    assert!(watcher.inner.projects.lock().await.is_empty());
+    assert!(watcher.inner.degraded_projects.lock().await.is_empty());
 }
 
 #[tokio::test]
@@ -963,143 +892,4 @@ async fn shutdown_cancels_and_joins_project_watcher_tasks() {
 
     assert!(watcher.inner.projects.lock().await.is_empty());
     assert!(state.task.lock().await.is_none());
-}
-
-/// The safety-critical property that justifies this metadata watcher over the
-/// removed #80 working-tree watcher: a plain source-file edit (no git
-/// operation) must NOT trigger any watcher sync. We drive the REAL watcher
-/// task and assert `last_sync` never advances.
-///
-/// This test proves a NEGATIVE about a REAL inotify event (a working-tree
-/// write that must not be delivered/acted on), so it deliberately runs on the
-/// real clock — paused time cannot manufacture "an OS event that never
-/// arrives". Determinism instead comes from making both the readiness and the
-/// negative window OBSERVABLE rather than fixed sleeps:
-///   1. We wait on the `entered_debounce` state signal, so the watch is
-///      PROVABLY installed before the edit — closing the old false-pass
-///      window where a 200ms sleep elapsed before inotify was armed (a real
-///      regression could then slip through unseen).
-///   2. After the edit we poll `last_sync` across a window several times the
-///      debounce+max-delay budget and fail on the FIRST advance. A scheduler
-///      stall only lengthens the safe window — it can never produce a false
-///      negative — so no magic epsilon is needed.
-#[tokio::test]
-async fn source_file_edit_triggers_no_sync() {
-    let repo = temp_repo();
-    let config = fast_watch_config();
-    let debounce_ms = config.watch_debounce_ms;
-    let max_delay_ms = config.watch_max_delay_ms;
-    let watcher = GitWatcher::new(config);
-    let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
-        return;
-    };
-
-    let baseline = state.health.snapshot().last_sync;
-
-    std::fs::write(repo.path().join("a.txt"), "changed by editor\n").unwrap();
-    std::fs::write(repo.path().join("b.txt"), "brand new file\n").unwrap();
-
-    // Poll across a window MUCH larger than debounce + max-delay, failing
-    // fast on the FIRST sign of a spurious reaction. We assert TWO things at
-    // every tick, so the test is non-vacuous even against an unindexed repo
-    // (where a sync would no-op and never move `last_sync`):
-    //   * `last_sync` never advances — no sync ran, AND
-    //   * the dirty set never becomes marked — no working-tree event ever
-    //     reached `classify_and_mark`. The dirty mark is the ROOT observable:
-    //     if a regression recursively watched the working tree, the edit
-    //     would set `dirty` for the ~debounce+max-delay window, which this
-    //     20ms poll catches before the loop drains it. A scheduler stall only
-    //     widens both safe windows; it cannot fabricate a false negative.
-    let window = Duration::from_millis((debounce_ms + max_delay_ms) * 4 + 500);
-    let deadline = std::time::Instant::now() + window;
-    while std::time::Instant::now() < deadline {
-        assert_eq!(
-            state.health.snapshot().last_sync,
-            baseline,
-            "a working-tree source edit must not advance last_sync (metadata-only watcher)"
-        );
-        assert!(
-            state.dirty.lock().await.is_clean(),
-            "a working-tree source edit must never mark the dirty set \
-             (the metadata-only watcher must not watch the working tree)"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-
-    // Final check after the full observation window.
-    assert_eq!(
-        state.health.snapshot().last_sync,
-        baseline,
-        "a working-tree source edit must not advance last_sync (metadata-only watcher)"
-    );
-    assert!(
-        state.dirty.lock().await.is_clean(),
-        "a working-tree source edit must never mark the dirty set"
-    );
-}
-
-/// The REAL debounce path (`project_task` → `debounce_loop`) coalesces a
-/// burst of metadata events into a single drained pass: after events stop,
-/// the dirty set is taken exactly once and returns to clean. This drives the
-/// live task (not a reimplemented helper) and injects events through the real
-/// notify-callback body (`classify_and_mark`), then asserts the debounce loop
-/// drains them.
-///
-/// Deterministic under `start_paused = true`: there is no wall-clock guess.
-/// Readiness is a state signal (`entered_debounce`), and the coalesce sleep
-/// is driven by `tokio::time::advance` PAST the hard cap, so the drain is
-/// forced to fire regardless of scheduler latency. The coalescing guarantee
-/// is still fully asserted: the set is dirty before time advances and clean
-/// after exactly one drain (a per-event re-fire would either not reach clean
-/// or would leave residue across the burst).
-#[tokio::test(start_paused = true)]
-async fn debounce_loop_coalesces_and_drains_events() {
-    let repo = temp_repo();
-    let watcher = GitWatcher::new(fast_watch_config());
-    let max_delay_ms = watcher.inner.config.watch_max_delay_ms;
-    let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
-        return;
-    };
-
-    for i in 0..5 {
-        let event = notify::Event {
-            kind: EventKind::Modify(notify::event::ModifyKind::Data(
-                notify::event::DataChange::Content,
-            )),
-            paths: vec![state.project_root.join(format!(".git/refs/heads/feat/{i}"))],
-            attrs: EventAttributes::default(),
-        };
-        classify_and_mark(&state, &event);
-    }
-    assert!(
-        !state.dirty.lock().await.is_clean(),
-        "events should mark the dirty set before the debounce fires"
-    );
-
-    // Let the loop observe the burst and park on the debounce sleep.
-    for _ in 0..8 {
-        tokio::task::yield_now().await;
-    }
-
-    tokio::time::advance(Duration::from_millis(max_delay_ms + 1)).await;
-
-    let drained = tokio::time::timeout(TEST_READY_TIMEOUT, state.plan_drained.notified())
-        .await
-        .is_ok();
-    assert!(
-        drained,
-        "the real debounce loop must coalesce the event burst and drain the dirty set"
-    );
-    assert_eq!(
-        state.drained_plans.load(Ordering::Relaxed),
-        1,
-        "one event burst must produce exactly one coalesced plan"
-    );
-    let health = state.health.snapshot();
-    assert_eq!(health.events_received, 5);
-    assert_eq!(health.plans_drained, 1);
-    assert!(
-        state.dirty.lock().await.is_clean(),
-        "draining the coalesced plan must clear the dirty set"
-    );
 }

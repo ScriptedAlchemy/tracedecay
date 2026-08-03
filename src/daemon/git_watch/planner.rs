@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tokio::sync::Mutex;
@@ -10,8 +9,8 @@ use tokio::time::Instant;
 use crate::branch::BranchAddOutcome;
 
 use super::generation::{
-    GenerationError, GenerationGate, GenerationReservation, ReservationError, SnapshotGeneration,
-    snapshot_generation,
+    GenerationError, GenerationGate, GenerationReservation, ReservationError, SYNC_RETRY_INITIAL,
+    SnapshotGeneration, snapshot_generation,
 };
 use super::{
     DirtyPlan, GitWatcherInner, IN_FLIGHT_RETRY_DELAY, TraceDecay, WatchState, log_daemon_event,
@@ -57,10 +56,6 @@ pub(super) async fn execute_plan(
         let reservation = match reserve_generation(&state.worktree_gates, &generation).await {
             Ok(reservation) => reservation,
             Err(ReservationError::Unchanged) => {
-                state
-                    .health
-                    .worktree_generation_skips
-                    .fetch_add(1, Ordering::Relaxed);
                 continue;
             }
             Err(error) => {
@@ -165,10 +160,18 @@ pub(super) async fn execute_plan(
     }
 
     if plan.gc_eligible || plan.reconcile_metadata {
+        let mut gc_retry = false;
         for root in &roots {
             if let Some(graph) = retained_project_graph(inner, root).await {
-                store_maintenance::run_gc(inner, &graph).await;
+                gc_retry |= !store_maintenance::run_gc(inner, &graph).await;
+            } else {
+                gc_retry = true;
             }
+        }
+        if gc_retry {
+            state
+                .schedule_retry(DirtyPlan::gc(), SYNC_RETRY_INITIAL)
+                .await;
         }
     }
 }
@@ -256,13 +259,8 @@ fn retry_delay(error: ReservationError) -> Duration {
 
 async fn defer_plan(state: &WatchState, plan: DirtyPlan, error: ReservationError) {
     if error == ReservationError::Unchanged {
-        state
-            .health
-            .unchanged_generation_skips
-            .fetch_add(1, Ordering::Relaxed);
         return;
     }
-    state.health.backoff_skips.fetch_add(1, Ordering::Relaxed);
     state.schedule_retry(plan, retry_delay(error)).await;
 }
 
@@ -296,12 +294,7 @@ async fn defer_generation_error(
             log_generation_failure(root, &error);
             drop(reservation);
         }
-        Err(ReservationError::Unchanged) => {
-            state
-                .health
-                .unchanged_generation_skips
-                .fetch_add(1, Ordering::Relaxed);
-        }
+        Err(ReservationError::Unchanged) => {}
         Err(error) => {
             defer_plan(state, plan, error).await;
         }
@@ -362,20 +355,34 @@ pub(super) async fn sync_snapshot(
             return;
         }
     }
-    if store_maintenance::sync_project(
-        &graph,
-        inner.config.full_sync_escalation_files,
-        &inner.administration,
-    )
-    .await
-    {
+    let synced = if graph.project_root() == root {
+        store_maintenance::sync_project(
+            &graph,
+            inner.config.full_sync_escalation_files,
+            &inner.administration,
+        )
+        .await
+    } else if let Some(branch) = crate::branch::current_branch(root) {
+        matches!(
+            store_maintenance::track_worktree_branch(
+                &inner.administration,
+                &graph,
+                root.to_path_buf(),
+                branch,
+            )
+            .await,
+            Some(outcome) if worktree_tracking_succeeded(&outcome)
+        )
+    } else {
+        false
+    };
+    if synced {
         match record_success_if_current(&state.sync_gates, generation.clone(), root).await {
             Ok(true) => {
                 let branch = generation
                     .branch
                     .clone()
                     .unwrap_or_else(|| "detached".to_string());
-                state.health.mark_synced();
                 log_daemon_event(
                     "git_watch_synced",
                     &[
