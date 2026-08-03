@@ -32,7 +32,6 @@ export interface ThreadRelations {
   branchSpans: readonly LoomBranchSpanV1[];
   commitStatus: LoomSourceStatusV1 | null;
   branchStatus: LoomSourceStatusV1 | null;
-  deliveryStatus: LoomSourceStatusV1 | null;
 }
 
 export function ThreadChain({
