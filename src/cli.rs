@@ -114,7 +114,7 @@ pub struct Cli {
     /// Verify and print the exact signed lifecycle plan without mutating.
     /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
     /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `migrate registry-gc`).
+    /// from unrelated subcommands (e.g. `branch gc`, `migrate storage-report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
     /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
@@ -1026,122 +1026,6 @@ pub enum MemoryAction {
 
 #[derive(Subcommand)]
 pub enum MigrateAction {
-    /// Consolidate two non-empty profile shards for one repository identity.
-    #[command(
-        long_about = CONSOLIDATE_LONG_ABOUT,
-        after_help = CONSOLIDATE_AFTER_HELP
-    )]
-    Consolidate {
-        /// Repository path whose git-common-dir identity owns both shards.
-        #[arg(long, default_value = ".")]
-        project: String,
-        /// Legacy/input project id to preserve and merge.
-        #[arg(long = "source-project-id")]
-        source_project_id: String,
-        /// Currently selected project id to use as the merge base.
-        #[arg(long = "target-project-id")]
-        target_project_id: String,
-        /// Profile root containing projects/<project-id> shards.
-        #[arg(long = "profile-root")]
-        profile_root: Option<String>,
-        /// Apply the planned consolidation. Omit for a read-only inventory.
-        #[arg(long)]
-        apply: bool,
-        /// Confirmation token printed by the read-only inventory.
-        #[arg(long = "confirm-token", requires = "apply")]
-        confirm_token: Option<String>,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Build a readonly migration inventory or manifest plan
-    Plan {
-        /// Root directory to scan (repeatable). Defaults to the current directory.
-        #[arg(long = "root")]
-        roots: Vec<String>,
-        /// Include all registered projects even when explicit roots are supplied.
-        #[arg(long = "include-all-registered")]
-        include_all_registered: bool,
-        /// Follow symlinked directories while scanning.
-        #[arg(long)]
-        follow_symlinks: bool,
-        /// Run full SQLite integrity checks during a read-only inventory preview.
-        #[arg(long = "verify-integrity")]
-        verify_integrity: bool,
-        /// Write a manifest plan to this path instead of only printing inventory.
-        #[arg(long)]
-        manifest: Option<String>,
-        /// Save a manifest under the target profile's migration-inventory directory.
-        #[arg(long)]
-        save: bool,
-        /// Target profile root for manifest-backed profile-shard planning.
-        #[arg(long)]
-        profile_root: Option<String>,
-        /// Project id to use for manifest-backed profile-shard planning.
-        #[arg(long)]
-        project_id: Option<String>,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Export a profile-sharded project store to a standalone directory.
-    Export {
-        /// Export from the current profile-sharded store layout.
-        #[arg(long = "from-profile", required = true)]
-        from_profile: bool,
-        /// Project path whose enrollment marker identifies the profile shard.
-        #[arg(long, conflicts_with = "project_id")]
-        project: Option<String>,
-        /// Project id to export from the current profile root.
-        #[arg(long = "project-id", conflicts_with = "project")]
-        project_id: Option<String>,
-        /// Destination directory for the exported store.
-        #[arg(long)]
-        to: String,
-    },
-    /// Apply a single-store manifest plan with staged profile-shard copy and cutover.
-    Apply {
-        /// Manifest path to apply.
-        #[arg(long)]
-        manifest: String,
-        /// Confirmation token from `migrate plan`.
-        #[arg(long = "confirm-token")]
-        confirm_token: String,
-    },
-    /// Verify a manifest plan without mutating source stores.
-    Verify {
-        /// Manifest path to verify.
-        #[arg(long)]
-        manifest: String,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Reconstruct registry plans from profile-sharded store manifests without applying them.
-    Reconstruct {
-        /// Profile root containing projects/<project_id>/store_manifest.json files.
-        #[arg(long = "profile-root")]
-        profile_root: String,
-        /// Apply registry reconstruction plans after scanning manifests.
-        #[arg(long)]
-        apply: bool,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove stale registry rows for projects whose canonical roots no longer exist.
-    #[command(name = "registry-gc")]
-    RegistryGc {
-        /// Only consider registered projects whose canonical root starts with this prefix.
-        #[arg(long)]
-        prefix: Option<String>,
-        /// Apply deletions. Omit for a dry-run preview.
-        #[arg(long)]
-        apply: bool,
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Read-only per-store size, free-page ratio, and retention-backlog report
     /// (plan 38 §7). Never mutates anything; use `branch gc` and the daemon's
     /// automatic sweeps to reclaim what this reports.
@@ -1180,21 +1064,12 @@ pub enum MigrateAction {
         #[arg(long)]
         restore: String,
     },
-    /// Roll back a manifest plan when the rollback preconditions are supported.
-    Rollback {
-        /// Manifest path to roll back.
-        #[arg(long)]
-        manifest: String,
-        /// Confirmation token from `migrate plan`.
-        #[arg(long = "confirm-token")]
-        confirm_token: String,
-    },
     /// Remove old source artifacts after a verified manifest-backed migration.
     CleanupSources {
         /// Manifest path to clean up.
         #[arg(long)]
         manifest: String,
-        /// Confirmation token from `migrate plan`.
+        /// Confirmation token recorded in the manifest being cleaned up.
         #[arg(long = "confirm-token")]
         confirm_token: String,
     },

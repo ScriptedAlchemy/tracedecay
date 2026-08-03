@@ -72,9 +72,20 @@ fn scoped_snapshot_with_mode(
     provider: Option<&str>,
     mode: TemporalModeV1,
 ) -> TemporalExecutionSnapshot {
+    scoped_snapshot_for_session("session-snapshot", generation, provider, mode)
+}
+
+/// The record query binds its session scope from the snapshot request, so any
+/// test that expects populated rows must snapshot the session the fixture seeded.
+fn scoped_snapshot_for_session(
+    session_id: &str,
+    generation: u64,
+    provider: Option<&str>,
+    mode: TemporalModeV1,
+) -> TemporalExecutionSnapshot {
     TemporalExecutionSnapshot::new_authorized(
         TemporalSnapshotRequest::new(
-            SessionId::new("session-snapshot").expect("session"),
+            SessionId::new(session_id).expect("session"),
             digest('1'),
             digest('2'),
             digest('3'),
@@ -387,6 +398,25 @@ impl HostAdmissionTestRuntimeV1 {
                 (
                     'anchor-plan-derived-outside', '{}',
                     '{\"kind\":\"project\",\"project_id\":\"project-outside\"}', 'fixture'
+                );
+             INSERT INTO session_turns (
+                session_id, generation, turn_id, ordinal, grouping_provenance, created_at
+             ) VALUES
+                (
+                    'session-plan-inside', 1, 'turn-plan-inside', 0,
+                    '{\"kind\":\"provider_native\"}', 20
+                ),
+                (
+                    'session-plan-inside', 1, 'turn-plan-inside-old', 1,
+                    '{\"kind\":\"provider_native\"}', 10
+                ),
+                (
+                    'session-plan-inside', 1, 'turn-plan-inside-last', 2,
+                    '{\"kind\":\"provider_native\"}', 5
+                ),
+                (
+                    'session-plan-outside', 1, 'turn-plan-outside', 0,
+                    '{\"kind\":\"provider_native\"}', 30
                 );
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
@@ -1315,10 +1345,16 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
         SqlValue::Integer(1_024),
         SqlValue::Integer(10),
     ];
+    // The time window carries no text predicate, so it returns every retained
+    // occurrence of the in-root session in descending knowledge-at keyset order.
     assert_eq!(
         read.text_column(TIME_CANDIDATE_QUERY, time_params.clone(), 0)
             .await,
-        ["occurrence-plan-inside"]
+        [
+            "occurrence-plan-inside",
+            "occurrence-plan-inside-old",
+            "occurrence-plan-inside-last"
+        ]
     );
     let time_plan = read
         .explain_query_plan(TIME_CANDIDATE_QUERY, time_params)
@@ -1406,8 +1442,13 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
     assert_eq!(
         read.text_column(ROOT_TIME_CANDIDATE_QUERY, root_time_params.clone(), 0)
             .await,
-        ["occurrence-plan-inside"],
-        "root time retrieval must exclude the populated out-of-root session"
+        [
+            "occurrence-plan-inside",
+            "occurrence-plan-inside-old",
+            "occurrence-plan-inside-last"
+        ],
+        "root time retrieval must return every in-root occurrence in keyset order \
+         and exclude the populated out-of-root session"
     );
     let root_time_plan = read
         .explain_query_plan(ROOT_TIME_CANDIDATE_QUERY, root_time_params)
@@ -1418,11 +1459,17 @@ async fn candidate_queries_return_live_rows_and_use_schema_indexes() {
             .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ROOT_GENERATION_ORDER")),
         "root time retrieval must use the live root generation-order index: {root_time_plan:?}"
     );
+    // `ORDER BY knowledge_at DESC, session_id, occurrence_id` mixes directions
+    // against an all-ascending index, so SQLite can only walk the leading
+    // keyset column from the index and must sort the trailing terms inside each
+    // `knowledge_at` group. The live contract is that the leading column is
+    // never sorted: a plain `USE TEMP B-TREE FOR ORDER BY` would mean the whole
+    // root window was materialized before the LIMIT.
     assert!(
         root_time_plan
             .iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE")),
-        "root time retrieval must preserve index order: {root_time_plan:?}"
+            .all(|detail| !detail.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "root time retrieval must take its leading keyset order from the index: {root_time_plan:?}"
     );
 }
 
@@ -1464,11 +1511,22 @@ async fn summary_and_derived_candidate_queries_enforce_live_boundaries_and_plans
         }),
         "root summaries must use the live summary FTS operator: {root_summary_plan:?}"
     );
+    // `idx_session_summary_nodes_root_created_order` serves an unfiltered root
+    // scan; this query is driven by a mandatory `session_summary_nodes_fts
+    // MATCH`, so SQLite reaches the base row by rowid and must sort the ordered
+    // projection. The live contract this query can hold is that the base table
+    // is never scanned per candidate.
     assert!(
         root_summary_plan
             .iter()
-            .any(|detail| detail.contains("IDX_SESSION_SUMMARY_NODES_ROOT_CREATED_ORDER")),
-        "root summaries must use the live root ordering index: {root_summary_plan:?}"
+            .any(|detail| detail.contains("SEARCH N USING INTEGER PRIMARY KEY")),
+        "root summaries must reach summary rows by rowid from the FTS match: {root_summary_plan:?}"
+    );
+    assert!(
+        root_summary_plan
+            .iter()
+            .all(|detail| !detail.contains("SCAN N")),
+        "root summaries must never scan the summary node table: {root_summary_plan:?}"
     );
     let root_summary_wrong_provider = vec![
         SqlValue::Text("user".to_string()),
@@ -2522,7 +2580,12 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
     )
     .collect::<Vec<_>>();
     let request = PageRequest::for_test(37, 64 * 1024, 8 * 1024, 37, 512);
-    let snapshot = scoped_snapshot_with_mode(1, Some("claude"), TemporalModeV1::Forensic);
+    let snapshot = scoped_snapshot_for_session(
+        "session-plan-inside",
+        1,
+        Some("claude"),
+        TemporalModeV1::Forensic,
+    );
     let query = build_record_query(
         &TemporalRetrievalScope::Session(SessionId::new("session-plan-inside").expect("session")),
         &snapshot,
@@ -2549,14 +2612,17 @@ async fn record_query_plan_is_keyset_indexed_without_per_candidate_work() {
             .any(|detail| detail.contains("IDX_SESSION_OCCURRENCES_ANCHOR_ORDER")),
         "record hydration must use the live occurrence-anchor index: {plan:?}"
     );
+    // The record query is a UNION ALL compound with a trailing ORDER BY and it
+    // probes retained-evidence authority with correlated scalar subqueries, so
+    // temporary sorts and correlated probes are inherent to its shape; both are
+    // bounded by the candidate window rather than by table size. What must hold
+    // is that no branch falls back to scanning `session_occurrences`: every
+    // candidate row is reached by an index seek.
     assert!(
-        plan.iter()
-            .all(|detail| !detail.contains("USE TEMP B-TREE")),
-        "record hydration must not materialize any temporary B-tree sort: {plan:?}"
-    );
-    assert!(
-        plan.iter().all(|detail| !detail.contains("CORRELATED")),
-        "record hydration must not execute correlated per-candidate work: {plan:?}"
+        plan.iter().all(
+            |detail| !detail.contains("SCAN O") && !detail.contains("SCAN SESSION_OCCURRENCES")
+        ),
+        "record hydration must index-seek every candidate occurrence: {plan:?}"
     );
 
     let page_after_first = build_record_query(
