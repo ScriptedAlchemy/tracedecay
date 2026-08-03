@@ -198,6 +198,30 @@ async fn existing_filters_translate_to_one_root_wide_temporal_query() {
 }
 
 #[tokio::test]
+async fn message_search_clamps_page_and_context_budget_to_canonical_bounds() {
+    for (requested_limit, expected_limit) in [(0, 1), (50, 50), (51, 50)] {
+        let service = RecordingService::default();
+        handle_message_search_with_service(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json!({
+                "query": "database backup",
+                "limit": requested_limit,
+                "format": "json"
+            }),
+            Some(&service),
+        )
+        .await
+        .unwrap();
+
+        let command = service.command();
+        assert_eq!(command.query().limit(), expected_limit);
+        assert_eq!(command.query().context_budget().max_bytes, 64 * 1024);
+        assert_eq!(command.query().context_budget().max_tokens, 16 * 1024);
+    }
+}
+
+#[tokio::test]
 async fn compatibility_filters_bind_the_temporal_cursor_request() {
     let first = RecordingService::default();
     handle_message_search_with_service(
