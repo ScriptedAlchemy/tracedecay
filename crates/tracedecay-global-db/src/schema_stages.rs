@@ -1,17 +1,15 @@
 use super::schema_contract::{
-    authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
-    ensure_authority_invariant_schema, ensure_authority_invariants, require_foreign_key_audit,
+    ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
-    suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
-    validate_authority_schema_contract, validate_registry_schema_contract,
+    validate_authority_rows_exhaustive, validate_authority_schema_contract,
+    validate_registry_schema_contract,
 };
 use super::{
-    configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, git_index_transactions, global_db_operation_error, observation,
-    observation_projection, project_registry, session_temporal,
+    configuration, git_index_transactions, global_db_operation_error, observation,
+    observation_projection, session_temporal,
 };
 use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, QueryExecutor, TransactionBehavior, params,
+    Connection, Executor, QueryExecutor, TransactionBehavior,
 };
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
@@ -168,7 +166,9 @@ const TRANSCRIPT_SCHEMA: &str = "
         role TEXT NOT NULL,
         timestamp INTEGER,
         ordinal INTEGER NOT NULL,
-        text TEXT NOT NULL,
+        occurrence_id TEXT,
+        snippet_text TEXT NOT NULL,
+        index_text TEXT NOT NULL,
         kind TEXT,
         model TEXT,
         tool_names TEXT,
@@ -185,77 +185,17 @@ const TRANSCRIPT_SCHEMA: &str = "
         ON session_messages(timestamp);
     CREATE INDEX IF NOT EXISTS idx_session_messages_source
         ON session_messages(source_path);
-    CREATE TABLE IF NOT EXISTS session_backfill_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-    CREATE VIRTUAL TABLE IF NOT EXISTS session_messages_fts USING fts5(
-        text, role, kind, model, tool_names,
-        content='session_messages', content_rowid='rowid'
-    );
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_insert
-        AFTER INSERT ON session_messages BEGIN
-            INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
-            VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
-        END;
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_delete
-        AFTER DELETE ON session_messages BEGIN
-            INSERT INTO session_messages_fts(
-                session_messages_fts, rowid, text, role, kind, model, tool_names
-            )
-            VALUES (
-                'delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names
-            );
-        END;
-    CREATE TRIGGER IF NOT EXISTS session_messages_fts_update
-        AFTER UPDATE ON session_messages BEGIN
-            INSERT INTO session_messages_fts(
-                session_messages_fts, rowid, text, role, kind, model, tool_names
-            )
-            VALUES (
-                'delete', OLD.rowid, OLD.text, OLD.role, OLD.kind, OLD.model, OLD.tool_names
-            );
-            INSERT INTO session_messages_fts(rowid, text, role, kind, model, tool_names)
-            VALUES (NEW.rowid, NEW.text, NEW.role, NEW.kind, NEW.model, NEW.tool_names);
-        END;
 ";
 
-/// Installs the global/session schema at its final shape through the exact
-/// registered runtime connection, or verifies that an existing store already
-/// carries it. No database path is resolved or reopened, and no store is
-/// stepped forward from an older shape.
+/// Installs the final Registered schema into an empty sibling staging store.
+///
+/// Existing stores are never sent through this path. The runtime registry
+/// validates their exact catalog read-only and returns `ResetRequired` for any
+/// other shape.
 pub async fn ensure_registered_schema(
     conn: &Connection,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    let convergence = ensure_registered_schema_for_admission(conn).await?;
-    converge_registered_schema(conn, convergence).await
-}
-
-#[derive(Clone, Copy)]
-pub struct RegisteredSchemaConvergence {
-    force_exhaustive: bool,
-    is_fresh: bool,
-}
-
-/// Installs the minimum schema and write guards required before a registered
-/// runtime may be published. Historical convergence remains separately
-/// resumable so daemon admission never waits for whole-store scans.
-pub async fn ensure_registered_schema_for_admission(
-    conn: &Connection,
-) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
-    let is_fresh = !table_exists(conn, "sessions").await?
-        && !table_exists(conn, "observations").await?
-        && !table_exists(conn, "code_projects").await?;
-    ensure_authority_audit_checkpoint_schema(conn).await?;
-    let force_exhaustive = !authority_invariant_triggers_intact(conn).await?;
-    if force_exhaustive && !is_fresh {
-        // Persist the requirement before the schema transaction repairs the
-        // trigger evidence that armed it. The progress row doubles as the
-        // resumable cursor and is removed only by a completed FK sweep.
-        require_foreign_key_audit(conn).await?;
-    }
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
@@ -268,12 +208,6 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| {
                 global_db_operation_error("initialize global project registry", error)
             })?;
-        ensure_code_project_native_root_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure native project roots", error))?;
-        project_registry::migrate_project_rows_to_canonical_keys(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("migrate canonical project keys", error))?;
         validate_registry_schema_contract(&transaction).await?;
 
         configuration::ensure_configuration_schema(&transaction)
@@ -295,15 +229,7 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| {
                 global_db_operation_error("initialize authorized scope-set schema", error)
             })?;
-        ensure_session_parent_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
-        ensure_parse_offset_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
-
         ensure_authority_audit_checkpoint_schema(&transaction).await?;
-        suspend_session_invariants_for_schema_upgrade(&transaction).await?;
         session_temporal::ensure_session_temporal_schema(&transaction).await?;
         observation::ensure_observation_schema(&transaction).await?;
         observation_projection::ensure_observation_projection_schema(&transaction)
@@ -357,50 +283,7 @@ pub async fn ensure_registered_schema_for_admission(
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
     validate_authority_schema_contract(conn).await?;
-    Ok(RegisteredSchemaConvergence {
-        force_exhaustive,
-        is_fresh,
-    })
-}
-
-/// Completes resumable authority convergence after the registered runtime is
-/// available. Every stage retains its existing durable checkpoint semantics.
-///
-/// Stores are created at the final schema by
-/// [`ensure_registered_schema_for_admission`], so there is nothing here to step
-/// an older shape forward: the historical projection-anchor binding, retrieval
-/// anchor, repository provenance, projector version migration, and session
-/// project-path passes were all one-time legacy upgrades and have been removed.
-/// Only the authority invariant audit remains, and it stays out of line because
-/// it pages real authority rows on a large store.
-pub async fn converge_registered_schema(
-    conn: &Connection,
-    convergence: RegisteredSchemaConvergence,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    // The invariant pass pages historical authority rows and can legitimately
-    // outlive an ordinary open on a large store. The admission phase has
-    // already installed and validated its guard triggers, so daemon reads and
-    // guarded writes may proceed while these idempotent repairs advance.
-    // Completed repairs survive interruption, while the trusted checkpoint is
-    // still written only after every audit succeeds.
-    ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
-}
-
-async fn table_exists(
-    conn: &impl QueryExecutor,
-    table: &str,
-) -> tracedecay_runtime_core::errors::Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
-            params![table],
-        )
-        .await
-        .map_err(|error| global_db_operation_error("inspect registered global schema", error))?;
-    rows.next()
-        .await
-        .map(|row| row.is_some())
-        .map_err(|error| global_db_operation_error("inspect registered global schema", error))
+    Ok(())
 }
 
 pub async fn validate_observation_authority_connection(

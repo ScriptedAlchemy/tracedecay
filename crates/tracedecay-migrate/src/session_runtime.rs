@@ -284,8 +284,7 @@ async fn attach_registered(
     let authority = runtime
         .database_authority(operation)
         .map_err(|failure| registry_error(operation, failure))?;
-    RegisteredGlobalDb::migrate_and_attach(runtime, expected_binding, expected_locator, authority)
-        .await
+    RegisteredGlobalDb::attach_exact(runtime, expected_binding, expected_locator, authority).await
 }
 
 fn registry_error(

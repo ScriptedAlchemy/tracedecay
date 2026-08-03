@@ -3,7 +3,7 @@ use tracedecay_runtime_core::errors::{Result, TraceDecayError};
 use tracedecay_runtime_core::store_runtime::schema::{StoreSchemaContractV2, StoreSchemaKindV2};
 
 const REGISTERED_CATALOG_FINGERPRINT_V2: &str =
-    "e70b2b5c62401ca1b6e6962fd4c91bd5e20025c55a7b8ecf8b1b0f725f4a4a40";
+    "63875ae92b818b73c7599f0663cbdf7fdca1cb029a6687ad26b2a1fcc25b94de";
 
 pub fn final_registered_schema_contract() -> Result<StoreSchemaContractV2> {
     StoreSchemaContractV2::new(
@@ -19,11 +19,16 @@ pub fn final_registered_schema_contract() -> Result<StoreSchemaContractV2> {
 pub async fn install_final_registered_schema(connection: &Connection) -> Result<()> {
     super::super::ensure_registered_schema(connection).await?;
     let transaction = connection.authorized_long_lease_transaction().await?;
+    let final_fragments = format!(
+        "{}
+         {}
+         PRAGMA application_id = 1413763634;
+         PRAGMA user_version = 1;",
+        crate::session_content::SESSION_CONTENT_SCHEMA_DDL,
+        tracedecay_rusqlite_runtime::remote::REMOTE_OBSERVATION_EVENTS_SCHEMA,
+    );
     transaction
-        .execute_schema_batch_step(
-            "PRAGMA application_id = 1413763634;
-             PRAGMA user_version = 1;",
-        )
+        .execute_schema_batch_step(&final_fragments)
         .await?;
     transaction.commit().await?;
     Ok(())

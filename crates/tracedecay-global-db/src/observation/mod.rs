@@ -1,11 +1,8 @@
-mod backfill;
 mod codec;
 mod persist;
 pub mod retention;
 mod schema;
 
-pub use backfill::OBSERVATION_PROVENANCE_SCHEMA_MIGRATION;
-pub use schema::OBSERVATION_ANCHOR_SCHEMA_MIGRATION;
 pub(super) use schema::ensure_observation_schema;
 
 use tracedecay_domain::{

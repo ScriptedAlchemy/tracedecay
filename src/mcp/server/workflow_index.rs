@@ -51,10 +51,9 @@ impl DaemonWorkflowIndexReadService {
     /// missing schema is never answered as a built index that happens to be
     /// empty.
     ///
-    /// One probe covers git-scope reads too: `ensure_registered_schema_for_admission`
-    /// installs the git-correlation and workflow-index DDL in a single
-    /// transaction, so the correlation tables cannot be absent while these are
-    /// present.
+    /// Exact Registered schema admission covers git-correlation and
+    /// workflow-index tables as one catalog, so either both are present or the
+    /// runtime is refused before this read service is constructed.
     async fn schema_missing(
         snapshot: &RegisteredWorkflowIndexSnapshot,
     ) -> Result<bool, WorkflowReadError> {

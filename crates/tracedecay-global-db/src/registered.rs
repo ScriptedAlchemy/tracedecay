@@ -83,12 +83,9 @@ impl RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredGlobalDb {
-    /// Creates the registered schema at its final shape (or verifies an
-    /// existing store already carries it) before validating and exposing the
-    /// registered global database facade. No path is reopened, and no store is
-    /// stepped forward from an older shape: a store at any other shape is a
-    /// typed refusal from [`super::ensure_registered_schema`].
-    pub async fn migrate_and_attach(
+    /// Attaches a runtime only after the registry has proved the exact final
+    /// Registered schema. This path never creates or changes schema.
+    pub async fn attach_exact(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
         expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
@@ -96,42 +93,8 @@ impl RegisteredGlobalDb {
     ) -> tracedecay_runtime_core::errors::Result<Self> {
         let write_connection =
             registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        if !runtime.schema_migrated() {
-            super::ensure_registered_schema(&write_connection).await?;
-        }
+        require_exact_registered_schema(&runtime)?;
         Self::finish_attach(runtime, write_connection, authority).await
-    }
-
-    /// Installs only admission-critical schema before publishing a daemon
-    /// runtime. The returned plan owns resumable historical convergence.
-    pub async fn migrate_and_attach_for_daemon(
-        runtime: StoreRuntimeHandle,
-        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
-        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
-        authority: DatabaseAuthority,
-    ) -> tracedecay_runtime_core::errors::Result<(
-        Self,
-        Option<super::schema_stages::RegisteredSchemaConvergence>,
-    )> {
-        let write_connection =
-            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
-        let convergence = if runtime.schema_migrated() {
-            None
-        } else {
-            Some(
-                super::schema_stages::ensure_registered_schema_for_admission(&write_connection)
-                    .await?,
-            )
-        };
-        let database = Self::finish_attach(runtime, write_connection, authority).await?;
-        Ok((database, convergence))
-    }
-
-    pub async fn converge_schema(
-        &self,
-        convergence: super::schema_stages::RegisteredSchemaConvergence,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
-        super::schema_stages::converge_registered_schema(&self.write_connection, convergence).await
     }
 
     pub async fn release_connection_memory(&self) -> tracedecay_runtime_core::errors::Result<()> {
@@ -797,6 +760,26 @@ impl RegisteredGlobalDbWriteTransaction<'_> {
                 tracedecay_runtime_core::db::engine::Error::invalid_operation(error.to_string())
             })
     }
+}
+
+fn require_exact_registered_schema(
+    runtime: &StoreRuntimeHandle,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    let exact = runtime.exact_schema().map_err(|error| {
+        registered_error(
+            "attach registered global database runtime",
+            format!("exact-final schema proof unavailable: {error:?}"),
+        )
+    })?;
+    if exact.contract().kind()
+        != tracedecay_runtime_core::store_runtime::schema::StoreSchemaKindV2::Registered
+    {
+        return Err(registered_error(
+            "attach registered global database runtime",
+            "runtime carries the wrong exact-final schema kind",
+        ));
+    }
+    Ok(())
 }
 
 fn registered_connection(

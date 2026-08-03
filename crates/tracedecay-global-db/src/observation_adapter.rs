@@ -114,6 +114,7 @@ impl RemoteReplayTransactionPortV1 for RegisteredRemoteReplayTransactionV1 {
                 RuntimeSubmitOutcomeV1::Saturated { .. }
                 | RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. }
                 | RuntimeSubmitOutcomeV1::CancelledBeforeCommit { .. }
+                | RuntimeSubmitOutcomeV1::CommitRecoveryRequired { .. }
                 | RuntimeSubmitOutcomeV1::Unavailable { .. } => {
                     return Err(RemoteReplayTransactionErrorV1::Unavailable);
                 }

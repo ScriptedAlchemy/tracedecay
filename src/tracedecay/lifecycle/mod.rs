@@ -420,13 +420,15 @@ impl TraceDecay {
 
     /// Requires the exact graph/memory proof issued before runtime publication.
     pub async fn ensure_schema_current(&self) -> Result<()> {
-        let exact = self.db.retained_runtime().exact_schema().map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("exact final schema proof unavailable: {error:?}"),
-            }
-        })?;
+        let exact =
+            self.db
+                .retained_runtime()
+                .exact_schema()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("exact final schema proof unavailable: {error:?}"),
+                })?;
         if exact.contract().kind()
-            != crate::store_runtime::schema::StoreSchemaKindV2::GraphMemory
+            != tracedecay_runtime_core::store_runtime::schema::StoreSchemaKindV2::GraphMemory
         {
             return Err(TraceDecayError::Config {
                 message: "runtime carries the wrong exact final schema kind".to_owned(),
