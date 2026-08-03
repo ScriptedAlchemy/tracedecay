@@ -99,7 +99,7 @@ impl CodexAppServerBackend {
 
 impl AgentTaskBackend for CodexAppServerBackend {
     fn run_task(&self, request: &AgentTaskRequest) -> Result<AgentTaskResponse> {
-        let backend_message = request.backend_message().map_err(automation_error)?;
+        let backend_message = request.backend_message().map_err(config_automation_error)?;
         let summary = run_prompt_with_codex_app_server(
             &backend_message,
             &self.config,
@@ -109,7 +109,7 @@ impl AgentTaskBackend for CodexAppServerBackend {
             .contract
             .strict_json
             .then(|| {
-                tracedecay_automation::backend::extract_response_json_object(
+                tracedecay_automation::backend::extract_response_json_object_preserving_json(
                     &summary.text,
                     &request.contract,
                 )
@@ -129,10 +129,24 @@ impl AgentTaskBackend for CodexAppServerBackend {
 }
 
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
-    tracedecay_automation::backend::extract_json_object_prefix(text).map_err(automation_error)
+    tracedecay_automation::backend::extract_json_object_prefix_preserving_json(text)
+        .map_err(automation_error)
 }
 
-fn automation_error(error: tracedecay_automation::AutomationError) -> TraceDecayError {
+fn automation_error(error: tracedecay_automation::backend::JsonExtractionError) -> TraceDecayError {
+    match error {
+        tracedecay_automation::backend::JsonExtractionError::Json(error) => {
+            TraceDecayError::Json(error)
+        }
+        tracedecay_automation::backend::JsonExtractionError::Config(error) => {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        }
+    }
+}
+
+fn config_automation_error(error: tracedecay_automation::AutomationError) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),
     }

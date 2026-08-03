@@ -1,10 +1,40 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::fmt;
 use std::time::Duration;
 
 use crate::config::{AutomationBackend, AutomationConfig};
 use crate::{AutomationError, Result};
+
+/// Errors returned while decoding backend JSON. Syntax failures retain their
+/// original serde error so root adapters can preserve the historical error
+/// variant instead of flattening malformed output into a config error.
+#[derive(Debug)]
+pub enum JsonExtractionError {
+    Json(serde_json::Error),
+    Config(AutomationError),
+}
+
+impl JsonExtractionError {
+    fn into_automation_error(self) -> AutomationError {
+        match self {
+            Self::Json(error) => AutomationError::config(error.to_string()),
+            Self::Config(error) => error,
+        }
+    }
+}
+
+impl fmt::Display for JsonExtractionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Json(error) => error.fmt(formatter),
+            Self::Config(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for JsonExtractionError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -401,22 +431,39 @@ pub fn backend_availability(
 }
 
 pub fn extract_json_object_prefix(text: &str) -> Result<Value> {
-    let candidate = strip_optional_json_fence(text)?;
-    parse_json_object_prefix(candidate)
+    extract_json_object_prefix_preserving_json(text)
+        .map_err(JsonExtractionError::into_automation_error)
+}
+
+/// Extracts a backend JSON object while retaining serde syntax errors.
+pub fn extract_json_object_prefix_preserving_json(
+    text: &str,
+) -> std::result::Result<Value, JsonExtractionError> {
+    let candidate = strip_optional_json_fence(text).map_err(JsonExtractionError::Config)?;
+    parse_json_object_prefix_preserving_json(candidate)
 }
 
 pub fn extract_response_json_object(text: &str, contract: &AgentTaskContract) -> Result<Value> {
+    extract_response_json_object_preserving_json(text, contract)
+        .map_err(JsonExtractionError::into_automation_error)
+}
+
+/// Extracts and validates backend JSON while retaining serde syntax errors.
+pub fn extract_response_json_object_preserving_json(
+    text: &str,
+    contract: &AgentTaskContract,
+) -> std::result::Result<Value, JsonExtractionError> {
     let mut schema_error = None;
     for (start, _) in text.char_indices().filter(|(_, ch)| *ch == '{') {
         if !is_json_object_candidate_boundary(&text[..start]) {
             continue;
         }
-        let Ok(value) = parse_json_object_prefix(&text[start..]) else {
+        let Ok(value) = parse_json_object_prefix_preserving_json(&text[start..]) else {
             continue;
         };
         if let Err(err) = validate_response_schema(&value, contract) {
             if schema_error.is_none() {
-                schema_error = Some(err);
+                schema_error = Some(JsonExtractionError::Config(err));
             }
             continue;
         }
@@ -428,8 +475,8 @@ pub fn extract_response_json_object(text: &str, contract: &AgentTaskContract) ->
         return Err(err);
     }
 
-    let value = extract_json_object_prefix(text)?;
-    validate_response_schema(&value, contract)?;
+    let value = extract_json_object_prefix_preserving_json(text)?;
+    validate_response_schema(&value, contract).map_err(JsonExtractionError::Config)?;
     Ok(value)
 }
 
@@ -441,20 +488,22 @@ fn is_json_object_candidate_boundary(prefix: &str) -> bool {
         .is_none_or(|ch| matches!(ch, '}' | ']'))
 }
 
-fn parse_json_object_prefix(candidate: &str) -> Result<Value> {
+fn parse_json_object_prefix_preserving_json(
+    candidate: &str,
+) -> std::result::Result<Value, JsonExtractionError> {
     let mut stream = serde_json::Deserializer::from_str(candidate).into_iter::<Value>();
     let value = match stream.next() {
-        Some(value) => value.map_err(|err| AutomationError::config(err.to_string()))?,
+        Some(value) => value.map_err(JsonExtractionError::Json)?,
         None => {
-            return Err(AutomationError::config(
+            return Err(JsonExtractionError::Config(AutomationError::config(
                 "automation backend output must be a JSON object",
-            ));
+            )));
         }
     };
     if !value.is_object() {
-        return Err(AutomationError::config(
+        return Err(JsonExtractionError::Config(AutomationError::config(
             "automation backend output must be a JSON object",
-        ));
+        )));
     }
     Ok(value)
 }
