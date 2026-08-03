@@ -98,6 +98,8 @@ impl DaemonSessionRetrievalRoot {
         registry: &RegisteredGlobalDb,
         context: ProjectRegistryContext,
     ) -> Option<Self> {
+        let worktree_root = crate::worktree::git_worktree_root(cg.project_root())
+            .unwrap_or_else(|| cg.project_root().to_path_buf());
         let profile_root = registry.db_path().parent()?;
         let serving_db = cg.db_path();
         let mut selected = None;
@@ -130,7 +132,7 @@ impl DaemonSessionRetrievalRoot {
             SessionRootId::new(graph_scope_id.clone()).ok()?,
             ResolvedGitRoute::new(
                 RepositoryId::new(repository_id).ok()?,
-                WorktreeId::new(context.project.canonical_root.clone()).ok()?,
+                WorktreeId::new(worktree_root.display().to_string()).ok()?,
                 BranchId::new(graph_scope_id).ok()?,
             ),
         );
@@ -141,12 +143,13 @@ impl DaemonSessionRetrievalRoot {
             .collect::<HashSet<_>>();
         project_paths.insert(PathBuf::from(&context.project.canonical_root));
         project_paths.insert(PathBuf::from(&context.project.display_root));
+        project_paths.insert(worktree_root.clone());
         Some(Self {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id: Some(context.project.project_id),
             project_paths,
-            authorized_root: Some(context.project.display_root),
+            authorized_root: Some(worktree_root.display().to_string()),
             expected_runtime_shard: None,
         })
     }
@@ -411,16 +414,22 @@ impl DaemonProjectSessionRetrievalRouter {
     async fn context_for_selector(
         &self,
         selector: &crate::mcp::tools::SessionRetrievalProjectSelector,
-    ) -> Option<ProjectRegistryContext> {
+    ) -> Option<(ProjectRegistryContext, PathBuf)> {
         if let Some(project_id) = selector.project_id.as_deref() {
             return self
                 .registry
                 .project_registry_context_by_id(project_id)
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .map(|context| {
+                    let requested_root = PathBuf::from(&context.project.canonical_root);
+                    (context, requested_root)
+                });
         }
         let project_path = Path::new(selector.project_path.as_deref()?);
+        let requested_root = crate::worktree::git_worktree_root(project_path)
+            .unwrap_or_else(|| project_path.to_path_buf());
         if let Some(store) = self
             .registry
             .try_resolve_project_store_record_by_alias(project_path)
@@ -433,7 +442,8 @@ impl DaemonProjectSessionRetrievalRouter {
                 .project_registry_context_by_id(&store.project_id)
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .map(|context| (context, requested_root.clone()));
         }
         if let Some(context) = self
             .registry
@@ -442,7 +452,7 @@ impl DaemonProjectSessionRetrievalRouter {
             .ok()
             .flatten()
         {
-            return Some(context);
+            return Some((context, requested_root));
         }
         let git_common_dir = crate::worktree::git_common_dir(project_path);
         self.registry
@@ -450,13 +460,14 @@ impl DaemonProjectSessionRetrievalRouter {
             .await
             .ok()
             .flatten()
+            .map(|context| (context, requested_root))
     }
 
     async fn service_for_context(
         &self,
         context: ProjectRegistryContext,
+        requested_root: PathBuf,
     ) -> Option<DaemonSessionRetrievalService> {
-        let requested_root = PathBuf::from(&context.project.canonical_root);
         let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
             context.clone(),
             requested_root,
@@ -469,12 +480,10 @@ impl DaemonProjectSessionRetrievalRouter {
         )?
         .with_project_runtime_shard(&self.profile_identity)?;
         let project_id = ProjectId::new(root.project_id.as_deref()?).ok()?;
-        let enrollment_roots = root.project_paths.iter().cloned().collect::<Vec<_>>();
         let database = graph
             .store_runtime_registry()
-            .project_sessions(project_id, enrollment_roots)
-            .await
-            .ok()?;
+            .mounted_project_sessions(&project_id)
+            .await?;
         DaemonSessionRetrievalService::new_registered(
             Arc::clone(&database),
             database,
@@ -494,10 +503,10 @@ impl DaemonProjectSessionRetrievalRouter {
         let Some(selector) = command.project_selector() else {
             return SessionRetrievalServiceOutcome::WrongScope;
         };
-        let Some(context) = self.context_for_selector(selector).await else {
+        let Some((context, requested_root)) = self.context_for_selector(selector).await else {
             return SessionRetrievalServiceOutcome::WrongScope;
         };
-        let Some(service) = self.service_for_context(context).await else {
+        let Some(service) = self.service_for_context(context, requested_root).await else {
             return SessionRetrievalServiceOutcome::Unavailable(
                 SessionRetrievalUnavailable::without_worker(
                     SessionRetrievalUnavailableReason::TemporalStoreUnavailable,

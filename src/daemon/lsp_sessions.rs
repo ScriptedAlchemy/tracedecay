@@ -97,6 +97,9 @@ pub(super) async fn admitted_lsp_workspace_for_request(
         let canonical_uri = url::Url::from_file_path(&requested_path).ok()?.to_string();
         let mut candidates = Vec::new();
         for graph in &graphs {
+            if graph.project_root() != requested_path {
+                continue;
+            }
             let Some(raw_project_id) = graph.store_layout().identity.project_id.as_deref() else {
                 continue;
             };
@@ -104,10 +107,8 @@ pub(super) async fn admitted_lsp_workspace_for_request(
             else {
                 continue;
             };
-            #[allow(deprecated)]
-            let Ok(scope) = crate::application::context::resolve_registered_root_scope(
+            let Ok(scope) = crate::daemon::project_open_owners::resolved_scope_for_project(
                 graph.project_root(),
-                &requested_path,
                 &project_id,
             ) else {
                 continue;

@@ -559,7 +559,13 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
             MultiRootScopeSetCasRequestV1::new(
                 scope_set_id.clone(),
                 None,
-                vec![ProjectId::new("project.quarantined").expect("project")],
+                vec![
+                    tracedecay_application::RegisteredRootSelectorV1::new(
+                        ProjectId::new("project.quarantined").expect("project"),
+                        project_root.clone(),
+                    )
+                    .expect("registered root"),
+                ],
             )
             .expect("CAS request"),
             observed_at,
