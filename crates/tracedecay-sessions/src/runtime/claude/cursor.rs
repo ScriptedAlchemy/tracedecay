@@ -26,7 +26,7 @@ pub(super) fn claude_cursor_key(path: &Path) -> TranscriptCursorKey {
         return TranscriptCursorKey::for_path(path);
     }
 
-    TranscriptCursorKey::opaque(claude_non_unicode_cursor_key(path), path)
+    TranscriptCursorKey::opaque(claude_non_unicode_cursor_key(path))
 }
 
 fn claude_non_unicode_cursor_key(path: &Path) -> String {
