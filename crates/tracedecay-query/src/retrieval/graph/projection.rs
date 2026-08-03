@@ -10,7 +10,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use grafeo_adapters::plugins::algorithms::{Control, TraversalEvent, bfs_with_visitor};
-use grafeo_common::types::{EdgeId, NodeId, Value};
+use grafeo_common::types::{EdgeId, NodeId};
 use grafeo_core::graph::{
     Direction, GraphProjection, GraphStoreSearch, ProjectionSpec, lpg::LpgStore,
 };
@@ -32,7 +32,6 @@ use crate::retrieval::ports::{
 // Domain-scoped labels and edge types let a future Work DAG use the same
 // embedded Grafeo substrate through a filtered projection without overlap.
 const CODE_SYMBOL_LABEL: &str = "TraceDecayCodeSymbol";
-const CANONICAL_ID_PROPERTY: &str = "canonical_id";
 
 #[derive(Clone, Debug)]
 struct SymbolBindingV1 {
@@ -130,7 +129,6 @@ impl CodeGraphEvidenceAdapterV1 {
             }
         }
 
-        let graph = Arc::new(LpgStore::new().map_err(graph_unavailable)?);
         let mut retained_edges: Vec<_> = edges
             .iter()
             .filter(|edge| symbols.contains_key(&edge.from_occurrence))
@@ -160,15 +158,13 @@ impl CodeGraphEvidenceAdapterV1 {
         for edge in &retained_edges {
             occurrences.insert(edge.to_occurrence.clone());
         }
+        let graph = Arc::new(LpgStore::new().map_err(graph_unavailable)?);
         let nodes: BTreeMap<_, _> = occurrences
             .into_iter()
             .map(|occurrence| {
                 // Grafeo IDs are disposable projection-local handles. Stable
-                // authority stays in typed labels, edges, and canonical IDs.
-                let node = graph.create_node_with_props(
-                    &[CODE_SYMBOL_LABEL],
-                    [(CANONICAL_ID_PROPERTY, Value::from(occurrence.as_str()))],
-                );
+                // authority stays in typed occurrence bindings and edges.
+                let node = graph.create_node(&[CODE_SYMBOL_LABEL]);
                 (occurrence, node)
             })
             .collect();
