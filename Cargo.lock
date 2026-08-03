@@ -4897,6 +4897,8 @@ dependencies = [
  "tokio",
  "toml",
  "tower 0.5.3",
+ "tracedecay-automation",
+ "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
@@ -4911,6 +4913,18 @@ dependencies = [
  "webpki-roots 1.0.7",
  "zip",
 ]
+
+[[package]]
+name = "tracedecay-automation"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tracedecay-capture"
+version = "0.1.0"
 
 [[package]]
 name = "tracedecay-code-extraction"

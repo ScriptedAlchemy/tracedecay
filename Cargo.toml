@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "crates/tracedecay-automation",
+    "crates/tracedecay-capture",
     "crates/tracedecay-domain",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
@@ -125,6 +127,8 @@ tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", defau
 tracedecay-code-index = { path = "crates/tracedecay-code-index", default-features = false }
 tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp" }
+tracedecay-capture = { path = "crates/tracedecay-capture" }
+tracedecay-automation = { path = "crates/tracedecay-automation" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
