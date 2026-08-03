@@ -10,6 +10,7 @@ mod binding;
 mod executable;
 mod id;
 mod manifest;
+mod mcp;
 mod profile;
 mod retrieval;
 mod snapshot;
@@ -32,10 +33,17 @@ pub use id::{
 pub use manifest::{
     AuthorityRequirement, AvailabilityContract, CancellationContract, CancellationPoint,
     CapabilityManifestInputV1, CapabilityManifestV1, DeadlineBehavior, DeadlineContract,
-    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass, PaginationContract,
-    PrivacyClass, ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaRef, ScopeDimension, ScopeRequirement, StreamResumeContract,
-    StreamingContract, TerminalState, TerminalStateContract, UnavailabilityReason,
+    DeniedDisclosurePolicy, EffectClass, IdempotencyContract, InverseContract,
+    InverseUnavailableReason, LifecycleClass, PaginationContract, PrivacyClass, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaRef,
+    ScopeDimension, ScopeRequirement, StreamResumeContract, StreamingContract, TerminalState,
+    TerminalStateContract, UnavailabilityReason,
+};
+pub use mcp::{
+    MCP_DISPATCH_CONTRACT_VERSION, McpDeadlineContractV1, McpDispatchAvailability,
+    McpDispatchCatalogError, McpDispatchCatalogV1, McpDispatchContractInputV1,
+    McpDispatchContractV1, McpDispatchUnavailableReason, McpIdempotencyContract,
+    McpInverseContract, McpInverseUnavailableReason, McpTerminalState,
 };
 pub use profile::{
     ProfileBudget, ProfileDefinition, ProfileDefinitionInputV1, ProfileKind,
