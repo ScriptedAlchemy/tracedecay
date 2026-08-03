@@ -13,9 +13,8 @@ use tracedecay_store::runtime::{
     ScopeSetStoreContractError,
 };
 
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlHandle, MigrationSqlRow, MigrationSqlStatement,
-    MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlHandle, ExactSqlRow, ExactSqlStatement, ExactSqlValue,
 };
 
 pub const AUTHORIZED_SCOPE_SET_SCHEMA_V1: &str = "
@@ -42,7 +41,7 @@ pub enum AuthorizedScopeSetStoreError {
     #[error("authorized scope-set actor does not match the stored owner")]
     OwnershipMismatch,
     #[error(transparent)]
-    RegisteredStore(#[from] MigrationSqlError),
+    RegisteredStore(#[from] ExactSqlError),
 }
 
 /// Persistence executor for one exact scope-set record.
@@ -144,11 +143,11 @@ impl AuthorizedScopeSetExecutor {
 /// Scope-set persistence over the exact registered and fenced project store.
 #[derive(Clone)]
 pub struct AuthorizedScopeSetSqliteStorage {
-    handle: MigrationSqlHandle,
+    handle: ExactSqlHandle,
 }
 
 impl AuthorizedScopeSetSqliteStorage {
-    pub fn from_registered(handle: MigrationSqlHandle) -> Self {
+    pub fn from_registered(handle: ExactSqlHandle) -> Self {
         Self { handle }
     }
 
@@ -190,7 +189,7 @@ impl AuthorizedScopeSetSqliteStorage {
             return Err(AuthorizedScopeSetStoreError::OwnershipMismatch);
         }
         let payload = serde_json::to_vec(next)?;
-        transaction.execute(MigrationSqlStatement::new(
+        transaction.execute(ExactSqlStatement::new(
             "INSERT INTO authorized_scope_sets_v1 (
                  scope_set_id, revision, digest, canonical_payload
              ) VALUES (?1, ?2, ?3, ?4)
@@ -200,10 +199,10 @@ impl AuthorizedScopeSetSqliteStorage {
                  canonical_payload = excluded.canonical_payload"
                 .to_owned(),
             vec![
-                MigrationSqlValue::Text(next.scope_set_id().as_str().to_owned()),
-                MigrationSqlValue::Integer(revision_to_i64(next.revision())?),
-                MigrationSqlValue::Text(next.digest().as_str().to_owned()),
-                MigrationSqlValue::Blob(payload.clone()),
+                ExactSqlValue::Text(next.scope_set_id().as_str().to_owned()),
+                ExactSqlValue::Integer(revision_to_i64(next.revision())?),
+                ExactSqlValue::Text(next.digest().as_str().to_owned()),
+                ExactSqlValue::Blob(payload.clone()),
             ],
         )?)?;
         transaction.commit()?;
@@ -220,26 +219,26 @@ impl AuthorizedScopeSetSqliteStorage {
 
 fn registered_read_statement(
     scope_set_id: &ScopeSetId,
-) -> Result<MigrationSqlStatement, AuthorizedScopeSetStoreError> {
-    Ok(MigrationSqlStatement::new(
+) -> Result<ExactSqlStatement, AuthorizedScopeSetStoreError> {
+    Ok(ExactSqlStatement::new(
         "SELECT revision, digest, canonical_payload
          FROM authorized_scope_sets_v1
          WHERE scope_set_id = ?1"
             .to_owned(),
-        vec![MigrationSqlValue::Text(scope_set_id.as_str().to_owned())],
+        vec![ExactSqlValue::Text(scope_set_id.as_str().to_owned())],
     )?)
 }
 
 fn decode_registered_rows(
-    rows: Vec<MigrationSqlRow>,
+    rows: Vec<ExactSqlRow>,
 ) -> Result<Option<AuthorizedScopeSet>, AuthorizedScopeSetStoreError> {
     let Some(row) = rows.into_iter().next() else {
         return Ok(None);
     };
     let [
-        MigrationSqlValue::Integer(revision),
-        MigrationSqlValue::Text(digest),
-        MigrationSqlValue::Blob(payload),
+        ExactSqlValue::Integer(revision),
+        ExactSqlValue::Text(digest),
+        ExactSqlValue::Blob(payload),
     ] = row.values.as_slice()
     else {
         return Err(AuthorizedScopeSetStoreError::InvalidData(

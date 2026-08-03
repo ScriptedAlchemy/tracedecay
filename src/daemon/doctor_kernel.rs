@@ -1416,7 +1416,7 @@ fn cached_store_telemetry_port<E>(
     cache: &Mutex<StoreTelemetryPortCache>,
     path: &Path,
     scope: &tracedecay_application::ResolvedScope,
-    open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, E>,
+    open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, E>,
 ) -> Option<(
     tracedecay_application::storage::StoreKeyV1,
     tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
