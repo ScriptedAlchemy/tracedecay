@@ -27,7 +27,7 @@ Rules:
   lane. `StoreRuntimeHandle`/`PhysicalRuntimeAttachment` expose no fenced
   compaction port, `RegisteredGlobalDb` exposes no retention port, and the
   existing LCM/observation retention engines require `libsql::Connection`.
-  Migration SQL correctly denies `PRAGMA incremental_vacuum`; no bypass added.
+  Exact SQL correctly denies `PRAGMA incremental_vacuum`; no bypass added.
   Required interfaces: a registered LCM/observation retention port bound to
   the retained writer/`DatabaseAuthority`, plus a `StoreRuntimeHandle` fenced
   bounded-compaction operation for profile, profile-session, and code shards.
