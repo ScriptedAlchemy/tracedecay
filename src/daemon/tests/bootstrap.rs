@@ -1009,8 +1009,8 @@ async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
         .expect("cooperative project-open shutdown timed out")
         .expect("project-open shutdown task");
     assert!(
-        cooperative,
-        "normal warm-up cancellation must not reach its timeout guard"
+        cooperative.is_clean(),
+        "normal warm-up cancellation must not reach its timeout guard: {cooperative:?}"
     );
     tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
@@ -1070,7 +1070,10 @@ async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
     .await
     .expect("shutdown backstop must join the aborted task");
 
-    assert!(!cooperative, "noncooperative task must reach the backstop");
+    assert!(
+        !cooperative.is_clean(),
+        "noncooperative task must reach the backstop"
+    );
     dropped_rx
         .await
         .expect("joined task must drop its owned resources before shutdown returns");
@@ -1108,7 +1111,7 @@ async fn project_open_shutdown_until_reserves_time_to_join_aborted_tasks() {
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
 
     assert!(
-        !tasks.shutdown_until(deadline).await,
+        !tasks.shutdown_until(deadline).await.is_clean(),
         "noncooperative task must be reported as timed out"
     );
     assert!(
@@ -1157,7 +1160,10 @@ async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() 
     .await
     .expect("shutdown must detach synchronous work after its abort deadline");
 
-    assert!(!cooperative, "synchronous work must reach the backstop");
+    assert!(
+        !cooperative.is_clean(),
+        "synchronous work must reach the backstop"
+    );
     assert_eq!(tasks.tracked_route_count().await, 0);
     release.store(true, std::sync::atomic::Ordering::Release);
 }
@@ -1451,7 +1457,7 @@ async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready(
 }
 
 #[tokio::test(start_paused = true)]
-async fn portable_shutdown_owners_share_one_absolute_deadline() {
+async fn transport_shutdown_owners_share_one_absolute_deadline() {
     let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(2);
     let owners = ["maintenance", "http_application", "project_open"]
@@ -1475,7 +1481,8 @@ async fn portable_shutdown_owners_share_one_absolute_deadline() {
         })
         .collect();
 
-    let shutdown = super::super::bootstrap::join_portable_shutdown_owners(deadline, owners);
+    let shutdown =
+        super::super::shutdown_coordination::join_shutdown_owner_phases(deadline, vec![owners]);
     tokio::pin!(shutdown);
     tokio::time::advance(tokio::time::Duration::from_secs(2)).await;
     let receipt = shutdown.await;
@@ -1489,6 +1496,103 @@ async fn portable_shutdown_owners_share_one_absolute_deadline() {
     );
     assert_eq!(receipt.unfinished(), &["http_application", "project_open"]);
     assert_eq!(receipt.deadline, deadline);
+}
+
+#[tokio::test(start_paused = true)]
+async fn unix_and_portable_shutdown_inputs_share_the_same_phase_order() {
+    async fn run(
+        owner: &'static str,
+    ) -> super::super::shutdown_orchestration::DaemonShutdownReceipt {
+        let lifecycle = DaemonLifecycle::default();
+        let mut clients = tokio::task::JoinSet::new();
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancelled_by_owner = Arc::clone(&cancelled);
+        let cancelled_before_server = Arc::clone(&cancelled);
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+        let phases = vec![vec![
+            super::super::shutdown_coordination::ShutdownOwner::new(
+                owner,
+                move || {
+                    cancelled_by_owner.store(true, std::sync::atomic::Ordering::Release);
+                },
+                async {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                },
+            ),
+        ]];
+
+        super::super::shutdown_orchestration::coordinate_daemon_shutdown(
+            &lifecycle,
+            &mut clients,
+            deadline,
+            phases,
+            async move {
+                assert!(
+                    cancelled_before_server.load(std::sync::atomic::Ordering::Acquire),
+                    "producer cancellation must precede transport-server shutdown"
+                );
+                super::super::store_shutdown::ShutdownTaskReceipt::default()
+            },
+        )
+        .await
+    }
+
+    let portable = run("portable_transport").await;
+    let unix = run("unix_transport").await;
+
+    for receipt in [portable, unix] {
+        assert!(receipt.in_flight_drained);
+        assert!(receipt.clients_drained);
+        assert!(receipt.background.unfinished().is_empty());
+        assert!(receipt.project_servers.is_clean());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn retained_client_activity_does_not_skip_final_server_shutdown() {
+    struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let lifecycle = DaemonLifecycle::default();
+    let activity = lifecycle.try_enter().expect("retain client activity");
+    let mut clients = tokio::task::JoinSet::new();
+    let server_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_polled_by_future = Arc::clone(&server_polled);
+    let server_future_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server_guard = Dropped(Arc::clone(&server_future_dropped));
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(10);
+
+    let receipt = super::super::shutdown_orchestration::coordinate_daemon_shutdown(
+        &lifecycle,
+        &mut clients,
+        deadline,
+        vec![Vec::new()],
+        async move {
+            let _guard = server_guard;
+            server_polled_by_future.store(true, std::sync::atomic::Ordering::Release);
+            super::super::store_shutdown::ShutdownTaskReceipt::default()
+        },
+    )
+    .await;
+
+    assert!(!receipt.in_flight_drained);
+    assert!(!receipt.clients_drained);
+    assert!(receipt.project_servers.is_clean());
+    assert!(
+        server_polled.load(std::sync::atomic::Ordering::Acquire),
+        "final server teardown must run after client drain timeout"
+    );
+    assert!(
+        server_future_dropped.load(std::sync::atomic::Ordering::Acquire),
+        "completed server teardown must release its captured ownership"
+    );
+    drop(activity);
+    lifecycle.wait_for_idle().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -1520,11 +1624,11 @@ async fn portable_shutdown_aborts_stuck_client_then_uses_remaining_store_budget(
     let store_started_at = Arc::new(std::sync::Mutex::new(None));
     let store_started_by_shutdown = Arc::clone(&store_started_at);
     let shutdown = tokio::spawn(async move {
-        super::super::bootstrap::coordinate_portable_shutdown(
+        super::super::shutdown_orchestration::coordinate_daemon_shutdown(
             &lifecycle,
             &mut clients,
             shutdown_deadline,
-            Vec::new(),
+            vec![Vec::new()],
             async move {
                 *store_started_by_shutdown
                     .lock()

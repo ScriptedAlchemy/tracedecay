@@ -1,22 +1,18 @@
 use std::collections::HashMap;
 use std::future::Future;
 
+use super::shutdown_coordination::ShutdownStatus;
 use super::{DAEMON_TASK_ABORT_DEADLINE, StoreAdministration};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ShutdownTaskStatus {
-    Clean,
-    Failed,
-    TimedOut,
-}
+pub(super) type ShutdownTaskStatus = ShutdownStatus;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct ShutdownTaskOutcome {
     pub(super) owner: String,
     pub(super) status: ShutdownTaskStatus,
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct ShutdownTaskReceipt {
     pub(super) outcomes: Vec<ShutdownTaskOutcome>,
 }
@@ -37,6 +33,28 @@ impl ShutdownTaskReceipt {
             .all(|outcome| outcome.status == ShutdownTaskStatus::Clean)
     }
 
+    pub(super) fn status(&self) -> ShutdownTaskStatus {
+        let failures = self
+            .outcomes
+            .iter()
+            .filter_map(|outcome| match &outcome.status {
+                ShutdownTaskStatus::Failed(error) => Some(format!("{}: {error}", outcome.owner)),
+                ShutdownTaskStatus::Clean | ShutdownTaskStatus::TimedOut => None,
+            })
+            .collect::<Vec<_>>();
+        if !failures.is_empty() {
+            ShutdownTaskStatus::Failed(failures.join("; "))
+        } else if self
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.status == ShutdownTaskStatus::TimedOut)
+        {
+            ShutdownTaskStatus::TimedOut
+        } else {
+            ShutdownTaskStatus::Clean
+        }
+    }
+
     pub(super) fn extend(&mut self, mut other: Self) {
         self.outcomes.append(&mut other.outcomes);
     }
@@ -44,7 +62,7 @@ impl ShutdownTaskReceipt {
     pub(super) fn failed_count(&self) -> usize {
         self.outcomes
             .iter()
-            .filter(|outcome| outcome.status == ShutdownTaskStatus::Failed)
+            .filter(|outcome| matches!(outcome.status, ShutdownTaskStatus::Failed(_)))
             .count()
     }
 
@@ -62,7 +80,7 @@ pub(super) async fn join_shutdown_tasks_until<Tasks, Task>(
 ) -> ShutdownTaskReceipt
 where
     Tasks: IntoIterator<Item = (String, Option<tokio::task::AbortHandle>, Task)>,
-    Task: Future<Output = std::result::Result<(), ()>> + Send + 'static,
+    Task: Future<Output = std::result::Result<(), String>> + Send + 'static,
 {
     let now = tokio::time::Instant::now();
     let cooperative_deadline =
@@ -92,10 +110,9 @@ where
                         ordinal,
                         ShutdownTaskOutcome {
                             owner,
-                            status: if task_result.is_ok() {
-                                ShutdownTaskStatus::Clean
-                            } else {
-                                ShutdownTaskStatus::Failed
+                            status: match task_result {
+                                Ok(()) => ShutdownTaskStatus::Clean,
+                                Err(error) => ShutdownTaskStatus::Failed(error),
                             },
                         },
                     ));
@@ -107,7 +124,7 @@ where
                         ordinal,
                         ShutdownTaskOutcome {
                             owner,
-                            status: ShutdownTaskStatus::Failed,
+                            status: ShutdownTaskStatus::Failed(error.to_string()),
                         },
                     ));
                 }
@@ -183,7 +200,7 @@ impl StoreAdministration {
                     (
                         format!("project_server_retirement[{ordinal}]"),
                         Some(retirement_abort),
-                        async move { retirement.await.map_err(|_| ()) },
+                        async move { retirement.await.map_err(|error| error.to_string()) },
                     )
                 }),
         )
@@ -231,17 +248,16 @@ mod tests {
             )
             .await;
 
-        assert_eq!(
-            receipt
-                .outcomes
-                .iter()
-                .map(|outcome| (outcome.owner.as_str(), outcome.status))
-                .collect::<Vec<_>>(),
-            [
-                ("project_server_retirement[0]", ShutdownTaskStatus::Failed),
-                ("project_server_retirement[1]", ShutdownTaskStatus::Failed),
-            ]
-        );
+        assert_eq!(receipt.outcomes[0].owner, "project_server_retirement[0]");
+        assert_eq!(receipt.outcomes[1].owner, "project_server_retirement[1]");
+        assert!(matches!(
+            receipt.outcomes[0].status,
+            ShutdownTaskStatus::Failed(_)
+        ));
+        assert!(matches!(
+            receipt.outcomes[1].status,
+            ShutdownTaskStatus::Failed(_)
+        ));
         assert!(!receipt.is_clean());
     }
 

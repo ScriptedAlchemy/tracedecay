@@ -9,7 +9,9 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
-use super::store_shutdown::join_shutdown_tasks_until;
+use super::store_shutdown::{
+    ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus, join_shutdown_tasks_until,
+};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -363,7 +365,7 @@ impl ProjectOpenTasks {
     }
 
     #[cfg(test)]
-    pub(super) async fn shutdown(&self) -> bool {
+    pub(super) async fn shutdown(&self) -> ShutdownTaskReceipt {
         self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE, DAEMON_TASK_ABORT_DEADLINE)
             .await
     }
@@ -372,7 +374,10 @@ impl ProjectOpenTasks {
         self.shutdown.cancel();
     }
 
-    pub(super) async fn shutdown_until(&self, deadline: tokio::time::Instant) -> bool {
+    pub(super) async fn shutdown_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> ShutdownTaskReceipt {
         self.cancel();
         let entries = {
             let mut registry = self.registry.lock().await;
@@ -390,12 +395,11 @@ impl ProjectOpenTasks {
                 (
                     format!("project_open[{ordinal}]"),
                     Some(task_abort),
-                    async move { entry.task.await.map_err(|_| ()) },
+                    async move { entry.task.await.map_err(|error| error.to_string()) },
                 )
             }),
         )
         .await
-        .is_clean()
     }
 
     #[cfg(test)]
@@ -403,7 +407,7 @@ impl ProjectOpenTasks {
         &self,
         cooperative_deadline: Duration,
         post_abort_deadline: Duration,
-    ) -> bool {
+    ) -> ShutdownTaskReceipt {
         let mut entries = {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
@@ -414,32 +418,47 @@ impl ProjectOpenTasks {
             entry.cancellation.cancel();
         }
         let cooperative_deadline = tokio::time::Instant::now() + cooperative_deadline;
-        let mut drained = true;
-        for entry in &mut entries {
-            if tokio::time::timeout_at(cooperative_deadline, &mut entry.task)
-                .await
-                .is_err()
-            {
-                drained = false;
-                entry.task.abort();
+        let mut outcomes = Vec::with_capacity(entries.len());
+        for (ordinal, entry) in entries.iter_mut().enumerate() {
+            match tokio::time::timeout_at(cooperative_deadline, &mut entry.task).await {
+                Ok(Ok(())) => outcomes.push(ShutdownTaskOutcome {
+                    owner: format!("project_open[{ordinal}]"),
+                    status: ShutdownTaskStatus::Clean,
+                }),
+                Ok(Err(error)) => outcomes.push(ShutdownTaskOutcome {
+                    owner: format!("project_open[{ordinal}]"),
+                    status: ShutdownTaskStatus::Failed(error.to_string()),
+                }),
+                Err(_) => {
+                    entry.task.abort();
+                    outcomes.push(ShutdownTaskOutcome {
+                        owner: format!("project_open[{ordinal}]"),
+                        status: ShutdownTaskStatus::TimedOut,
+                    });
+                }
             }
         }
-        if !drained {
+        if outcomes
+            .iter()
+            .any(|outcome| outcome.status == ShutdownTaskStatus::TimedOut)
+        {
             let post_abort_deadline = tokio::time::Instant::now() + post_abort_deadline;
-            for entry in &mut entries {
+            for (ordinal, entry) in entries.iter_mut().enumerate() {
                 if entry.task.is_finished() {
                     continue;
                 }
-                let _ = tokio::time::timeout_at(post_abort_deadline, &mut entry.task).await;
+                if let Ok(Err(error)) =
+                    tokio::time::timeout_at(post_abort_deadline, &mut entry.task).await
+                {
+                    outcomes[ordinal].status = ShutdownTaskStatus::Failed(error.to_string());
+                }
             }
-        }
-        if !drained {
             log_daemon_event(
                 "project_server_warmup",
                 &[("outcome", "shutdown_abort_timeout".to_string())],
             );
         }
-        drained
+        ShutdownTaskReceipt { outcomes }
     }
 
     #[cfg(test)]

@@ -673,25 +673,28 @@ impl DaemonEngine {
         let termination = Arc::new(MaintenanceTaskTermination::pending());
         let administration = self.store_administration.clone();
         let scheduler_engine = self.clone();
+        let shutdown_lifecycle = self.lifecycle.clone();
         let loop_key = key.clone();
         #[cfg(test)]
         let exit_barrier = self.automation_scheduler_exit_barrier.lock().await.clone();
         let (published, start) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let _ = start.await;
-            Box::pin(run_automation_scheduler_loop(
-                project_path,
-                handshake,
-                cg,
-                loop_wake,
-                scheduler_engine,
-                loop_key,
-                loop_completion,
-                loop_generation,
-                #[cfg(test)]
-                exit_barrier,
-            ))
-            .await;
+            tokio::select! {
+                () = shutdown_lifecycle.wait_for_draining() => {}
+                () = Box::pin(run_automation_scheduler_loop(
+                    project_path,
+                    handshake,
+                    cg,
+                    loop_wake,
+                    scheduler_engine,
+                    loop_key,
+                    loop_completion,
+                    loop_generation,
+                    #[cfg(test)]
+                    exit_barrier,
+                )) => {}
+            }
             administration
                 .automation_schedulers()
                 .lock()

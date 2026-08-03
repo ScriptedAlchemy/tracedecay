@@ -127,6 +127,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         }));
     }
     lifecycle.begin_draining();
+    drop(listener);
     let hard_backstop_deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
     let shutdown_deadline = hard_backstop_deadline - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
     let maintenance_cancel = maintenance.clone();
@@ -139,46 +140,48 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let replay_join = store_administration.clone();
     let startup_ingest_servers = project_servers_for_shutdown(&store_administration).await;
     let http_application_cancel = http_application_service.shutdown_signal();
-    let owners = vec![
-        shutdown_coordination::ShutdownOwner::new(
-            "project_server_startup_ingest",
-            move || {
-                cancel_project_server_startup_ingests(&startup_ingest_servers);
-            },
-            async {},
-        ),
-        shutdown_coordination::ShutdownOwner::new(
-            "maintenance",
-            move || maintenance_cancel.cancel(),
-            async move { maintenance_join.shutdown().await },
-        ),
-        shutdown_coordination::ShutdownOwner::with_deadline_result(
-            "http_application",
-            move || http_application_cancel.cancel(),
-            move |_| async move { http_application_service.shutdown().await.is_ok() },
-        ),
-        shutdown_coordination::ShutdownOwner::with_deadline_result(
-            "project_open",
-            move || project_open_cancel.cancel(),
-            move |deadline| async move { project_open.shutdown_until(deadline).await },
-        ),
-        shutdown_coordination::ShutdownOwner::new(
+    let owner_phases = vec![
+        vec![
+            shutdown_coordination::ShutdownOwner::new(
+                "project_server_startup_ingest",
+                move || {
+                    cancel_project_server_startup_ingests(&startup_ingest_servers);
+                },
+                async {},
+            ),
+            shutdown_coordination::ShutdownOwner::new(
+                "maintenance",
+                move || maintenance_cancel.cancel(),
+                async move { maintenance_join.shutdown().await },
+            ),
+            shutdown_coordination::ShutdownOwner::with_deadline_result(
+                "http_application",
+                move || http_application_cancel.cancel(),
+                move |_| async move { http_application_service.shutdown().await },
+            ),
+            shutdown_coordination::ShutdownOwner::with_deadline_status(
+                "project_open",
+                move || project_open_cancel.cancel(),
+                move |deadline| async move { project_open.shutdown_until(deadline).await.status() },
+            ),
+            shutdown_coordination::ShutdownOwner::new(
+                "host_admission_replay",
+                move || replay_cancel.cancel_host_admission_replay(),
+                async move { replay_join.shutdown_host_admission_replay().await },
+            ),
+        ],
+        vec![shutdown_coordination::ShutdownOwner::new(
             "invocation",
             move || invocation_cancel.cancel(),
             async move { invocation_join.shutdown().await },
-        ),
-        shutdown_coordination::ShutdownOwner::new(
-            "host_admission_replay",
-            move || replay_cancel.cancel_host_admission_replay(),
-            async move { replay_join.shutdown_host_admission_replay().await },
-        ),
+        )],
     ];
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
-    let shutdown = coordinate_portable_shutdown(
+    let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
         &lifecycle,
         &mut clients,
         shutdown_deadline,
-        owners,
+        owner_phases,
         shutdown_project_servers(shutdown_deadline, &store_administration),
     )
     .await;
@@ -201,70 +204,6 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     log_background_shutdown_receipt(&shutdown.background);
     log_project_server_shutdown_receipt(&shutdown.project_servers);
     endpoint_cleanup
-}
-
-#[cfg(any(not(unix), test))]
-pub(super) async fn join_portable_shutdown_owners(
-    deadline: tokio::time::Instant,
-    owners: Vec<shutdown_coordination::ShutdownOwner>,
-) -> shutdown_coordination::ShutdownReceipt {
-    shutdown_coordination::join_shutdown_owners(deadline, owners).await
-}
-
-#[cfg(any(not(unix), test))]
-pub(super) struct PortableShutdownReceipt {
-    pub(super) in_flight_drained: bool,
-    pub(super) clients_drained: bool,
-    pub(super) background: shutdown_coordination::ShutdownReceipt,
-    pub(super) project_servers: store_shutdown::ShutdownTaskReceipt,
-}
-
-#[cfg(any(not(unix), test))]
-pub(super) async fn coordinate_portable_shutdown<ProjectServerShutdown>(
-    lifecycle: &DaemonLifecycle,
-    clients: &mut JoinSet<Result<()>>,
-    shutdown_deadline: tokio::time::Instant,
-    owners: Vec<shutdown_coordination::ShutdownOwner>,
-    project_server_shutdown: ProjectServerShutdown,
-) -> PortableShutdownReceipt
-where
-    ProjectServerShutdown: std::future::Future<Output = store_shutdown::ShutdownTaskReceipt>,
-{
-    let mut background_shutdown =
-        Box::pin(join_portable_shutdown_owners(shutdown_deadline, owners));
-    let mut background_receipt = None;
-    let client_drain_deadline = std::cmp::min(
-        tokio::time::Instant::now() + DAEMON_CLIENT_DRAIN_DEADLINE,
-        shutdown_deadline,
-    );
-    let in_flight = tokio::time::timeout_at(client_drain_deadline, lifecycle.wait_for_idle());
-    tokio::pin!(in_flight);
-    let in_flight_drained = loop {
-        tokio::select! {
-            receipt = &mut background_shutdown, if background_receipt.is_none() => {
-                background_receipt = Some(receipt);
-            }
-            drained = &mut in_flight => break drained.is_ok(),
-        }
-    };
-
-    clients.abort_all();
-    let clients_drained = tokio::time::timeout_at(shutdown_deadline, async {
-        while clients.join_next().await.is_some() {}
-    })
-    .await
-    .is_ok();
-    let background = match background_receipt {
-        Some(receipt) => receipt,
-        None => background_shutdown.await,
-    };
-    let project_servers = project_server_shutdown.await;
-    PortableShutdownReceipt {
-        in_flight_drained,
-        clients_drained,
-        background,
-        project_servers,
-    }
 }
 
 fn log_background_shutdown_receipt(receipt: &shutdown_coordination::ShutdownReceipt) {
@@ -297,7 +236,7 @@ fn log_project_server_shutdown_receipt(receipt: &store_shutdown::ShutdownTaskRec
         }
         let status = match outcome.status {
             store_shutdown::ShutdownTaskStatus::Clean => continue,
-            store_shutdown::ShutdownTaskStatus::Failed => "failed",
+            store_shutdown::ShutdownTaskStatus::Failed(_) => "failed",
             store_shutdown::ShutdownTaskStatus::TimedOut => "timed_out",
         };
         log_daemon_event(
@@ -465,58 +404,28 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             "daemon_shutdown",
             &[("socket", socket_path.display().to_string())],
         );
-        let http_application_cancel = http_application_service.shutdown_signal();
-        http_application_cancel.cancel();
-        let mut background_shutdown = Box::pin(engine.shutdown_background_tasks(shutdown_deadline));
-        let mut background_receipt = None;
-        let mut bootstrap_shutdown = Box::pin(shutdown_coordination::join_shutdown_owners(
+        let mut owner_phases = engine.shutdown_owner_phases().await;
+        let http_application_owner = shutdown_coordination::ShutdownOwner::with_deadline_result(
+            "http_application",
+            {
+                let signal = http_application_service.shutdown_signal();
+                move || signal.cancel()
+            },
+            move |_| async move { http_application_service.shutdown().await },
+        );
+        match owner_phases.first_mut() {
+            Some(producers) => producers.push(http_application_owner),
+            None => owner_phases.push(vec![http_application_owner]),
+        }
+        let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
+            &engine.lifecycle,
+            &mut client_tasks,
             shutdown_deadline,
-            vec![shutdown_coordination::ShutdownOwner::with_deadline_result(
-                "http_application",
-                move || http_application_cancel.cancel(),
-                move |_| async move { http_application_service.shutdown().await.is_ok() },
-            )],
-        ));
-        let mut bootstrap_receipt = None;
-        let in_flight = timeout(
-            DAEMON_CLIENT_DRAIN_DEADLINE,
-            engine.lifecycle.wait_for_idle(),
-        );
-        tokio::pin!(in_flight);
-        let in_flight_drained = loop {
-            tokio::select! {
-                receipt = &mut background_shutdown, if background_receipt.is_none() => {
-                    background_receipt = Some(receipt);
-                }
-                receipt = &mut bootstrap_shutdown, if bootstrap_receipt.is_none() => {
-                    bootstrap_receipt = Some(receipt);
-                }
-                drained = &mut in_flight => break drained.is_ok(),
-            }
-        };
-        // Once admitted requests are finished (or their bound elapsed), every
-        // remaining client task is an idle socket reader or already-cancelled
-        // request wrapper. Abort those immediately instead of making shutdown wait
-        // for clients to close persistent connections themselves.
-        client_tasks.abort_all();
-        let clients_drained =
-            drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
-        let (background_receipt, bootstrap_receipt) = tokio::join!(
-            async {
-                match background_receipt {
-                    Some(receipt) => receipt,
-                    None => background_shutdown.await,
-                }
-            },
-            async {
-                match bootstrap_receipt {
-                    Some(receipt) => receipt,
-                    None => bootstrap_shutdown.await,
-                }
-            },
-        );
-        let project_server_receipt = engine.shutdown_servers(shutdown_deadline).await;
-        if !in_flight_drained || !clients_drained {
+            owner_phases,
+            engine.shutdown_servers(shutdown_deadline),
+        )
+        .await;
+        if !shutdown.in_flight_drained || !shutdown.clients_drained {
             log_daemon_event(
                 "daemon_shutdown",
                 &[
@@ -532,9 +441,8 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 ],
             );
         }
-        log_background_shutdown_receipt(&background_receipt);
-        log_background_shutdown_receipt(&bootstrap_receipt);
-        log_project_server_shutdown_receipt(&project_server_receipt);
+        log_background_shutdown_receipt(&shutdown.background);
+        log_project_server_shutdown_receipt(&shutdown.project_servers);
     })
     .await
     .is_ok();

@@ -184,6 +184,7 @@ pub(crate) mod project_open_owners;
 pub(crate) mod query_authority_provider;
 mod semantic_evaluation;
 mod shutdown_coordination;
+mod shutdown_orchestration;
 pub(crate) use core_admission::*;
 pub use core_client::*;
 pub(crate) use core_doctor::*;
