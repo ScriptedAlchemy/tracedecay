@@ -249,6 +249,13 @@ fn capability(
         } else {
             IdempotencyContract::NotRequired
         },
+        inverse: if is_effect {
+            tracedecay_tool_catalog::InverseContract::Unavailable {
+                reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+            }
+        } else {
+            tracedecay_tool_catalog::InverseContract::NotApplicable
+        },
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
