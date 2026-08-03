@@ -178,7 +178,7 @@ pub struct ExactSqlRollbackReceipt {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SqlRequest {
+pub(crate) enum SqlRequest {
     Validate(ExactSqlStatement),
     Execute(ExactSqlStatement),
     Query(ExactSqlStatement),
@@ -197,7 +197,7 @@ impl SqlRequest {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum SqlResult {
+pub(crate) enum SqlResult {
     Validated,
     Executed(ExactSqlExecuteResult),
     Queried(ExactSqlRows),

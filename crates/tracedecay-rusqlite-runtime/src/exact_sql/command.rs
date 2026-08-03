@@ -155,9 +155,16 @@ pub(crate) fn run_writer_command(
                 let _ = reply.send(Err(error));
                 return;
             }
-            let statement =
-                ExactSqlStatement::new("PRAGMA wal_checkpoint(TRUNCATE)".to_owned(), Vec::new())
-                    .expect("fixed WAL checkpoint statement is valid");
+            let statement = match ExactSqlStatement::new(
+                "PRAGMA wal_checkpoint(TRUNCATE)".to_owned(),
+                Vec::new(),
+            ) {
+                Ok(statement) => statement,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
             let result = with_exact_sql_guard(
                 connection,
                 false,
@@ -394,12 +401,22 @@ fn run_transaction(
                 }
                 let intent = request.intent();
                 let repeated_authority =
-                    (execution_policy == ExecutionPolicy::AuthorityRevalidated).then(|| {
-                        (
-                            Arc::clone(authority.as_ref().expect("exact SQL authority")),
-                            intent,
-                        )
-                    });
+                    if execution_policy == ExecutionPolicy::AuthorityRevalidated {
+                        let Some(authority) = authority.as_ref() else {
+                            let _ = transaction.rollback();
+                            let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
+                                "authority-revalidated batch requires attached write authority"
+                                    .to_owned(),
+                            )));
+                            return TransactionCompletion::abandoned(
+                                attachments,
+                                previous_attachment_limit,
+                            );
+                        };
+                        Some((Arc::clone(authority), intent))
+                    } else {
+                        None
+                    };
                 let execution_deadline =
                     (execution_policy == ExecutionPolicy::Bounded).then_some(transaction_deadline);
                 let (mut result, inserted) = execute_request(

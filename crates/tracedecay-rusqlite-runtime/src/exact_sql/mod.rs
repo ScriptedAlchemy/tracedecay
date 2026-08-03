@@ -276,19 +276,6 @@ impl ExactSqlHandle {
         (self.table_size_telemetry)(reader_wait, &mut interrupted)
     }
 
-    pub fn dispatch(
-        &self,
-        request: SqlRequest,
-        reader_wait: Duration,
-    ) -> Result<SqlResult, ExactSqlError> {
-        match request {
-            SqlRequest::Query(statement) => {
-                self.query(statement, reader_wait).map(SqlResult::Queried)
-            }
-            request => self.dispatch_writer(request),
-        }
-    }
-
     pub fn execute(
         &self,
         statement: ExactSqlStatement,
