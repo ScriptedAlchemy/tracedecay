@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -8,12 +9,13 @@ use tracedecay_domain::{
     AuthorizationRevision, CodeSearchChunkId, ComponentRevision, ExactClass,
     FreshnessCompatibilityV1, FreshnessVectorDigest, FusedCandidate, FusionProfileId,
     HydrationReceipt, HydrationRevision, LogicalEvidenceId, OccurrenceProvenance, PrincipalId,
-    PrivacyDomainId, RankedCandidate, RefId, RepositoryId, RetrievalAnchorId, RetrievalBudget,
-    RetrievalRequest, RetrievalScope, RetrievalSnapshot, SingleRootScopeV1, SourceFreshness,
-    SourceInstanceKey, SourceNamespace, SourceOccurrenceId, TemporalModeV1, UtcMicros,
-    VectorWatermark, WorktreeId,
+    PrivacyDomainId, PublicRetrieverStatus, RankedCandidate, RefId, RepositoryId,
+    RetrievalAnchorId, RetrievalBudget, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverKind, SingleRootScopeV1, SourceFreshness, SourceInstanceKey, SourceNamespace,
+    SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
+use super::super::code_index_executor::completed_search_coverage;
 use super::super::code_index_scheduler::{CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1};
 use super::super::{code_index_search_display_binding, code_index_search_hydration_budget};
 use tracedecay_query::code_search::CodeIndexSearchDisplayV1;
@@ -436,4 +438,71 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
     assert_eq!(rerank_symbol.id, chunk.id);
     assert_eq!(rerank_chunk.id, chunk.id);
     assert_eq!(rerank_symbol.sanitized_text, rerank_chunk.sanitized_text);
+}
+
+#[test]
+fn one_unavailable_lane_does_not_erase_other_lane_coverage() {
+    let statuses = BTreeMap::from([
+        (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+        (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
+        (RetrieverKind::Graph, PublicRetrieverStatus::Unavailable),
+    ]);
+    let coverage = completed_search_coverage(
+        &statuses,
+        "generation.coverage-test",
+        false,
+        &tracedecay_query::code_search::CodeIndexSemanticStatusV1::Unavailable {
+            reason: "semantic_warming",
+        },
+    );
+
+    assert_eq!(
+        coverage.exact,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Complete
+    );
+    assert_eq!(
+        coverage.lexical,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Complete
+    );
+    assert_eq!(
+        coverage.graph,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable {
+            reason: tracedecay_query::code_search::lane_reason::SERVING_LANE_UNAVAILABLE,
+        }
+    );
+    assert_eq!(
+        coverage.semantic,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable {
+            reason: "semantic_warming",
+        }
+    );
+}
+
+#[test]
+fn stale_generation_marks_only_servable_lanes_stale() {
+    let statuses = BTreeMap::from([
+        (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+        (RetrieverKind::Lexical, PublicRetrieverStatus::Partial),
+        (RetrieverKind::Graph, PublicRetrieverStatus::Unavailable),
+    ]);
+    let coverage = completed_search_coverage(
+        &statuses,
+        "generation.stale-test",
+        true,
+        &tracedecay_query::code_search::CodeIndexSemanticStatusV1::Complete,
+    );
+    let stale = tracedecay_query::code_search::CodeIndexLaneStatusV1::Stale {
+        generation: "generation.stale-test".to_owned(),
+    };
+
+    assert_eq!(coverage.exact, stale);
+    assert_eq!(coverage.lexical, stale);
+    assert!(matches!(
+        coverage.graph,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Unavailable { .. }
+    ));
+    assert_eq!(
+        coverage.semantic,
+        tracedecay_query::code_search::CodeIndexLaneStatusV1::Complete
+    );
 }

@@ -12,6 +12,14 @@ impl CodeIndexSchedulerRegistryV1 {
             .clear();
         for worktree in mounted.values() {
             worktree.shutting_down.store(true, Ordering::Release);
+            if let Some(latest) = worktree
+                .serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+            {
+                latest.warm_control.cancel();
+            }
             *worktree
                 .serving_generation
                 .write()
@@ -32,6 +40,14 @@ impl CodeIndexSchedulerRegistryV1 {
             return false;
         };
         worktree.shutting_down.store(true, Ordering::Release);
+        if let Some(latest) = worktree
+            .serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            latest.warm_control.cancel();
+        }
         *worktree
             .serving_generation
             .write()

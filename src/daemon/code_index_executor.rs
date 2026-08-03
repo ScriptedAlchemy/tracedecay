@@ -4,7 +4,7 @@
 //! signatures, or behavior changed. `use super::*` re-exposes every name the
 //! parent `daemon` module had in scope so the moved code resolves unchanged.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tracedecay_query::code_search;
@@ -72,6 +72,69 @@ fn code_index_search_unavailable(
     semantic_reason: &'static str,
 ) -> code_search::CodeIndexSearchOutcomeV1 {
     code_index_search_unavailable_for_generation(None, reason, semantic_reason)
+}
+
+fn generation_lane_status(
+    statuses: &BTreeMap<tracedecay_domain::RetrieverKind, tracedecay_domain::PublicRetrieverStatus>,
+    lane: tracedecay_domain::RetrieverKind,
+    generation: &str,
+    served_stale: bool,
+) -> code_search::CodeIndexLaneStatusV1 {
+    use tracedecay_domain::PublicRetrieverStatus;
+
+    match statuses.get(&lane) {
+        Some(PublicRetrieverStatus::Complete | PublicRetrieverStatus::Partial) if !served_stale => {
+            code_search::CodeIndexLaneStatusV1::Complete
+        }
+        Some(
+            PublicRetrieverStatus::Complete
+            | PublicRetrieverStatus::Partial
+            | PublicRetrieverStatus::Stale,
+        ) => code_search::CodeIndexLaneStatusV1::Stale {
+            generation: generation.to_owned(),
+        },
+        Some(PublicRetrieverStatus::Unavailable) | None => {
+            code_search::CodeIndexLaneStatusV1::Unavailable {
+                reason: code_search::lane_reason::SERVING_LANE_UNAVAILABLE,
+            }
+        }
+    }
+}
+
+pub(super) fn completed_search_coverage(
+    statuses: &BTreeMap<tracedecay_domain::RetrieverKind, tracedecay_domain::PublicRetrieverStatus>,
+    generation: &str,
+    served_stale: bool,
+    semantic: &code_search::CodeIndexSemanticStatusV1,
+) -> code_search::CodeIndexSearchCoverageV1 {
+    code_search::CodeIndexSearchCoverageV1 {
+        exact: generation_lane_status(
+            statuses,
+            tracedecay_domain::RetrieverKind::ExactLiteral,
+            generation,
+            served_stale,
+        ),
+        lexical: generation_lane_status(
+            statuses,
+            tracedecay_domain::RetrieverKind::Lexical,
+            generation,
+            served_stale,
+        ),
+        graph: generation_lane_status(
+            statuses,
+            tracedecay_domain::RetrieverKind::Graph,
+            generation,
+            served_stale,
+        ),
+        semantic: match semantic {
+            code_search::CodeIndexSemanticStatusV1::Complete => {
+                code_search::CodeIndexLaneStatusV1::Complete
+            }
+            code_search::CodeIndexSemanticStatusV1::Unavailable { reason } => {
+                code_search::CodeIndexLaneStatusV1::Unavailable { reason }
+            }
+        },
+    }
 }
 
 /// The authority check repeated at every point a search may still be abandoned:
@@ -858,21 +921,12 @@ pub(super) fn code_index_search_executor(
                     "authorization_changed_during_publication",
                 );
             }
-            // Additive only: the generation-bound lanes all ran against the
-            // admitted generation here, so warm coverage restates what the
-            // existing candidates already mean. Ranking identity, fallback
-            // bytes, and the cursor are untouched. When query admission had to
-            // fall back to the last complete generation because no current one
-            // was admissible, the same lanes are reported stale against the
-            // generation that actually answered.
-            let coverage = if executed.query.served_stale {
-                code_search::CodeIndexSearchCoverageV1::fused_stale(
-                    executed.query.generation.as_str(),
-                    &semantic,
-                )
-            } else {
-                code_search::CodeIndexSearchCoverageV1::fused(&semantic)
-            };
+            let coverage = completed_search_coverage(
+                &executed.query.authorized.composition.public_lane_statuses,
+                executed.query.generation.as_str(),
+                executed.query.served_stale,
+                &semantic,
+            );
             code_search::CodeIndexSearchOutcomeV1::Complete(
                 code_search::CodeIndexSearchCompletedV1 {
                     code_generation: executed.query.generation.as_str().to_owned(),

@@ -1008,11 +1008,35 @@ fn relation_records(
     maximum_depth: u32,
     scope: &tracedecay_application::CodeQueryScope,
 ) -> Result<Vec<SymbolRelationRecord>, RetrievalPortError> {
+    relation_records_with_edge_probe(latest, start, kinds, reverse, maximum_depth, scope)
+        .map(|(records, _)| records)
+}
+
+pub(super) fn relation_records_with_edge_probe(
+    latest: &LatestCompleteCodeIndexV1,
+    start: &SymbolOccurrenceId,
+    kinds: &[RelationEdgeKindV1],
+    reverse: bool,
+    maximum_depth: u32,
+    scope: &tracedecay_application::CodeQueryScope,
+) -> Result<(Vec<SymbolRelationRecord>, usize), RetrievalPortError> {
+    relation_records_measured(latest, start, kinds, reverse, maximum_depth, scope)
+}
+
+fn relation_records_measured(
+    latest: &LatestCompleteCodeIndexV1,
+    start: &SymbolOccurrenceId,
+    kinds: &[RelationEdgeKindV1],
+    reverse: bool,
+    maximum_depth: u32,
+    scope: &tracedecay_application::CodeQueryScope,
+) -> Result<(Vec<SymbolRelationRecord>, usize), RetrievalPortError> {
     let index = latest.record_index()?;
     let edges = latest.generation.edges();
     let mut queue = VecDeque::from([(start.clone(), 0_u32)]);
     let mut visited = BTreeSet::from([start.clone()]);
     let mut records = Vec::new();
+    let mut examined_edges = 0_usize;
     while let Some((current, depth)) = queue.pop_front() {
         if depth >= maximum_depth {
             continue;
@@ -1021,8 +1045,9 @@ fn relation_records(
         // which made this traversal O(visited x edges). The positions arrive in
         // ascending order and carry the same incidence test the scan applied,
         // so the surviving `kinds` filter yields the identical edge sequence.
-        for edge in index
-            .incident_edge_positions(&current, reverse)
+        let incident = index.incident_edge_positions(&current, reverse);
+        examined_edges = examined_edges.saturating_add(incident.len());
+        for edge in incident
             .iter()
             .map(|position| &edges[*position])
             .filter(|edge| kinds.contains(&edge.kind))
@@ -1057,7 +1082,7 @@ fn relation_records(
             .cmp(&right.depth)
             .then(left.symbol.node_id.cmp(&right.symbol.node_id))
     });
-    Ok(records)
+    Ok((records, examined_edges))
 }
 
 fn retrieval_failure_omission(reason: &RetrievalFailure) -> OmissionReason {
@@ -1299,7 +1324,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.exact().retrieve_exact(&lane_request);
+            let Ok(exact) = owners.exact() else {
+                return unavailable(finished_at);
+            };
+            let outcome = exact.retrieve_exact(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) =
@@ -1402,7 +1430,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.lexical().retrieve_lexical(&lane_request);
+            let Ok(lexical) = owners.lexical() else {
+                return unavailable(finished_at);
+            };
+            let outcome = lexical.retrieve_lexical(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.lexical(outcome, |path| {
@@ -1497,7 +1528,10 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             else {
                 return unavailable_for_generation(finished_at, served_generation);
             };
-            let outcome = owners.graph().retrieve_graph(&lane_request);
+            let Ok(graph) = owners.graph() else {
+                return unavailable(finished_at);
+            };
+            let outcome = graph.retrieve_graph(&lane_request);
             match outcome {
                 Ok(outcome) => {
                     let Ok(outcome) = native_context.graph(outcome, |path| {

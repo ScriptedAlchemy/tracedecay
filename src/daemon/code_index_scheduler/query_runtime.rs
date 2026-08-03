@@ -353,7 +353,7 @@ impl CodeIndexSchedulerRegistryV1 {
             literals: parser.parse_literals(query_view, request),
             budget: request.budget,
         };
-        let exact = owners.exact().retrieve_exact(&exact_request)?;
+        let exact = owners.exact()?.retrieve_exact(&exact_request)?;
 
         let lexical_parts = lexical_query_parts(query_view.as_str())?;
         let lexical_request = LexicalLaneRequest {
@@ -369,7 +369,7 @@ impl CodeIndexSchedulerRegistryV1 {
             score_domain: input.lexical_score_domain,
             budget: request.budget,
         };
-        let lexical = owners.lexical().retrieve_lexical(&lexical_request)?;
+        let lexical = owners.lexical()?.retrieve_lexical(&lexical_request)?;
 
         let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
         let graph = if graph_seeds.is_empty() {
@@ -377,14 +377,19 @@ impl CodeIndexSchedulerRegistryV1 {
                 detail: "exact and lexical lanes produced no graph seed".to_owned(),
             })
         } else {
-            owners.graph().retrieve_graph(&GraphLaneRequest {
-                base: request.clone(),
-                generation: generation.clone(),
-                seed_anchors: graph_seeds,
-                edge_kinds: input.graph_edge_kinds,
-                max_depth: input.graph_max_depth,
-                budget: request.budget,
-            })?
+            match owners.graph() {
+                Ok(graph) => graph.retrieve_graph(&GraphLaneRequest {
+                    base: request.clone(),
+                    generation: generation.clone(),
+                    seed_anchors: graph_seeds,
+                    edge_kinds: input.graph_edge_kinds,
+                    max_depth: input.graph_max_depth,
+                    budget: request.budget,
+                })?,
+                Err(_) => RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+                    detail: "graph serving lane is unavailable".to_owned(),
+                }),
+            }
         };
         let lanes = vec![
             CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)

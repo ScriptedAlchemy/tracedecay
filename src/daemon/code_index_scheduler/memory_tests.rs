@@ -3,14 +3,17 @@ use std::num::NonZeroU64;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
-use tracedecay_domain::{ProjectId, SanitizerRevision, WorktreeId};
+use tracedecay_domain::{ProjectId, RelationEdgeKindV1, SanitizerRevision, WorktreeId};
 use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 
+use super::queries::relation_records_with_edge_probe;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
+    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, ServingLaneV1,
+    SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
 use crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
@@ -73,6 +76,28 @@ fn realistic_corpus_fixture() -> TempDir {
     }
     git(root.path(), &["add", "src/modules"]);
     git(root.path(), &["commit", "-q", "-m", "realistic corpus"]);
+    root
+}
+
+fn relation_scale_fixture(disconnected_edges: usize) -> TempDir {
+    let root = TempDir::new().expect("fixture root");
+    git(root.path(), &["init", "-q"]);
+    git(
+        root.path(),
+        &["config", "user.email", "memory@test.invalid"],
+    );
+    git(root.path(), &["config", "user.name", "Memory Test"]);
+    fs::create_dir_all(root.path().join("src")).expect("create source directory");
+    let mut source = String::from("pub fn start() { target(); }\npub fn target() {}\n");
+    for edge in 0..disconnected_edges {
+        source.push_str(&format!(
+            "pub fn noise_caller_{edge}() {{ noise_target_{edge}(); }}\n\
+             pub fn noise_target_{edge}() {{}}\n"
+        ));
+    }
+    fs::write(root.path().join("src/lib.rs"), source).expect("write relation corpus");
+    git(root.path(), &["add", "src/lib.rs"]);
+    git(root.path(), &["commit", "-q", "-m", "relation corpus"]);
     root
 }
 
@@ -297,17 +322,19 @@ fn cancelled_lane_warm_releases_every_unpublished_lane_charge() {
         Err(tracedecay_query::retrieval::ports::RetrievalPortError::Cancelled)
     ));
     assert!(
-        resident_memory
-            .snapshot()
-            .charges
-            .iter()
-            .all(|charge| { charge.key.component.as_str() != "code_index.serving_generation.v1" }),
+        resident_memory.snapshot().charges.iter().all(|charge| {
+            !charge
+                .key
+                .component
+                .as_str()
+                .starts_with("code_index.serving_")
+        }),
         "cancelled warm must publish no derived lane reservation"
     );
 }
 
 #[test]
-fn lane_admission_denies_before_publishing_any_derived_owner() {
+fn lane_admission_retains_only_independently_admitted_owners() {
     let project = fixture();
     let store = TempDir::new().expect("store root");
     let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
@@ -324,7 +351,7 @@ fn lane_admission_denies_before_publishing_any_derived_owner() {
     scheduler.reconcile_now().expect("generation");
     let latest = scheduler.latest_complete().expect("latest");
     assert!(matches!(
-        latest.production_query_owners(),
+        latest.warm_serving_caches(),
         Err(tracedecay_query::retrieval::ports::RetrievalPortError::AuthorityUnavailable(_))
     ));
     assert!(!latest.query_owners_are_warm());
@@ -333,9 +360,205 @@ fn lane_admission_denies_before_publishing_any_derived_owner() {
             .snapshot()
             .charges
             .iter()
-            .all(|charge| { charge.key.component.as_str() != "code_index.serving_generation.v1" }),
-        "denied lane build must retain no partial reservation"
+            .all(|charge| charge.bytes <= 32 * 1024 * 1024),
+        "one denied lane must not publish a reservation beyond the process bound"
     );
+}
+
+#[test]
+fn one_lane_warm_failure_never_poison_caches_or_blocks_other_lanes() {
+    for lane in [
+        ServingLaneV1::RecordIndex,
+        ServingLaneV1::Exact,
+        ServingLaneV1::Lexical,
+        ServingLaneV1::Graph,
+    ] {
+        let project = fixture();
+        let store = TempDir::new().expect("store root");
+        let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+            NonZeroU64::new(1024 * 1024 * 1024).expect("resident limit"),
+        ));
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+            ProjectId::new(format!("project.code-index-lane-{}", lane as u8)).expect("project id"),
+            project.path(),
+            store.path().to_path_buf(),
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+            resident_memory,
+        )
+        .expect("scheduler");
+        scheduler.reconcile_now().expect("generation");
+        let latest = scheduler.latest_complete().expect("latest");
+        let owners = latest.production_query_owners().expect("serving registry");
+        owners.fail_next(lane);
+        assert!(
+            latest.warm_serving_caches().is_err(),
+            "the injected lane failure must be reported"
+        );
+
+        match lane {
+            ServingLaneV1::RecordIndex => {
+                assert!(latest.record_index().is_err());
+                owners.exact().expect("exact remains independent");
+                owners.lexical().expect("lexical remains independent");
+                owners.graph().expect("graph remains independent");
+            }
+            ServingLaneV1::Exact => {
+                assert!(owners.exact().is_err());
+                latest.record_index().expect("record remains independent");
+                owners.lexical().expect("lexical remains independent");
+                owners.graph().expect("graph remains independent");
+            }
+            ServingLaneV1::Lexical => {
+                assert!(owners.lexical().is_err());
+                latest.record_index().expect("record remains independent");
+                owners.exact().expect("exact remains independent");
+                owners.graph().expect("graph remains independent");
+            }
+            ServingLaneV1::Graph => {
+                assert!(owners.graph().is_err());
+                latest.record_index().expect("record remains independent");
+                owners.exact().expect("exact remains independent");
+                owners.lexical().expect("lexical remains independent");
+            }
+        }
+        latest
+            .warm_serving_caches()
+            .expect("a failed lane retries because failure was not cached");
+        latest.record_index().expect("record retry");
+        owners.exact().expect("exact retry");
+        owners.lexical().expect("lexical retry");
+        owners.graph().expect("graph retry");
+    }
+}
+
+#[test]
+fn relation_traversal_examines_only_reachable_adjacency_in_a_large_generation() {
+    const DISCONNECTED_EDGES: usize = 1_000;
+
+    let project = relation_scale_fixture(DISCONNECTED_EDGES);
+    let store = TempDir::new().expect("store root");
+    let resident_memory = Arc::new(ProcessResidentMemoryV1::new(
+        NonZeroU64::new(2 * 1024 * 1024 * 1024).expect("resident limit"),
+    ));
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+        ProjectId::new("project.code-index-relation-scale").expect("project id"),
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+        resident_memory,
+    )
+    .expect("scheduler");
+    scheduler.reconcile_now().expect("generation");
+    let latest = scheduler.latest_complete().expect("latest");
+    latest
+        .warm_serving_caches()
+        .expect("warm independent serving lanes");
+    let start = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.qualified_name == "start" || symbol.qualified_name.ends_with("::start")
+        })
+        .expect("start symbol")
+        .occurrence
+        .clone();
+    let scope = tracedecay_application::CodeQueryScope::new(
+        latest.generation.manifest().generation_id.clone(),
+        None,
+    )
+    .expect("query scope");
+
+    let (records, examined_edges) = relation_records_with_edge_probe(
+        &latest,
+        &start,
+        &[RelationEdgeKindV1::Calls],
+        false,
+        1,
+        &scope,
+    )
+    .expect("relation traversal");
+
+    assert_eq!(records.len(), 1, "only start -> target is reachable");
+    assert_eq!(
+        examined_edges, 1,
+        "disconnected edges must not contribute to traversal work"
+    );
+    assert!(
+        latest.generation.edges().len() >= DISCONNECTED_EDGES,
+        "fixture must retain the large disconnected edge population"
+    );
+}
+
+#[tokio::test]
+async fn mount_publishes_a_large_generation_before_bounded_lane_warming() {
+    let project = realistic_corpus_fixture();
+    let store = TempDir::new().expect("store root");
+    let project_id = ProjectId::new("project.code-index-mount-publication").expect("project id");
+    let scoped_store = super::scoped_code_index_store_root(store.path(), project.path());
+    {
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open_with_resident_memory(
+            project_id.clone(),
+            project.path(),
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+            Arc::new(ProcessResidentMemoryV1::new(
+                NonZeroU64::new(2 * 1024 * 1024 * 1024).expect("resident limit"),
+            )),
+        )
+        .expect("scheduler");
+        scheduler.reconcile_now().expect("sealed generation");
+    }
+
+    let registry = CodeIndexSchedulerRegistryV1::with_background_reconcile_permits(2, 0);
+    let started = Instant::now();
+    registry
+        .mount_worktree(project_id, project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount retained generation");
+    let mount_elapsed = started.elapsed();
+    let canonical_root = project.path().canonicalize().expect("canonical root");
+    let (latest, scheduler) = {
+        let mounted = registry.mounted.lock().await;
+        let mounted = mounted.get(&canonical_root).expect("mounted worktree");
+        (
+            mounted
+                .serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .expect("published generation"),
+            Arc::clone(&mounted.scheduler),
+        )
+    };
+
+    assert!(
+        mount_elapsed < Duration::from_secs(30),
+        "mount decode took {mount_elapsed:?}; lane warming must not be charged to mount"
+    );
+    assert!(
+        !latest.serving_lanes_are_ready(),
+        "zero warm permits prove publication happened before any lane warm"
+    );
+    assert!(
+        registry.mounted.try_lock().is_ok(),
+        "publication must release the mount registry lock before warming"
+    );
+    assert!(
+        scheduler.try_lock().is_ok(),
+        "publication must release the scheduler writer before warming"
+    );
+
+    registry.background_reconcile_admission().add_permits(1);
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !latest.serving_lanes_are_ready() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("bounded lane warming completed");
+    registry.shutdown().await;
 }
 
 #[test]
@@ -360,11 +583,13 @@ fn in_flight_lane_arc_retains_charge_until_its_final_reader_drops() {
     drop(latest);
     drop(scheduler);
     assert!(
-        resident_memory
-            .snapshot()
-            .charges
-            .iter()
-            .any(|charge| { charge.key.component.as_str() == "code_index.serving_generation.v1" }),
+        resident_memory.snapshot().charges.iter().any(|charge| {
+            charge
+                .key
+                .component
+                .as_str()
+                .starts_with("code_index.serving_")
+        }),
         "in-flight lane owner must retain its reservation"
     );
     drop(owners);
@@ -397,7 +622,9 @@ fn realistic_corpus_retains_every_serving_component_within_authority() {
     for component in [
         "code_index.capture_working_set.v1",
         "code_index.canonical_generation.v1",
-        "code_index.serving_generation.v1",
+        "code_index.serving_record_index.v1",
+        "code_index.serving_exact_lexical.v1",
+        "code_index.serving_graph.v1",
     ] {
         assert!(
             snapshot

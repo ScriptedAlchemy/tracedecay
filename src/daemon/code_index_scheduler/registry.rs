@@ -614,11 +614,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 opened.replace_semantic_schedule_hook(Some(hook));
             }
             let restored = opened.try_latest_complete()?;
-            if let Some(latest) = restored.as_ref() {
-                latest
-                    .warm_serving_caches()
-                    .map_err(|error| CodeIndexSchedulerErrorV1::Serving(error.to_string()))?;
-            }
             Ok::<_, CodeIndexSchedulerErrorV1>((opened, restored))
         })
         .await
@@ -636,8 +631,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        // Mount is atomic: a retained generation becomes visible only after all
-        // serving lanes are resident-ready.
+        // Publish the verified sealed generation before any derived lane warms.
+        // A cold lane is a typed per-lane unavailable state; keeping the entire
+        // generation hidden behind BM25 construction made mount latency scale
+        // with the corpus and held every cache-hit reader behind that work.
         let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
@@ -700,6 +697,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     *worker_serving_generation
                         .write()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+                    background_reconcile::spawn_bounded_warm(
+                        Arc::clone(&worker_background_reconcile_admission),
+                        latest.clone(),
+                    );
                 }
                 if let Ok(BackgroundCodeIndexReconcileV1::Completed {
                     outcome: Ok(outcome),
@@ -807,7 +808,14 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
-        if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
+        drop(mounted);
+        if let Some(latest) = restored_generation.as_ref() {
+            background_reconcile::spawn_bounded_warm(
+                Arc::clone(&self.background_reconcile_admission),
+                latest.clone(),
+            );
+        }
+        if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation.as_ref()) {
             let _ = hook(&latest.generation);
         }
         // Schedule a background verification pass UNLESS the restore-time witness
@@ -1383,9 +1391,6 @@ impl CodeIndexSchedulerRegistryV1 {
                     }
                     Err(_) => return None,
                 };
-                if latest.warm_serving_caches().is_err() {
-                    return None;
-                }
                 *serving_generation
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
@@ -1435,6 +1440,12 @@ impl CodeIndexSchedulerRegistryV1 {
             .await
             .ok()
             .flatten()?;
+        if !latest.serving_lanes_are_ready() {
+            background_reconcile::spawn_bounded_warm(
+                Arc::clone(&self.background_reconcile_admission),
+                latest.clone(),
+            );
+        }
         if let Some(publication) = publication {
             let _ = self.generation_publications.send(publication);
         }

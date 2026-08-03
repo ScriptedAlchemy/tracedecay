@@ -44,13 +44,18 @@ pub(super) fn reconcile(
             latest: None,
         };
     }
-    if let Some(latest) = latest.as_ref()
-        && let Err(error) = latest.warm_serving_caches()
-    {
-        return BackgroundCodeIndexReconcileV1::Completed {
-            outcome: Err(CodeIndexSchedulerErrorV1::Serving(error.to_string())),
-            latest: None,
-        };
-    }
     BackgroundCodeIndexReconcileV1::Completed { outcome, latest }
+}
+
+pub(super) fn spawn_bounded_warm(
+    admission: Arc<tokio::sync::Semaphore>,
+    latest: LatestCompleteCodeIndexV1,
+) {
+    tokio::spawn(async move {
+        let Ok(_admission) = admission.acquire_owned().await else {
+            latest.warm_control.cancel();
+            return;
+        };
+        let _ = tokio::task::spawn_blocking(move || latest.warm_serving_caches()).await;
+    });
 }

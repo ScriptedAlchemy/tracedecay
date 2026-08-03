@@ -99,6 +99,8 @@ pub mod lane_reason {
     pub const GENERATION_UNAVAILABLE: &str = "generation_unavailable";
     /// The lane exists but this request was denied, cancelled, or timed out.
     pub const REQUEST_TERMINATED: &str = "request_terminated";
+    /// One independently warmed serving lane was not resident for this query.
+    pub const SERVING_LANE_UNAVAILABLE: &str = "serving_lane_unavailable";
 }
 
 /// Per-lane serving status for one search response.

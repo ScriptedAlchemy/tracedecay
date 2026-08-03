@@ -1514,13 +1514,19 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     let canonical_edges = latest.generation.shared_edges();
     let prior_chunk_owners = Arc::strong_count(&canonical_chunks);
     let prior_edge_owners = Arc::strong_count(&canonical_edges);
+    latest
+        .warm_serving_caches()
+        .expect("warm independent serving lanes");
     let owners = latest
         .production_query_owners()
         .expect("connect production query owners");
+    let exact = owners.exact().expect("exact lane");
+    let lexical = owners.lexical().expect("lexical lane");
+    let graph = owners.graph().expect("graph lane");
     assert!(
-        std::mem::size_of_val(owners.exact()) > 0
-            && std::mem::size_of_val(owners.lexical()) > 0
-            && std::mem::size_of_val(owners.graph()) > 0,
+        std::mem::size_of_val(exact) > 0
+            && std::mem::size_of_val(lexical) > 0
+            && std::mem::size_of_val(graph) > 0,
         "exact/lexical/graph production owners must be concrete lane values"
     );
     assert_eq!(
@@ -1574,6 +1580,9 @@ fn generation_record_index_matches_linear_scan_lookups() {
     let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
     published(scheduler.reconcile_now().expect("publish"));
     let latest = scheduler.latest_complete().expect("latest generation");
+    latest
+        .warm_serving_caches()
+        .expect("warm independent serving lanes");
 
     let generation = latest.generation();
     let snapshot_files = &generation.snapshot().files;
