@@ -1,7 +1,5 @@
 //! Durable workflow authority over the registered Work exact-SQL channel.
 
-use std::sync::Arc;
-
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
@@ -16,11 +14,8 @@ use tracedecay_domain::{
     WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
     WorkflowRunEventV1, WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
 };
-use tracedecay_rusqlite_runtime::migration_sql::{
-    MigrationSqlError, MigrationSqlHandle, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
-};
 use tracedecay_rusqlite_runtime::workflow::{
-    WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError, migrate_workflow_schema_v2,
+    WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,
 };
 
 mod work_registered_store;
@@ -105,34 +100,27 @@ fn placement(run_id: RunId) -> WorkflowPlacementReceiptV1 {
     .unwrap()
 }
 
-struct AllowWorkflowSchemaMigration;
-
-impl MigrationSqlWriteAuthority for AllowWorkflowSchemaMigration {
-    fn verify(&self, _: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
-        Ok(())
-    }
-}
-
-fn schema_migration_handle(store: &RegisteredWorkStore) -> MigrationSqlHandle {
-    store
-        .migration_handle()
-        .clone()
-        .with_write_authority(Arc::new(AllowWorkflowSchemaMigration))
-        .unwrap()
-}
-
-fn migrated_authority(store: &RegisteredWorkStore) -> WorkflowSqliteAuthority {
-    migrate_workflow_schema_v2(&schema_migration_handle(store)).unwrap();
+fn authority(store: &RegisteredWorkStore) -> WorkflowSqliteAuthority {
     WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap()
 }
 
 #[test]
-fn runtime_requires_explicit_workflow_migration() {
-    let store = RegisteredWorkStore::start("workflow-explicit-migration");
+fn non_final_store_requires_reset_without_runtime_schema_mutation() {
+    let store = RegisteredWorkStore::start_with_setup("workflow-reset-required", |connection| {
+        connection
+            .execute_batch(
+                "DROP TABLE workflow_run_heads_v2;
+                 DROP TABLE workflow_run_events_v2;
+                 DROP TABLE workflow_handoffs_v1;
+                 DROP TABLE workflow_activations_v1;
+                 DROP TABLE workflow_definitions_v1;",
+            )
+            .unwrap();
+    });
 
     assert!(matches!(
         WorkflowSqliteAuthority::from_work_storage(store.storage()),
-        Err(WorkflowSqliteAuthorityBuildError::MigrationRequired)
+        Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
     ));
     assert_eq!(
         store.inspect(|connection| {
@@ -146,20 +134,14 @@ fn runtime_requires_explicit_workflow_migration() {
                 .unwrap()
         }),
         0,
-        "runtime attachment must not create workflow schema"
+        "runtime attachment must not mutate a non-final store"
     );
-
-    assert!(migrate_workflow_schema_v2(store.migration_handle()).is_err());
-    migrate_workflow_schema_v2(&schema_migration_handle(&store)).unwrap();
-    assert!(WorkflowSqliteAuthority::from_work_storage(store.storage()).is_ok());
-    assert_eq!(store.count("workflow_schema_v2"), 1);
-    assert_eq!(store.count("workflow_executions_v1"), 0);
 }
 
 #[test]
 fn run_journal_appends_replays_and_rebuilds_after_restart() {
     let store = RegisteredWorkStore::start("workflow-run-journal");
-    let authority = migrated_authority(&store);
+    let authority = authority(&store);
     let run_id = id::<RunId>("run.workflow.runtime-store.journal");
     let admitted = WorkflowRunEventV1::admitted(
         run_id.clone(),
@@ -403,7 +385,7 @@ fn execution_completion_rejects_child_without_terminal_receipt() {
 #[test]
 fn definitions_activate_and_reject_conflicting_payloads() {
     let store = RegisteredWorkStore::start("workflow-definitions");
-    let authority = migrated_authority(&store);
+    let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     let second = definition(2, "operation.prepare.v1");
     let conflicting = definition(1, "operation.prepare.v2");
@@ -470,7 +452,7 @@ fn definitions_activate_and_reject_conflicting_payloads() {
 #[test]
 fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     let store = RegisteredWorkStore::start("workflow-handoff");
-    let authority = migrated_authority(&store);
+    let authority = authority(&store);
     let scope = handoff_scope();
     let secret = "s".repeat(48);
     let grant = TaskHandoffGrantV1::new(
@@ -576,7 +558,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
 #[test]
 fn definition_and_handoff_survive_registered_store_restart() {
     let store = RegisteredWorkStore::start("workflow-restart");
-    let authority = migrated_authority(&store);
+    let authority = authority(&store);
     let first = definition(1, "operation.prepare.v1");
     WorkflowDefinitionAuthorityPort::insert(&authority, &first).unwrap();
     WorkflowDefinitionAuthorityPort::compare_and_swap_activation(

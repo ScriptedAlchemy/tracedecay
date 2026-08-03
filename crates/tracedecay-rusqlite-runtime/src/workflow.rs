@@ -1,8 +1,8 @@
 //! Durable workflow authority over the canonical Work registered SQL channel.
 //!
-//! Definitions, handoffs, and execution fencing share the exact
-//! `ExactSqlHandle` owned by `WorkSqliteStorage`. This module never opens a
-//! private connection or creates a second Work authority.
+//! Definitions, handoffs, and run events share the exact registered writer
+//! owned by `WorkSqliteStorage`. Fresh stores install the final schema as one
+//! Work schema; attaching this authority never creates or migrates tables.
 
 use std::time::Duration;
 
