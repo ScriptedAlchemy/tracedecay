@@ -7,7 +7,7 @@
 //! matches symbol *names*, not file *content*.
 
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -82,7 +82,10 @@ pub(super) async fn handle_grep(
         .get("case_sensitive")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let path_glob = args.get("path_glob").and_then(Value::as_str);
+    let path_glob = args
+        .get("path_glob")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
     let max_results = args
         .get("max_results")
         .and_then(Value::as_u64)
@@ -100,7 +103,7 @@ pub(super) async fn handle_grep(
     // Optional path filter. A caller-supplied glob whitelists candidate files
     // via the `ignore` crate's override mechanism (same glob semantics as a
     // `.gitignore` line), so it prunes at the walker level.
-    let overrides = match path_glob {
+    let overrides = match path_glob.as_deref() {
         Some(raw) if !raw.trim().is_empty() => {
             let mut builder = OverrideBuilder::new(&project_root);
             builder.add(raw).map_err(|err| TraceDecayError::Config {
@@ -114,8 +117,15 @@ pub(super) async fn handle_grep(
     };
 
     // Collect one extra past the cap so we can honestly report truncation.
-    let scan =
-        scan_tree_off_thread(project_root, matcher, overrides, context_lines, max_results).await?;
+    let scan = scan_tree_off_thread(
+        project_root,
+        matcher,
+        overrides,
+        path_glob,
+        context_lines,
+        max_results,
+    )
+    .await?;
 
     // Scope filtering mirrors `tracedecay_search`: when the client pins a
     // subtree, only hits under it are returned.
@@ -161,9 +171,10 @@ fn build_matcher(pattern: &str, fixed_strings: bool, case_sensitive: bool) -> Re
 }
 
 async fn scan_tree_off_thread(
-    project_root: std::path::PathBuf,
+    project_root: PathBuf,
     matcher: Regex,
     overrides: Option<Override>,
+    path_glob: Option<String>,
     context_lines: usize,
     max_results: usize,
 ) -> Result<ScanResult> {
@@ -188,6 +199,7 @@ async fn scan_tree_off_thread(
                 &project_root,
                 &matcher,
                 overrides,
+                path_glob.as_deref(),
                 context_lines,
                 max_results,
                 || worker_cancelled.load(Ordering::Acquire),
@@ -222,6 +234,63 @@ struct ScanResult {
     truncated: bool,
 }
 
+struct GeneratedDirScope {
+    literal_prefix: PathBuf,
+    may_match_descendants: bool,
+}
+
+impl GeneratedDirScope {
+    fn from_path_glob(path_glob: &str) -> Option<Self> {
+        let path_glob = path_glob.trim();
+        if path_glob.is_empty() || path_glob.starts_with('!') {
+            return None;
+        }
+        let segments: Vec<&str> = path_glob
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        let wildcard_start = segments
+            .iter()
+            .position(|segment| {
+                segment.contains('*')
+                    || segment.contains('?')
+                    || segment.contains('[')
+                    || segment.contains('{')
+            })
+            .unwrap_or(segments.len());
+        let literal_prefix =
+            segments[..wildcard_start]
+                .iter()
+                .fold(PathBuf::new(), |mut prefix, segment| {
+                    prefix.push(segment);
+                    prefix
+                });
+        let wildcard_suffix = &segments[wildcard_start..];
+        let may_match_descendants = wildcard_suffix
+            .iter()
+            .enumerate()
+            .any(|(index, segment)| index > 0 || *segment == "**");
+
+        Some(Self {
+            literal_prefix,
+            may_match_descendants,
+        })
+    }
+
+    fn allows(&self, project_root: &Path, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(project_root) else {
+            return false;
+        };
+        if self.literal_prefix.as_os_str().is_empty() {
+            return self.may_match_descendants;
+        }
+        self.literal_prefix.starts_with(relative)
+            || relative == self.literal_prefix
+            || (self.may_match_descendants && relative.starts_with(&self.literal_prefix))
+    }
+}
+
 /// Walks the working tree respecting `.gitignore`, skipping binary files, and
 /// collects matching lines. Stops early once `max_results` + 1 hits are found
 /// so the caller can report truncation without scanning the whole tree.
@@ -229,6 +298,7 @@ fn scan_tree<F>(
     project_root: &Path,
     matcher: &Regex,
     overrides: Option<Override>,
+    path_glob: Option<&str>,
     context_lines: usize,
     max_results: usize,
     is_cancelled: F,
@@ -236,9 +306,12 @@ fn scan_tree<F>(
 where
     F: Fn() -> bool,
 {
-    let allow_generated_dirs = overrides
+    let has_positive_override = overrides
         .as_ref()
         .is_some_and(|overrides| overrides.num_whitelists() > 0);
+    let generated_dir_overrides = overrides.clone();
+    let generated_dir_scope = path_glob.and_then(GeneratedDirScope::from_path_glob);
+    let filter_root = project_root.to_path_buf();
     let mut builder = WalkBuilder::new(project_root);
     builder
         .follow_links(false)
@@ -255,8 +328,15 @@ where
             if segment == ".git" || segment == ".tracedecay" {
                 return false;
             }
+            let requested_generated_dir = has_positive_override
+                && (generated_dir_overrides
+                    .as_ref()
+                    .is_some_and(|overrides| overrides.matched(entry.path(), true).is_whitelist())
+                    || generated_dir_scope
+                        .as_ref()
+                        .is_some_and(|scope| scope.allows(&filter_root, entry.path())));
             !entry.file_type().is_some_and(|kind| kind.is_dir())
-                || allow_generated_dirs
+                || requested_generated_dir
                 || !crate::config::is_generated_dir_segment(&segment)
         });
     if let Some(overrides) = overrides {
@@ -490,7 +570,7 @@ mod tests {
         .expect("metadata fixture");
 
         let matcher = Regex::new("UNIQUE_GENERATED_DIR_TOKEN").expect("matcher");
-        let scan = scan_tree(project.path(), &matcher, None, 0, 10, || false);
+        let scan = scan_tree(project.path(), &matcher, None, None, 0, 10, || false);
         let files = scan
             .hits
             .iter()
@@ -513,6 +593,66 @@ mod tests {
     }
 
     #[test]
+    fn scan_tree_path_glob_prunes_unrelated_generated_directories() {
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(project.path().join("src")).expect("source fixture directory");
+        std::fs::write(
+            project.path().join("src/selected.rs"),
+            "NORMAL_PATH_GLOB_TOKEN\n",
+        )
+        .expect("source fixture");
+
+        let overrides = |root: &Path| {
+            let mut builder = OverrideBuilder::new(root);
+            builder.add("src/**").expect("path glob");
+            builder.build().expect("overrides")
+        };
+        let matcher = Regex::new("NORMAL_PATH_GLOB_TOKEN").expect("matcher");
+        let baseline_checks = std::sync::atomic::AtomicUsize::new(0);
+        let baseline = scan_tree(
+            project.path(),
+            &matcher,
+            Some(overrides(project.path())),
+            Some("src/**"),
+            0,
+            10,
+            || {
+                baseline_checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                false
+            },
+        );
+
+        std::fs::create_dir_all(project.path().join("target/generated"))
+            .expect("generated fixture directory");
+        std::fs::write(
+            project.path().join("target/generated/unrelated.rs"),
+            "NORMAL_PATH_GLOB_TOKEN\n",
+        )
+        .expect("generated fixture");
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let scan = scan_tree(
+            project.path(),
+            &matcher,
+            Some(overrides(project.path())),
+            Some("src/**"),
+            0,
+            10,
+            || {
+                checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                false
+            },
+        );
+
+        assert_eq!(scan.hits.len(), baseline.hits.len());
+        assert_eq!(
+            checks.load(std::sync::atomic::Ordering::Relaxed),
+            baseline_checks.load(std::sync::atomic::Ordering::Relaxed),
+            "unrelated generated directories must not reach the scan loop"
+        );
+    }
+
+    #[test]
     fn scan_tree_stops_when_cancelled_during_line_matching() {
         let project = tempfile::tempdir().expect("temp project");
         let source = "CANCELLATION_TOKEN\n".repeat(100);
@@ -520,7 +660,7 @@ mod tests {
 
         let matcher = Regex::new("CANCELLATION_TOKEN").expect("matcher");
         let checks = std::sync::atomic::AtomicUsize::new(0);
-        let scan = scan_tree(project.path(), &matcher, None, 0, 200, || {
+        let scan = scan_tree(project.path(), &matcher, None, None, 0, 200, || {
             checks.fetch_add(1, Ordering::Relaxed) >= 10
         });
 
@@ -542,7 +682,7 @@ mod tests {
             .expect("source fixture");
 
         let matcher = Regex::new("OVERSIZED_FILE_TOKEN").expect("matcher");
-        let scan = scan_tree(project.path(), &matcher, None, 0, 10, || false);
+        let scan = scan_tree(project.path(), &matcher, None, None, 0, 10, || false);
         let files = scan
             .hits
             .iter()
