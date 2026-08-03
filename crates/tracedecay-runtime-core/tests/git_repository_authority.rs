@@ -1,7 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
+use std::io::Write as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use tempfile::TempDir;
 use tracedecay_domain::git::{
@@ -62,6 +63,46 @@ impl Fixture {
         self.git(&["add", "-A"]);
         self.git(&["commit", "--quiet", "-m", subject]);
         self.git(&["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    fn import_linear_history(&self, commits: usize) {
+        let mut child = Command::new("git")
+            .arg("fast-import")
+            .arg("--quiet")
+            .current_dir(self.path())
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("git fast-import");
+        let input = child.stdin.as_mut().expect("fast-import stdin");
+        for index in 0..commits {
+            let message = format!("commit {index}");
+            writeln!(input, "commit refs/heads/main").expect("commit command");
+            writeln!(input, "mark :{}", index + 1).expect("commit mark");
+            writeln!(
+                input,
+                "author Fixture <fixture@example.com> {} +0000",
+                1_000_000_000 + index
+            )
+            .expect("author");
+            writeln!(
+                input,
+                "committer Fixture <fixture@example.com> {} +0000",
+                1_000_000_000 + index
+            )
+            .expect("committer");
+            writeln!(input, "data {}", message.len()).expect("message size");
+            writeln!(input, "{message}").expect("message");
+            if index > 0 {
+                writeln!(input, "from :{index}").expect("parent");
+            }
+            let content = format!("{index}\n");
+            writeln!(input, "M 100644 inline tracked.txt").expect("file command");
+            writeln!(input, "data {}", content.len()).expect("content size");
+            write!(input, "{content}").expect("content");
+        }
+        writeln!(input, "done").expect("done");
+        drop(child.stdin.take());
+        assert!(child.wait().expect("fast-import exit").success());
     }
 }
 
@@ -237,6 +278,24 @@ fn authority_rev_walk_is_bounded_and_reports_truncation() {
     assert!(history.truncated);
     assert_eq!(history.commits[0].subject, "commit 3");
     assert_eq!(history.commits[1].subject, "commit 2");
+}
+
+#[test]
+fn authority_does_not_report_truncation_at_exact_scan_boundary() {
+    let fixture = Fixture::init("sha1");
+    fixture.import_linear_history(1_024);
+
+    let history = GitRepositoryAuthority::discover(fixture.path())
+        .unwrap()
+        .history(&GitHistoryOptions {
+            max_count: 1,
+            first_parent: false,
+            path: Some("missing.txt".to_owned()),
+            follow_renames: false,
+        })
+        .unwrap();
+    assert!(history.commits.is_empty());
+    assert!(!history.truncated);
 }
 
 fn _assert_send_sync<T: Send + Sync>() {}
