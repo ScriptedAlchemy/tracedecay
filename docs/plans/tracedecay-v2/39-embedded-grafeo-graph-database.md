@@ -19,6 +19,7 @@
 - Durable facts remain project-wide. Branches and worktrees never own, copy, merge, or retire facts.
 - Preserve typed TraceDecay IDs at every boundary; Grafeo node and edge IDs are storage-local handles only.
 - Preserve typed cancellation, staleness, denial, unavailable, reset-required, corruption, and budget-exhaustion outcomes.
+- Validation and pre-commit mutation failures leave the prior graph readable. A Grafeo post-commit WAL/checkpoint failure is reported as typed `DurabilityUncertain`, permanently closes that handle, and permits no further reads until exact reopen/recovery validates the store.
 - Preserve deterministic ordering, pagination, authorization, coverage, and exact source hydration above the storage layer.
 - Never install, dogfood, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
 - Each implementation lane uses its own recognized worktree, merges the current integration floor before review, and is parent-reviewed before merge.
@@ -147,7 +148,7 @@ git push origin codex/tracedecay-total-redesign-plan
 **Files:**
 - Create: `crates/tracedecay-graph-db/Cargo.toml`
 - Create: `crates/tracedecay-graph-db/src/lib.rs`
-- Create: `crates/tracedecay-graph-db/src/error.rs`
+- Create: `crates/tracedecay-graph-db/src/error.rs` with `Cancelled`, `InvalidRequest`, `Conflict`, `BudgetExhausted`, `ResetRequired`, `Corrupt`, `Unavailable`, `DurabilityUncertain`, and `Closed`
 - Create: `crates/tracedecay-graph-db/src/location.rs`
 - Create: `crates/tracedecay-graph-db/src/runtime.rs`
 - Create: `crates/tracedecay-graph-db/src/projection.rs`
@@ -243,7 +244,7 @@ pub struct GraphRelation {
 }
 ```
 
-All validation occurs before mutation. A failed batch leaves the prior generation readable. `GraphPublication` carries the canonical event/generation identity, idempotency key, expected graph watermark, replacement batch, and resulting watermark; same-key/same-input replay returns the original commit while changed input conflicts.
+All validation occurs before mutation. Validation and transaction failures leave the prior generation readable. Grafeo `0.5.42` surfaces some WAL/checkpoint failures after its in-memory commit; those failures poison the handle as `DurabilityUncertain` instead of falsely claiming rollback or serving uncertain state. `GraphPublication` carries the canonical event/generation identity, idempotency key, expected graph watermark, replacement batch, and resulting watermark; same-key/same-input replay returns the original commit while changed input conflicts.
 
 - [ ] **Step 4: Verify boundary isolation**
 
