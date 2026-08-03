@@ -639,7 +639,9 @@ impl ObservationProjectionStore for GlobalDbObservationStore<'_> {
     ) -> ProjectionStoreResult<Option<CanonicalObservationIdV1>> {
         match dispatch_runtime_observation_read(
             self.runtime,
-            ObservationReadOperationV1::NextQueuedProjection,
+            ObservationReadOperationV1::NextQueuedProjection {
+                now_micros: tracedecay_application::clock::now_micros().0,
+            },
         )
         .map_err(projection_runtime_error)?
         {

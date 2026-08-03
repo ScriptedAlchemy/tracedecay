@@ -131,8 +131,11 @@ fn connection() -> Connection {
                     PRIMARY KEY(source_json, scope_json, coverage_json)
                  );
                  CREATE TABLE projection_queue (
-                    observation_id TEXT PRIMARY KEY,
-                    observation_sequence INTEGER NOT NULL UNIQUE
+                   observation_id TEXT PRIMARY KEY,
+                   observation_sequence INTEGER NOT NULL UNIQUE,
+                   attempt_count INTEGER NOT NULL DEFAULT 0,
+                   next_retry_at_micros INTEGER NOT NULL DEFAULT 0,
+                   last_error_code TEXT
                  );
                  CREATE TABLE retrieval_anchors (
                     anchor_id TEXT PRIMARY KEY,
@@ -600,7 +603,9 @@ fn replay_queue_and_checkpoint_reads_preserve_projection_ordering() {
     assert_eq!(
         read(
             &mut connection,
-            &ObservationReadOperationV1::NextQueuedProjection,
+            &ObservationReadOperationV1::NextQueuedProjection {
+                now_micros: i64::MAX,
+            },
         )
         .unwrap(),
         ObservationReadResultV1::NextQueuedProjection(Some(
@@ -635,7 +640,9 @@ fn replay_queue_and_checkpoint_reads_preserve_projection_ordering() {
     assert_eq!(
         read(
             &mut connection,
-            &ObservationReadOperationV1::NextQueuedProjection,
+            &ObservationReadOperationV1::NextQueuedProjection {
+                now_micros: i64::MAX,
+            },
         )
         .unwrap(),
         ObservationReadResultV1::NextQueuedProjection(None)

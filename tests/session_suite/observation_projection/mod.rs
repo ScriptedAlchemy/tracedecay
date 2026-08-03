@@ -18,9 +18,9 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, CLAUDE_SESSION_MESSAGE_PROJECTOR_VERSION, ObservationPersistOutcome,
     ObservationProjectionStatus, ObservationProjectionStore, ObservationStore, ObservationWrite,
-    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError,
-    SESSION_MESSAGE_PROJECTOR_VERSION_V4, build_observation_resolution_authorization_v1,
-    build_observation_retrieval_anchor_v2,
+    ProjectionPersistOutcome, ProjectionRebuildOutcome, ProjectionRetryReason,
+    ProjectionSkipReason, ProjectionStoreError, SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+    build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
 use crate::common::isolated_lcm_db_path;

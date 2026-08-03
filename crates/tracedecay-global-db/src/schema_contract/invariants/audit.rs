@@ -1166,13 +1166,16 @@ async fn validate_projection_authority_suffix_pages(
                     ));
                 }
             };
-            let stored_collision = disposition.as_ref().is_some_and(|disposition| {
-                disposition.reason == ProjectionSkipReason::OutputCollision.as_str()
-            });
-            if stored_collision {
+            let stored_rejection = disposition
+                .as_ref()
+                .and_then(|disposition| ProjectionSkipReason::from_durable_str(&disposition.reason))
+                .is_some_and(|reason| {
+                    reason == ProjectionSkipReason::OutputCollision || reason.is_rejection()
+                });
+            if stored_rejection {
                 if !state.is_skip() {
                     return Err(authority_violation(
-                        "projection authority must contain exactly one collision skip outcome",
+                        "projection authority must contain exactly one deterministic skip outcome",
                     ));
                 }
                 let disposition = disposition
@@ -1180,7 +1183,7 @@ async fn validate_projection_authority_suffix_pages(
                     .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
                 if disposition.receipt_id != observation_receipt_id {
                     return Err(authority_violation(
-                        "projection collision disposition disagrees with observation receipt",
+                        "projection disposition disagrees with observation receipt",
                     ));
                 }
                 continue;
