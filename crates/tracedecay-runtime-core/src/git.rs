@@ -6,7 +6,7 @@
 //! absolute path exactly once (cached in a [`OnceLock`]) and hands every product
 //! spawn site that cached path, so the long-running daemon never re-walks `PATH`.
 //!
-//! The gix-first read paths in [`crate::branch`] and [`crate::worktree`] are
+//! The gix-first read paths in the application branch and worktree modules are
 //! unaffected: they still prefer in-process `gix` and only reach a `git`
 //! subprocess as a gated fallback. This module only changes *which* program those
 //! fallbacks (and the one-shot spawn sites) exec.
