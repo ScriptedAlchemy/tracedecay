@@ -418,45 +418,18 @@ impl TraceDecay {
         &self.db
     }
 
-    async fn schema_version(db: &Database, operation: &str) -> Result<u32> {
-        let connection = db.engine_conn();
-        let mut rows = connection
-            .query("PRAGMA user_version", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("{operation}: failed to read user_version: {e}"),
-                operation: operation.to_string(),
-            })?;
-        let row = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to read user_version row: {e}"),
-            operation: operation.to_string(),
-        })?;
-        match row {
-            Some(row) => {
-                let version: i64 = row.get(0).map_err(|e| TraceDecayError::Database {
-                    message: format!("{operation}: failed to read user_version value: {e}"),
-                    operation: operation.to_string(),
-                })?;
-                Ok(version as u32)
-            }
-            None => Ok(0),
-        }
-    }
-
-    /// Refuses a read-only store that is not at the one schema shape this
-    /// binary creates. There is no upgrade path to name: the store was written
-    /// by an incompatible binary, so the only remedy is a fresh one.
+    /// Requires the exact graph/memory proof issued before runtime publication.
     pub async fn ensure_schema_current(&self) -> Result<()> {
-        let current = Self::schema_version(&self.db, "ensure_schema_current").await?;
-        let supported = crate::db::migrations::SCHEMA_VERSION;
-        if current != supported {
+        let exact = self.db.retained_runtime().exact_schema().map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("exact final schema proof unavailable: {error:?}"),
+            }
+        })?;
+        if exact.contract().kind()
+            != crate::store_runtime::schema::StoreSchemaKindV2::GraphMemory
+        {
             return Err(TraceDecayError::Config {
-                message: format!(
-                    "TraceDecay database schema v{current} is not the v{supported} shape this \
-                     binary creates; this store was created by an incompatible binary and cannot \
-                     be upgraded in place. Remove the store directory and let this binary create \
-                     a fresh one."
-                ),
+                message: "runtime carries the wrong exact final schema kind".to_owned(),
             });
         }
         Ok(())

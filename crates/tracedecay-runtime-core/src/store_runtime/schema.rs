@@ -9,7 +9,77 @@ const GRAPH_MEMORY_APPLICATION_ID_V2: u32 = u32::from_be_bytes(*b"TDG2");
 const REGISTERED_APPLICATION_ID_V2: u32 = u32::from_be_bytes(*b"TDR2");
 const FINAL_SCHEMA_VERSION_V2: u32 = 1;
 const GRAPH_MEMORY_CATALOG_FINGERPRINT_V2: &str =
-    "a815c62d1a306ed2cef7c7092605f7fa574b8206f2cfa59266e5d90ed13aaf78";
+    "be66fe9a4f4269a624f7589b227fbab7d38b855b04177bef6c2d327f85f3025d";
+pub const SEMANTIC_VECTOR_GRAPH_SCHEMA_V2: &str = "
+CREATE TABLE semantic_vector_generation_v1 (
+    build_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    lifecycle TEXT NOT NULL CHECK (lifecycle IN ('staged', 'published')),
+    generation_id TEXT UNIQUE,
+    record_json TEXT NOT NULL,
+    CHECK (
+        (lifecycle = 'staged' AND generation_id IS NULL)
+        OR (lifecycle = 'published' AND generation_id IS NOT NULL)
+    )
+) STRICT;
+CREATE TABLE semantic_vector_active_generation_v1 (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    shard_id_json TEXT NOT NULL,
+    generation_id TEXT
+) STRICT;
+CREATE TABLE semantic_vector_payload_owner_v1 (
+    build_id TEXT NOT NULL,
+    output_digest TEXT NOT NULL,
+    PRIMARY KEY (build_id, output_digest)
+) STRICT;
+CREATE INDEX semantic_vector_payload_owner_v1_address
+    ON semantic_vector_payload_owner_v1 (output_digest);
+CREATE TABLE semantic_vector_state_slice_owner_v1 (
+    build_id TEXT NOT NULL,
+    collection_digest TEXT NOT NULL,
+    PRIMARY KEY (build_id, collection_digest)
+) STRICT;
+CREATE INDEX semantic_vector_state_slice_owner_v1_address
+    ON semantic_vector_state_slice_owner_v1 (collection_digest);
+CREATE TABLE semantic_vector_generation_retired_v1 (
+    build_id TEXT PRIMARY KEY
+) STRICT;
+CREATE TABLE semantic_vector_orphan_resource_v1 (
+    kind TEXT NOT NULL CHECK (kind IN ('payload', 'state_slice')),
+    address TEXT NOT NULL,
+    PRIMARY KEY (kind, address)
+) STRICT;
+CREATE TABLE semantic_vector_payload_v1 (
+    output_digest TEXT PRIMARY KEY,
+    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE TABLE semantic_vector_evaluation_payload_v1 (
+    output_digest TEXT PRIMARY KEY,
+    dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE TABLE semantic_vector_state_slice_v1 (
+    collection_digest TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX semantic_vector_state_slice_v1_address
+    ON semantic_vector_state_slice_v1 (collection_digest, ordinal);
+CREATE TABLE semantic_vector_evaluation_state_slice_v1 (
+    collection_digest TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+    payload BLOB NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX semantic_vector_evaluation_state_slice_v1_address
+    ON semantic_vector_evaluation_state_slice_v1 (collection_digest, ordinal);
+CREATE TABLE semantic_vector_evaluation_state_v1 (
+    evaluation_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    state_json TEXT NOT NULL
+) STRICT;
+";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreSchemaKindV2 {
@@ -357,10 +427,11 @@ pub async fn install_final_graph_memory_schema(
     crate::db::migrations::create_schema_connection(connection).await?;
     let transaction = connection.authorized_long_lease_transaction().await?;
     transaction
-        .execute_schema_batch_step(
-            "PRAGMA application_id = 1413760818;
+        .execute_schema_batch_step(&format!(
+            "{SEMANTIC_VECTOR_GRAPH_SCHEMA_V2}
+             PRAGMA application_id = 1413760818;
              PRAGMA user_version = 1;",
-        )
+        ))
         .await?;
     transaction.commit().await?;
     Ok(())

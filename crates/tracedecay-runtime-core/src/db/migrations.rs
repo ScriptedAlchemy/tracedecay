@@ -1,60 +1,23 @@
 // Rust guideline compliant 2025-10-17
 //! Schema creation for the tracedecay database.
 //!
-//! This binary creates every store at one final schema shape and never steps an
-//! older shape forward. `PRAGMA user_version` records that shape as an atomic
-//! integer built into `SQLite`; a store carrying any other value was written by
-//! an incompatible binary and is refused at open with a fresh-start remedy.
+//! The store runtime owns final-schema identity and admission. This module
+//! supplies only the graph catalog fragment installed into a fresh staging
+//! store; it never opens, upgrades, stamps, or admits a store.
 
-use crate::db::engine::{Connection, Executor, QueryExecutor, Transaction};
+use crate::db::engine::{Connection, Executor, Transaction};
 use crate::errors::{Result, TraceDecayError};
 
-/// The one schema shape this binary creates and accepts. It is an identity
-/// stamp, not a ladder rung: a store at any other version is refused.
-pub const SCHEMA_VERSION: u32 = 25;
+/// Metadata version for the extraction generation published in graph rows.
+///
+/// This is not SQLite store identity. Exact store identity is the typed catalog
+/// contract in `store_runtime::schema`.
+pub const GRAPH_GENERATION_SCHEMA_VERSION: u32 = 25;
 
 /// Metadata stamp for the extraction generation currently published in the
 /// core graph tables.
 pub const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_version";
 
-/// Reads the current schema version from `PRAGMA user_version`.
-async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
-    let mut rows =
-        conn.query("PRAGMA user_version", ())
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read user_version: {e}"),
-                operation: "get_version".to_string(),
-            })?;
-    let row = rows.next().await.map_err(|e| TraceDecayError::Database {
-        message: format!("failed to read user_version row: {e}"),
-        operation: "get_version".to_string(),
-    })?;
-    match row {
-        Some(r) => {
-            let v: i64 = r.get(0).map_err(|e| TraceDecayError::Database {
-                message: format!("failed to read user_version value: {e}"),
-                operation: "get_version".to_string(),
-            })?;
-            Ok(v as u32)
-        }
-        None => Ok(0),
-    }
-}
-
-/// Sets the schema version via `PRAGMA user_version`.
-///
-/// PRAGMA statements cannot be parameterised, so we format the value
-/// directly. This is safe because `version` is a u32.
-async fn set_version(conn: &impl Executor, version: u32) -> Result<()> {
-    conn.execute(&format!("PRAGMA user_version = {version}"), ())
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to set user_version: {e}"),
-            operation: "set_version".to_string(),
-        })?;
-    Ok(())
-}
 /// Configures incremental auto-vacuum for a brand-new database before any
 /// schema-shaping pragmas or tables are created.
 pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> Result<()> {
@@ -67,17 +30,8 @@ pub async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &str) -> 
     Ok(())
 }
 
-/// Creates the complete schema from scratch for a brand-new database and
-/// stamps [`SCHEMA_VERSION`]. This is the only way a store comes into
-/// existence: there is no stepwise path to this shape.
-pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
-    let writer = database.writer_connection("create schema").await?;
-    create_schema_connection(writer.engine_connection()).await
-}
-
-/// Creates the schema on an already-open connection. This is the door the
-/// store runtime uses when it initializes a brand-new shard.
-pub async fn create_schema_connection(conn: &Connection) -> Result<()> {
+/// Installs the graph fragment into the store runtime's fresh staging file.
+pub(crate) async fn create_schema_connection(conn: &Connection) -> Result<()> {
     // Fresh databases only need the pragma before tables are created.
     configure_fresh_auto_vacuum(conn, "create_schema").await?;
 
@@ -271,79 +225,7 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
     super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
-    set_version(conn, SCHEMA_VERSION).await?;
     Ok(())
-}
-/// Reports whether the file already carries user schema objects.
-///
-/// A brand-new file has `user_version = 0` and no objects at all. That is not a
-/// store at an older shape; it is an empty file this binary may create into.
-async fn store_has_objects(conn: &impl QueryExecutor) -> Result<bool> {
-    let mut rows = conn
-        .query(
-            "SELECT 1 FROM sqlite_master
-             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'
-             LIMIT 1",
-            (),
-        )
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to probe sqlite_master for existing schema: {e}"),
-            operation: "ensure_schema_current".to_string(),
-        })?;
-    Ok(rows
-        .next()
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read sqlite_master probe row: {e}"),
-            operation: "ensure_schema_current".to_string(),
-        })?
-        .is_some())
-}
-
-fn unsupported_schema_version(current: u32) -> TraceDecayError {
-    TraceDecayError::Database {
-        message: format!(
-            "database schema v{current} is not the v{SCHEMA_VERSION} shape this binary creates; \
-             this store was created by an incompatible binary and cannot be upgraded in place. \
-             Remove the store directory and let this binary create a fresh one."
-        ),
-        operation: "ensure_schema_current".to_string(),
-    }
-}
-
-/// Verifies an opened store carries the schema this binary creates, creating it
-/// when the file is still empty.
-///
-/// This binary has no upgrade ladder: a store stamped with any other version is
-/// refused with the fresh-start remedy rather than stepped forward.
-pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
-    let writer = database.writer_connection("ensure schema current").await?;
-    ensure_schema_current_connection(writer.engine_connection()).await
-}
-
-pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Result<()> {
-    let current = get_version(conn).await?;
-    if current == SCHEMA_VERSION {
-        return Ok(());
-    }
-    if current == 0 && !store_has_objects(conn).await? {
-        return create_schema_connection(conn).await;
-    }
-    Err(unsupported_schema_version(current))
-}
-
-/// Compatibility alias for `crates/tracedecay-migrate`, which still names the
-/// schema door `migrate`. It performs no migration: see
-/// [`ensure_schema_current`].
-pub async fn migrate(database: &crate::db::Database) -> Result<()> {
-    ensure_schema_current(database).await
-}
-
-/// Connection-level compatibility alias. See [`migrate`].
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn migrate_connection(conn: &Connection) -> Result<()> {
-    ensure_schema_current_connection(conn).await
 }
 
 async fn create_memory_fact_relations_schema(conn: &impl Executor, operation: &str) -> Result<()> {

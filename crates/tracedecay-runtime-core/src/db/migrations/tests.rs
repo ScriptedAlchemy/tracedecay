@@ -7,7 +7,7 @@ use tracedecay_rusqlite_runtime::migration_sql::{
 
 use crate::db::engine::{Connection, TestConnection};
 
-use super::{SCHEMA_VERSION, create_schema_connection, ensure_schema_current_connection};
+use super::create_schema_connection;
 
 mod fts;
 
@@ -56,28 +56,6 @@ async fn create_schema_db() -> (TestConnection, TempDir) {
     (conn, dir)
 }
 
-/// Sets PRAGMA `user_version` on the connection.
-async fn set_user_version(conn: &Connection, version: u32) {
-    conn.execute(&format!("PRAGMA user_version = {version}"), ())
-        .await
-        .expect("failed to set user_version");
-}
-
-/// Reads PRAGMA `user_version` from the connection.
-async fn get_user_version(conn: &Connection) -> u32 {
-    let mut rows = conn
-        .query("PRAGMA user_version", ())
-        .await
-        .expect("failed to query user_version");
-    let row = rows
-        .next()
-        .await
-        .expect("failed to read user_version row")
-        .expect("user_version should return a row");
-    let v: i64 = row.get(0).expect("failed to read user_version value");
-    v as u32
-}
-
 /// Checks whether a table exists in `sqlite_master`.
 async fn table_exists(conn: &Connection, table_name: &str) -> bool {
     let mut rows = conn
@@ -122,50 +100,9 @@ async fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
-/// An empty file is created at the one supported shape, and reopening it is a
-/// pure identity check.
+/// The catalog fragment remains transactional inside the canonical installer.
 #[tokio::test]
-async fn an_empty_database_is_created_at_the_supported_schema_version() {
-    let (conn, _dir) = create_raw_db().await;
-
-    assert_eq!(super::get_version(&*conn).await.unwrap(), 0);
-    ensure_schema_current_connection(&conn).await.unwrap();
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-
-    ensure_schema_current_connection(&conn)
-        .await
-        .expect("reopening a current store is an identity check");
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
-}
-
-/// A store stamped with any other version was written by an incompatible
-/// binary. This binary has no ladder, so it refuses with the fresh-start
-/// remedy instead of upgrading in place.
-#[tokio::test]
-async fn a_store_at_another_schema_version_is_refused_with_a_fresh_start_remedy() {
-    for stamped in [1_u32, 18, 24, SCHEMA_VERSION + 1] {
-        let (conn, _dir) = create_schema_db().await;
-        set_user_version(&conn, stamped).await;
-
-        let error = ensure_schema_current_connection(&conn)
-            .await
-            .expect_err("a store at another version must be refused");
-        let message = error.to_string();
-        assert!(
-            message.contains("created by an incompatible binary"),
-            "v{stamped} refusal must name the cause: {message}"
-        );
-        assert!(
-            message.contains("Remove the store directory"),
-            "v{stamped} refusal must name the fresh-start remedy: {message}"
-        );
-    }
-}
-
-/// Creation is atomic: an interrupted create leaves neither DDL nor a version
-/// stamp behind, and the retry still produces the full shape.
-#[tokio::test]
-async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
+async fn interrupted_fresh_schema_rolls_back_ddl_before_retry() {
     let (conn, _dir) = create_raw_db().await;
     super::configure_fresh_auto_vacuum(&conn, "test interrupted fresh schema")
         .await
@@ -175,17 +112,11 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     super::create_schema_transaction(&transaction)
         .await
         .unwrap();
-    assert_eq!(
-        super::get_version(&transaction).await.unwrap(),
-        SCHEMA_VERSION
-    );
     transaction.rollback().await.unwrap();
 
-    assert_eq!(get_user_version(&conn).await, 0);
     assert!(!table_exists(&conn, "nodes").await);
 
-    ensure_schema_current_connection(&conn).await.unwrap();
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
+    create_schema_connection(&conn).await.unwrap();
     assert!(column_exists(&conn, "nodes", "branches").await);
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
 }
@@ -253,5 +184,4 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         .await,
         1
     );
-    assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
 }

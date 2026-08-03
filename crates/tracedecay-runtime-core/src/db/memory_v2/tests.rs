@@ -146,7 +146,7 @@ async fn fresh_v23_fact_relations_carry_provenance_and_referential_integrity() {
         optional_i64(&conn, "PRAGMA user_version", ())
             .await
             .unwrap(),
-        Some(i64::from(super::super::migrations::SCHEMA_VERSION))
+        Some(0)
     );
     assert!(
         table_exists(&conn, "memory_v2_compatibility_banks")

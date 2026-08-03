@@ -193,7 +193,6 @@ impl DaemonSessionRuntimeRegistryV1 {
         )
         .await?;
         let database = Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?;
-        tracedecay_runtime_core::db::migrations::migrate(&database).await?;
         Ok(database)
     }
 }

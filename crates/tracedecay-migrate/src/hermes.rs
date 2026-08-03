@@ -596,7 +596,9 @@ mod tests {
                 path,
                 Arc::new(ForeignFixtureWriteAuthority),
             );
-            tracedecay_runtime_core::db::migrations::migrate_connection(&connection)
+            tracedecay_runtime_core::store_runtime::schema::install_final_graph_memory_schema(
+                &connection,
+            )
                 .await
                 .unwrap();
             crate::root_seam::global_db::ensure_registered_schema(&connection)
