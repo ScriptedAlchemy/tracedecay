@@ -9,7 +9,7 @@
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
 #[cfg(unix)]
-use super::shutdown_coordination::{ShutdownOwner, ShutdownReceipt, join_shutdown_owners};
+use super::shutdown_coordination::{ShutdownOwner, ShutdownReceipt, join_shutdown_owner_phases};
 use super::*;
 
 #[cfg(unix)]
@@ -836,8 +836,8 @@ impl DaemonEngine {
         &self,
         deadline: tokio::time::Instant,
     ) -> ShutdownReceipt {
+        let startup_ingest_servers = project_servers_for_shutdown(&self.store_administration).await;
         let project_open = project_open_tasks(&self.project_open_gates).await;
-        let startup_ingest_cancel = self.store_administration.clone();
         let project_open_cancel = project_open.clone();
         let project_open_join = project_open;
 
@@ -871,86 +871,99 @@ impl DaemonEngine {
         let pr_cancel = Arc::clone(&self.pr_autotrack_task);
         let pr_join = Arc::clone(&self.pr_autotrack_task);
 
-        join_shutdown_owners(
+        join_shutdown_owner_phases(
             deadline,
             vec![
-                ShutdownOwner::new("project_server_startup_ingest", || {}, async move {
-                    cancel_project_server_startup_ingests(&startup_ingest_cancel).await;
-                }),
-                ShutdownOwner::with_deadline_result(
-                    "project_open",
-                    move || project_open_cancel.cancel(),
-                    move |deadline| async move { project_open_join.shutdown_until(deadline).await },
-                ),
-                ShutdownOwner::new(
+                vec![
+                    ShutdownOwner::new(
+                        "project_server_startup_ingest",
+                        move || {
+                            cancel_project_server_startup_ingests(&startup_ingest_servers);
+                        },
+                        async {},
+                    ),
+                    ShutdownOwner::with_deadline_result(
+                        "project_open",
+                        move || project_open_cancel.cancel(),
+                        move |deadline| async move {
+                            project_open_join.shutdown_until(deadline).await
+                        },
+                    ),
+                    ShutdownOwner::with_deadline_result(
+                        "automation",
+                        move || automation_cancel.cancel_automation_schedulers(),
+                        move |deadline| async move {
+                            automation_join
+                                .shutdown_automation_schedulers_until(deadline)
+                                .await
+                        },
+                    ),
+                    ShutdownOwner::with_deadline_result(
+                        "memory_repair",
+                        move || repair_cancel.cancel_memory_repair_schedulers(),
+                        move |deadline| async move {
+                            repair_join
+                                .shutdown_memory_repair_schedulers_until(deadline)
+                                .await
+                        },
+                    ),
+                    ShutdownOwner::with_deadline(
+                        "session_temporal_refresh",
+                        move || session_cancel.cancel(),
+                        move |deadline| async move {
+                            session_join.shutdown_until(deadline).await;
+                        },
+                    ),
+                    ShutdownOwner::new(
+                        "host_admission_replay",
+                        move || replay_cancel.cancel_host_admission_replay(),
+                        async move { replay_join.shutdown_host_admission_replay().await },
+                    ),
+                    ShutdownOwner::new(
+                        "maintenance",
+                        move || maintenance_cancel.cancel(),
+                        async move { maintenance_join.shutdown().await },
+                    ),
+                    ShutdownOwner::new(
+                        "git_watcher",
+                        move || watcher_cancel.cancel(),
+                        async move { watcher_join.shutdown().await },
+                    ),
+                    ShutdownOwner::new(
+                        "pr_autotrack",
+                        move || {
+                            if let Some(task) = pr_cancel
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .as_ref()
+                            {
+                                task.abort();
+                            }
+                        },
+                        async move {
+                            let task = pr_join
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .take();
+                            if let Some(task) = task {
+                                let _ = task.await;
+                            }
+                        },
+                    ),
+                ],
+                vec![ShutdownOwner::new(
                     "invocation",
                     move || invocation_cancel.cancel(),
                     async move { invocation_join.shutdown().await },
-                ),
-                ShutdownOwner::with_deadline(
-                    "session_temporal_refresh",
-                    move || session_cancel.cancel(),
-                    move |deadline| async move {
-                        session_join.shutdown_until(deadline).await;
-                    },
-                ),
-                ShutdownOwner::with_deadline_result(
-                    "automation",
-                    move || automation_cancel.cancel_automation_schedulers(),
-                    move |deadline| async move {
-                        automation_join
-                            .shutdown_automation_schedulers_until(deadline)
-                            .await
-                    },
-                ),
-                ShutdownOwner::with_deadline_result(
-                    "memory_repair",
-                    move || repair_cancel.cancel_memory_repair_schedulers(),
-                    move |deadline| async move {
-                        repair_join
-                            .shutdown_memory_repair_schedulers_until(deadline)
-                            .await
-                    },
-                ),
-                ShutdownOwner::new(
+                )],
+                vec![ShutdownOwner::new(
                     "retirement_reapers",
-                    move || retirement_cancel.cancel_retirement_reapers(),
-                    async move { retirement_join.shutdown_retirement_reapers().await },
-                ),
-                ShutdownOwner::new(
-                    "host_admission_replay",
-                    move || replay_cancel.cancel_host_admission_replay(),
-                    async move { replay_join.shutdown_host_admission_replay().await },
-                ),
-                ShutdownOwner::new(
-                    "maintenance",
-                    move || maintenance_cancel.cancel(),
-                    async move { maintenance_join.shutdown().await },
-                ),
-                ShutdownOwner::new("git_watcher", move || watcher_cancel.cancel(), async move {
-                    watcher_join.shutdown().await;
-                }),
-                ShutdownOwner::new(
-                    "pr_autotrack",
-                    move || {
-                        if let Some(task) = pr_cancel
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .as_ref()
-                        {
-                            task.abort();
-                        }
-                    },
+                    || {},
                     async move {
-                        let task = pr_join
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .take();
-                        if let Some(task) = task {
-                            let _ = task.await;
-                        }
+                        retirement_cancel.cancel_retirement_reapers();
+                        retirement_join.shutdown_retirement_reapers().await;
                     },
-                ),
+                )],
             ],
         )
         .await

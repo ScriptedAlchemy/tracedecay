@@ -131,19 +131,21 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let shutdown_deadline = hard_backstop_deadline - DAEMON_SHUTDOWN_RECEIPT_LOG_RESERVE;
     let maintenance_cancel = maintenance.clone();
     let maintenance_join = maintenance.clone();
-    let project_open_gates = Arc::clone(&project_open_gates);
+    let project_open = project_open_tasks(&project_open_gates).await;
+    let project_open_cancel = project_open.clone();
     let invocation_cancel = invocation.clone();
     let invocation_join = invocation.clone();
     let replay_cancel = store_administration.clone();
     let replay_join = store_administration.clone();
-    let startup_ingest_cancel = store_administration.clone();
+    let startup_ingest_servers = project_servers_for_shutdown(&store_administration).await;
+    let http_application_cancel = http_application_service.shutdown_signal();
     let owners = vec![
         shutdown_coordination::ShutdownOwner::new(
             "project_server_startup_ingest",
-            || {},
-            async move {
-                cancel_project_server_startup_ingests(&startup_ingest_cancel).await;
+            move || {
+                cancel_project_server_startup_ingests(&startup_ingest_servers);
             },
+            async {},
         ),
         shutdown_coordination::ShutdownOwner::new(
             "maintenance",
@@ -152,15 +154,13 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         ),
         shutdown_coordination::ShutdownOwner::with_deadline_result(
             "http_application",
-            || {},
+            move || http_application_cancel.cancel(),
             move |_| async move { http_application_service.shutdown().await.is_ok() },
         ),
         shutdown_coordination::ShutdownOwner::with_deadline_result(
             "project_open",
-            || {},
-            move |deadline| async move {
-                shutdown_portable_project_open_tasks(project_open_gates.as_ref(), deadline).await
-            },
+            move || project_open_cancel.cancel(),
+            move |deadline| async move { project_open.shutdown_until(deadline).await },
         ),
         shutdown_coordination::ShutdownOwner::new(
             "invocation",
@@ -254,15 +254,11 @@ where
     })
     .await
     .is_ok();
-    let (background, project_servers) = tokio::join!(
-        async {
-            match background_receipt {
-                Some(receipt) => receipt,
-                None => background_shutdown.await,
-            }
-        },
-        project_server_shutdown,
-    );
+    let background = match background_receipt {
+        Some(receipt) => receipt,
+        None => background_shutdown.await,
+    };
+    let project_servers = project_server_shutdown.await;
     PortableShutdownReceipt {
         in_flight_drained,
         clients_drained,
@@ -471,11 +467,12 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         );
         let mut background_shutdown = Box::pin(engine.shutdown_background_tasks(shutdown_deadline));
         let mut background_receipt = None;
+        let http_application_cancel = http_application_service.shutdown_signal();
         let mut bootstrap_shutdown = Box::pin(shutdown_coordination::join_shutdown_owners(
             shutdown_deadline,
             vec![shutdown_coordination::ShutdownOwner::with_deadline_result(
                 "http_application",
-                || {},
+                move || http_application_cancel.cancel(),
                 move |_| async move { http_application_service.shutdown().await.is_ok() },
             )],
         ));
@@ -503,7 +500,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         client_tasks.abort_all();
         let clients_drained =
             drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
-        let (background_receipt, bootstrap_receipt, project_server_receipt) = tokio::join!(
+        let (background_receipt, bootstrap_receipt) = tokio::join!(
             async {
                 match background_receipt {
                     Some(receipt) => receipt,
@@ -516,8 +513,8 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                     None => bootstrap_shutdown.await,
                 }
             },
-            engine.shutdown_servers(shutdown_deadline),
         );
+        let project_server_receipt = engine.shutdown_servers(shutdown_deadline).await;
         if !in_flight_drained || !clients_drained {
             log_daemon_event(
                 "daemon_shutdown",

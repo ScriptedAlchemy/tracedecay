@@ -445,14 +445,3 @@ pub(super) async fn portable_cached_project_open_failure(
     let tasks = project_open_tasks(project_open_gates).await;
     Ok(tasks.cached_failure(&route).await)
 }
-
-#[cfg(not(unix))]
-pub(super) async fn shutdown_portable_project_open_tasks(
-    project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
-    deadline: tokio::time::Instant,
-) -> bool {
-    project_open_tasks(project_open_gates)
-        .await
-        .shutdown_until(deadline)
-        .await
-}

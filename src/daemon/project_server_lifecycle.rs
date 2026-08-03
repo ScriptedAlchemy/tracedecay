@@ -11,10 +11,10 @@
 use super::store_shutdown::{ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
 
-pub(super) async fn cancel_project_server_startup_ingests(
+pub(super) async fn project_servers_for_shutdown(
     store_administration: &StoreAdministration,
-) {
-    let servers = {
+) -> Vec<Arc<crate::mcp::McpServer>> {
+    {
         let registry = store_administration.project_servers().lock().await;
         let mut seen = HashSet::new();
         registry
@@ -22,7 +22,10 @@ pub(super) async fn cancel_project_server_startup_ingests(
             .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
             .cloned()
             .collect::<Vec<_>>()
-    };
+    }
+}
+
+pub(super) fn cancel_project_server_startup_ingests(servers: &[Arc<crate::mcp::McpServer>]) {
     for server in servers {
         server.cancel_startup_transcript_ingest();
     }

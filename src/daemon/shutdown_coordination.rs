@@ -84,17 +84,56 @@ pub(super) async fn join_shutdown_owners(
     deadline: Instant,
     owners: Vec<ShutdownOwner>,
 ) -> ShutdownReceipt {
-    let owners = owners
+    join_shutdown_owner_phases(deadline, vec![owners]).await
+}
+
+pub(super) async fn join_shutdown_owner_phases(
+    deadline: Instant,
+    phases: Vec<Vec<ShutdownOwner>>,
+) -> ShutdownReceipt {
+    let mut ordinal = 0;
+    let phases = phases
         .into_iter()
-        .map(|owner| {
-            (owner.cancel)();
-            (owner.name, owner.join)
+        .map(|phase| {
+            phase
+                .into_iter()
+                .map(|owner| {
+                    (owner.cancel)();
+                    let prepared = (ordinal, owner.name, owner.join);
+                    ordinal += 1;
+                    prepared
+                })
+                .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
 
+    let mut receipts = Vec::new();
+    for phase in phases {
+        receipts.extend(join_shutdown_phase(deadline, phase).await);
+    }
+    receipts.sort_by_key(|(ordinal, _)| *ordinal);
+    let owners = receipts
+        .into_iter()
+        .map(|(_, receipt)| receipt)
+        .collect::<Vec<_>>();
+    let unfinished = owners
+        .iter()
+        .filter_map(|receipt| (!receipt.finished).then_some(receipt.name))
+        .collect();
+    ShutdownReceipt {
+        deadline,
+        owners,
+        unfinished,
+    }
+}
+
+async fn join_shutdown_phase(
+    deadline: Instant,
+    owners: Vec<(usize, &'static str, ShutdownJoinFactory)>,
+) -> Vec<(usize, ShutdownOwnerReceipt)> {
     let mut joins = tokio::task::JoinSet::new();
     let mut pending = std::collections::HashMap::new();
-    for (ordinal, (name, join)) in owners.into_iter().enumerate() {
+    for (ordinal, name, join) in owners {
         let handle = joins.spawn(async move {
             let finished = tokio::time::timeout_at(deadline, join(deadline))
                 .await
@@ -134,20 +173,7 @@ pub(super) async fn join_shutdown_owners(
             },
         )
     }));
-    receipts.sort_by_key(|(ordinal, _)| *ordinal);
-    let owners = receipts
-        .into_iter()
-        .map(|(_, receipt)| receipt)
-        .collect::<Vec<_>>();
-    let unfinished = owners
-        .iter()
-        .filter_map(|receipt| (!receipt.finished).then_some(receipt.name))
-        .collect();
-    ShutdownReceipt {
-        deadline,
-        owners,
-        unfinished,
-    }
+    receipts
 }
 
 #[cfg(test)]
@@ -158,7 +184,7 @@ mod tests {
 
     use tokio::time::Instant;
 
-    use super::{ShutdownOwner, join_shutdown_owners};
+    use super::{ShutdownOwner, join_shutdown_owner_phases, join_shutdown_owners};
 
     #[tokio::test(start_paused = true)]
     async fn cancellation_reaches_every_owner_before_any_join_is_polled() {
@@ -228,5 +254,41 @@ mod tests {
         );
         assert_eq!(receipt.unfinished(), &["blocked-a", "blocked-b"]);
         assert_eq!(receipt.deadline, deadline);
+    }
+
+    #[tokio::test]
+    async fn later_dependency_phases_join_only_after_earlier_phases_finish() {
+        let first_finished = Arc::new(AtomicBool::new(false));
+        let later_cancelled = Arc::new(AtomicBool::new(false));
+        let first_finished_in_join = Arc::clone(&first_finished);
+        let first_finished_before_later_join = Arc::clone(&first_finished);
+        let later_cancelled_in_cancel = Arc::clone(&later_cancelled);
+        let later_cancelled_before_first_join = Arc::clone(&later_cancelled);
+
+        let receipt = join_shutdown_owner_phases(
+            Instant::now() + Duration::from_secs(1),
+            vec![
+                vec![ShutdownOwner::new("producer", || {}, async move {
+                    assert!(
+                        later_cancelled_before_first_join.load(Ordering::Acquire),
+                        "every phase must be cancelled before the first join"
+                    );
+                    first_finished_in_join.store(true, Ordering::Release);
+                })],
+                vec![ShutdownOwner::new(
+                    "authority",
+                    move || later_cancelled_in_cancel.store(true, Ordering::Release),
+                    async move {
+                        assert!(
+                            first_finished_before_later_join.load(Ordering::Acquire),
+                            "authority join must wait for producer joins"
+                        );
+                    },
+                )],
+            ],
+        )
+        .await;
+
+        assert!(receipt.owners.iter().all(|owner| owner.finished));
     }
 }
