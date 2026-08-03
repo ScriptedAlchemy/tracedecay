@@ -190,7 +190,14 @@ pub fn workflow_invalid_request_response(request_id: RequestId) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::WorkflowOperation;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use axum::response::IntoResponse;
+    use tower::ServiceExt;
+    use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+    use tracedecay_domain::UtcMicros;
+
+    use super::{WorkflowHttpRequest, WorkflowOperation, workflow_application_router};
 
     #[test]
     fn descriptor_derives_route_and_catalog_identity() {
@@ -203,6 +210,43 @@ mod tests {
                 operation
                     .operation_id_str()
                     .starts_with("operation.workflow.")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn one_router_mounts_every_canonical_workflow_operation() {
+        let router = workflow_application_router(|_request: WorkflowHttpRequest| async {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        });
+
+        for operation in WorkflowOperation::ALL {
+            let cancellation =
+                CancellationSignal::active("cancellation.workflow-api-test").expect("cancellation");
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri(operation.route_path())
+                        .header("content-type", "application/json")
+                        .extension(
+                            RequestId::new("request.workflow-api-test").expect("request identity"),
+                        )
+                        .extension(super::HttpApplicationControls {
+                            deadline: Deadline::new(UtcMicros(9_999_999)).expect("deadline"),
+                            cancellation,
+                        })
+                        .body(Body::from("{}"))
+                        .expect("Workflow request"),
+                )
+                .await
+                .expect("Workflow response");
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{}",
+                operation.route_path()
             );
         }
     }
