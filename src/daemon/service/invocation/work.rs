@@ -431,6 +431,7 @@ fn workflow_coordination_problem(error: WorkflowCoordinationError) -> DaemonInvo
         WorkflowCoordinationError::InvalidDefinition
         | WorkflowCoordinationError::ImmutableDefinitionConflict
         | WorkflowCoordinationError::UnsupportedOperation
+        | WorkflowCoordinationError::CatalogDigestMismatch
         | WorkflowCoordinationError::StaleActivation => DaemonInvocationProblem::InvalidRequest,
     }
 }
@@ -455,6 +456,7 @@ fn workflow_runtime_problem(error: WorkflowFanOutRuntimeError) -> DaemonInvocati
     match error {
         WorkflowFanOutRuntimeError::AuthorityUnavailable(_)
         | WorkflowFanOutRuntimeError::ChildUnavailable(_) => DaemonInvocationProblem::Unavailable,
+        WorkflowFanOutRuntimeError::ResetRequired => DaemonInvocationProblem::ResetRequired,
         WorkflowFanOutRuntimeError::StaleFence => DaemonInvocationProblem::NotFoundOrNotAuthorized,
         _ => DaemonInvocationProblem::InvalidRequest,
     }

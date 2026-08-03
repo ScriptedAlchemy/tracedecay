@@ -9,13 +9,10 @@ use std::time::Duration;
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
     TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError,
-    WorkflowExecutionAuthorityPort, WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1,
-    WorkflowExecutionTruthV1, WorkflowFanOutCheckpointV1,
+    WorkflowDefinitionAuthorityPort,
 };
 use tracedecay_domain::{
-    AttemptId, ManifestDigest, UtcMicros, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
-    WorkflowDefinitionId, WorkflowDefinitionV1, canonical_sha256,
+    ManifestDigest, UtcMicros, WorkflowDefinitionId, WorkflowDefinitionV1, canonical_sha256,
 };
 
 use crate::migration_sql::{
@@ -24,42 +21,7 @@ use crate::migration_sql::{
 };
 use crate::work::WorkSqliteStorage;
 
-const WORKFLOW_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS workflow_definitions_v1 (
-    definition_id TEXT NOT NULL,
-    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
-    payload TEXT NOT NULL,
-    payload_digest TEXT NOT NULL,
-    PRIMARY KEY (definition_id, definition_version)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS workflow_activations_v1 (
-    definition_id TEXT NOT NULL PRIMARY KEY,
-    active_version INTEGER NOT NULL CHECK (active_version > 0)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS workflow_handoffs_v1 (
-    token_digest TEXT NOT NULL PRIMARY KEY,
-    scope_payload TEXT NOT NULL,
-    issued_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
-    consumed INTEGER NOT NULL CHECK (consumed IN (0, 1))
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS workflow_executions_v1 (
-    definition_id TEXT NOT NULL,
-    definition_version INTEGER NOT NULL CHECK (definition_version > 0),
-    run_id TEXT NOT NULL,
-    step_id TEXT NOT NULL,
-    plan_digest TEXT NOT NULL,
-    attempt_id TEXT NOT NULL,
-    lease_id TEXT NOT NULL,
-    fence_epoch INTEGER NOT NULL CHECK (fence_epoch > 0),
-    checkpoint_payload TEXT,
-    terminal_payload TEXT,
-    PRIMARY KEY (definition_id, definition_version, run_id, step_id)
-) STRICT;
-";
+mod run_journal;
 
 /// Workflow persistence on the registered Work migration-SQL handle.
 #[derive(Clone)]
@@ -68,22 +30,17 @@ pub struct WorkflowSqliteAuthority {
 }
 
 impl WorkflowSqliteAuthority {
-    /// Clone the crate-visible Work handle and install workflow tables through it.
+    /// Clone the crate-visible Work handle after the registered store proves
+    /// the exact final schema.
     pub fn from_work_storage(
         storage: &WorkSqliteStorage,
     ) -> Result<Self, WorkflowSqliteAuthorityBuildError> {
-        let authority = Self {
+        storage
+            .require_exact_schema()
+            .map_err(|_| WorkflowSqliteAuthorityBuildError::ResetRequired)?;
+        Ok(Self {
             handle: storage.handle.clone(),
-        };
-        authority.install_schema()?;
-        Ok(authority)
-    }
-
-    fn install_schema(&self) -> Result<(), WorkflowSqliteAuthorityBuildError> {
-        self.handle
-            .execute_batch(WORKFLOW_SCHEMA_V1)
-            .map(|_| ())
-            .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)
+        })
     }
 
     pub(crate) fn state_handle(&self) -> &MigrationSqlHandle {
@@ -94,6 +51,7 @@ impl WorkflowSqliteAuthority {
 /// Construction failure for the durable workflow authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WorkflowSqliteAuthorityBuildError {
+    ResetRequired,
     Unavailable,
 }
 
@@ -115,18 +73,6 @@ fn handoff_unavailable(_: MigrationSqlError) -> TaskHandoffAuthorityError {
 
 fn handoff_codec_unavailable() -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
-}
-
-fn execution_unavailable(_: MigrationSqlError) -> WorkflowExecutionAuthorityError {
-    WorkflowExecutionAuthorityError::Unavailable(
-        "workflow execution authority unavailable".to_owned(),
-    )
-}
-
-fn execution_codec_unavailable() -> WorkflowExecutionAuthorityError {
-    WorkflowExecutionAuthorityError::Unavailable(
-        "workflow execution authority unavailable".to_owned(),
-    )
 }
 
 fn statement(
@@ -445,272 +391,5 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             .commit()
             .map(|_| TaskHandoffConsumeOutcome::Consumed)
             .map_err(handoff_unavailable)
-    }
-}
-
-#[derive(Clone)]
-struct StoredExecution {
-    plan_digest: ManifestDigest,
-    fence: WorkflowExecutionFenceV1,
-    checkpoint: Option<WorkflowFanOutCheckpointV1>,
-    terminal: Option<WorkflowExecutionTruthV1>,
-}
-
-fn identity_params(identity: &WorkflowExecutionIdentityV1) -> Result<Vec<MigrationSqlValue>, ()> {
-    Ok(vec![
-        MigrationSqlValue::Text(identity.definition_id.as_str().to_owned()),
-        MigrationSqlValue::Integer(version_i64(identity.definition_version)?),
-        MigrationSqlValue::Text(identity.run_id.as_str().to_owned()),
-        MigrationSqlValue::Text(identity.step_id.as_str().to_owned()),
-    ])
-}
-
-fn load_execution(
-    transaction: &MigrationSqlTransaction,
-    identity: &WorkflowExecutionIdentityV1,
-) -> Result<Option<StoredExecution>, WorkflowExecutionAuthorityError> {
-    let rows = query_tx(
-        transaction,
-        "SELECT plan_digest, attempt_id, lease_id, fence_epoch, checkpoint_payload, terminal_payload
-         FROM workflow_executions_v1
-         WHERE definition_id = ?1
-           AND definition_version = ?2
-           AND run_id = ?3
-           AND step_id = ?4",
-        identity_params(identity).map_err(|_| execution_codec_unavailable())?,
-    )
-    .map_err(execution_unavailable)?;
-    let Some(row) = rows.rows.first() else {
-        return Ok(None);
-    };
-    let plan_digest = ManifestDigest::new(
-        migration_text(&row.values, 0)
-            .ok_or_else(execution_codec_unavailable)?
-            .to_owned(),
-    )
-    .map_err(|_| execution_codec_unavailable())?;
-    let attempt_id = AttemptId::new(
-        migration_text(&row.values, 1)
-            .ok_or_else(execution_codec_unavailable)?
-            .to_owned(),
-    )
-    .map_err(|_| execution_codec_unavailable())?;
-    let lease_id = WorkLeaseId::new(
-        migration_text(&row.values, 2)
-            .ok_or_else(execution_codec_unavailable)?
-            .to_owned(),
-    )
-    .map_err(|_| execution_codec_unavailable())?;
-    let fence_epoch = migration_integer(&row.values, 3).ok_or_else(execution_codec_unavailable)?;
-    let fence = WorkflowExecutionFenceV1 {
-        attempt_id,
-        lease: WorkLeaseFenceV1::new(
-            lease_id,
-            WorkFenceEpochV1::new(
-                version_u64(fence_epoch).map_err(|_| execution_codec_unavailable())?,
-            )
-            .map_err(|_| execution_codec_unavailable())?,
-        )
-        .map_err(|_| execution_codec_unavailable())?,
-    };
-    let checkpoint = match row.values.get(4) {
-        Some(MigrationSqlValue::Null) | None => None,
-        Some(MigrationSqlValue::Text(payload)) => {
-            Some(decode_json(payload).map_err(|_| execution_codec_unavailable())?)
-        }
-        _ => return Err(execution_codec_unavailable()),
-    };
-    let terminal = match row.values.get(5) {
-        Some(MigrationSqlValue::Null) | None => None,
-        Some(MigrationSqlValue::Text(payload)) => {
-            Some(decode_json(payload).map_err(|_| execution_codec_unavailable())?)
-        }
-        _ => return Err(execution_codec_unavailable()),
-    };
-    Ok(Some(StoredExecution {
-        plan_digest,
-        fence,
-        checkpoint,
-        terminal,
-    }))
-}
-
-fn insert_execution(
-    transaction: &MigrationSqlTransaction,
-    identity: &WorkflowExecutionIdentityV1,
-    fence: &WorkflowExecutionFenceV1,
-    plan_digest: &ManifestDigest,
-) -> Result<(), WorkflowExecutionAuthorityError> {
-    let mut params = identity_params(identity).map_err(|_| execution_codec_unavailable())?;
-    params.extend([
-        MigrationSqlValue::Text(plan_digest.as_str().to_owned()),
-        MigrationSqlValue::Text(fence.attempt_id.as_str().to_owned()),
-        MigrationSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
-        MigrationSqlValue::Integer(
-            version_i64(fence.lease.epoch().get()).map_err(|_| execution_codec_unavailable())?,
-        ),
-    ]);
-    execute_tx(
-        transaction,
-        "INSERT INTO workflow_executions_v1 (
-             definition_id, definition_version, run_id, step_id,
-             plan_digest, attempt_id, lease_id, fence_epoch,
-             checkpoint_payload, terminal_payload
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, NULL)",
-        params,
-    )
-    .map_err(execution_unavailable)
-}
-
-fn update_execution_fence(
-    transaction: &MigrationSqlTransaction,
-    identity: &WorkflowExecutionIdentityV1,
-    fence: &WorkflowExecutionFenceV1,
-) -> Result<(), WorkflowExecutionAuthorityError> {
-    let mut params = vec![
-        MigrationSqlValue::Text(fence.attempt_id.as_str().to_owned()),
-        MigrationSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
-        MigrationSqlValue::Integer(
-            version_i64(fence.lease.epoch().get()).map_err(|_| execution_codec_unavailable())?,
-        ),
-    ];
-    params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
-    execute_tx(
-        transaction,
-        "UPDATE workflow_executions_v1
-         SET attempt_id = ?1, lease_id = ?2, fence_epoch = ?3
-         WHERE definition_id = ?4
-           AND definition_version = ?5
-           AND run_id = ?6
-           AND step_id = ?7",
-        params,
-    )
-    .map_err(execution_unavailable)
-}
-
-impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
-    fn begin(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        plan_digest: &ManifestDigest,
-    ) -> Result<WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError> {
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(execution_unavailable)?;
-        let stored = load_execution(&transaction, identity)?;
-        let Some(stored) = stored else {
-            insert_execution(&transaction, identity, fence, plan_digest)?;
-            transaction.commit().map_err(execution_unavailable)?;
-            return Ok(WorkflowExecutionAdmissionV1::Execute);
-        };
-
-        if let Some(terminal) = stored.terminal {
-            let admission = if &stored.plan_digest == plan_digest {
-                WorkflowExecutionAdmissionV1::Replay(terminal)
-            } else {
-                WorkflowExecutionAdmissionV1::PlanConflict
-            };
-            let _ = transaction.rollback();
-            return Ok(admission);
-        }
-
-        if &stored.plan_digest != plan_digest {
-            let _ = transaction.rollback();
-            return Ok(WorkflowExecutionAdmissionV1::PlanConflict);
-        }
-        if stored.fence.lease.lease_id() != fence.lease.lease_id()
-            || (stored.fence != *fence
-                && stored.fence.lease.epoch().get() >= fence.lease.epoch().get())
-        {
-            let _ = transaction.rollback();
-            return Ok(WorkflowExecutionAdmissionV1::StaleLease);
-        }
-
-        if stored.fence != *fence {
-            update_execution_fence(&transaction, identity, fence)?;
-        }
-        let admission = match stored.checkpoint {
-            Some(checkpoint) => WorkflowExecutionAdmissionV1::Recover { checkpoint },
-            None => WorkflowExecutionAdmissionV1::Execute,
-        };
-        transaction.commit().map_err(execution_unavailable)?;
-        Ok(admission)
-    }
-
-    fn checkpoint(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        checkpoint: &WorkflowFanOutCheckpointV1,
-    ) -> Result<(), WorkflowExecutionAuthorityError> {
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(execution_unavailable)?;
-        let stored = load_execution(&transaction, identity)?
-            .ok_or(WorkflowExecutionAuthorityError::Conflict)?;
-        if stored.terminal.is_some()
-            || &stored.fence != fence
-            || stored.plan_digest != checkpoint.plan_digest
-        {
-            let _ = transaction.rollback();
-            return Err(WorkflowExecutionAuthorityError::Conflict);
-        }
-        let payload = encode_json(checkpoint).map_err(|_| execution_codec_unavailable())?;
-        let mut params = vec![MigrationSqlValue::Text(payload)];
-        params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
-        execute_tx(
-            &transaction,
-            "UPDATE workflow_executions_v1
-             SET checkpoint_payload = ?1
-             WHERE definition_id = ?2
-               AND definition_version = ?3
-               AND run_id = ?4
-               AND step_id = ?5",
-            params,
-        )
-        .map_err(execution_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(execution_unavailable)
-    }
-
-    fn complete(
-        &self,
-        identity: &WorkflowExecutionIdentityV1,
-        fence: &WorkflowExecutionFenceV1,
-        truth: &WorkflowExecutionTruthV1,
-    ) -> Result<(), WorkflowExecutionAuthorityError> {
-        let transaction = self
-            .handle
-            .begin_immediate()
-            .map_err(execution_unavailable)?;
-        let stored = load_execution(&transaction, identity)?
-            .ok_or(WorkflowExecutionAuthorityError::Conflict)?;
-        if stored.terminal.is_some() || &stored.fence != fence {
-            let _ = transaction.rollback();
-            return Err(WorkflowExecutionAuthorityError::Conflict);
-        }
-        let payload = encode_json(truth).map_err(|_| execution_codec_unavailable())?;
-        let mut params = vec![MigrationSqlValue::Text(payload)];
-        params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
-        execute_tx(
-            &transaction,
-            "UPDATE workflow_executions_v1
-             SET terminal_payload = ?1
-             WHERE definition_id = ?2
-               AND definition_version = ?3
-               AND run_id = ?4
-               AND step_id = ?5",
-            params,
-        )
-        .map_err(execution_unavailable)?;
-        transaction
-            .commit()
-            .map(|_| ())
-            .map_err(execution_unavailable)
     }
 }

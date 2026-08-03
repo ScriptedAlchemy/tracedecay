@@ -1,8 +1,8 @@
 use tracedecay_application::{
-    CancellationContext, WorkflowFailurePolicyV1, WorkflowFanOutCheckpointV1,
-    WorkflowFanOutInputV1, WorkflowFanOutRequestV1, WorkflowFanOutRuntimeError,
-    WorkflowProviderAdmissionV1, prepare_workflow_fan_out, validate_workflow_checkpoint,
+    CancellationContext, WorkflowFailurePolicyV1, WorkflowFanOutInputV1, WorkflowFanOutRequestV1,
+    WorkflowFanOutRuntimeError, WorkflowProviderAdmissionV1, prepare_workflow_fan_out,
 };
+use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, ProjectId, ProviderId, RunId, UtcMicros,
     WorkEffectStateV1, WorkExecutionBudgetV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
@@ -65,6 +65,9 @@ fn request(inputs: &[&str], max_width: u32, max_parallel: u32) -> WorkflowFanOut
             backend: WorkProviderBackendV1::CodexAppServer,
             model: "gpt-test".to_owned(),
             configuration_digest: digest('b'),
+            topology_digest: digest('d'),
+            provider_registry_digest: digest('e'),
+            worktree_placement: safe_work_topology_policy_v1().placement,
             reference: None,
             commit: id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
             deadline: UtcMicros(1_000),
@@ -160,30 +163,5 @@ fn child_attempt_identity_survives_workflow_fence_renewal() {
             .iter()
             .map(|child| (&child.task_id, &child.attempt_identity))
             .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn checkpoint_records_only_canonical_attempt_identity() {
-    let plan = prepare_workflow_fan_out(&request(&["a"], 1, 1)).unwrap();
-    let child = &plan.children[0];
-    let checkpoint = WorkflowFanOutCheckpointV1 {
-        plan_digest: plan.plan_digest.clone(),
-        children: vec![tracedecay_application::WorkflowChildRecordV1 {
-            task_id: child.task_id.clone(),
-            attempt_identity: child.attempt_identity.clone(),
-        }],
-    };
-
-    validate_workflow_checkpoint(&plan, &checkpoint).unwrap();
-    let value = serde_json::to_value(checkpoint).unwrap();
-    assert_eq!(
-        value["children"][0]
-            .as_object()
-            .expect("child checkpoint object")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec!["attempt_identity", "task_id"]
     );
 }

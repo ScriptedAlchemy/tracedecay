@@ -11,7 +11,7 @@ use tracedecay_tool_catalog::{
     StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
 };
 
-use crate::{WorkflowExecutionTruthV1, WorkflowFanOutRequestV1};
+use crate::WorkflowFanOutRequestV1;
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
@@ -50,7 +50,7 @@ pub fn workflow_executable_binding_registry()
             .iter()
             .map(|(operation, _, _)| {
                 if *operation == "execute_fan_out" {
-                    available::<WorkflowFanOutRequestV1, WorkflowExecutionTruthV1>(
+                    available::<WorkflowFanOutRequestV1, tracedecay_domain::WorkflowRunProjectionV1>(
                         operation,
                         "/application/workflow/execute-fan-out",
                     )

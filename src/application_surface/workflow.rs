@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_application::{WorkflowExecutionTruthV1, WorkflowFanOutRequestV1};
+use tracedecay_application::WorkflowFanOutRequestV1;
 
 use crate::daemon_contract::{WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1};
 
@@ -49,7 +49,7 @@ async fn invoke_workflow_operation(
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
-            invoke_registered_http::<WorkflowExecutionTruthV1, _>(
+            invoke_registered_http::<tracedecay_domain::WorkflowRunProjectionV1, _>(
                 executor,
                 operation,
                 request_id,
