@@ -321,33 +321,9 @@ pub async fn ensure_observation_schema(
             observation_sequence INTEGER NOT NULL UNIQUE,
             attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
             next_retry_at_micros INTEGER NOT NULL DEFAULT 0 CHECK(next_retry_at_micros >= 0),
-            last_error_code TEXT,
+            last_error TEXT,
             FOREIGN KEY(observation_id) REFERENCES observations(observation_id)
         );",
-    )
-    .await
-    .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;
-    super::super::ensure_table_columns(
-        conn,
-        "projection_queue",
-        &[
-            (
-                "attempt_count",
-                "ALTER TABLE projection_queue
-                 ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0
-                 CHECK(attempt_count >= 0)",
-            ),
-            (
-                "next_retry_at_micros",
-                "ALTER TABLE projection_queue
-                 ADD COLUMN next_retry_at_micros INTEGER NOT NULL DEFAULT 0
-                 CHECK(next_retry_at_micros >= 0)",
-            ),
-            (
-                "last_error_code",
-                "ALTER TABLE projection_queue ADD COLUMN last_error_code TEXT",
-            ),
-        ],
     )
     .await
     .map_err(|error| global_db_operation_error(OBSERVATION_SCHEMA_OPERATION, error))?;

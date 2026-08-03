@@ -9,9 +9,9 @@ use tracedecay_sessions::compatibility::{
 };
 use tracedecay_store::{
     ObservationProjection, ProjectedObservation, ProjectionPersistOutcome,
-    ProjectionRebuildOutcome, ProjectionRetryReason, ProjectionSkipReason, ProjectionStoreError,
-    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection,
-    SessionMessageRecord, SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
+    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
+    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
+    SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
 };
 
 use super::super::session_temporal::record_canonical_observation_effect;
@@ -55,10 +55,10 @@ pub async fn project_observation_with_engine(
         return Err(ProjectionStoreError::RetryDeferred {
             attempt_count: retry.attempt_count,
             next_retry_at_micros: retry.next_retry_at_micros,
-            reason: retry.reason.ok_or_else(|| {
+            last_error: retry.last_error.ok_or_else(|| {
                 storage_message(
                     "read deferred projection retry",
-                    "deferred projection retry has no failure reason",
+                    "deferred projection retry has no failure detail",
                 )
             })?,
         });
@@ -68,7 +68,8 @@ pub async fn project_observation_with_engine(
             Ok(()) => Ok(outcome),
             Err(commit_error) => {
                 let error = storage("commit projection transaction", commit_error);
-                persist_projection_retry(conn, observation_id, now_micros).await?;
+                persist_projection_retry(conn, observation_id, now_micros, &error.durable_detail())
+                    .await?;
                 Err(error)
             }
         },
@@ -77,9 +78,15 @@ pub async fn project_observation_with_engine(
                 storage("rollback failed projection transaction", rollback_error)
             })?;
             if matches!(error, ProjectionStoreError::Storage { .. }) {
-                persist_projection_retry(conn, observation_id, now_micros).await?;
-            } else if let Some(reason) = error.deterministic_rejection_reason() {
-                persist_projection_rejection(conn, observation_id, reason).await?;
+                persist_projection_retry(conn, observation_id, now_micros, &error.durable_detail())
+                    .await?;
+            } else if matches!(error, ProjectionStoreError::Contract(_)) {
+                persist_projection_rejection(
+                    conn,
+                    observation_id,
+                    ProjectionSkipReason::InvalidContract,
+                )
+                .await?;
             }
             Err(error)
         }
@@ -97,6 +104,7 @@ async fn persist_projection_retry(
     conn: &Connection,
     observation_id: &CanonicalObservationIdV1,
     now_micros: i64,
+    last_error: &str,
 ) -> ProjectionStoreResult<()> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -113,7 +121,7 @@ async fn persist_projection_retry(
         observation_id,
         attempt_count,
         next_retry_at_micros,
-        ProjectionRetryReason::Storage,
+        last_error,
     )
     .await?;
     transaction
@@ -280,7 +288,7 @@ async fn project_observation_in_transaction(
         verify_effect(transaction, &observation, &effect).await?;
         if !matches!(
             effect,
-            ObservationProjection::Skipped(reason) if reason.is_rejection()
+            ObservationProjection::Skipped(ProjectionSkipReason::InvalidContract)
         ) {
             record_canonical_observation_effect(transaction, sequence, &observation, &effect)
                 .await?;
@@ -309,7 +317,7 @@ async fn project_observation_in_transaction(
     .await?;
     if !matches!(
         effect,
-        ObservationProjection::Skipped(reason) if reason.is_rejection()
+        ObservationProjection::Skipped(ProjectionSkipReason::InvalidContract)
     ) {
         record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
     }
@@ -524,7 +532,7 @@ async fn stage_projection_rebuild_batch_transaction(
         .await?;
         if !matches!(
             effect,
-            ObservationProjection::Skipped(reason) if reason.is_rejection()
+            ObservationProjection::Skipped(ProjectionSkipReason::InvalidContract)
         ) {
             record_canonical_observation_effect(transaction, sequence, &observation, &effect)
                 .await?;

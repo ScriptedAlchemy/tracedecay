@@ -135,7 +135,7 @@ fn connection() -> Connection {
                    observation_sequence INTEGER NOT NULL UNIQUE,
                    attempt_count INTEGER NOT NULL DEFAULT 0,
                    next_retry_at_micros INTEGER NOT NULL DEFAULT 0,
-                   last_error_code TEXT
+                   last_error TEXT
                  );
                  CREATE TABLE retrieval_anchors (
                     anchor_id TEXT PRIMARY KEY,

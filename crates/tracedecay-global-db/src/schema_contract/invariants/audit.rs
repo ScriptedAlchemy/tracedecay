@@ -1170,7 +1170,11 @@ async fn validate_projection_authority_suffix_pages(
                 .as_ref()
                 .and_then(|disposition| ProjectionSkipReason::from_durable_str(&disposition.reason))
                 .is_some_and(|reason| {
-                    reason == ProjectionSkipReason::OutputCollision || reason.is_rejection()
+                    matches!(
+                        reason,
+                        ProjectionSkipReason::OutputCollision
+                            | ProjectionSkipReason::InvalidContract
+                    )
                 });
             if stored_rejection {
                 if !state.is_skip() {
