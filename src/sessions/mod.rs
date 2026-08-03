@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::global_db::GlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use crate::sessions::source::{TranscriptSource, ingest_source};
@@ -32,34 +30,6 @@ pub mod workflow_state;
 
 pub use providers::{ProviderScope, SessionProvider};
 pub use shared::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-pub use tracedecay_sessions::SessionMessageType;
-
-/// Scope filter for session-message full-text search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionSearchScope {
-    All,
-    ParentsOnly,
-    SubagentsOnly,
-}
-
-impl SessionSearchScope {
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim() {
-            "all" => Some(Self::All),
-            "parents_only" => Some(Self::ParentsOnly),
-            "subagents_only" => Some(Self::SubagentsOnly),
-            _ => None,
-        }
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::ParentsOnly => "parents_only",
-            Self::SubagentsOnly => "subagents_only",
-        }
-    }
-}
 
 pub const USER_SESSIONS_DB_FILENAME: &str = "user-sessions.db";
 
@@ -592,76 +562,10 @@ pub(crate) async fn ingest_sources(
     stats
 }
 
-/// Provider-neutral metadata for an indexed agent session.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionRecord {
-    pub provider: String,
-    pub session_id: String,
-    pub project_key: String,
-    pub project_path: String,
-    pub title: Option<String>,
-    pub started_at: Option<i64>,
-    pub ended_at: Option<i64>,
-    pub transcript_path: Option<String>,
-    pub metadata_json: Option<String>,
-    pub parent_session_id: Option<String>,
-    pub is_subagent: bool,
-    pub agent_id: Option<String>,
-    pub parent_tool_use_id: Option<String>,
-}
-
-/// Provider-neutral message payload extracted from an agent transcript.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionMessageRecord {
-    pub provider: String,
-    pub message_id: String,
-    pub session_id: String,
-    pub role: String,
-    pub timestamp: Option<i64>,
-    pub ordinal: i64,
-    pub text: String,
-    pub kind: Option<String>,
-    pub model: Option<String>,
-    pub tool_names: Option<String>,
-    pub source_path: Option<String>,
-    pub source_offset: Option<i64>,
-    pub metadata_json: Option<String>,
-}
-
-/// Search hit for session-message full-text lookup.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SessionMessageSearchResult {
-    pub session: SessionRecord,
-    pub message: SessionMessageRecord,
-    pub score: f64,
-}
-
-/// Inclusive timestamp bounds for session-message full-text search.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSearchTimeRange {
-    pub start_time: Option<i64>,
-    pub end_time: Option<i64>,
-}
-
-/// Relationship and time filters for session-message full-text search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SessionSearchFilters<'a> {
-    pub scope: SessionSearchScope,
-    pub message_type: SessionMessageType,
-    pub parent_session_id: Option<&'a str>,
-    pub time_range: SessionSearchTimeRange,
-}
-
-impl Default for SessionSearchFilters<'_> {
-    fn default() -> Self {
-        Self {
-            scope: SessionSearchScope::All,
-            message_type: SessionMessageType::All,
-            parent_session_id: None,
-            time_range: SessionSearchTimeRange::default(),
-        }
-    }
-}
+pub use tracedecay_sessions::{
+    SessionMessageRecord, SessionMessageSearchResult, SessionMessageType, SessionRecord,
+    SessionSearchFilters, SessionSearchScope, SessionSearchTimeRange,
+};
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

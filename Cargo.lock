@@ -5047,8 +5047,19 @@ dependencies = [
 name = "tracedecay-sessions"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "filetime",
+ "gix",
+ "hex",
+ "libsql",
  "regex",
  "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracedecay-runtime-core",
+ "tracing",
 ]
 
 [[package]]
