@@ -465,9 +465,10 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             "daemon_shutdown",
             &[("socket", socket_path.display().to_string())],
         );
+        let http_application_cancel = http_application_service.shutdown_signal();
+        http_application_cancel.cancel();
         let mut background_shutdown = Box::pin(engine.shutdown_background_tasks(shutdown_deadline));
         let mut background_receipt = None;
-        let http_application_cancel = http_application_service.shutdown_signal();
         let mut bootstrap_shutdown = Box::pin(shutdown_coordination::join_shutdown_owners(
             shutdown_deadline,
             vec![shutdown_coordination::ShutdownOwner::with_deadline_result(
