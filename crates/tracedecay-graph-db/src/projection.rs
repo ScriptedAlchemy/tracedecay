@@ -283,10 +283,7 @@ impl GraphWriteBatch {
         mut mutations: Vec<GraphMutation>,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Self, GraphDbError> {
-        for mutation in &mutations {
-            mutation.validate()?;
-        }
-        mutations.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        normalize_mutations(&mut mutations)?;
         Ok(Self {
             namespace,
             projection,
@@ -301,11 +298,7 @@ impl GraphWriteBatch {
         if self.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        for mutation in &self.mutations {
-            mutation.validate()?;
-        }
-        self.mutations
-            .sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        normalize_mutations(&mut self.mutations)?;
         let canonical = serde_json::to_vec(&(
             &self.namespace,
             &self.projection,
@@ -318,6 +311,27 @@ impl GraphWriteBatch {
         })?;
         Ok(hex::encode(Sha256::digest(canonical)))
     }
+}
+
+fn normalize_mutations(mutations: &mut Vec<GraphMutation>) -> Result<(), GraphDbError> {
+    for mutation in mutations.iter() {
+        mutation.validate()?;
+    }
+    let upserted_entities: BTreeSet<_> = mutations
+        .iter()
+        .filter_map(|mutation| match mutation {
+            GraphMutation::UpsertEntity(entity) => Some(entity.identity.clone()),
+            _ => None,
+        })
+        .collect();
+    mutations.retain(|mutation| {
+        !matches!(
+            mutation,
+            GraphMutation::DeleteEntity(identity) if upserted_entities.contains(identity)
+        )
+    });
+    mutations.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+    Ok(())
 }
 
 #[derive(Clone)]
