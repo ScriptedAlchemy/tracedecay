@@ -4904,6 +4904,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
+ "tracedecay-runtime-core",
  "tracing",
  "tree-sitter",
  "tree-sitter-language",
@@ -4975,6 +4976,16 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "tracedecay-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "amari-holographic",
+ "bincode",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
