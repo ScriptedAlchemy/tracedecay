@@ -94,9 +94,8 @@ fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal
         Some(reason) if reason == "tool_unavailable" || reason.ends_with("_unavailable") => {
             McpToolCallTerminal::Unavailable
         }
-        Some(_) | None if response.error.is_some() => McpToolCallTerminal::Denied,
-        Some(_) => McpToolCallTerminal::Completed,
-        None => McpToolCallTerminal::Completed,
+        _ if response.error.is_some() => McpToolCallTerminal::Denied,
+        _ => McpToolCallTerminal::Completed,
     }
 }
 
