@@ -1,1 +1,1 @@
-pub use tracedecay_sessions::runtime::codex::*;
+pub use tracedecay_sessions::runtime::codex::CodexSource;

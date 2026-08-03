@@ -4,7 +4,14 @@ use std::pin::Pin;
 use tracedecay_sessions::SessionMessageRecord;
 use tracedecay_sessions::git_correlation::{CommitSessionRecord, SpanObservation};
 
-pub use tracedecay_sessions::runtime::transcript_backfill::*;
+pub use tracedecay_sessions::runtime::transcript_backfill::{
+    read_structured_backfill_cursor_for_test, try_acquire_structured_backfill_lock,
+    write_structured_backfill_cursor_for_test,
+};
+pub(crate) use tracedecay_sessions::runtime::transcript_backfill::{
+    BackfillStats, StructuredBackfillStats, StructuredBackfillStore, backfill_structured_rows,
+    backfill_transcript_facts,
+};
 
 impl StructuredBackfillStore for crate::global_db::GlobalDb {
     fn db_path(&self) -> &std::path::Path {

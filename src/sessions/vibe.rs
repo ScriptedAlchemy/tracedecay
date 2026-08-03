@@ -1,1 +1,1 @@
-pub use tracedecay_sessions::runtime::vibe::*;
+pub use tracedecay_sessions::runtime::vibe::VibeSource;

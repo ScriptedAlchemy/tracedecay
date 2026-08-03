@@ -1,6 +1,6 @@
 use std::future::Future;
-use std::pin::Pin;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 use tracedecay_sessions::SessionRecord;
 use tracedecay_sessions::runtime::shared::StoredCursor;
@@ -200,7 +200,9 @@ mod tests {
     #[test]
     fn profile_pin_ignores_tracedecay_outside_plugins() {
         assert_eq!(
-            pin_from_config("tracedecay:\n  project_root: /wrong\nplugins:\n  enabled:\n    - tracedecay\n"),
+            pin_from_config(
+                "tracedecay:\n  project_root: /wrong\nplugins:\n  enabled:\n    - tracedecay\n"
+            ),
             None,
         );
     }

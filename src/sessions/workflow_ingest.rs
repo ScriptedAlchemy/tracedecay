@@ -4,7 +4,8 @@ use tracedecay_sessions::runtime::workflow_index::{
     WorkflowAgent, WorkflowIndexError, WorkflowRun,
 };
 
-pub use tracedecay_sessions::runtime::workflow_ingest::*;
+pub use tracedecay_sessions::runtime::workflow_ingest::{WorkflowIngestStats, ingest_workflow_runs};
+pub(crate) use tracedecay_sessions::runtime::workflow_ingest::WorkflowIngestStore;
 
 impl WorkflowIngestStore for crate::global_db::GlobalDb {
     fn dashboard_connection(&self) -> libsql::Connection {

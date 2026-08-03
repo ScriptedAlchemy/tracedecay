@@ -192,11 +192,11 @@ pub async fn ingest_legacy_pinned_profile_with_project_pin(
         return Ok(TranscriptIngestStats::default());
     }
     let legacy_project_pin = legacy_project_pin.ok_or_else(|| {
-            format!(
-                "legacy Hermes state store '{}' has no project pin",
-                state_db.display()
-            )
-        })?;
+        format!(
+            "legacy Hermes state store '{}' has no project pin",
+            state_db.display()
+        )
+    })?;
     let profile = profile_dir
         .parent()
         .filter(|parent| parent.file_name().is_some_and(|name| name == "profiles"))
@@ -225,10 +225,7 @@ struct HermesProfileSource {
     legacy_project_pin: Option<PathBuf>,
 }
 
-fn all_profile_sources<F>(
-    hermes_homes: &[PathBuf],
-    project_pin: &F,
-) -> Vec<HermesProfileSource>
+fn all_profile_sources<F>(hermes_homes: &[PathBuf], project_pin: &F) -> Vec<HermesProfileSource>
 where
     F: Fn(&Path) -> Option<PathBuf>,
 {
