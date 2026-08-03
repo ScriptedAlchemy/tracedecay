@@ -104,10 +104,8 @@ async fn migrate_observation_schema(
         return Ok(());
     }
 
-    // This full-table rewrite is exactly the operation that interrupted a
-    // real dogfood upgrade on a 15GB `sessions.db` and, before the
-    // `tracedecay_runtime_core::durability` model existed, failed the whole strict
-    // post-update because of it (see `crate::doctor::heal`'s module doc).
+    // This full-table rewrite previously interrupted a 15GB `sessions.db`
+    // during an update.
     // `observations` must stay classified `Recoverable` -- re-derivable by
     // re-running sanitization/projection over recoverable transcript
     // sources -- for that failure to stay non-blocking; assert it here so a

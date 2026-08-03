@@ -35,6 +35,3 @@ TRACEDECAY_DATA_DIR = { value = "target/test-profile/.tracedecay", force = false
 # https://nexte.st/docs/installation/pre-built-binaries/
 test-all = "nextest run --workspace --all-features --no-fail-fast"
 test-ci = "nextest run --workspace --all-features --no-fail-fast"
-# Fast local iteration: build the ordinary development binary, then install a
-# stable copy through the same forward-only migration and health-check flow.
-dogfood = "run --quiet --bin tracedecay -- dogfood"

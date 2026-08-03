@@ -4401,7 +4401,7 @@ mod tests {
             adopt: false,
         };
 
-        // Install then Repair is exactly the non-interactive dogfood loop:
+        // Install then Repair is exactly the non-interactive update loop:
         // `reinstall_agent_integrations` re-runs the canonical component set
         // as `Repair` on every update.
         for operation in [

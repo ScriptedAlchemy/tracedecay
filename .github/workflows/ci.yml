@@ -50,8 +50,8 @@ jobs:
 
       # `build.rs` writes this stamp when it drives the npm build; the direct
       # npm build above skips it, so reproduce the exact stamp with the same
-      # Rust module. Downstream consumers (dogfood, freshness checks) require
-      # the artifact to ship a stamp that truthfully matches these sources.
+      # Rust module. The artifact must ship a stamp that truthfully matches
+      # these sources.
       - name: Write dashboard source stamp
         run: |
           rustc --edition 2024 -O build-support/write_dashboard_stamp.rs \
@@ -179,9 +179,8 @@ jobs:
 
   release-version-drift:
     name: Release Version Drift
-    # The dogfood command contract test below exercises the checkout's built
-    # dashboard bundle and its .source-stamp, so this job consumes the same
-    # artifact every Rust job uses instead of rebuilding the dashboard.
+    # This job consumes the dashboard artifact shared by Rust jobs instead of
+    # rebuilding it.
     needs: dashboard-assets
     # Also runs on push so the workflow-contract tests below actually protect
     # master, which is the branch they exist to protect. `on.push.branches` is
@@ -221,9 +220,6 @@ jobs:
           python3 scripts/test-check-packaged-mcp-stdio.py
           python3 scripts/test-resolve-release-source-profile.py
           python3 scripts/test-scoop-manifest-workflows.py
-
-      - name: Test local dogfood command contract
-        run: bash tests/dogfood_command_test.sh
 
       - name: Check release version drift
         continue-on-error: true

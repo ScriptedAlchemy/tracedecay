@@ -313,25 +313,6 @@ Update re-runs install for every configured agent integration so a separate
 Related: tracedecay upgrade (refresh only after a real install),
 tracedecay update-plugin (plugins only), tracedecay channel.";
 
-pub(crate) const DOGFOOD_LONG_ABOUT: &str = "\
-Installs the executable you are running right now into the live user \
-environment, so a source checkout can be exercised without cutting a release. \
-Runs the repository's `scripts/dogfood.sh` installer against the current \
-binary, then hands off to the same post-update refresh that `tracedecay \
-update` performs. Only meaningful from a TraceDecay source build; a released \
-binary has no installer script to run.";
-
-pub(crate) const DOGFOOD_AFTER_HELP: &str = "\
-Examples:
-  cargo build --release                          Build the binary to install
-  ./target/release/tracedecay dogfood            Install that build for the user
-
-Notes: the installed binary replaces the one on PATH, refreshes configured
-agent integrations, and restarts the managed daemon.
-
-Related: tracedecay update (install a published release instead),
-tracedecay doctor (verify the resulting install).";
-
 pub(crate) const CHANNEL_LONG_ABOUT: &str = "\
 Shows the release channel used by `tracedecay upgrade`/`update`, or switches \
 between `stable` and `beta`. Beta receives releases earlier; switching back \
