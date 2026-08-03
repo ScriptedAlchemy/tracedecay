@@ -332,9 +332,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                             &profile_root,
                             options.clone(),
                         ));
-                        return dispatch_control
-                            .run(McpToolDispatchStage::Handler, dispatch)
-                            .await;
+                        return dispatch_control.run_handler(dispatch).await;
                     }
                     let dispatch: std::pin::Pin<
                         Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
@@ -346,9 +344,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                         options.global_db.map(std::sync::Arc::as_ref),
                         options.session_authorities.profile_retrieval,
                     ));
-                    return dispatch_control
-                        .run(McpToolDispatchStage::Handler, dispatch)
-                        .await;
+                    return dispatch_control.run_handler(dispatch).await;
                 }
                 "project" => {
                     if let Some(object) = args.as_object_mut() {
@@ -539,9 +535,7 @@ pub fn handle_tool_call_with_registry_and_implicit_project<'a>(
                 }
             }
         };
-        dispatch_control
-            .run(McpToolDispatchStage::Handler, dispatched)
-            .await
+        dispatch_control.run_handler(dispatched).await
     })
 }
 

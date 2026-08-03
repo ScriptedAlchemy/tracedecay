@@ -103,9 +103,8 @@ fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal
         Some(reason) if reason == "tool_unavailable" || reason.ends_with("_unavailable") => {
             McpToolCallTerminal::Unavailable
         }
-        Some(_) | None if response.error.is_some() => McpToolCallTerminal::Denied,
-        Some(_) => McpToolCallTerminal::Completed,
-        None => McpToolCallTerminal::Completed,
+        _ if response.error.is_some() => McpToolCallTerminal::Denied,
+        _ => McpToolCallTerminal::Completed,
     }
 }
 
@@ -1361,15 +1360,7 @@ impl McpServer {
             Some(dispatch_control.cancellation()),
             Some(dispatch_control.clone()),
         );
-        let outcome = if dispatch_control.requires_cooperative_worker_cleanup() {
-            dispatch_control
-                .run_cooperatively(McpToolDispatchStage::Handler, execution)
-                .await
-        } else {
-            dispatch_control
-                .run(McpToolDispatchStage::Handler, execution)
-                .await
-        };
+        let outcome = dispatch_control.run_handler(execution).await;
         DispatchedToolCall {
             cg,
             selected_owner,

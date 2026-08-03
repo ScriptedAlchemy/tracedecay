@@ -265,6 +265,22 @@ impl McpToolDispatchControl {
         }
     }
 
+    /// Run the terminal handler stage with the policy's required worker
+    /// settlement semantics. Nested dispatch layers must use this rather than
+    /// calling [`Self::run`] directly, otherwise they could drop a cooperative
+    /// handler before its owned worker has joined.
+    pub(crate) async fn run_handler<T, F>(&self, future: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        if self.requires_cooperative_worker_cleanup() {
+            self.run_cooperatively(McpToolDispatchStage::Handler, future)
+                .await
+        } else {
+            self.run(McpToolDispatchStage::Handler, future).await
+        }
+    }
+
     /// Run a lifecycle operation whose successful value is not itself a
     /// TraceDecay result (for example a completed JSON-RPC response).
     pub(crate) async fn run_value<T, F>(&self, stage: McpToolDispatchStage, future: F) -> Result<T>
@@ -552,7 +568,7 @@ mod dispatch_control_tests {
     use tracedecay_domain::UtcMicros;
 
     use super::{McpToolDispatchControl, McpToolDispatchStage, McpToolWorkerSettlement};
-    use crate::mcp::tools::execution::McpToolExecutionPolicyV1;
+    use crate::mcp::tools::execution::{McpToolExecutionPolicyV1, execution_policy_for_tool};
 
     #[tokio::test]
     async fn one_absolute_deadline_covers_the_entire_current_stage() {
@@ -690,12 +706,11 @@ mod dispatch_control_tests {
     #[tokio::test]
     async fn cooperative_cancellation_waits_for_handler_cleanup() {
         let cancellation = CancellationSignal::active("cancel.dispatch.cooperative").unwrap();
-        let control = McpToolDispatchControl::new(
-            "tracedecay_cooperative_fixture",
-            McpToolExecutionPolicyV1::interactive_read(1_000),
-            cancellation,
-        )
-        .unwrap();
+        let policy = execution_policy_for_tool("tracedecay_pr_context")
+            .expect("PR context must retain a dispatch policy");
+        let control =
+            McpToolDispatchControl::new("tracedecay_cooperative_fixture", policy, cancellation)
+                .unwrap();
         let started = Arc::new(tokio::sync::Notify::new());
         let cleaned = Arc::new(AtomicBool::new(false));
         let handler_started = Arc::clone(&started);
@@ -704,7 +719,7 @@ mod dispatch_control_tests {
         let dispatch_control = control.clone();
         let dispatch = tokio::spawn(async move {
             dispatch_control
-                .run_cooperatively(McpToolDispatchStage::Handler, async move {
+                .run_handler(async move {
                     handler_started.notify_one();
                     handler_cancellation.cancelled().await;
                     handler_cleaned.store(true, Ordering::Release);
