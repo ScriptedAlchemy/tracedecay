@@ -119,6 +119,21 @@ impl StoreRuntimeRegistry {
         let key = request.key.clone();
         let (binding, attempt, updates, join, eviction) = {
             let mut state = self.lock_state();
+            if let Some(path) = request
+                .database_authority
+                .as_ref()
+                .map(|authority| authority.canonical_database_path())
+                && let Some(reservation) = state
+                    .destructive_paths
+                    .values()
+                    .find(|reservation| super::destructive::reservation_matches(reservation, path))
+            {
+                return StoreRuntimeOpenBegin::Rejected(
+                    StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
+                        root: reservation.root.clone(),
+                    },
+                );
+            }
             if let Err(failure) = validate_profile_authority(&state, request) {
                 return StoreRuntimeOpenBegin::Rejected(failure);
             }
@@ -226,26 +241,33 @@ impl StoreRuntimeRegistry {
     }
 
     pub async fn open(&self, request: StoreRuntimeOpenRequest) -> StoreRuntimeOpenResult {
-        if let Some(path) = request
-            .database_authority
-            .as_ref()
-            .map(|authority| authority.canonical_database_path())
-        {
-            while let Some(mut released) = self.destructive_wait(path) {
-                while !*released.borrow_and_update() {
-                    if released.changed().await.is_err() {
-                        return StoreRuntimeOpenResult::Failed(
-                            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                                operation: "wait for destructive store maintenance",
-                                message: "destructive reservation closed without release"
-                                    .to_owned(),
-                            },
-                        );
+        loop {
+            if let Some(path) = request
+                .database_authority
+                .as_ref()
+                .map(|authority| authority.canonical_database_path())
+            {
+                while let Some(mut released) = self.destructive_wait(path) {
+                    while !*released.borrow_and_update() {
+                        if released.changed().await.is_err() {
+                            return StoreRuntimeOpenResult::Failed(
+                                StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                                    operation: "wait for destructive store maintenance",
+                                    message: "destructive reservation closed without release"
+                                        .to_owned(),
+                                },
+                            );
+                        }
                     }
                 }
             }
+            match self.begin_or_join_open(&request) {
+                StoreRuntimeOpenBegin::Rejected(
+                    StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. },
+                ) => continue,
+                begin => return begin.wait().await,
+            }
         }
-        self.begin_or_join_open(&request).wait().await
     }
 
     fn fail_reserved_open(

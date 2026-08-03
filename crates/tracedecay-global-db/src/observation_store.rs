@@ -1,9 +1,7 @@
-use std::collections::BTreeSet;
 use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::project_registry::ProjectIdentityAliasKind;
 use super::{CodeProjectRecord, RegisteredGlobalDb, StoreInstanceRecord};
 
 /// The already-existing project store authorized to persist sanitized observations.
@@ -203,45 +201,14 @@ impl RegisteredGlobalDb {
         &self,
         project_root: &Path,
     ) -> Result<Vec<String>, ProjectObservationStoreError> {
-        let mut project_ids = BTreeSet::new();
-        match tracedecay_runtime_core::storage::read_repository_identity_marker(project_root) {
-            Ok(Some(marker)) => {
-                project_ids.insert(marker.project_id);
-            }
-            Ok(None) => {}
-            Err(error) => {
-                return Err(ProjectObservationStoreError::NonCanonicalStore {
-                    project_id: "<unresolved>".to_string(),
-                    store_id: "<unresolved>".to_string(),
-                    reason: format!("repository identity marker is invalid: {error}"),
-                });
-            }
-        }
-        if let Some(project_id) = self
-            .project_id_by_path_alias(project_root, ProjectIdentityAliasKind::ProjectRoot)
+        let git_common_dir = tracedecay_runtime_core::worktree::git_common_dir(project_root);
+        self.project_ids_by_identity(project_root, git_common_dir.as_deref())
             .await
             .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
                 project_id: "<unresolved>".to_string(),
                 store_id: "<unresolved>".to_string(),
-                reason: format!("project path alias lookup failed: {error}"),
-            })?
-        {
-            project_ids.insert(project_id);
-        }
-        if let Some(git_common_dir) =
-            tracedecay_runtime_core::worktree::git_common_dir(project_root)
-            && let Some(project_id) = self
-                .project_id_by_path_alias(&git_common_dir, ProjectIdentityAliasKind::GitCommonDir)
-                .await
-                .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
-                    project_id: "<unresolved>".to_string(),
-                    store_id: "<unresolved>".to_string(),
-                    reason: format!("Git common-directory alias lookup failed: {error}"),
-                })?
-        {
-            project_ids.insert(project_id);
-        }
-        Ok(project_ids.into_iter().collect())
+                reason: format!("project identity resolution failed: {error}"),
+            })
     }
 
     fn validate_project_observation_store(

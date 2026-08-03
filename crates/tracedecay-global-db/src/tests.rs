@@ -1191,3 +1191,64 @@ async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
         "the optional form reports unavailable rather than zero"
     );
 }
+
+#[tokio::test]
+async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_identities() {
+    let harness = RegisteredGlobalDbHarness::open("project-identity-conflict").await;
+    let project = harness.storage_root().join("repo");
+    let common_dir = harness.storage_root().join("git-common-dir");
+    let common_dir_owner = harness.storage_root().join("common-dir-owner");
+    let marker_owner = harness.storage_root().join("marker-owner");
+    for path in [&project, &common_dir, &common_dir_owner, &marker_owner] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+    std::fs::create_dir_all(project.join(".git/objects")).unwrap();
+    std::fs::create_dir_all(project.join(".git/refs/heads")).unwrap();
+    std::fs::write(project.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        project.join(".git/config"),
+        "[core]\nrepositoryformatversion = 0\nbare = false\n",
+    )
+    .unwrap();
+
+    harness
+        .registered
+        .upsert_code_project(
+            "proj_common_dir",
+            &common_dir_owner,
+            Some(&common_dir),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    harness
+        .registered
+        .upsert_code_project("proj_marker", &marker_owner, None, None, None)
+        .await
+        .unwrap();
+    tracedecay_runtime_core::storage::write_repository_identity_marker(&project, "proj_marker")
+        .unwrap();
+
+    assert_eq!(
+        harness
+            .registered
+            .project_ids_by_identity(&project, Some(&common_dir))
+            .await
+            .unwrap(),
+        vec!["proj_common_dir".to_owned(), "proj_marker".to_owned()]
+    );
+    let error = harness
+        .registered
+        .resolve_project_store_by_identity(&project, Some(&common_dir))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        tracedecay_runtime_core::errors::TraceDecayError::ProjectRoute {
+            reason_code,
+            retryable: false,
+            ..
+        } if reason_code == "project_identity_conflict"
+    ));
+}
