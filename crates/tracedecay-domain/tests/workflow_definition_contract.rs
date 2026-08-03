@@ -7,12 +7,12 @@ use tracedecay_domain::{
     MAX_WORKFLOW_PREDECESSORS, MAX_WORKFLOW_STEPS, ManifestDigest, ProjectId, ProviderId, RunId,
     TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1, WorkCommandId,
     WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1, WorkflowDefinitionError,
-    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowFanOutV1, WorkflowOperationRef,
-    WorkflowOutputArtifactV1, WorkflowOutputName, WorkflowOutputReferenceV1,
-    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
-    WorkflowRunEventV1, WorkflowRunProjectionV1, WorkflowRunStateError, WorkflowRunStatusV1,
-    WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepId, WorkflowStepOutputV1,
-    WorkflowStepV1,
+    WorkflowDefinitionId, WorkflowDefinition, WorkflowFanOut, WorkflowOperationRef,
+    WorkflowOutputArtifact, WorkflowOutputName, WorkflowOutputReference,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
+    WorkflowRunEvent, WorkflowRunProjection, WorkflowRunStateError, WorkflowRunStatus,
+    WorkflowStepEffectOutcome, WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepOutput,
+    WorkflowStep,
 };
 
 fn id<T>(value: &str) -> T
@@ -30,10 +30,10 @@ fn digest(byte: char) -> ManifestDigest {
 fn step(
     step_id: &str,
     predecessors: &[&str],
-    inputs: Vec<WorkflowOutputReferenceV1>,
+    inputs: Vec<WorkflowOutputReference>,
     outputs: &[&str],
-) -> WorkflowStepV1 {
-    WorkflowStepV1 {
+) -> WorkflowStep {
+    WorkflowStep {
         step_id: id(step_id),
         operation: id(&format!("operation.{step_id}.v1")),
         predecessors: predecessors.iter().map(|value| id(value)).collect(),
@@ -43,8 +43,8 @@ fn step(
     }
 }
 
-fn output(producer_step_id: &str, output_name: &str) -> WorkflowOutputReferenceV1 {
-    WorkflowOutputReferenceV1 {
+fn output(producer_step_id: &str, output_name: &str) -> WorkflowOutputReference {
+    WorkflowOutputReference {
         producer_step_id: id(producer_step_id),
         output_name: id(output_name),
     }
@@ -60,8 +60,8 @@ fn borrowed(values: &[String]) -> Vec<&str> {
     values.iter().map(String::as_str).collect()
 }
 
-fn definition(steps: Vec<WorkflowStepV1>) -> Result<WorkflowDefinitionV1, WorkflowDefinitionError> {
-    WorkflowDefinitionV1::new(
+fn definition(steps: Vec<WorkflowStep>) -> Result<WorkflowDefinition, WorkflowDefinitionError> {
+    WorkflowDefinition::new(
         id("workflow.definition.fixture"),
         1,
         id::<ProjectId>("project.workflow.fixture"),
@@ -123,7 +123,7 @@ fn workflow_step_count_is_bounded() {
 
 /// Builds `count` zero-predecessor producer steps plus one consumer that names
 /// each of them as a predecessor, so only the fan-in count can be at fault.
-fn fan_in(count: usize) -> Vec<WorkflowStepV1> {
+fn fan_in(count: usize) -> Vec<WorkflowStep> {
     let producers = names("producer", count);
     let mut steps = producers
         .iter()
@@ -283,7 +283,7 @@ fn output_reference_from_non_predecessor_is_rejected() {
 fn fan_out_is_accepted_across_the_declared_range_and_rejected_outside_it() {
     let with_fan_out = |max_width| {
         let mut fan_out = step("review", &[], vec![], &["finding"]);
-        fan_out.fan_out = Some(WorkflowFanOutV1 { max_width });
+        fan_out.fan_out = Some(WorkflowFanOut { max_width });
         definition(vec![fan_out])
     };
 
@@ -322,20 +322,20 @@ fn wire_definitions_are_revalidated_during_deserialization() {
         .as_object_mut()
         .unwrap()
         .insert("scheduler".to_owned(), json!("must not exist"));
-    assert!(serde_json::from_value::<WorkflowDefinitionV1>(unknown_field).is_err());
+    assert!(serde_json::from_value::<WorkflowDefinition>(unknown_field).is_err());
 
     let mut zero_version = valid.clone();
     zero_version["definition_version"] = json!(0);
-    assert!(serde_json::from_value::<WorkflowDefinitionV1>(zero_version).is_err());
+    assert!(serde_json::from_value::<WorkflowDefinition>(zero_version).is_err());
 
     let mut unbounded_fan_out = valid.clone();
     unbounded_fan_out["steps"][0]["fan_out"] = json!({ "max_width": MAX_WORKFLOW_FAN_OUT + 1 });
-    assert!(serde_json::from_value::<WorkflowDefinitionV1>(unbounded_fan_out).is_err());
+    assert!(serde_json::from_value::<WorkflowDefinition>(unbounded_fan_out).is_err());
 
     let mut unbounded_fan_in = valid;
     unbounded_fan_in["steps"][0]["predecessors"] =
         json!(names("producer", MAX_WORKFLOW_PREDECESSORS + 1));
-    assert!(serde_json::from_value::<WorkflowDefinitionV1>(unbounded_fan_in).is_err());
+    assert!(serde_json::from_value::<WorkflowDefinition>(unbounded_fan_in).is_err());
 }
 
 #[test]
@@ -351,8 +351,8 @@ fn identities_are_canonical_product_data_strings() {
     assert_eq!(unique.len(), 2);
 }
 
-fn run_context(command: &str, byte: char, occurred_at: i64) -> WorkflowRunEventContextV1 {
-    WorkflowRunEventContextV1 {
+fn run_context(command: &str, byte: char, occurred_at: i64) -> WorkflowRunEventContext {
+    WorkflowRunEventContext {
         command_id: id::<WorkCommandId>(command),
         input_digest: digest(byte),
         occurred_at: UtcMicros(occurred_at),
@@ -365,8 +365,8 @@ fn placement(
     configuration: char,
     topology: char,
     registry: char,
-) -> WorkflowPlacementReceiptV1 {
-    WorkflowPlacementReceiptV1::new(
+) -> WorkflowPlacementReceipt {
+    WorkflowPlacementReceipt::new(
         id::<RunId>(run_id),
         id::<WorkflowStepId>(step_id),
         WorkProviderRouteV1::new(
@@ -397,10 +397,10 @@ fn step_output(
     output_name: &str,
     child: &str,
     artifact: WorkArtifactRefV1,
-) -> WorkflowStepOutputV1 {
-    WorkflowStepOutputV1::new(
+) -> WorkflowStepOutput {
+    WorkflowStepOutput::new(
         id(output_name),
-        vec![WorkflowOutputArtifactV1::new(attempt(child), artifact)],
+        vec![WorkflowOutputArtifact::new(attempt(child), artifact)],
     )
     .unwrap()
 }
@@ -408,7 +408,7 @@ fn step_output(
 #[test]
 fn named_output_artifact_sets_are_non_empty_unique_and_canonical() {
     let artifact = |child: &str, byte: char| {
-        WorkflowOutputArtifactV1::new(
+        WorkflowOutputArtifact::new(
             attempt(child),
             WorkArtifactRefV1::new(
                 id::<WorkArtifactId>(&format!("artifact.workflow.{child}")),
@@ -419,15 +419,15 @@ fn named_output_artifact_sets_are_non_empty_unique_and_canonical() {
         )
     };
     assert_eq!(
-        WorkflowStepOutputV1::new(id("finding"), Vec::new()).unwrap_err(),
+        WorkflowStepOutput::new(id("finding"), Vec::new()).unwrap_err(),
         WorkflowRunStateError::InvalidStepOutputs
     );
     let duplicate = artifact("duplicate", '1');
     assert_eq!(
-        WorkflowStepOutputV1::new(id("finding"), vec![duplicate.clone(), duplicate]).unwrap_err(),
+        WorkflowStepOutput::new(id("finding"), vec![duplicate.clone(), duplicate]).unwrap_err(),
         WorkflowRunStateError::InvalidStepOutputs
     );
-    let output = WorkflowStepOutputV1::new(
+    let output = WorkflowStepOutput::new(
         id("finding"),
         vec![artifact("zeta", '2'), artifact("alpha", '3')],
     )
@@ -446,7 +446,7 @@ fn named_output_artifact_sets_are_non_empty_unique_and_canonical() {
 #[test]
 fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
     let mut prepare = step("prepare", &[], vec![], &["context"]);
-    prepare.fan_out = Some(WorkflowFanOutV1 { max_width: 2 });
+    prepare.fan_out = Some(WorkflowFanOut { max_width: 2 });
     let definition = definition(vec![
         prepare,
         step(
@@ -457,7 +457,7 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
         ),
     ])
     .unwrap();
-    let admitted = WorkflowRunEventV1::admitted(
+    let admitted = WorkflowRunEvent::admitted(
         id::<RunId>("run.workflow.dataflow"),
         definition,
         digest('d'),
@@ -465,12 +465,12 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
         run_context("workflow.admit", 'e', 1),
     )
     .unwrap();
-    let mut run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    let mut run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
     assert_eq!(run.ready_steps(), vec![id::<WorkflowStepId>("prepare")]);
 
     let started = run
         .next_event(
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id: id("prepare"),
                 placement: placement("run.workflow.dataflow", "prepare", 'b', 'd', '8'),
             },
@@ -487,26 +487,26 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
         7,
     )
     .unwrap();
-    let completed_output = WorkflowStepOutputV1::new(
+    let completed_output = WorkflowStepOutput::new(
         id("context"),
         vec![
-            WorkflowOutputArtifactV1::new(attempt("prepare-b"), second_artifact.clone()),
-            WorkflowOutputArtifactV1::new(attempt("prepare-a"), artifact.clone()),
+            WorkflowOutputArtifact::new(attempt("prepare-b"), second_artifact.clone()),
+            WorkflowOutputArtifact::new(attempt("prepare-a"), artifact.clone()),
         ],
     )
     .unwrap();
     let completed = run
         .next_event(
-            WorkflowRunCommandV1::CompleteStep {
+            WorkflowRunCommand::CompleteStep {
                 step_id: id("prepare"),
                 outputs: vec![completed_output.clone()],
-                effect_receipt: WorkflowStepEffectReceiptV1::new(
+                effect_receipt: WorkflowStepEffectReceipt::new(
                     id::<RunId>("run.workflow.dataflow"),
                     id::<WorkflowStepId>("prepare"),
                     placement("run.workflow.dataflow", "prepare", 'b', 'd', '8')
                         .placement_digest()
                         .clone(),
-                    WorkflowStepEffectOutcomeV1::Completed,
+                    WorkflowStepEffectOutcome::Completed,
                     digest('9'),
                     &[completed_output],
                 )
@@ -523,7 +523,7 @@ fn run_projection_releases_a_dependent_with_the_exact_predecessor_artifact() {
     assert_eq!(inputs[0].reference(), &output("prepare", "context"));
     assert_eq!(inputs[0].artifacts()[0].artifact(), &artifact);
     assert_eq!(inputs[0].artifacts()[1].artifact(), &second_artifact);
-    assert_eq!(run.status(), WorkflowRunStatusV1::Running);
+    assert_eq!(run.status(), WorkflowRunStatus::Running);
 }
 
 #[test]
@@ -538,7 +538,7 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
         ),
     ])
     .unwrap();
-    let admitted = WorkflowRunEventV1::admitted(
+    let admitted = WorkflowRunEvent::admitted(
         id::<RunId>("run.workflow.invalid-output"),
         definition,
         digest('d'),
@@ -546,11 +546,11 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
         run_context("workflow.invalid.admit", '3', 1),
     )
     .unwrap();
-    let mut run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    let mut run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
     run = run
         .apply(
             &run.next_event(
-                WorkflowRunCommandV1::StartStep {
+                WorkflowRunCommand::StartStep {
                     step_id: id("prepare"),
                     placement: placement("run.workflow.invalid-output", "prepare", 'b', 'd', '8'),
                 },
@@ -565,16 +565,16 @@ fn run_projection_rejects_a_digest_only_or_misnamed_output() {
 
     let error = run
         .next_event(
-            WorkflowRunCommandV1::CompleteStep {
+            WorkflowRunCommand::CompleteStep {
                 step_id: id("prepare"),
                 outputs: vec![wrong_output.clone()],
-                effect_receipt: WorkflowStepEffectReceiptV1::new(
+                effect_receipt: WorkflowStepEffectReceipt::new(
                     id::<RunId>("run.workflow.invalid-output"),
                     id::<WorkflowStepId>("prepare"),
                     placement("run.workflow.invalid-output", "prepare", 'b', 'd', '8')
                         .placement_digest()
                         .clone(),
-                    WorkflowStepEffectOutcomeV1::Completed,
+                    WorkflowStepEffectOutcome::Completed,
                     digest('9'),
                     &[wrong_output],
                 )
@@ -597,7 +597,7 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
     let configuration_digest = digest('b');
     let topology_digest = digest('d');
     let registry_digest = digest('8');
-    let admitted = WorkflowRunEventV1::admitted(
+    let admitted = WorkflowRunEvent::admitted(
         run_id.clone(),
         definition(vec![step("prepare", &[], vec![], &["context"])]).unwrap(),
         topology_digest.clone(),
@@ -605,8 +605,8 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
         run_context("workflow.receipts.admit", 'e', 1),
     )
     .unwrap();
-    let run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
-    let placement = WorkflowPlacementReceiptV1::new(
+    let run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
+    let placement = WorkflowPlacementReceipt::new(
         run_id.clone(),
         step_id.clone(),
         WorkProviderRouteV1::new(
@@ -624,7 +624,7 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
     .unwrap();
     let started = run
         .next_event(
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id: step_id.clone(),
                 placement: placement.clone(),
             },
@@ -642,18 +642,18 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
         )
         .unwrap(),
     )];
-    let effect = WorkflowStepEffectReceiptV1::new(
+    let effect = WorkflowStepEffectReceipt::new(
         run_id,
         step_id.clone(),
         placement.placement_digest().clone(),
-        WorkflowStepEffectOutcomeV1::Completed,
+        WorkflowStepEffectOutcome::Completed,
         digest('2'),
         &outputs,
     )
     .unwrap();
     let completed = run
         .next_event(
-            WorkflowRunCommandV1::CompleteStep {
+            WorkflowRunCommand::CompleteStep {
                 step_id: step_id.clone(),
                 outputs,
                 effect_receipt: effect.clone(),
@@ -662,7 +662,7 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
         )
         .unwrap();
     let rebuilt =
-        WorkflowRunProjectionV1::rebuild(&[run.history()[0].clone(), started, completed]).unwrap();
+        WorkflowRunProjection::rebuild(&[run.history()[0].clone(), started, completed]).unwrap();
 
     let step = rebuilt.step(&step_id).unwrap();
     assert_eq!(step.placement_receipt(), Some(&placement));
@@ -673,7 +673,7 @@ fn run_projection_journals_bound_placement_and_effect_receipts() {
 fn run_projection_rejects_receipts_bound_to_other_runtime_state() {
     let run_id = id::<RunId>("run.workflow.receipt-binding");
     let step_id = id::<WorkflowStepId>("prepare");
-    let admitted = WorkflowRunEventV1::admitted(
+    let admitted = WorkflowRunEvent::admitted(
         run_id.clone(),
         definition(vec![step("prepare", &[], vec![], &[])]).unwrap(),
         digest('d'),
@@ -681,8 +681,8 @@ fn run_projection_rejects_receipts_bound_to_other_runtime_state() {
         run_context("workflow.receipt-binding.admit", 'e', 1),
     )
     .unwrap();
-    let run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
-    let stale_placement = WorkflowPlacementReceiptV1::new(
+    let run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
+    let stale_placement = WorkflowPlacementReceipt::new(
         run_id,
         step_id.clone(),
         WorkProviderRouteV1::new(
@@ -701,7 +701,7 @@ fn run_projection_rejects_receipts_bound_to_other_runtime_state() {
 
     assert_eq!(
         run.next_event(
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id,
                 placement: stale_placement,
             },
@@ -717,8 +717,8 @@ fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
     let run_id = id::<RunId>("run.workflow.missing-child-output");
     let step_id = id::<WorkflowStepId>("prepare");
     let mut fan_out_step = step("prepare", &[], vec![], &["analysis", "evidence"]);
-    fan_out_step.fan_out = Some(WorkflowFanOutV1 { max_width: 2 });
-    let admitted = WorkflowRunEventV1::admitted(
+    fan_out_step.fan_out = Some(WorkflowFanOut { max_width: 2 });
+    let admitted = WorkflowRunEvent::admitted(
         run_id.clone(),
         definition(vec![fan_out_step]).unwrap(),
         digest('d'),
@@ -726,7 +726,7 @@ fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
         run_context("workflow.missing-child.admit", 'e', 1),
     )
     .unwrap();
-    let run = WorkflowRunProjectionV1::rebuild(&[admitted]).unwrap();
+    let run = WorkflowRunProjection::rebuild(&[admitted]).unwrap();
     let placement = placement(
         "run.workflow.missing-child-output",
         "prepare",
@@ -736,7 +736,7 @@ fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
     );
     let started = run
         .next_event(
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id: step_id.clone(),
                 placement: placement.clone(),
             },
@@ -745,13 +745,13 @@ fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
         .unwrap();
     let run = run.apply(&started).unwrap();
     let child_artifact = |child: &str, artifact_name: &str, byte: char| {
-        WorkflowOutputArtifactV1::new(
+        WorkflowOutputArtifact::new(
             attempt(child),
             WorkArtifactRefV1::new(id::<WorkArtifactId>(artifact_name), digest(byte), 1).unwrap(),
         )
     };
     let outputs = vec![
-        WorkflowStepOutputV1::new(
+        WorkflowStepOutput::new(
             id("analysis"),
             vec![
                 child_artifact("alpha", "artifact.analysis.alpha", '1'),
@@ -759,17 +759,17 @@ fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
             ],
         )
         .unwrap(),
-        WorkflowStepOutputV1::new(
+        WorkflowStepOutput::new(
             id("evidence"),
             vec![child_artifact("alpha", "artifact.evidence.alpha", '3')],
         )
         .unwrap(),
     ];
-    let effect = WorkflowStepEffectReceiptV1::new(
+    let effect = WorkflowStepEffectReceipt::new(
         run_id,
         step_id.clone(),
         placement.placement_digest().clone(),
-        WorkflowStepEffectOutcomeV1::Completed,
+        WorkflowStepEffectOutcome::Completed,
         digest('4'),
         &outputs,
     )
@@ -777,7 +777,7 @@ fn fan_out_rejects_a_declared_output_missing_one_child_artifact() {
 
     assert_eq!(
         run.next_event(
-            WorkflowRunCommandV1::CompleteStep {
+            WorkflowRunCommand::CompleteStep {
                 step_id,
                 outputs,
                 effect_receipt: effect,

@@ -7,7 +7,7 @@ use thiserror::Error;
 use crate::configuration::WorktreePlacementModeV1;
 use crate::{
     ManifestDigest, RunId, WorkProviderBackendV1, WorkProviderRouteV1, WorkflowStepId,
-    WorkflowStepOutputV1, canonical_sha256,
+    WorkflowStepOutput, canonical_sha256,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -20,7 +20,7 @@ pub enum WorkflowReceiptError {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPlacementReceiptV1 {
+pub struct WorkflowPlacementReceipt {
     run_id: RunId,
     step_id: WorkflowStepId,
     route: WorkProviderRouteV1,
@@ -33,7 +33,7 @@ pub struct WorkflowPlacementReceiptV1 {
     placement_digest: ManifestDigest,
 }
 
-impl WorkflowPlacementReceiptV1 {
+impl WorkflowPlacementReceipt {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         run_id: RunId,
@@ -171,7 +171,7 @@ fn placement_digest(
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum WorkflowStepEffectOutcomeV1 {
+pub enum WorkflowStepEffectOutcome {
     Completed,
     Failed,
     Cancelled,
@@ -181,24 +181,24 @@ pub enum WorkflowStepEffectOutcomeV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowStepEffectReceiptV1 {
+pub struct WorkflowStepEffectReceipt {
     run_id: RunId,
     step_id: WorkflowStepId,
     placement_digest: ManifestDigest,
-    outcome: WorkflowStepEffectOutcomeV1,
+    outcome: WorkflowStepEffectOutcome,
     effect_digest: ManifestDigest,
     output_set_digest: ManifestDigest,
     receipt_digest: ManifestDigest,
 }
 
-impl WorkflowStepEffectReceiptV1 {
+impl WorkflowStepEffectReceipt {
     pub fn new(
         run_id: RunId,
         step_id: WorkflowStepId,
         placement_digest: ManifestDigest,
-        outcome: WorkflowStepEffectOutcomeV1,
+        outcome: WorkflowStepEffectOutcome,
         effect_digest: ManifestDigest,
-        outputs: &[WorkflowStepOutputV1],
+        outputs: &[WorkflowStepOutput],
     ) -> Result<Self, WorkflowReceiptError> {
         let output_set_digest = output_set_digest(outputs)?;
         let receipt_digest = effect_receipt_digest(
@@ -238,7 +238,7 @@ impl WorkflowStepEffectReceiptV1 {
 
     pub fn validate_outputs(
         &self,
-        outputs: &[WorkflowStepOutputV1],
+        outputs: &[WorkflowStepOutput],
     ) -> Result<(), WorkflowReceiptError> {
         self.validate()?;
         if self.output_set_digest != output_set_digest(outputs)? {
@@ -259,7 +259,7 @@ impl WorkflowStepEffectReceiptV1 {
         &self.placement_digest
     }
 
-    pub const fn outcome(&self) -> WorkflowStepEffectOutcomeV1 {
+    pub const fn outcome(&self) -> WorkflowStepEffectOutcome {
         self.outcome
     }
 
@@ -277,7 +277,7 @@ impl WorkflowStepEffectReceiptV1 {
 }
 
 fn output_set_digest(
-    outputs: &[WorkflowStepOutputV1],
+    outputs: &[WorkflowStepOutput],
 ) -> Result<ManifestDigest, WorkflowReceiptError> {
     let mut ordered = outputs.to_vec();
     ordered.sort_by(|left, right| left.output_name().cmp(right.output_name()));
@@ -289,7 +289,7 @@ fn effect_receipt_digest(
     run_id: &RunId,
     step_id: &WorkflowStepId,
     placement_digest: &ManifestDigest,
-    outcome: WorkflowStepEffectOutcomeV1,
+    outcome: WorkflowStepEffectOutcome,
     effect_digest: &ManifestDigest,
     output_set_digest: &ManifestDigest,
 ) -> Result<ManifestDigest, WorkflowReceiptError> {

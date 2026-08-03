@@ -13,15 +13,15 @@ use tracedecay_domain::configuration::WorktreePlacementModeV1;
 use tracedecay_domain::{
     AttemptId, CommitId, ManifestDigest, RefId, RunId, TaskId, UtcMicros, WorkAttemptIdentityV1,
     WorkCommandId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkLeaseFenceV1,
-    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1,
-    WorkflowOperationRef, WorkflowPlacementReceiptV1, WorkflowStepId, canonical_sha256,
+    WorkProviderBackendV1, WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition,
+    WorkflowOperationRef, WorkflowPlacementReceipt, WorkflowStepId, canonical_sha256,
 };
 
 use crate::context::CancellationContext;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowExecutionIdentityV1 {
+pub struct WorkflowExecutionIdentity {
     pub definition_id: WorkflowDefinitionId,
     pub definition_version: u64,
     pub run_id: RunId,
@@ -30,21 +30,21 @@ pub struct WorkflowExecutionIdentityV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowExecutionFenceV1 {
+pub struct WorkflowExecutionFence {
     pub attempt_id: AttemptId,
     pub lease: WorkLeaseFenceV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowFanOutInputV1 {
+pub struct WorkflowFanOutInput {
     pub identity: String,
     pub input_digest: ManifestDigest,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowProviderAdmissionV1 {
+pub struct WorkflowProviderAdmission {
     pub route: WorkProviderRouteV1,
     pub backend: WorkProviderBackendV1,
     pub model: String,
@@ -61,13 +61,13 @@ pub struct WorkflowProviderAdmissionV1 {
     pub effect_state: WorkEffectStateV1,
 }
 
-impl WorkflowProviderAdmissionV1 {
+impl WorkflowProviderAdmission {
     pub fn placement(
         &self,
         run_id: RunId,
         step_id: WorkflowStepId,
-    ) -> Result<WorkflowPlacementReceiptV1, WorkflowFanOutRuntimeError> {
-        WorkflowPlacementReceiptV1::new(
+    ) -> Result<WorkflowPlacementReceipt, WorkflowFanOutRuntimeError> {
+        WorkflowPlacementReceipt::new(
             run_id,
             step_id,
             self.route.clone(),
@@ -84,7 +84,7 @@ impl WorkflowProviderAdmissionV1 {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "policy", rename_all = "snake_case")]
-pub enum WorkflowFailurePolicyV1 {
+pub enum WorkflowFailurePolicy {
     FailFast,
     Collect,
     RequireAtLeast {
@@ -95,23 +95,23 @@ pub enum WorkflowFailurePolicyV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowFanOutRequestV1 {
-    pub definition: WorkflowDefinitionV1,
+pub struct WorkflowFanOutRequest {
+    pub definition: WorkflowDefinition,
     pub run_id: RunId,
     pub step_id: WorkflowStepId,
-    pub fence: WorkflowExecutionFenceV1,
+    pub fence: WorkflowExecutionFence,
     pub admitted_at: UtcMicros,
     pub cancellation: CancellationContext,
     #[schemars(range(min = 1))]
     pub max_parallel: u32,
-    pub failure_policy: WorkflowFailurePolicyV1,
-    pub provider: WorkflowProviderAdmissionV1,
-    pub inputs: Vec<WorkflowFanOutInputV1>,
+    pub failure_policy: WorkflowFailurePolicy,
+    pub provider: WorkflowProviderAdmission,
+    pub inputs: Vec<WorkflowFanOutInput>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPlannedChildV1 {
+pub struct WorkflowPlannedChild {
     pub ordinal: u32,
     pub task_id: TaskId,
     pub attempt_identity: WorkAttemptIdentityV1,
@@ -121,18 +121,18 @@ pub struct WorkflowPlannedChildV1 {
     pub evidence_command_id: WorkCommandId,
     pub proposal_id: tracedecay_domain::ProposalId,
     pub proposal_digest: ManifestDigest,
-    pub input: WorkflowFanOutInputV1,
+    pub input: WorkflowFanOutInput,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowFanOutPlanV1 {
-    pub identity: WorkflowExecutionIdentityV1,
+pub struct WorkflowFanOutPlan {
+    pub identity: WorkflowExecutionIdentity,
     pub operation: WorkflowOperationRef,
     pub max_parallel: u32,
-    pub failure_policy: WorkflowFailurePolicyV1,
+    pub failure_policy: WorkflowFailurePolicy,
     pub plan_digest: ManifestDigest,
-    pub children: Vec<WorkflowPlannedChildV1>,
+    pub children: Vec<WorkflowPlannedChild>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,8 +197,8 @@ impl Display for WorkflowFanOutRuntimeError {
 impl std::error::Error for WorkflowFanOutRuntimeError {}
 
 pub fn prepare_workflow_fan_out(
-    request: &WorkflowFanOutRequestV1,
-) -> Result<WorkflowFanOutPlanV1, WorkflowFanOutRuntimeError> {
+    request: &WorkflowFanOutRequest,
+) -> Result<WorkflowFanOutPlan, WorkflowFanOutRuntimeError> {
     request
         .definition
         .validate()
@@ -237,7 +237,7 @@ pub fn prepare_workflow_fan_out(
     {
         return Err(WorkflowFanOutRuntimeError::InvalidParallelism);
     }
-    if let WorkflowFailurePolicyV1::RequireAtLeast { successes } = request.failure_policy
+    if let WorkflowFailurePolicy::RequireAtLeast { successes } = request.failure_policy
         && (successes == 0
             || usize::try_from(successes).map_or(true, |value| value > request.inputs.len()))
     {
@@ -264,7 +264,7 @@ pub fn prepare_workflow_fan_out(
         }
     }
 
-    let identity = WorkflowExecutionIdentityV1 {
+    let identity = WorkflowExecutionIdentity {
         definition_id: request.definition.definition_id().clone(),
         definition_version: request.definition.definition_version(),
         run_id: request.run_id.clone(),
@@ -310,7 +310,7 @@ pub fn prepare_workflow_fan_out(
                 .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
         )
         .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
-        children.push(WorkflowPlannedChildV1 {
+        children.push(WorkflowPlannedChild {
             ordinal,
             task_id,
             attempt_identity,
@@ -332,7 +332,7 @@ pub fn prepare_workflow_fan_out(
             input,
         });
     }
-    Ok(WorkflowFanOutPlanV1 {
+    Ok(WorkflowFanOutPlan {
         identity,
         operation: step.operation.clone(),
         max_parallel: request.max_parallel,

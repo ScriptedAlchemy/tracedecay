@@ -10,12 +10,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowStepId, WorktreeId,
+    WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinition, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_tool_catalog::OperationId;
 
-pub const WORKFLOW_CANONICAL_WORK_OPERATION_V1: &str = "operation.work.attempt_start";
+pub const WORKFLOW_CANONICAL_WORK_OPERATION: &str = "operation.work.attempt_start";
 
 /// Upper inclusive bound for calibrated placement scores (micros of unit interval).
 pub const MAX_CALIBRATED_SCORE_MICROS: u32 = 1_000_000;
@@ -33,14 +33,14 @@ pub enum WorkflowDefinitionAuthorityError {
 pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
     fn insert(
         &self,
-        definition: &WorkflowDefinitionV1,
+        definition: &WorkflowDefinition,
     ) -> Result<(), WorkflowDefinitionAuthorityError>;
 
     fn load(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
-    ) -> Result<Option<WorkflowDefinitionV1>, WorkflowDefinitionAuthorityError>;
+    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError>;
 
     fn active_version(
         &self,
@@ -57,7 +57,7 @@ pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowActivationV1 {
+pub struct WorkflowActivation {
     pub definition_id: WorkflowDefinitionId,
     pub active_version: u64,
 }
@@ -65,14 +65,14 @@ pub struct WorkflowActivationV1 {
 /// Wire request for [`WorkflowDefinitionService::register`].
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionRegisterRequestV1 {
-    pub definition: WorkflowDefinitionV1,
+pub struct WorkflowDefinitionRegisterRequest {
+    pub definition: WorkflowDefinition,
 }
 
 /// Wire request for [`WorkflowDefinitionService::activate`].
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionActivateRequestV1 {
+pub struct WorkflowDefinitionActivateRequest {
     pub definition_id: WorkflowDefinitionId,
     pub expected_active_version: Option<u64>,
     #[schemars(range(min = 1))]
@@ -129,8 +129,8 @@ where
 
     pub fn register(
         &self,
-        definition: WorkflowDefinitionV1,
-    ) -> Result<WorkflowDefinitionV1, WorkflowCoordinationError> {
+        definition: WorkflowDefinition,
+    ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
         definition
             .validate()
             .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
@@ -157,7 +157,7 @@ where
         definition_id: &WorkflowDefinitionId,
         expected_active_version: Option<u64>,
         replacement_version: u64,
-    ) -> Result<WorkflowActivationV1, WorkflowCoordinationError> {
+    ) -> Result<WorkflowActivation, WorkflowCoordinationError> {
         if replacement_version == 0 {
             return Err(WorkflowCoordinationError::InvalidDefinition);
         }
@@ -172,7 +172,7 @@ where
             )
         })?;
         if definition.steps().iter().any(|step| {
-            step.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION_V1
+            step.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION
                 || OperationId::new(step.operation.as_str())
                     .ok()
                     .and_then(|operation| catalog.get(&operation))
@@ -196,7 +196,7 @@ where
                 replacement_version,
             )
             .map_err(coordination_authority_error)?;
-        Ok(WorkflowActivationV1 {
+        Ok(WorkflowActivation {
             definition_id: definition_id.clone(),
             active_version: replacement_version,
         })
@@ -219,7 +219,7 @@ fn coordination_authority_error(
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPlacementRequestV1 {
+pub struct WorkflowPlacementRequest {
     pub definition_id: WorkflowDefinitionId,
     #[schemars(range(min = 1))]
     pub definition_version: u64,
@@ -232,7 +232,7 @@ pub struct WorkflowPlacementRequestV1 {
     pub minimum_calibrated_score_micros: u32,
 }
 
-impl WorkflowPlacementRequestV1 {
+impl WorkflowPlacementRequest {
     pub fn validate(&self) -> Result<(), WorkflowPlacementError> {
         if self.definition_version == 0
             || self.minimum_calibrated_score_micros > MAX_CALIBRATED_SCORE_MICROS
@@ -245,7 +245,7 @@ impl WorkflowPlacementRequestV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPlacementCandidateV1 {
+pub struct WorkflowPlacementCandidate {
     pub route: WorkProviderRouteV1,
     pub priority: u32,
     pub expertise_digest: ManifestDigest,
@@ -254,8 +254,8 @@ pub struct WorkflowPlacementCandidateV1 {
     pub calibrated_score_micros: u32,
 }
 
-impl WorkflowPlacementCandidateV1 {
-    fn evidence_matches(&self, request: &WorkflowPlacementRequestV1) -> bool {
+impl WorkflowPlacementCandidate {
+    fn evidence_matches(&self, request: &WorkflowPlacementRequest) -> bool {
         self.expertise_digest == request.required_expertise_digest
             && self.calibration_profile_digest == request.calibration_profile_digest
             && self.calibrated_score_micros <= MAX_CALIBRATED_SCORE_MICROS
@@ -273,8 +273,8 @@ pub enum WorkflowPlacementError {
 pub trait WorkflowPlacementPort: Send + Sync {
     fn candidates(
         &self,
-        request: &WorkflowPlacementRequestV1,
-    ) -> Result<Vec<WorkflowPlacementCandidateV1>, WorkflowPlacementError>;
+        request: &WorkflowPlacementRequest,
+    ) -> Result<Vec<WorkflowPlacementCandidate>, WorkflowPlacementError>;
 }
 
 pub struct WorkflowPlacementService<P> {
@@ -291,7 +291,7 @@ where
 
     pub fn place(
         &self,
-        request: &WorkflowPlacementRequestV1,
+        request: &WorkflowPlacementRequest,
     ) -> Result<WorkProviderRouteV1, WorkflowPlacementError> {
         request.validate()?;
         let mut candidates = self.placement.candidates(request)?;
@@ -348,7 +348,7 @@ impl fmt::Debug for TaskHandoffToken {
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffScopeV1 {
+pub struct TaskHandoffScope {
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
@@ -363,7 +363,7 @@ pub struct TaskHandoffScopeV1 {
     to_actor_id: ActorId,
 }
 
-impl TaskHandoffScopeV1 {
+impl TaskHandoffScope {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_id: ProjectId,
@@ -447,7 +447,7 @@ impl TaskHandoffScopeV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for TaskHandoffScopeV1 {
+impl<'de> Deserialize<'de> for TaskHandoffScope {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -488,16 +488,16 @@ impl<'de> Deserialize<'de> for TaskHandoffScopeV1 {
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffGrantV1 {
-    scope: TaskHandoffScopeV1,
+pub struct TaskHandoffGrant {
+    scope: TaskHandoffScope,
     token_digest: ManifestDigest,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
 }
 
-impl TaskHandoffGrantV1 {
+impl TaskHandoffGrant {
     pub fn new(
-        scope: TaskHandoffScopeV1,
+        scope: TaskHandoffScope,
         token_digest: ManifestDigest,
         issued_at: UtcMicros,
         expires_at: UtcMicros,
@@ -526,7 +526,7 @@ impl TaskHandoffGrantV1 {
         Ok(())
     }
 
-    pub fn scope(&self) -> &TaskHandoffScopeV1 {
+    pub fn scope(&self) -> &TaskHandoffScope {
         &self.scope
     }
 
@@ -543,7 +543,7 @@ impl TaskHandoffGrantV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for TaskHandoffGrantV1 {
+impl<'de> Deserialize<'de> for TaskHandoffGrant {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -551,7 +551,7 @@ impl<'de> Deserialize<'de> for TaskHandoffGrantV1 {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            scope: TaskHandoffScopeV1,
+            scope: TaskHandoffScope,
             token_digest: ManifestDigest,
             issued_at: UtcMicros,
             expires_at: UtcMicros,
@@ -584,18 +584,18 @@ pub enum TaskHandoffConsumeOutcome {
 /// its digest, never the secret itself.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffIssueRequestV1 {
+pub struct TaskHandoffIssueRequest {
     pub issuer: ActorId,
-    pub scope: TaskHandoffScopeV1,
+    pub scope: TaskHandoffScope,
     pub secret: String,
     pub issued_at: UtcMicros,
     pub expires_at: UtcMicros,
 }
 
-impl fmt::Debug for TaskHandoffIssueRequestV1 {
+impl fmt::Debug for TaskHandoffIssueRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("TaskHandoffIssueRequestV1")
+            .debug_struct("TaskHandoffIssueRequest")
             .field("issuer", &self.issuer)
             .field("scope", &self.scope)
             .field("secret", &"[REDACTED]")
@@ -608,17 +608,17 @@ impl fmt::Debug for TaskHandoffIssueRequestV1 {
 /// Wire request for [`TaskHandoffService::redeem`].
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffRedeemRequestV1 {
+pub struct TaskHandoffRedeemRequest {
     pub secret: String,
-    pub expected_scope: TaskHandoffScopeV1,
+    pub expected_scope: TaskHandoffScope,
     pub redeemer: ActorId,
     pub consumed_at: UtcMicros,
 }
 
-impl fmt::Debug for TaskHandoffRedeemRequestV1 {
+impl fmt::Debug for TaskHandoffRedeemRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("TaskHandoffRedeemRequestV1")
+            .debug_struct("TaskHandoffRedeemRequest")
             .field("secret", &"[REDACTED]")
             .field("expected_scope", &self.expected_scope)
             .field("redeemer", &self.redeemer)
@@ -631,8 +631,8 @@ impl fmt::Debug for TaskHandoffRedeemRequestV1 {
 /// once and only once, for the caller that actually consumed it.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffRedeemedV1 {
-    pub scope: TaskHandoffScopeV1,
+pub struct TaskHandoffRedeemed {
+    pub scope: TaskHandoffScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -642,12 +642,12 @@ pub enum TaskHandoffAuthorityError {
 }
 
 pub trait TaskHandoffAuthorityPort: Send + Sync {
-    fn issue(&self, grant: &TaskHandoffGrantV1) -> Result<(), TaskHandoffAuthorityError>;
+    fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError>;
 
     fn consume(
         &self,
         token_digest: &ManifestDigest,
-        expected_scope: &TaskHandoffScopeV1,
+        expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<TaskHandoffConsumeOutcome, TaskHandoffAuthorityError>;
 }
@@ -702,15 +702,15 @@ where
     pub fn issue(
         &self,
         issuer: &ActorId,
-        scope: TaskHandoffScopeV1,
+        scope: TaskHandoffScope,
         token: &TaskHandoffToken,
         expires_at: UtcMicros,
         issued_at: UtcMicros,
-    ) -> Result<TaskHandoffGrantV1, TaskHandoffError> {
+    ) -> Result<TaskHandoffGrant, TaskHandoffError> {
         if issuer != scope.from_actor_id() {
             return Err(TaskHandoffError::Unauthorized);
         }
-        let grant = TaskHandoffGrantV1::new(scope, token.digest()?, issued_at, expires_at)?;
+        let grant = TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at)?;
         self.authority
             .issue(&grant)
             .map_err(handoff_authority_error)?;
@@ -720,7 +720,7 @@ where
     pub fn redeem(
         &self,
         token: &TaskHandoffToken,
-        expected_scope: &TaskHandoffScopeV1,
+        expected_scope: &TaskHandoffScope,
         redeemer: &ActorId,
         consumed_at: UtcMicros,
     ) -> Result<(), TaskHandoffError> {

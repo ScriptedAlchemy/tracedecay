@@ -2,17 +2,17 @@
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
-    WorkflowDefinitionAuthorityPort, WorkflowRunAppendOutcomeV1, WorkflowRunAppendRequestV1,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowRunAppendOutcome, WorkflowRunAppendRequest,
     WorkflowRunStoragePort,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, ProviderId, RepositoryId, RunId, TaskId, ThreadId,
     UtcMicros, WorkCommandId, WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
-    WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
-    WorkflowPlacementReceiptV1, WorkflowRunCommandV1, WorkflowRunEventContextV1,
-    WorkflowRunEventV1, WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
+    WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef, WorkflowOutputName,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
+    WorkflowRunEvent, WorkflowStepId, WorkflowStep, WorktreeId, canonical_sha256,
 };
 use tracedecay_rusqlite_runtime::workflow::{
     WorkflowSqliteAuthority, WorkflowSqliteAuthorityBuildError,
@@ -40,12 +40,12 @@ fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", hex_byte.repeat(32))).unwrap()
 }
 
-fn definition(version: u64, operation: &str) -> WorkflowDefinitionV1 {
-    WorkflowDefinitionV1::new(
+fn definition(version: u64, operation: &str) -> WorkflowDefinition {
+    WorkflowDefinition::new(
         id("workflow.definition.runtime-store"),
         version,
         id::<ProjectId>("project.workflow.runtime-store"),
-        vec![WorkflowStepV1 {
+        vec![WorkflowStep {
             step_id: id::<WorkflowStepId>("prepare"),
             operation: id::<WorkflowOperationRef>(operation),
             predecessors: Default::default(),
@@ -60,8 +60,8 @@ fn definition(version: u64, operation: &str) -> WorkflowDefinitionV1 {
     .unwrap()
 }
 
-fn handoff_scope() -> TaskHandoffScopeV1 {
-    TaskHandoffScopeV1::new(
+fn handoff_scope() -> TaskHandoffScope {
+    TaskHandoffScope::new(
         id::<ProjectId>("project.workflow.runtime-store"),
         id::<RepositoryId>("repository.workflow.runtime-store"),
         id::<WorktreeId>("worktree.workflow.runtime-store"),
@@ -81,8 +81,8 @@ fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
 }
 
-fn placement(run_id: RunId) -> WorkflowPlacementReceiptV1 {
-    WorkflowPlacementReceiptV1::new(
+fn placement(run_id: RunId) -> WorkflowPlacementReceipt {
+    WorkflowPlacementReceipt::new(
         run_id,
         id::<WorkflowStepId>("prepare"),
         WorkProviderRouteV1::new(
@@ -176,38 +176,38 @@ fn run_journal_appends_replays_and_rebuilds_after_restart() {
     let store = RegisteredWorkStore::start("workflow-run-journal");
     let authority = authority(&store);
     let run_id = id::<RunId>("run.workflow.runtime-store.journal");
-    let admitted = WorkflowRunEventV1::admitted(
+    let admitted = WorkflowRunEvent::admitted(
         run_id.clone(),
         definition(1, "operation.prepare.v1"),
         digest('d'),
         digest('8'),
-        WorkflowRunEventContextV1 {
+        WorkflowRunEventContext {
             command_id: id::<WorkCommandId>("command.workflow.runtime-store.admit"),
             input_digest: digest('e'),
             occurred_at: UtcMicros(10),
         },
     )
     .unwrap();
-    let request = WorkflowRunAppendRequestV1 {
+    let request = WorkflowRunAppendRequest {
         expected_sequence: None,
         event: admitted,
     };
     let projection = match WorkflowRunStoragePort::append(&authority, &request).unwrap() {
-        WorkflowRunAppendOutcomeV1::Appended(projection) => projection,
-        WorkflowRunAppendOutcomeV1::Replayed(_) => panic!("first append replayed"),
+        WorkflowRunAppendOutcome::Appended(projection) => projection,
+        WorkflowRunAppendOutcome::Replayed(_) => panic!("first append replayed"),
     };
     assert!(matches!(
         WorkflowRunStoragePort::append(&authority, &request).unwrap(),
-        WorkflowRunAppendOutcomeV1::Replayed(_)
+        WorkflowRunAppendOutcome::Replayed(_)
     ));
 
     let started = projection
         .next_event(
-            WorkflowRunCommandV1::StartStep {
+            WorkflowRunCommand::StartStep {
                 step_id: id::<WorkflowStepId>("prepare"),
                 placement: placement(run_id.clone()),
             },
-            WorkflowRunEventContextV1 {
+            WorkflowRunEventContext {
                 command_id: id::<WorkCommandId>("command.workflow.runtime-store.start"),
                 input_digest: digest('f'),
                 occurred_at: UtcMicros(11),
@@ -216,7 +216,7 @@ fn run_journal_appends_replays_and_rebuilds_after_restart() {
         .unwrap();
     WorkflowRunStoragePort::append(
         &authority,
-        &WorkflowRunAppendRequestV1 {
+        &WorkflowRunAppendRequest {
             expected_sequence: Some(1),
             event: started,
         },
@@ -486,7 +486,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     let authority = authority(&store);
     let scope = handoff_scope();
     let secret = "s".repeat(48);
-    let grant = TaskHandoffGrantV1::new(
+    let grant = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&secret),
         UtcMicros(10),
@@ -509,7 +509,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
             )
             .unwrap();
         assert!(!payload.contains(&secret));
-        let persisted: TaskHandoffScopeV1 = serde_json::from_str(&payload).unwrap();
+        let persisted: TaskHandoffScope = serde_json::from_str(&payload).unwrap();
         assert_eq!(persisted, scope);
         assert_eq!(
             persisted.thread_id().as_str(),
@@ -525,7 +525,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         assert_eq!(count, 0);
     });
 
-    let wrong_scope = TaskHandoffScopeV1::new(
+    let wrong_scope = TaskHandoffScope::new(
         scope.project_id().clone(),
         scope.repository_id().clone(),
         scope.worktree_id().clone(),
@@ -555,7 +555,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         TaskHandoffConsumeOutcome::Missing
     );
 
-    let expired = TaskHandoffGrantV1::new(
+    let expired = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&"e".repeat(48)),
         UtcMicros(10),
@@ -601,7 +601,7 @@ fn definition_and_handoff_survive_registered_store_restart() {
     .unwrap();
 
     let scope = handoff_scope();
-    let grant = TaskHandoffGrantV1::new(
+    let grant = TaskHandoffGrant::new(
         scope.clone(),
         token_digest(&"r".repeat(48)),
         UtcMicros(10),

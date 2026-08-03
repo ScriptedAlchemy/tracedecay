@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowDefinitionAuthorityError,
+    TaskHandoffGrant, TaskHandoffScope, WorkflowDefinitionAuthorityError,
     WorkflowDefinitionAuthorityPort,
 };
 use tracedecay_domain::{
-    ManifestDigest, UtcMicros, WorkflowDefinitionId, WorkflowDefinitionV1, canonical_sha256,
+    ManifestDigest, UtcMicros, WorkflowDefinitionId, WorkflowDefinition, canonical_sha256,
 };
 
 use crate::migration_sql::{
@@ -101,20 +101,20 @@ fn version_u64(value: i64) -> Result<u64, ()> {
 }
 
 fn definition_digest(
-    definition: &WorkflowDefinitionV1,
+    definition: &WorkflowDefinition,
 ) -> Result<ManifestDigest, WorkflowDefinitionAuthorityError> {
     canonical_sha256(definition).map_err(|_| definition_codec_unavailable())
 }
 
 fn encode_definition(
-    definition: &WorkflowDefinitionV1,
+    definition: &WorkflowDefinition,
 ) -> Result<String, WorkflowDefinitionAuthorityError> {
     serde_json::to_string(definition).map_err(|_| definition_codec_unavailable())
 }
 
 fn decode_definition(
     payload: &str,
-) -> Result<WorkflowDefinitionV1, WorkflowDefinitionAuthorityError> {
+) -> Result<WorkflowDefinition, WorkflowDefinitionAuthorityError> {
     serde_json::from_str(payload).map_err(|_| definition_codec_unavailable())
 }
 
@@ -155,7 +155,7 @@ fn execute_tx(
 impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
     fn insert(
         &self,
-        definition: &WorkflowDefinitionV1,
+        definition: &WorkflowDefinition,
     ) -> Result<(), WorkflowDefinitionAuthorityError> {
         let version = version_i64(definition.definition_version())
             .map_err(|_| definition_codec_unavailable())?;
@@ -217,7 +217,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
-    ) -> Result<Option<WorkflowDefinitionV1>, WorkflowDefinitionAuthorityError> {
+    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError> {
         let version =
             version_i64(definition_version).map_err(|_| definition_codec_unavailable())?;
         let rows = query_handle(
@@ -311,7 +311,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
 }
 
 impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
-    fn issue(&self, grant: &TaskHandoffGrantV1) -> Result<(), TaskHandoffAuthorityError> {
+    fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError> {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
         let transaction = self
             .storage
@@ -352,7 +352,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     fn consume(
         &self,
         token_digest: &ManifestDigest,
-        expected_scope: &TaskHandoffScopeV1,
+        expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<TaskHandoffConsumeOutcome, TaskHandoffAuthorityError> {
         let transaction = self
@@ -372,7 +372,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             return Ok(TaskHandoffConsumeOutcome::Missing);
         };
         let scope_payload = sql_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
-        let scope: TaskHandoffScopeV1 =
+        let scope: TaskHandoffScope =
             decode_json(scope_payload).map_err(|_| handoff_codec_unavailable())?;
         if &scope != expected_scope {
             let _ = transaction.rollback();
