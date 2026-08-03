@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, TimeZone};
 
 /// Parses RFC3339 timestamps into Unix seconds, rejecting pre-epoch values.
 ///
@@ -95,28 +95,4 @@ fn parse_cursor_utc_offset(zone: &str) -> Option<FixedOffset> {
         .checked_mul(3_600)?
         .checked_add(minutes.checked_mul(60)?)?;
     FixedOffset::east_opt(sign.checked_mul(seconds)?)
-}
-
-#[must_use]
-pub fn format_yyyy_mm_dd(days: i64) -> String {
-    match days
-        .checked_mul(86_400)
-        .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
-    {
-        Some(timestamp) => timestamp.format("%Y-%m-%d").to_string(),
-        None => format!("UTC day out of range: {days}"),
-    }
-}
-
-#[must_use]
-pub fn humanize_unix_secs(secs: i64) -> String {
-    match DateTime::<Utc>::from_timestamp(secs, 0) {
-        Some(timestamp) => timestamp.format("%Y-%m-%d %H:%M:%SZ").to_string(),
-        None => format!("UTC timestamp out of range: {secs}"),
-    }
-}
-
-#[must_use]
-pub fn now_iso_utc() -> String {
-    Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
