@@ -3,7 +3,7 @@ use tempfile::TempDir;
 use tracedecay_domain::{
     AnchorProvenanceRelationV2, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
-    CopyProofV1, DurableObservationV1, MessageOccurrenceIdV1, ObservationId,
+    CopyProofV1, DurableObservationV1, LogicalCopyRecordV1, MessageOccurrenceIdV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
     ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
@@ -15,8 +15,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     AnchoredObservationWrite, ObservationProjectionStore, ObservationStore, ObservationWrite,
     SessionRefreshBeginOrJoinRequestV1, SessionRefreshCompletionRequestV1,
-    SessionRefreshFrontierV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
-    SessionTemporalProjectionBatchV1,
+    SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
+    SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
 };
 
 use super::super::refresh::SessionRefreshRestartStateV1;
@@ -301,11 +301,14 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
             .unwrap()
             .unwrap();
         assert_eq!(batch.occurrences().len(), 2);
-        assert_eq!(batch.copies().len(), 1);
+        // A parent-message link is conversation threading, not a logical copy:
+        // the derived copy edge requires the occurrence's own logical message id
+        // to be the parent link, so a reply contributes no copy record.
+        assert!(batch.copies().is_empty());
         assert_eq!(batch.assertions().len(), 1);
-        assert_eq!(batch.item_count(), 4);
-        assert_eq!(progress.committed_records(), 4);
-        assert_eq!(progress.coverage().visible, 4);
+        assert_eq!(batch.item_count(), 3);
+        assert_eq!(progress.committed_records(), 3);
+        assert_eq!(progress.coverage().visible, 3);
         store
             .persist_session_refresh_projection_batch(progress, batch)
             .await
@@ -352,7 +355,7 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     for (kind, expected) in [
         (SessionTemporalFixtureCountV1::ProjectionReceipts, 1),
         (SessionTemporalFixtureCountV1::Occurrences, 2),
-        (SessionTemporalFixtureCountV1::LogicalCopyEdges, 1),
+        (SessionTemporalFixtureCountV1::LogicalCopyEdges, 0),
         (SessionTemporalFixtureCountV1::Assertions, 1),
         (SessionTemporalFixtureCountV1::RefreshReceipts, 1),
     ] {
@@ -416,8 +419,21 @@ async fn relation_derivation_backs_off_to_the_total_batch_limit() {
         .unwrap();
     let store = temporal_store(&runtime);
     let session_id = fixture_session("session.projector.derived-limit");
+    // Every observation after the first supersedes its predecessor, so each of
+    // those occurrences derives one typed assertion edge on top of its own
+    // occurrence record. 501 observations therefore derive 1001 records, one
+    // past `MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS`, and the materializer
+    // must back off to a 500-observation prefix.
+    let mut previous_anchor = None;
     for ordinal in 0..501 {
-        let (observation, write) = fixture_observation(&session_id, ordinal, None, ordinal > 0);
+        let lineage = previous_anchor
+            .take()
+            .map(|anchor| (AnchorProvenanceRelationV2::Supersedes, anchor));
+        let (observation, write) = fixture_observation(&session_id, ordinal, lineage, ordinal > 0);
+        previous_anchor = Some(
+            derive_exact_observation_anchor_id(observation.scope(), observation.observation_id())
+                .unwrap(),
+        );
         Box::pin(persist_fixture(&runtime, observation, write)).await;
     }
     store
@@ -438,7 +454,8 @@ async fn relation_derivation_backs_off_to_the_total_batch_limit() {
         .unwrap()
         .unwrap();
     assert_eq!(first_batch.occurrences().len(), 500);
-    assert_eq!(first_batch.copies().len(), 499);
+    assert!(first_batch.copies().is_empty());
+    assert_eq!(first_batch.assertions().len(), 499);
     assert_eq!(first_batch.item_count(), 999);
     assert_eq!(first_progress.frontier().committed_through(), 500);
     assert_eq!(first_progress.committed_records(), 999);
@@ -458,7 +475,8 @@ async fn relation_derivation_backs_off_to_the_total_batch_limit() {
         .unwrap()
         .unwrap();
     assert_eq!(second_batch.occurrences().len(), 1);
-    assert_eq!(second_batch.copies().len(), 1);
+    assert!(second_batch.copies().is_empty());
+    assert_eq!(second_batch.assertions().len(), 1);
     assert_eq!(second_batch.item_count(), 2);
     assert_eq!(second_progress.frontier().committed_through(), 501);
     assert_eq!(second_progress.committed_records(), 1001);
@@ -555,7 +573,7 @@ async fn parent_resolver_pages_live_sized_observation_history() {
 }
 
 #[tokio::test]
-async fn materialize_persists_copy_bitemporality_and_rejects_forged_assertion_ids() {
+async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_ids() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -590,19 +608,53 @@ async fn materialize_persists_copy_bitemporality_and_rejects_forged_assertion_id
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(batch.copies().len(), 1);
-    assert_eq!(
-        batch.copies()[0].valid_time,
-        batch.occurrences()[1].valid_time
+    // The materializer no longer derives a copy edge from a parent-message
+    // reply — only a re-emission of the same logical message is a logical copy.
+    // Explicit typed copy records stay the persist-side authority, so this test
+    // drives the retained-copy persist path with the canonical parent-message
+    // proof for the retained pair.
+    assert!(batch.copies().is_empty());
+    let copy = LogicalCopyRecordV1 {
+        occurrence_id: batch.occurrences()[1].occurrence_id.clone(),
+        copied_from_occurrence_id: batch.occurrences()[0].occurrence_id.clone(),
+        proof: CopyProofV1::ParentMessageLinkage {
+            source_occurrence_id: batch.occurrences()[0].occurrence_id.clone(),
+            parent_message_id: tracedecay_domain::MessageId::new("message.projector.0").unwrap(),
+        },
+        knowledge_at: batch.occurrences()[1].knowledge_at,
+        valid_time: batch.occurrences()[1].valid_time,
+    };
+    let batch = SessionTemporalProjectionBatchV1::new(
+        batch.session_id().clone(),
+        batch.generation(),
+        batch.watermarks().clone(),
+        batch.occurrences().to_vec(),
+        vec![copy],
+        batch.assertions().to_vec(),
+    )
+    .unwrap()
+    .with_checkpoint(
+        batch.batch_ordinal(),
+        batch.source_through(),
+        batch.projection_through(),
+    )
+    .unwrap();
+    let mut coverage = *progress.coverage();
+    coverage.visible += 1;
+    let source_coverage = progress.source_coverage().cloned();
+    let mut progress = SessionRefreshProgressV1::new(
+        progress.operation_id().clone(),
+        progress.session_id().clone(),
+        progress.frontier(),
+        coverage,
+        progress.committed_batches(),
+        progress.committed_records() + 1,
+        progress.updated_at(),
     );
-    assert_eq!(
-        batch.copies()[0].knowledge_at,
-        batch.occurrences()[1].knowledge_at
-    );
-    assert!(matches!(
-        batch.copies()[0].proof,
-        CopyProofV1::ParentMessageLinkage { .. }
-    ));
+    if let Some(source_coverage) = source_coverage {
+        progress = progress.with_source_coverage(source_coverage);
+    }
+    assert_eq!(batch.item_count(), 4);
 
     let mut forged = batch.assertions()[0].clone();
     forged.assertion_id =
