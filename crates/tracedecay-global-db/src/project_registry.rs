@@ -1289,30 +1289,51 @@ impl RegisteredGlobalDb {
         project_root: &Path,
         git_common_dir: Option<&Path>,
     ) -> tracedecay_runtime_core::errors::Result<Option<String>> {
-        Ok(
-            match tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)? {
-                Some(marker) => Some(marker.project_id),
-                None => {
-                    if let Some(project_id) = self
-                        .project_id_by_path_alias(
-                            project_root,
-                            ProjectIdentityAliasKind::ProjectRoot,
-                        )
-                        .await?
-                    {
-                        Some(project_id)
-                    } else if let Some(git_common_dir) = git_common_dir {
-                        self.project_id_by_path_alias(
-                            git_common_dir,
-                            ProjectIdentityAliasKind::GitCommonDir,
-                        )
-                        .await?
-                    } else {
-                        None
-                    }
-                }
-            },
-        )
+        let project_ids = self
+            .project_ids_by_identity(project_root, git_common_dir)
+            .await?;
+        match project_ids.as_slice() {
+            [] => Ok(None),
+            [project_id] => Ok(Some(project_id.clone())),
+            _ => Err(
+                tracedecay_runtime_core::errors::TraceDecayError::project_route(
+                    "project_identity_conflict",
+                    false,
+                    format!(
+                        "project '{}' resolves to conflicting project identities: {}",
+                        project_root.display(),
+                        project_ids.join(", ")
+                    ),
+                ),
+            ),
+        }
+    }
+
+    pub(super) async fn project_ids_by_identity(
+        &self,
+        project_root: &Path,
+        git_common_dir: Option<&Path>,
+    ) -> tracedecay_runtime_core::errors::Result<Vec<String>> {
+        let mut project_ids = BTreeSet::new();
+        if let Some(marker) =
+            tracedecay_runtime_core::storage::read_repository_identity_marker(project_root)?
+        {
+            project_ids.insert(marker.project_id);
+        }
+        if let Some(project_id) = self
+            .project_id_by_path_alias(project_root, ProjectIdentityAliasKind::ProjectRoot)
+            .await?
+        {
+            project_ids.insert(project_id);
+        }
+        if let Some(git_common_dir) = git_common_dir
+            && let Some(project_id) = self
+                .project_id_by_path_alias(git_common_dir, ProjectIdentityAliasKind::GitCommonDir)
+                .await?
+        {
+            project_ids.insert(project_id);
+        }
+        Ok(project_ids.into_iter().collect())
     }
 
     pub(super) async fn project_id_by_path_alias(

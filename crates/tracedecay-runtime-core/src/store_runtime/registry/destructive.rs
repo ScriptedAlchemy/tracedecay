@@ -146,9 +146,12 @@ impl StoreRuntimeRegistry {
                         .database_authority
                         .as_ref()
                         .is_some_and(|authority| {
-                            authority
-                                .canonical_database_path()
-                                .starts_with(&target.root)
+                            target
+                                .database_paths
+                                .binary_search_by(|candidate| {
+                                    candidate.as_path().cmp(authority.canonical_database_path())
+                                })
+                                .is_ok()
                         }),
                     RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => false,
                 }) {
@@ -170,7 +173,12 @@ impl StoreRuntimeRegistry {
                     .values()
                     .filter_map(|entry| match entry {
                         RegistryEntry::Ready(ready)
-                            if ready.handle.locator().path().starts_with(&target.root) =>
+                            if target
+                                .database_paths
+                                .binary_search_by(|candidate| {
+                                    candidate.as_path().cmp(ready.handle.locator().path())
+                                })
+                                .is_ok() =>
                         {
                             ready
                                 .handle
@@ -200,7 +208,10 @@ impl StoreRuntimeRegistry {
         for (binding, authority) in closes {
             match self.close_exact(&binding, &authority).await {
                 Ok(proof) => closed.push(proof),
-                Err(error) => return Err(error),
+                Err(error) => {
+                    self.release_destructive(attempt)?;
+                    return Err(error);
+                }
             }
         }
         Ok(DestructiveMaintenanceReservation {
@@ -237,12 +248,11 @@ impl StoreRuntimeRegistry {
     }
 }
 
-fn reservation_matches(reservation: &DestructivePathReservation, path: &Path) -> bool {
-    path.starts_with(&reservation.root)
-        || reservation
-            .database_paths
-            .binary_search_by(|candidate| candidate.as_path().cmp(path))
-            .is_ok()
+pub(super) fn reservation_matches(reservation: &DestructivePathReservation, path: &Path) -> bool {
+    reservation
+        .database_paths
+        .binary_search_by(|candidate| candidate.as_path().cmp(path))
+        .is_ok()
 }
 
 fn canonical_existing_directory(root: PathBuf) -> Result<PathBuf, StoreRuntimeRegistryFailure> {

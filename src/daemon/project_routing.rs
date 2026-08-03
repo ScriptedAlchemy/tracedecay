@@ -93,12 +93,22 @@ pub(super) async fn project_open_gate(
     gates: &tokio::sync::Mutex<ProjectOpenGates>,
     route: &ProjectRouteKey,
 ) -> Arc<ProjectOpenGate> {
+    let mut gate_route = route.clone();
+    if let Some(git_common_dir) =
+        tracedecay_runtime_core::worktree::git_common_dir(&route.project_path)
+    {
+        gate_route.project_path = git_common_dir;
+    }
     let mut gates = gates.lock().await;
-    if let Some(gate) = gates.gates.get(route).and_then(std::sync::Weak::upgrade) {
+    if let Some(gate) = gates
+        .gates
+        .get(&gate_route)
+        .and_then(std::sync::Weak::upgrade)
+    {
         return gate;
     }
     let gate = Arc::new(ProjectOpenGate::new(()));
-    gates.gates.insert(route.clone(), Arc::downgrade(&gate));
+    gates.gates.insert(gate_route, Arc::downgrade(&gate));
     gate
 }
 

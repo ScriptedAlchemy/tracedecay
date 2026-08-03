@@ -327,9 +327,9 @@ mod tests {
     use crate::store_runtime::registry::{
         LifecycleShardRuntimePublisher, PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot,
         ProfileAuthorityPinResult, PublishedShardRuntime, ResolvedStoreLocator,
-        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenMode,
-        StoreRuntimeOpenRequest, StoreRuntimeOpenResult, StoreRuntimeRegistryConfig,
-        StoreRuntimeRegistryFuture, StoreRuntimeResolver,
+        ShardRuntimeBuildRequest, ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenBegin,
+        StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+        StoreRuntimeRegistryConfig, StoreRuntimeRegistryFuture, StoreRuntimeResolver,
     };
     use crate::store_runtime::shard::ShardRuntime;
 
@@ -349,19 +349,23 @@ mod tests {
     }
 
     fn code_shard() -> StoreShardIdV1 {
+        code_shard_for("worktree.close-exact")
+    }
+
+    fn code_shard_for(worktree_id: &str) -> StoreShardIdV1 {
         StoreShardIdV1::code(
             id::<BrainId>("brain.close-exact"),
             id::<UserProfileId>("profile.close-exact"),
             id::<ProjectId>("project.close-exact"),
             id::<RepositoryId>("repository.close-exact"),
             CodeShardScopeV1::Worktree {
-                worktree_id: id::<WorktreeId>("worktree.close-exact"),
+                worktree_id: id::<WorktreeId>(worktree_id),
             },
         )
     }
 
     struct FixtureResolver {
-        path: PathBuf,
+        profile_path: PathBuf,
     }
 
     impl StoreRuntimeResolver for FixtureResolver {
@@ -377,7 +381,9 @@ mod tests {
                 key.incarnation(),
                 LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
             );
-            let path = self.path.clone();
+            let path = _database_authority
+                .map(|authority| authority.canonical_database_path().to_path_buf())
+                .unwrap_or_else(|| self.profile_path.clone());
             Box::pin(async move { Ok(ResolvedStoreLocator::new(verified, path)) })
         }
     }
@@ -392,7 +398,7 @@ mod tests {
     ) {
         let authority = DatabaseAuthority::for_runtime(&path, "mount exact-close graph").unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver { profile_path: path }),
             Arc::new(LifecycleShardRuntimePublisher),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
@@ -563,6 +569,117 @@ mod tests {
         drop(profile);
     }
 
+    #[tokio::test]
+    async fn destructive_reservation_atomically_rejects_open_begin() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (registry, profile, code, authority) = mount_graph(path.clone()).await;
+        drop(code);
+
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap(),
+            )
+            .await
+            .unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+
+        assert!(matches!(
+            registry.begin_or_join_open(&StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority,
+            )),
+            StoreRuntimeOpenBegin::Rejected(
+                StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress { .. }
+            )
+        ));
+
+        reservation.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn failed_destructive_close_releases_reservation_for_retry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("graph.db");
+        create_graph_fixture_database_v1(&path).unwrap();
+        let path = path.canonicalize().unwrap();
+        let (registry, profile, code, _authority) = mount_graph(path.clone()).await;
+        let target =
+            super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap();
+
+        assert!(matches!(
+            registry.begin_destructive_maintenance(target.clone()).await,
+            Err(StoreRuntimeRegistryFailure::RuntimeCloseBlocked {
+                external_handles: 1,
+                ..
+            })
+        ));
+
+        drop(code);
+        let retry = registry
+            .begin_destructive_maintenance(target)
+            .await
+            .expect("failed close must release destructive reservation");
+        retry.abort_preserved().unwrap();
+        drop(profile);
+    }
+
+    #[tokio::test]
+    async fn destructive_reservation_does_not_block_unrelated_database_under_same_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let reserved_path = temporary.path().join("reserved.db");
+        let unrelated_path = temporary.path().join("unrelated.db");
+        create_graph_fixture_database_v1(&reserved_path).unwrap();
+        create_graph_fixture_database_v1(&unrelated_path).unwrap();
+        let reserved_path = reserved_path.canonicalize().unwrap();
+        let unrelated_path = unrelated_path.canonicalize().unwrap();
+        let (registry, profile, code, _authority) = mount_graph(reserved_path.clone()).await;
+        drop(code);
+        let reservation = registry
+            .begin_destructive_maintenance(
+                super::super::DestructiveMaintenanceTarget::new(temporary.path(), [reserved_path])
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let authority =
+            DatabaseAuthority::for_runtime(&unrelated_path, "mount unrelated database").unwrap();
+
+        let unrelated = tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard_for("worktree.unrelated"),
+                StoreIncarnationV1::new(1).unwrap(),
+                Some(pin),
+                authority,
+            )),
+        )
+        .await
+        .expect("an exact-path reservation must not block another database");
+        let unrelated = match unrelated {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("unrelated database open failed: {failure:?}")
+            }
+        };
+
+        drop(unrelated);
+        reservation.abort_preserved().unwrap();
+        drop(profile);
+    }
+
     struct BlockingCloseAttachment {
         opened_file_identity: u64,
         drained: AtomicBool,
@@ -653,7 +770,7 @@ mod tests {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount cancellation-safe exact-close").unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver { profile_path: path }),
             Arc::new(BlockingClosePublisher {
                 attachment: Arc::clone(&attachment),
             }),
@@ -793,7 +910,7 @@ mod tests {
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
         let registry = StoreRuntimeRegistry::with_config(
-            Arc::new(FixtureResolver { path }),
+            Arc::new(FixtureResolver { profile_path: path }),
             Arc::new(FailingPublisher),
             StoreRuntimeRegistryConfig::default(),
         )

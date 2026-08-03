@@ -1220,14 +1220,7 @@ impl StoreAdministration {
                 .await?;
             let disposition = recovery.disposition();
             recovery.recover(
-                |paths| {
-                    self.prove_no_external_branch_store_holders(paths)?;
-                    crate::migrate::memory_cutover::verify_branch_removal_receipts(
-                        data_root,
-                        &canonical_paths,
-                        paths,
-                    )
-                },
+                |paths| self.prove_no_external_branch_store_holders(paths),
                 |_| Ok(()),
             )?;
             match disposition {
@@ -1279,14 +1272,8 @@ impl StoreAdministration {
             .await?
             .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
             .await?;
-        let report = prepared.commit_registered(|paths| {
-            self.prove_no_external_branch_store_holders(paths)?;
-            crate::migrate::memory_cutover::verify_branch_removal_receipts(
-                data_root,
-                &canonical_paths,
-                paths,
-            )
-        })?;
+        let report = prepared
+            .commit_registered(|paths| self.prove_no_external_branch_store_holders(paths))?;
         reservation
             .finish_deleted()
             .map_err(destructive_reservation_error)?;

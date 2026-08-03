@@ -414,7 +414,7 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn same_identity_worktree_and_primary_register_one_project_authority() {
+async fn concurrent_same_identity_worktree_and_primary_share_one_project_authority() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let primary = root.join("primary");
@@ -452,14 +452,13 @@ async fn same_identity_worktree_and_primary_register_one_project_authority() {
         ..test_handshake_defaults()
     };
 
-    let primary_server = engine
-        .project_server(&primary_handshake)
-        .await
-        .expect("primary project must open");
-    let linked_server = engine
-        .project_server(&linked_handshake)
-        .await
-        .expect("linked worktree must reuse the primary authority");
+    let (primary_server, linked_server) = tokio::join!(
+        engine.project_server(&primary_handshake),
+        engine.project_server(&linked_handshake),
+    );
+    let primary_server = primary_server.expect("primary project must open");
+    let linked_server =
+        linked_server.expect("linked worktree must concurrently reuse the primary authority");
 
     assert!(
         Arc::ptr_eq(&primary_server, &linked_server),
