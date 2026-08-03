@@ -6,7 +6,7 @@ use grafeo_common::types::NodeId;
 use grafeo_core::graph::Direction;
 use grafeo_engine::GrafeoDB;
 
-use crate::runtime::{EntityIndex, StoredEntity, load_entities, parse_relation};
+use crate::state::{StateCache, StoredEntity, stable_key};
 use crate::{
     GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphRelationId,
     GraphRelationKind,
@@ -51,6 +51,7 @@ pub struct TraversalResult {
 
 pub(crate) fn traverse(
     database: &GrafeoDB,
+    state: &StateCache,
     request: TraversalRequest,
 ) -> Result<TraversalResult, GraphDbError> {
     if request.cancellation.is_cancelled() {
@@ -62,11 +63,10 @@ pub(crate) fn traverse(
     if request.max_results == 0 {
         return Ok(TraversalResult { visits: Vec::new() });
     }
-    let entities = load_entities(database)?;
-    let Some((start_node, _)) = entities.get(&(
-        request.namespace.as_str().to_owned(),
-        request.start.as_str().to_owned(),
-    )) else {
+    let Some((start_node, _)) = state
+        .entities
+        .get(&stable_key(&request.namespace, request.start.as_str()))
+    else {
         return Err(GraphDbError::invalid(
             "traversal start entity does not exist",
         ));
@@ -86,7 +86,7 @@ pub(crate) fn traverse(
         if admitted > request.max_visits {
             return Err(GraphDbError::BudgetExhausted);
         }
-        let stored = entity_for_node(&entities, node, &request.namespace)?;
+        let stored = entity_for_node(state, node, &request.namespace)?;
         visits.push(TraversalVisit {
             entity: stored.entity.identity.clone(),
             depth,
@@ -104,10 +104,12 @@ pub(crate) fn traverse(
             if request.cancellation.is_cancelled() {
                 return Err(GraphDbError::Cancelled);
             }
-            let edge = store.get_edge(edge_id).ok_or_else(|| {
-                GraphDbError::unavailable("Grafeo returned a missing traversal edge")
-            })?;
-            let relation = parse_relation(&edge)?;
+            let relation =
+                state
+                    .relation_by_edge(edge_id)
+                    .ok_or_else(|| GraphDbError::Corrupt {
+                        message: "Grafeo returned an uncached traversal edge".to_owned(),
+                    })?;
             if relation.namespace != request.namespace {
                 continue;
             }
@@ -116,7 +118,7 @@ pub(crate) fn traverse(
             {
                 continue;
             }
-            let target_entity = entity_for_node(&entities, target, &request.namespace)?;
+            let target_entity = entity_for_node(state, target, &request.namespace)?;
             outgoing.push((
                 relation.relation.identity.clone(),
                 target_entity.entity.identity.clone(),
@@ -137,15 +139,13 @@ pub(crate) fn traverse(
 }
 
 fn entity_for_node<'a>(
-    entities: &'a EntityIndex,
+    state: &'a StateCache,
     node: NodeId,
     namespace: &GraphNamespace,
 ) -> Result<&'a StoredEntity, GraphDbError> {
-    entities
-        .values()
-        .find_map(|(candidate, entity)| {
-            (*candidate == node && entity.namespace == *namespace).then_some(entity)
-        })
+    state
+        .entity_by_node(node)
+        .filter(|entity| entity.namespace == *namespace)
         .ok_or_else(|| GraphDbError::Corrupt {
             message: "relation targets a missing or foreign-namespace entity".to_owned(),
         })

@@ -1,37 +1,36 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use grafeo_common::types::{EdgeId, NodeId, Value};
+use grafeo_common::utils::error::ErrorCode;
 use grafeo_engine::GrafeoDB;
-use serde::{Deserialize, Serialize};
 
 use crate::location::ValidatedOpen;
+use crate::state::{
+    COMMIT_LABEL, ENTITY_LABEL, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, PAYLOAD_PROPERTY,
+    PUBLICATION_LABEL, RELATION_TYPE, SEQUENCE_PROPERTY, StableKey, StateCache, StoredCommit,
+    StoredEntity, StoredPublication, StoredRelation, serialize_payload, stable_key,
+};
 use crate::traversal;
 use crate::vector;
 use crate::{
     GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
-    GraphIdempotencyKey, GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty,
-    GraphPropertyName, GraphPublication, GraphRelation, GraphRelationId, GraphWatermark,
-    GraphWriteBatch, ProjectionReplacement, TraversalRequest, TraversalResult, VectorSearchRequest,
-    VectorSearchResult,
+    GraphIdempotencyKey, GraphMutation, GraphProjectionId, GraphProperty, GraphPropertyName,
+    GraphPublication, GraphRelation, GraphRelationId, GraphWriteBatch, ProjectionReplacement,
+    TraversalRequest, TraversalResult, VectorSearchRequest, VectorSearchResult,
 };
 
-const FORMAT_LABEL: &str = "__tracedecay_graph_db_format";
-const FORMAT_VERSION_PROPERTY: &str = "__tracedecay_graph_db_version";
-const SEQUENCE_PROPERTY: &str = "__tracedecay_graph_db_sequence";
-pub(crate) const ENTITY_LABEL: &str = "__tracedecay_graph_db_entity";
-const COMMIT_LABEL: &str = "__tracedecay_graph_db_commit";
-const PUBLICATION_LABEL: &str = "__tracedecay_graph_db_publication";
-const RELATION_TYPE: &str = "__tracedecay_graph_db_relation";
-const PAYLOAD_PROPERTY: &str = "__tracedecay_graph_db_payload";
-
+#[derive(Clone)]
 pub struct GraphDb {
     inner: Arc<Inner>,
 }
 
 struct Inner {
     database: RwLock<Option<GrafeoDB>>,
+    // Derived from Grafeo at open and replaced only after a successful commit.
+    // The database write lock prevents readers from observing a cache/database skew.
+    state: RwLock<StateCache>,
     durability: GraphDurability,
     closed: AtomicBool,
     poisoned: AtomicBool,
@@ -39,6 +38,7 @@ struct Inner {
 
 pub struct GraphSnapshot {
     database: Arc<GrafeoDB>,
+    state: Arc<StateCache>,
 }
 
 impl std::fmt::Debug for GraphDb {
@@ -59,48 +59,6 @@ impl std::fmt::Debug for GraphSnapshot {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct StoredEntity {
-    pub(crate) namespace: GraphNamespace,
-    pub(crate) projection: GraphProjectionId,
-    pub(crate) entity: GraphEntity,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct StoredRelation {
-    pub(crate) namespace: GraphNamespace,
-    pub(crate) projection: GraphProjectionId,
-    pub(crate) relation: GraphRelation,
-}
-
-type StableKey = (String, String);
-pub(crate) type EntityIndex = BTreeMap<StableKey, (NodeId, StoredEntity)>;
-type RelationIndex = BTreeMap<StableKey, (EdgeId, StoredRelation)>;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct StoredCommit {
-    namespace: GraphNamespace,
-    projection: GraphProjectionId,
-    commit: GraphCommit,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct StoredPublication {
-    namespace: GraphNamespace,
-    key: GraphIdempotencyKey,
-    digest: String,
-    commit: GraphCommit,
-}
-
-struct LoadedState {
-    marker: NodeId,
-    sequence: u64,
-    entities: EntityIndex,
-    relations: RelationIndex,
-    commits: Vec<StoredCommit>,
-    publications: Vec<StoredPublication>,
-}
-
 enum PreparedMutation {
     DeleteRelation(GraphRelationId),
     DeleteEntity(GraphEntityId),
@@ -108,29 +66,97 @@ enum PreparedMutation {
     UpsertRelation(GraphRelation, String),
 }
 
+type EntityDelta = BTreeMap<StableKey, Option<(NodeId, StoredEntity)>>;
+type RelationDelta = BTreeMap<StableKey, Option<(EdgeId, StoredRelation)>>;
+
+struct StateOverlay<'a> {
+    base: &'a StateCache,
+    entities: EntityDelta,
+    relations: RelationDelta,
+}
+
+impl<'a> StateOverlay<'a> {
+    fn new(base: &'a StateCache) -> Self {
+        Self {
+            base,
+            entities: BTreeMap::new(),
+            relations: BTreeMap::new(),
+        }
+    }
+
+    fn entity(&self, key: &StableKey) -> Option<&(NodeId, StoredEntity)> {
+        match self.entities.get(key) {
+            Some(value) => value.as_ref(),
+            None => self.base.entities.get(key),
+        }
+    }
+
+    fn relation(&self, key: &StableKey) -> Option<&(EdgeId, StoredRelation)> {
+        match self.relations.get(key) {
+            Some(value) => value.as_ref(),
+            None => self.base.relations.get(key),
+        }
+    }
+
+    fn remove_entity(&mut self, key: StableKey) -> Option<(NodeId, StoredEntity)> {
+        let existing = self.entity(&key).cloned();
+        self.entities.insert(key, None);
+        existing
+    }
+
+    fn remove_relation(&mut self, key: StableKey) -> Option<(EdgeId, StoredRelation)> {
+        let existing = self.relation(&key).cloned();
+        self.relations.insert(key, None);
+        existing
+    }
+
+    fn upsert_entity(&mut self, key: StableKey, node: NodeId, stored: StoredEntity) {
+        self.entities.insert(key, Some((node, stored)));
+    }
+
+    fn upsert_relation(&mut self, key: StableKey, edge: EdgeId, stored: StoredRelation) {
+        self.relations.insert(key, Some((edge, stored)));
+    }
+
+    fn into_delta(self) -> (EntityDelta, RelationDelta) {
+        (self.entities, self.relations)
+    }
+}
+
+fn apply_state_delta(state: &mut StateCache, entities: EntityDelta, relations: RelationDelta) {
+    for (key, value) in relations {
+        match value {
+            Some((edge, stored)) => state.insert_relation(key, edge, stored),
+            None => {
+                state.remove_relation(&key);
+            }
+        }
+    }
+    for (key, value) in entities {
+        match value {
+            Some((node, stored)) => state.insert_entity(key, node, stored),
+            None => {
+                state.remove_entity(&key);
+            }
+        }
+    }
+}
+
 impl GraphDb {
     pub fn open(options: GraphDbOpenOptions) -> Result<Self, GraphDbError> {
         let cancellation = Arc::clone(&options.cancellation);
         let validated = options.validate()?;
-        let database = GrafeoDB::with_config(validated.config.clone()).map_err(|error| {
-            if validated.preexisting_file {
-                GraphDbError::Corrupt {
-                    message: error.to_string(),
-                }
-            } else {
-                GraphDbError::unavailable(error.to_string())
-            }
-        })?;
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
+        let database = GrafeoDB::with_config(validated.config.clone())
+            .map_err(|error| map_open_error(error, validated.preexisting_file))?;
         validate_or_initialize_format(&database, &validated)?;
+        let state = StateCache::load(&database)?;
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
         Ok(Self {
             inner: Arc::new(Inner {
                 database: RwLock::new(Some(database)),
+                state: RwLock::new(state),
                 durability: validated.durability,
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
@@ -146,8 +172,10 @@ impl GraphDb {
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         let snapshot = GrafeoDB::import_snapshot(&bytes)
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let state = StateCache::load(&snapshot)?;
         Ok(GraphSnapshot {
             database: Arc::new(snapshot),
+            state: Arc::new(state),
         })
     }
 
@@ -155,8 +183,11 @@ impl GraphDb {
         let digest = batch.validate_and_digest()?;
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let state = load_state(database)?;
-        self.apply_locked(database, state, batch, digest, None)
+        if batch.cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let mut cached = self.state_write_guard()?;
+        self.apply_locked(database, &mut cached, batch, digest, None)
     }
 
     pub fn replace_projection(
@@ -174,9 +205,12 @@ impl GraphDb {
         }
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let state = load_state(database)?;
+        if replacement.cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let mut cached = self.state_write_guard()?;
         let mut mutations = Vec::new();
-        for (_, stored) in state.relations.values() {
+        for (_, stored) in cached.relations.values() {
             if stored.namespace == replacement.namespace
                 && stored.projection == replacement.projection
             {
@@ -185,7 +219,7 @@ impl GraphDb {
                 ));
             }
         }
-        for (_, stored) in state.entities.values() {
+        for (_, stored) in cached.entities.values() {
             if stored.namespace == replacement.namespace
                 && stored.projection == replacement.projection
             {
@@ -213,7 +247,7 @@ impl GraphDb {
             replacement.cancellation,
         )?;
         let digest = batch.validate_and_digest()?;
-        self.apply_locked(database, state, batch, digest, None)
+        self.apply_locked(database, &mut cached, batch, digest, None)
     }
 
     pub fn publish(&self, mut publication: GraphPublication) -> Result<GraphCommit, GraphDbError> {
@@ -221,29 +255,29 @@ impl GraphDb {
         let batch_digest = publication.batch.validate_and_digest()?;
         let guard = self.write_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        let state = load_state(database)?;
-        if let Some(existing) = state.publications.iter().find(|existing| {
-            existing.namespace == publication.namespace
-                && existing.key == publication.idempotency_key
-        }) {
+        if publication.cancellation.is_cancelled() || publication.batch.cancellation.is_cancelled()
+        {
+            return Err(GraphDbError::Cancelled);
+        }
+        let mut cached = self.state_write_guard()?;
+        if let Some(existing) =
+            cached.publication(&publication.namespace, &publication.idempotency_key)
+        {
             return if existing.digest == publication_digest {
                 Ok(existing.commit.clone())
             } else {
                 Err(GraphDbError::Conflict)
             };
         }
-        let current = latest_watermark(
-            &state,
-            &publication.namespace,
-            &publication.batch.projection,
-        );
-        if current.as_ref() != publication.expected_watermark.as_ref() {
+        let current =
+            cached.latest_watermark(&publication.namespace, &publication.batch.projection);
+        if current != publication.expected_watermark.as_ref() {
             return Err(GraphDbError::Conflict);
         }
         let publication_record = (publication.idempotency_key, publication_digest);
         self.apply_locked(
             database,
-            state,
+            &mut cached,
             publication.batch,
             batch_digest,
             Some(publication_record),
@@ -253,7 +287,8 @@ impl GraphDb {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        traversal::traverse(database, request)
+        let cached = self.state_read_guard()?;
+        traversal::traverse(database, &cached, request)
     }
 
     pub fn vector_search(
@@ -262,7 +297,8 @@ impl GraphDb {
     ) -> Result<VectorSearchResult, GraphDbError> {
         let guard = self.read_guard()?;
         let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
-        vector::vector_search(database, request)
+        let cached = self.state_read_guard()?;
+        vector::vector_search(database, &cached, request)
     }
 
     pub fn close(&self) -> Result<(), GraphDbError> {
@@ -292,12 +328,12 @@ impl GraphDb {
     fn apply_locked(
         &self,
         database: &GrafeoDB,
-        mut state: LoadedState,
+        state: &mut StateCache,
         batch: GraphWriteBatch,
         digest: String,
         publication: Option<(GraphIdempotencyKey, String)>,
     ) -> Result<GraphCommit, GraphDbError> {
-        validate_references(&state, &batch)?;
+        validate_references(state, &batch)?;
         let prepared = prepare_mutations(&batch)?;
         let sequence = state
             .sequence
@@ -315,16 +351,18 @@ impl GraphDb {
             commit: commit.clone(),
         };
         let commit_payload = serialize_payload(&stored_commit)?;
-        let publication_payload = publication
-            .as_ref()
-            .map(|(key, publication_digest)| {
-                serialize_payload(&StoredPublication {
+        let stored_publication =
+            publication
+                .as_ref()
+                .map(|(key, publication_digest)| StoredPublication {
                     namespace: batch.namespace.clone(),
                     key: key.clone(),
                     digest: publication_digest.clone(),
                     commit: commit.clone(),
-                })
-            })
+                });
+        let publication_payload = stored_publication
+            .as_ref()
+            .map(serialize_payload)
             .transpose()?;
         let sequence_value = i64::try_from(sequence)
             .map_err(|_| GraphDbError::unavailable("graph commit sequence exceeds i64"))?;
@@ -333,14 +371,17 @@ impl GraphDb {
         session
             .begin_transaction()
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        let marker = state.marker;
+        let mut overlay = StateOverlay::new(state);
         let mutation_result = apply_prepared_mutations(
             &session,
-            &mut state,
+            &mut overlay,
             &batch,
             prepared,
             &commit_payload,
             publication_payload.as_deref(),
             sequence_value,
+            marker,
         );
         if let Err(error) = mutation_result {
             if let Err(rollback_error) = session.rollback() {
@@ -353,9 +394,24 @@ impl GraphDb {
             }
             return Err(error);
         }
-        session
-            .commit()
-            .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        if batch.cancellation.is_cancelled() {
+            if let Err(rollback_error) = session.rollback() {
+                self.inner.poisoned.store(true, Ordering::Release);
+                return Err(GraphDbError::DurabilityUncertain {
+                    message: format!(
+                        "pre-commit cancellation followed by rollback failure: {rollback_error}"
+                    ),
+                });
+            }
+            return Err(GraphDbError::Cancelled);
+        }
+        session.commit().map_err(map_commit_error)?;
+        let (entities, relations) = overlay.into_delta();
+        apply_state_delta(state, entities, relations);
+        state.record_commit(stored_commit);
+        if let Some(stored) = stored_publication {
+            state.record_publication(stored);
+        }
         if self.inner.durability == GraphDurability::Sync
             && let Err(error) = database.wal_checkpoint()
         {
@@ -383,6 +439,20 @@ impl GraphDb {
             .map_err(|_| GraphDbError::unavailable("graph database write lock is poisoned"))
     }
 
+    fn state_read_guard(&self) -> Result<RwLockReadGuard<'_, StateCache>, GraphDbError> {
+        self.inner
+            .state
+            .read()
+            .map_err(|_| GraphDbError::unavailable("graph state cache read lock is poisoned"))
+    }
+
+    fn state_write_guard(&self) -> Result<RwLockWriteGuard<'_, StateCache>, GraphDbError> {
+        self.inner
+            .state
+            .write()
+            .map_err(|_| GraphDbError::unavailable("graph state cache write lock is poisoned"))
+    }
+
     fn ensure_available(&self) -> Result<(), GraphDbError> {
         if self.inner.poisoned.load(Ordering::Acquire) {
             return Err(durability_uncertain());
@@ -396,14 +466,14 @@ impl GraphDb {
 
 impl GraphSnapshot {
     pub fn traverse(&self, request: TraversalRequest) -> Result<TraversalResult, GraphDbError> {
-        traversal::traverse(&self.database, request)
+        traversal::traverse(&self.database, &self.state, request)
     }
 
     pub fn vector_search(
         &self,
         request: VectorSearchRequest,
     ) -> Result<VectorSearchResult, GraphDbError> {
-        vector::vector_search(&self.database, request)
+        vector::vector_search(&self.database, &self.state, request)
     }
 }
 
@@ -470,173 +540,12 @@ fn validate_or_initialize_format(
     Ok(())
 }
 
-pub(crate) fn load_entities(database: &GrafeoDB) -> Result<EntityIndex, GraphDbError> {
-    let store = database.graph_store();
-    let mut entities = BTreeMap::new();
-    for node_id in store.nodes_by_label(ENTITY_LABEL) {
-        let node = store
-            .get_node(node_id)
-            .ok_or_else(|| GraphDbError::Corrupt {
-                message: "entity node is unreadable".to_owned(),
-            })?;
-        let stored: StoredEntity =
-            parse_payload(node.get_property(PAYLOAD_PROPERTY), "entity node payload")?;
-        let key = (
-            stored.namespace.as_str().to_owned(),
-            stored.entity.identity.as_str().to_owned(),
-        );
-        if entities.insert(key, (node_id, stored)).is_some() {
-            return Err(GraphDbError::Corrupt {
-                message: "duplicate entity identity".to_owned(),
-            });
-        }
-    }
-    Ok(entities)
-}
-
-pub(crate) fn parse_relation(
-    edge: &grafeo_core::graph::lpg::Edge,
-) -> Result<StoredRelation, GraphDbError> {
-    parse_payload(edge.get_property(PAYLOAD_PROPERTY), "relation edge payload")
-}
-
-fn load_state(database: &GrafeoDB) -> Result<LoadedState, GraphDbError> {
-    let store = database.graph_store();
-    let markers = store.nodes_by_label(FORMAT_LABEL);
-    if markers.len() != 1 {
-        return Err(GraphDbError::Corrupt {
-            message: "live store lost its exact format marker".to_owned(),
-        });
-    }
-    let marker_node = store
-        .get_node(markers[0])
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "format marker is unreadable".to_owned(),
-        })?;
-    let sequence_i64 = marker_node
-        .get_property(SEQUENCE_PROPERTY)
-        .and_then(Value::as_int64)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: "format marker has no valid commit sequence".to_owned(),
-        })?;
-    let sequence = u64::try_from(sequence_i64).map_err(|_| GraphDbError::Corrupt {
-        message: "format marker has a negative commit sequence".to_owned(),
-    })?;
-    let entities = load_entities(database)?;
-    let mut relations = BTreeMap::new();
-    let mut seen_edges = HashSet::new();
-    for (node_id, _) in entities.values() {
-        for (_, edge_id) in store.edges_from(*node_id, grafeo_core::graph::Direction::Outgoing) {
-            if !seen_edges.insert(edge_id) {
-                continue;
-            }
-            let edge = store
-                .get_edge(edge_id)
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: "relation edge is unreadable".to_owned(),
-                })?;
-            if edge.edge_type.as_str() != RELATION_TYPE {
-                continue;
-            }
-            let stored = parse_relation(&edge)?;
-            let key = (
-                stored.namespace.as_str().to_owned(),
-                stored.relation.identity.as_str().to_owned(),
-            );
-            if relations.insert(key, (edge_id, stored)).is_some() {
-                return Err(GraphDbError::Corrupt {
-                    message: "duplicate relation identity".to_owned(),
-                });
-            }
-        }
-    }
-    let commits = load_labeled_payloads(database, COMMIT_LABEL, "commit payload")?;
-    let publications = load_labeled_payloads(database, PUBLICATION_LABEL, "publication payload")?;
-    Ok(LoadedState {
-        marker: markers[0],
-        sequence,
-        entities,
-        relations,
-        commits,
-        publications,
-    })
-}
-
-fn load_labeled_payloads<T: for<'de> Deserialize<'de>>(
-    database: &GrafeoDB,
-    label: &str,
-    description: &str,
-) -> Result<Vec<T>, GraphDbError> {
-    let store = database.graph_store();
-    store
-        .nodes_by_label(label)
-        .into_iter()
-        .map(|node_id| {
-            let node = store
-                .get_node(node_id)
-                .ok_or_else(|| GraphDbError::Corrupt {
-                    message: format!("{description} node is unreadable"),
-                })?;
-            parse_payload(node.get_property(PAYLOAD_PROPERTY), description)
-        })
-        .collect()
-}
-
-fn parse_payload<T: for<'de> Deserialize<'de>>(
-    value: Option<&Value>,
-    description: &str,
-) -> Result<T, GraphDbError> {
-    let json = value
-        .and_then(Value::as_str)
-        .ok_or_else(|| GraphDbError::Corrupt {
-            message: format!("{description} is missing or not a string"),
-        })?;
-    serde_json::from_str(json).map_err(|error| GraphDbError::Corrupt {
-        message: format!("invalid {description}: {error}"),
-    })
-}
-
-fn serialize_payload<T: Serialize>(value: &T) -> Result<String, GraphDbError> {
-    serde_json::to_string(value)
-        .map_err(|error| GraphDbError::invalid(format!("payload serialization failed: {error}")))
-}
-
-fn latest_watermark(
-    state: &LoadedState,
-    namespace: &GraphNamespace,
-    projection: &GraphProjectionId,
-) -> Option<GraphWatermark> {
-    state
-        .commits
-        .iter()
-        .filter(|stored| &stored.namespace == namespace && &stored.projection == projection)
-        .max_by_key(|stored| stored.commit.sequence)
-        .map(|stored| stored.commit.watermark.clone())
-}
-
-fn validate_references(state: &LoadedState, batch: &GraphWriteBatch) -> Result<(), GraphDbError> {
-    let mut entities: BTreeMap<(String, String), GraphProjectionId> = state
-        .entities
-        .iter()
-        .map(|(key, (_, stored))| (key.clone(), stored.projection.clone()))
-        .collect();
+fn validate_references(state: &StateCache, batch: &GraphWriteBatch) -> Result<(), GraphDbError> {
+    let mut entities: BTreeMap<StableKey, Option<GraphProjectionId>> = BTreeMap::new();
     let mut relations: BTreeMap<
-        (String, String),
-        (GraphProjectionId, GraphEntityId, GraphEntityId),
-    > = state
-        .relations
-        .iter()
-        .map(|(key, (_, stored))| {
-            (
-                key.clone(),
-                (
-                    stored.projection.clone(),
-                    stored.relation.from.clone(),
-                    stored.relation.to.clone(),
-                ),
-            )
-        })
-        .collect();
+        StableKey,
+        Option<(GraphProjectionId, GraphEntityId, GraphEntityId)>,
+    > = BTreeMap::new();
     let namespace = batch.namespace.as_str().to_owned();
     let mut mutation_keys = BTreeSet::new();
     for mutation in &batch.mutations {
@@ -647,58 +556,121 @@ fn validate_references(state: &LoadedState, batch: &GraphWriteBatch) -> Result<(
         match mutation {
             GraphMutation::DeleteRelation(identity) => {
                 let key = (namespace.clone(), identity.as_str().to_owned());
-                if let Some((owner, _, _)) = relations.get(&key)
-                    && owner != &batch.projection
+                if let Some((owner, _, _)) = logical_relation(state, &relations, &key)
+                    && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
-                relations.remove(&key);
+                relations.insert(key, None);
             }
             GraphMutation::DeleteEntity(identity) => {
                 let key = (namespace.clone(), identity.as_str().to_owned());
-                if let Some(owner) = entities.get(&key)
-                    && owner != &batch.projection
+                if let Some(owner) = logical_entity_owner(state, &entities, &key)
+                    && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
-                entities.remove(&key);
+                entities.insert(key, None);
             }
             GraphMutation::UpsertEntity(entity) => {
                 let key = (namespace.clone(), entity.identity.as_str().to_owned());
-                if let Some(owner) = entities.get(&key)
-                    && owner != &batch.projection
+                if let Some(owner) = logical_entity_owner(state, &entities, &key)
+                    && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
-                entities.insert(key, batch.projection.clone());
+                entities.insert(key, Some(batch.projection.clone()));
             }
             GraphMutation::UpsertRelation(relation) => {
                 let key = (namespace.clone(), relation.identity.as_str().to_owned());
-                if let Some((owner, _, _)) = relations.get(&key)
-                    && owner != &batch.projection
+                if let Some((owner, _, _)) = logical_relation(state, &relations, &key)
+                    && owner != batch.projection
                 {
                     return Err(GraphDbError::Conflict);
                 }
                 relations.insert(
                     key,
-                    (
+                    Some((
                         batch.projection.clone(),
                         relation.from.clone(),
                         relation.to.clone(),
-                    ),
+                    )),
                 );
             }
         }
     }
-    for (_, from, to) in relations.values() {
+    for (_, from, to) in relations.values().flatten() {
         for endpoint in [from, to] {
-            if !entities.contains_key(&(namespace.clone(), endpoint.as_str().to_owned())) {
+            require_entity(state, &entities, &batch.namespace, endpoint)?;
+        }
+    }
+    for (entity_key, owner) in &entities {
+        if owner.is_some() {
+            continue;
+        }
+        for relation_key in state.relations_for_entity(entity_key) {
+            if let Some((_, from, to)) = logical_relation(state, &relations, relation_key)
+                && [from, to].iter().any(|endpoint| {
+                    endpoint.as_str() == entity_key.1 && batch.namespace.as_str() == entity_key.0
+                })
+            {
                 return Err(GraphDbError::invalid(format!(
-                    "relation endpoint `{endpoint}` does not exist in namespace `{}`",
-                    batch.namespace
+                    "entity `{}` remains referenced by relation `{}`",
+                    entity_key.1, relation_key.1
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+fn logical_entity_owner(
+    state: &StateCache,
+    changes: &BTreeMap<StableKey, Option<GraphProjectionId>>,
+    key: &StableKey,
+) -> Option<GraphProjectionId> {
+    changes.get(key).cloned().flatten().or_else(|| {
+        (!changes.contains_key(key))
+            .then(|| {
+                state
+                    .entities
+                    .get(key)
+                    .map(|(_, stored)| stored.projection.clone())
+            })
+            .flatten()
+    })
+}
+
+fn logical_relation(
+    state: &StateCache,
+    changes: &BTreeMap<StableKey, Option<(GraphProjectionId, GraphEntityId, GraphEntityId)>>,
+    key: &StableKey,
+) -> Option<(GraphProjectionId, GraphEntityId, GraphEntityId)> {
+    changes.get(key).cloned().flatten().or_else(|| {
+        (!changes.contains_key(key))
+            .then(|| {
+                state.relations.get(key).map(|(_, stored)| {
+                    (
+                        stored.projection.clone(),
+                        stored.relation.from.clone(),
+                        stored.relation.to.clone(),
+                    )
+                })
+            })
+            .flatten()
+    })
+}
+
+fn require_entity(
+    state: &StateCache,
+    changes: &BTreeMap<StableKey, Option<GraphProjectionId>>,
+    namespace: &crate::GraphNamespace,
+    endpoint: &GraphEntityId,
+) -> Result<(), GraphDbError> {
+    if logical_entity_owner(state, changes, &stable_key(namespace, endpoint.as_str())).is_none() {
+        return Err(GraphDbError::invalid(format!(
+            "relation endpoint `{endpoint}` does not exist in namespace `{namespace}`"
+        )));
     }
     Ok(())
 }
@@ -743,12 +715,13 @@ fn prepare_mutations(batch: &GraphWriteBatch) -> Result<Vec<PreparedMutation>, G
 #[allow(clippy::too_many_arguments)]
 fn apply_prepared_mutations(
     session: &grafeo_engine::Session,
-    state: &mut LoadedState,
+    state: &mut StateOverlay<'_>,
     batch: &GraphWriteBatch,
     mutations: Vec<PreparedMutation>,
     commit_payload: &str,
     publication_payload: Option<&str>,
     sequence: i64,
+    marker: NodeId,
 ) -> Result<(), GraphDbError> {
     let namespace = batch.namespace.as_str().to_owned();
     for mutation in mutations {
@@ -757,17 +730,15 @@ fn apply_prepared_mutations(
         }
         match mutation {
             PreparedMutation::DeleteRelation(identity) => {
-                if let Some((edge_id, _)) = state
-                    .relations
-                    .remove(&(namespace.clone(), identity.as_str().to_owned()))
+                if let Some((edge_id, _)) =
+                    state.remove_relation((namespace.clone(), identity.as_str().to_owned()))
                 {
                     session.delete_edge(edge_id);
                 }
             }
             PreparedMutation::DeleteEntity(identity) => {
-                if let Some((node_id, _)) = state
-                    .entities
-                    .remove(&(namespace.clone(), identity.as_str().to_owned()))
+                if let Some((node_id, _)) =
+                    state.remove_entity((namespace.clone(), identity.as_str().to_owned()))
                 {
                     session.delete_node(node_id);
                 }
@@ -781,7 +752,7 @@ fn apply_prepared_mutations(
         }
     }
     session
-        .set_node_property(state.marker, SEQUENCE_PROPERTY, sequence.into())
+        .set_node_property(marker, SEQUENCE_PROPERTY, sequence.into())
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
     session
         .create_node_with_props(
@@ -802,7 +773,7 @@ fn apply_prepared_mutations(
 
 fn upsert_entity(
     session: &grafeo_engine::Session,
-    state: &mut LoadedState,
+    state: &mut StateOverlay<'_>,
     batch: &GraphWriteBatch,
     entity: GraphEntity,
     payload: String,
@@ -816,11 +787,15 @@ fn upsert_entity(
         projection: batch.projection.clone(),
         entity: entity.clone(),
     };
-    if let Some((node_id, previous)) = state.entities.get(&key) {
+    if let Some((node_id, previous)) = state.entity(&key) {
         for (name, property) in &previous.entity.properties {
-            if matches!(property, GraphProperty::Vector(_)) {
+            if let GraphProperty::Vector(vector) = property {
                 session
-                    .set_node_property(*node_id, &vector_property_key(name), Value::Null)
+                    .set_node_property(
+                        *node_id,
+                        &vector_property_key(name, vector.dimension, vector.metric),
+                        Value::Null,
+                    )
                     .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
             }
         }
@@ -828,13 +803,13 @@ fn upsert_entity(
             .set_node_property(*node_id, PAYLOAD_PROPERTY, payload.into())
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
         set_vector_properties(session, *node_id, &entity)?;
-        state.entities.insert(key, (*node_id, stored));
+        state.upsert_entity(key, *node_id, stored);
     } else {
         let mut properties = vec![(PAYLOAD_PROPERTY.to_owned(), Value::from(payload))];
         properties.extend(entity.properties.iter().filter_map(|(name, property)| {
             if let GraphProperty::Vector(vector) = property {
                 Some((
-                    vector_property_key(name),
+                    vector_property_key(name, vector.dimension, vector.metric),
                     Value::Vector(vector.values.clone().into()),
                 ))
             } else {
@@ -849,7 +824,7 @@ fn upsert_entity(
                     .map(|(name, value)| (name.as_str(), value.clone())),
             )
             .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-        state.entities.insert(key, (node_id, stored));
+        state.upsert_entity(key, node_id, stored);
     }
     Ok(())
 }
@@ -864,7 +839,7 @@ fn set_vector_properties(
             session
                 .set_node_property(
                     node_id,
-                    &vector_property_key(name),
+                    &vector_property_key(name, vector.dimension, vector.metric),
                     Value::Vector(vector.values.clone().into()),
                 )
                 .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
@@ -875,7 +850,7 @@ fn set_vector_properties(
 
 fn upsert_relation(
     session: &grafeo_engine::Session,
-    state: &mut LoadedState,
+    state: &mut StateOverlay<'_>,
     batch: &GraphWriteBatch,
     relation: GraphRelation,
     payload: String,
@@ -884,20 +859,18 @@ fn upsert_relation(
         batch.namespace.as_str().to_owned(),
         relation.identity.as_str().to_owned(),
     );
-    if let Some((edge_id, _)) = state.relations.remove(&key) {
+    if let Some((edge_id, _)) = state.remove_relation(key.clone()) {
         session.delete_edge(edge_id);
     }
     let from = state
-        .entities
-        .get(&(
+        .entity(&(
             batch.namespace.as_str().to_owned(),
             relation.from.as_str().to_owned(),
         ))
         .map(|(node, _)| *node)
         .ok_or_else(|| GraphDbError::invalid("relation source disappeared"))?;
     let to = state
-        .entities
-        .get(&(
+        .entity(&(
             batch.namespace.as_str().to_owned(),
             relation.to.as_str().to_owned(),
         ))
@@ -911,29 +884,74 @@ fn upsert_relation(
             [(PAYLOAD_PROPERTY, Value::from(payload))],
         )
         .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
-    state.relations.insert(
+    state.upsert_relation(
         key,
-        (
-            edge_id,
-            StoredRelation {
-                namespace: batch.namespace.clone(),
-                projection: batch.projection.clone(),
-                relation,
-            },
-        ),
+        edge_id,
+        StoredRelation {
+            namespace: batch.namespace.clone(),
+            projection: batch.projection.clone(),
+            relation,
+        },
     );
     Ok(())
 }
 
-pub(crate) fn vector_property_key(name: &GraphPropertyName) -> String {
+pub(crate) fn vector_property_key(
+    name: &GraphPropertyName,
+    dimension: usize,
+    metric: crate::VectorMetric,
+) -> String {
     format!(
-        "__tracedecay_graph_db_vector_{}",
-        hex::encode(name.as_str().as_bytes())
+        "__tracedecay_graph_db_vector_{}_{}_{}",
+        hex::encode(name.as_str().as_bytes()),
+        dimension,
+        metric.storage_tag()
     )
 }
 
 fn durability_uncertain() -> GraphDbError {
     GraphDbError::DurabilityUncertain {
         message: "the handle was poisoned after a post-commit durability failure".to_owned(),
+    }
+}
+
+fn map_open_error(
+    error: grafeo_common::utils::error::Error,
+    preexisting_file: bool,
+) -> GraphDbError {
+    let malformed_io = matches!(
+        &error,
+        grafeo_common::utils::error::Error::Io(io)
+            if preexisting_file
+                && matches!(
+                    io.kind(),
+                    std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+                )
+    );
+    let message = error.to_string();
+    if malformed_io {
+        return GraphDbError::Corrupt { message };
+    }
+    match error.error_code() {
+        ErrorCode::StorageCorrupted
+        | ErrorCode::StorageRecoveryFailed
+        | ErrorCode::SerializationError
+            if preexisting_file =>
+        {
+            GraphDbError::Corrupt { message }
+        }
+        _ => GraphDbError::unavailable(message),
+    }
+}
+
+fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {
+    // Grafeo 0.5.42 returns commit errors before version finalization and rolls
+    // conflicts back. Its post-finalization WAL failures are warning-only, so
+    // the mandatory Sync checkpoint above is the observable uncertainty gate.
+    match error.error_code() {
+        ErrorCode::TransactionConflict
+        | ErrorCode::TransactionSerialization
+        | ErrorCode::TransactionDeadlock => GraphDbError::Conflict,
+        _ => GraphDbError::unavailable(error.to_string()),
     }
 }

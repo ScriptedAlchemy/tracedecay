@@ -36,7 +36,6 @@ impl GraphFormatVersion {
 pub enum GraphDurability {
     Memory,
     Sync,
-    Batch { max_delay_ms: u64, max_records: u64 },
 }
 
 #[derive(Clone)]
@@ -88,7 +87,7 @@ impl GraphDbOpenOptions {
             GraphDbLocation::Persistent(path) => {
                 if self.durability == GraphDurability::Memory {
                     return Err(GraphDbError::invalid(
-                        "persistent graph databases require sync or batch durability",
+                        "persistent graph databases require sync durability",
                     ));
                 }
                 validate_persistent_path(&path)?;
@@ -100,18 +99,6 @@ impl GraphDbOpenOptions {
                 })?;
                 let durability = match self.durability {
                     GraphDurability::Sync => DurabilityMode::Sync,
-                    GraphDurability::Batch {
-                        max_delay_ms,
-                        max_records,
-                    } if max_delay_ms > 0 && max_records > 0 => DurabilityMode::Batch {
-                        max_delay_ms,
-                        max_records,
-                    },
-                    GraphDurability::Batch { .. } => {
-                        return Err(GraphDbError::invalid(
-                            "batch durability limits must be greater than zero",
-                        ));
-                    }
                     GraphDurability::Memory => {
                         return Err(GraphDbError::invalid(
                             "persistent graph databases require durable storage",
