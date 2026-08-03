@@ -147,7 +147,7 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::migrate(database.as_ref()).await?;
+        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -248,13 +248,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         .await?;
         let database =
             Arc::new(Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?);
-        crate::db::migrations::migrate(database.as_ref()).await?;
+        crate::db::migrations::ensure_schema_current(database.as_ref()).await?;
         mounted.insert(project_id, Arc::clone(&database));
         Ok(database)
     }
 
-    /// Mounts an existing project-memory shard without initializing or
-    /// migrating it, and exposes only a read-only database facade.
+    /// Mounts an existing project-memory shard without initializing it or
+    /// verifying its schema, and exposes only a read-only database facade.
     pub(crate) async fn project_memory_read_only(
         &self,
         project_id: ProjectId,

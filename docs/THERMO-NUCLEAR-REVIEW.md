@@ -88,7 +88,7 @@ The branch created or grew past 1000 lines (non-exhaustive), grouped by area:
 - **application crate**: host_admission.rs **3187**, evidence_assembly.rs **2427**, primitives/runtime.rs **2060**, application_surface.rs **1848**, +10 more >1000
 - **query**: temporal/ports.rs **4038** (trait buried at 1614), diagnostics_store.rs 1812, diagnostics_query.rs 1495
 - **domain crate**: git.rs **2553**, session.rs 1938, observation.rs 1908, configuration.rs 1659, +6 more
-- **rusqlite-runtime**: migration_sql.rs **2828**, evidence.rs 1580
+- **rusqlite-runtime**: exact_sql/ **2177**, evidence.rs 1580
 - **extraction**: chunks.rs **2768**, artifact_store.rs 2650, fastembed_adapter.rs 1921, session_pool.rs 1778
 - **sessions**: cursor.rs 1300→**2512**, kiro.rs 1810, cline_like.rs 1632, transcript_backfill.rs 1456
 - **misc**: config.rs 1054→**2615**, git_intelligence.rs 2573, candidate_output.rs 1816

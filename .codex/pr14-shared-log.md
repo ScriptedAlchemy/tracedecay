@@ -27,7 +27,7 @@ Rules:
   lane. `StoreRuntimeHandle`/`PhysicalRuntimeAttachment` expose no fenced
   compaction port, `RegisteredGlobalDb` exposes no retention port, and the
   existing LCM/observation retention engines require `libsql::Connection`.
-  Migration SQL correctly denies `PRAGMA incremental_vacuum`; no bypass added.
+  Exact SQL correctly denies `PRAGMA incremental_vacuum`; no bypass added.
   Required interfaces: a registered LCM/observation retention port bound to
   the retained writer/`DatabaseAuthority`, plus a `StoreRuntimeHandle` fenced
   bounded-compaction operation for profile, profile-session, and code shards.
@@ -137,12 +137,6 @@ intentionally not run:
   `src/catalog_composition.rs` (your profile-budget 164>160 is parked per
   owner), `src/db/engine` + rusqlite writer internals, NEXT.md (you have it
   open uncommitted).
-- **Environment notes:** dogfood is running as a tracked task; an unmanaged
-  `target/debug` daemon was stopped at ~01:05Z after holding daemon.sock for
-  15h44m (it blocked boundary recovery). If a background process of yours died
-  around 00:55Z mid-cargo, it may have shared the fate of our detached dogfood
-  wrapper — something is sweeping setsid'd processes; ours now runs
-  harness-tracked instead.
 
 ## claude-fable addendum: incarnation failure pinpointed (~01:35Z)
 
@@ -180,7 +174,7 @@ to refuse it; the producer is the bug. Repro:
 - Trunk now has: d264b1309/f5577fd6e (real agent-activity SSE: hook_activity via hook_v2_admit + legacy path, session_ingest at persist_parsed_transcript, code_index_activity, tool_call_activity; process-global broadcast tap, 500ms coalescing, per-(family,project) streams) and the scoped-Brain/measured-field merge (field.ts, ScopedBrain.tsx, GraphCanvas placed-node mode). Dashboard gates: tsc clean, 206/206.
 - Observation provenance backfill convergence bug (unpaged INSERT…SELECT interrupted by receive_with_probe every warmup; live profile daemon calls all fail "interrupted (operation: migrate observation authority schema)") is being fixed in a SEPARATE user-started session (chip task_c0c5f6f6) editing src/global_db/observation/provenance_backfill.rs + possibly reader/worker.rs — do not touch those files until it lands.
 - Also running separately (user chip): symbol-search-below-1024px archetype fix (ExplorerSplit).
-- Live evidence so far covers tool_call_activity only (isolated profile, 7342); hooks/session/code-index families need a re-dogfood after the backfill fix converges the live profile.
+- Isolated validation so far covers tool_call_activity only (isolated profile, 7342); hooks/session/code-index families require validation after the backfill fix converges.
 
 ## 2026-07-25 ~07:00 — PR13 audit verdict: PARTIAL; two load-bearing fixes dispatched (Claude coordinator)
 - Delivered: advisory wiring end-to-end (hook→cycle→notice), read-only GitHub w/ fail-closed scopes, CI localization, proximity, reference-only findings, host-bundle transactional lifecycle, Cursor native ingest, Scout deterministic spine.
@@ -188,12 +182,12 @@ to refuse it; the producer is the bug. Repro:
 - Deferred with eyes open (documented, not fixed now): Scout model path staged-inert, single-source evidence + constant relevance, 3 dropped event families, no coalescing windows, no schema quarantine/migration window, OpenCode analyzer keys written-never-read, Cline evidence dead code, fixtures compiled into prod binary, assert-by-grep theater tests, dead-end IdleWindow/OnRequest, outcome taxonomy only Attempted.
 
 ## 2026-07-25 ~07:20 — NEW convergence blocker: observation authority invariant (for S11/observation lane)
-- Live daemon (dogfood post-update, new binary w/ 9b985528a+83fcbc4c5+192d593a3): every project_server_warmup fails "invalid committed observation authority JSON: serialized observation identity does not match its source evidence (operation: ensure global database authority invariants)". Distinct from the old interrupted-migration failure. Looks like new invariant validator vs data committed by the pre-fix unpaged backfill (or incarnation rewrite). Needs either a repair/re-backfill pass for mismatched committed rows or invariant tolerance with provenance. Live repro: journalctl --user -u tracedecay.service | grep observation.
+- Live daemon (new binary w/ 9b985528a+83fcbc4c5+192d593a3): every project_server_warmup fails "invalid committed observation authority JSON: serialized observation identity does not match its source evidence (operation: ensure global database authority invariants)". Distinct from the old interrupted-migration failure. Looks like new invariant validator vs data committed by the pre-fix unpaged backfill (or incarnation rewrite). Needs either a repair/re-backfill pass for mismatched committed rows or invariant tolerance with provenance. Live repro: journalctl --user -u tracedecay.service | grep observation.
 
 ## 2026-07-25 ~07:05 — invariant remedy ownership CONFIRMED with migrate lane (Claude coordinator)
 - Re: the observation-authority invariant blocker logged ~07:20 above: the uncommitted work in src/migrate/consolidate/** (seed_legacy_observation_backfill_watermarks + legacy_completed_backfills_resume_from_the_premerge_frontier test, runtime WAL/sidecar changes) is recognized as the owning remedy. My dispatched repair agent halted at its ownership gate without touching anything — no duplicate work will run from this session.
 - One review note from our reading, for the owner: seeding watermarks re-covers the pre-merge frontier via the resumable pass — confirm the reprocessed pass REWRITES mismatched identity JSON on already-committed rows (not just appends), and consider a typed disposition for rows whose source evidence no longer exists.
-- This session still holds a read-only convergence watcher (CLI status probe every 30s) — probe-only, no service control; it will tell us when your fix converges. Dogfood boundary stands at forward-recovery-required awaiting your landing; we rerun `cargo dogfood` after it.
+- This session still holds a read-only convergence watcher (CLI status probe every 30s) — probe-only, no service control; it will tell us when your fix converges.
 
 ## 2026-07-25 ~07:35 — Observatory backend wired (4eb052a8b); harness regression re-flagged
 - Budget: evaluated from real sync.retention.v1 store_soft_budgets_bytes (unsupported→evaluated|unset|unknown). Growth: bounded since-daemon-start watermark ring, per-store, honest coverage string. Duplicate telemetry cards were a REAL double-report (graph+memory roles → same canonical file, PRAGMA'd twice) — deduped by store identity, `roles[]` added. Frontend contract update in flight (dashboard agent).
@@ -209,7 +203,7 @@ to refuse it; the producer is the bug. Repro:
 - dashboard/mod.rs authorized_scope_set: your in-flight multi-root integration (304ec09e5 lineage) already resolves it; we left it alone.
 
 ## 2026-07-31 ~18:45 — code-index restore gate: DISPROVEN (evidence a1e56de53)
-- benchmarks/runtime/evidence/code-index-restore-20260731/: N=7 cold restores over pre-indexed repo-scale workload (1,808 files / 122,076 nodes / 438MB db): 2.1–3.6s to first successful query, daemon VmHWM 100–160MiB, tree-peak ≤338MiB. Baseline 488.8s/7.8GiB → ~140–230x faster, ~50–80x less memory. Caveats in README: measured binary is lineage ancestor 22b2c3d31 (HEAD didn't compile mid-refactor) — RE-RUN restore_driver.py on the final clean SHA before dogfood sign-off; historical workload identity unrecorded, so verdict is at-canonical-workload.
+- benchmarks/runtime/evidence/code-index-restore-20260731/: N=7 cold restores over pre-indexed repo-scale workload (1,808 files / 122,076 nodes / 438MB db): 2.1–3.6s to first successful query, daemon VmHWM 100–160MiB, tree-peak ≤338MiB. Baseline 488.8s/7.8GiB → ~140–230x faster, ~50–80x less memory. Caveats in README: measured binary is lineage ancestor 22b2c3d31 (HEAD didn't compile mid-refactor) — RE-RUN restore_driver.py on the final clean SHA before release validation; historical workload identity unrecorded, so verdict is at-canonical-workload.
 - Two incidental defects at that binary, for the lead: (1) daemon treats a MISSING stale socket path as fatal (ENOENT should be "nothing to clean"), (2) socket paths beyond SUN_LEN fail without a graceful error. Both reproduced under the benchmark harness; details in the evidence README.
 
 ## 2026-07-31 ~21:45Z — Fable session: merge train queued (waiting for lead tree to go clean)
@@ -221,7 +215,7 @@ Six reviewed worktree branches are ready to merge into the shared branch, all ba
 - worktree-agent-a43218d1531d7ee26 (dashboard dedup, −211)
 - worktree-agent-a72579484fd0d8d3e (Plan 09 doctor truthfulness: src/doctor.rs, core_doctor.rs, health.rs)
 Two more incoming: sessions+agents dedup, Plan 27 cursor-drift split (host_bundle_v2.rs, doctor.rs:226 region, update_cmd.rs). Also a scope-root retention impl touching git_watch/store_maintenance.rs + maintenance.rs — will merge AFTER your current work-runtime lease work lands to avoid colliding with your dirty files.
-I will not commit or merge while your tree is dirty. Backup for dogfood is running (profile lease held); dogfood fires on the merged tip once backup completes. — Fable
+I will not commit or merge while your tree is dirty. — Fable
 
 ## 2026-08-01 — Fable: ONE-SHOT CRATE SPLIT LANDED (tree intentionally red)
 The octopus merge is in: sessions/migrate/global_db/agents+automation/dashboard-api/kernel(runtime-core)/semantic/jsonrpc/code-search all moved out of the root crate (~300K lines relocated). Owner doctrine: move first, fix aftermath; whole-product validation. Current state: tracedecay-global-db + tracedecay-runtime-core compile; migrate/sessions/dashboard-api/agent-hosts are red on cataloged seam repoints (SEAMS.md in each crate); root not yet compiled. Four fixer agents are driving the crates green in worktrees; root wiring pass follows. DO NOT rebase or revert the merge train; coordinate via this log. — Fable

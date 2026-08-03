@@ -187,6 +187,7 @@ impl Database {
         mode: TestDatabaseRuntimeMode,
         target_shard: StoreShardIdV1,
     ) -> Result<(Self, bool)> {
+        let graph_shard_check = target_shard == test_code_shard()?;
         let authority = authority.hold_for(db_path, "publish test database runtime")?;
         authority.require_active_write_scope("publish test database runtime")?;
         let path = authority.canonical_database_path().to_path_buf();
@@ -312,17 +313,22 @@ impl Database {
             DatabaseAccessMode::ReadWrite
         };
         let database = Self::publish_runtime(runtime, access).await?;
-        let migrated = match mode {
-            TestDatabaseRuntimeMode::Initialize => {
-                crate::db::migrations::migrate(&database).await?;
-                false
+        // Writable GRAPH test runtimes assert the store already carries the
+        // schema this binary creates; there is no ladder to step, so nothing
+        // is ever reported as migrated. Registered (global/session) shards are
+        // a different schema family: they carry their own installer and sit at
+        // user_version 0 by design, so the graph identity check must not run
+        // against them.
+        let graph_shard = graph_shard_check;
+        match mode {
+            TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
+                if graph_shard =>
+            {
+                crate::db::migrations::ensure_schema_current(&database).await?;
             }
-            TestDatabaseRuntimeMode::Existing => {
-                crate::db::migrations::migrate(&database).await?.is_some()
-            }
-            TestDatabaseRuntimeMode::ReadOnly => false,
-        };
-        Ok((database, migrated))
+            _ => {}
+        }
+        Ok((database, false))
     }
 }
 

@@ -192,21 +192,14 @@ fn now_secs_i64() -> i64 {
 /// required before any sweep. When the inventory cannot be read this pass
 /// reports failure and collects nothing rather than sweeping with an empty
 /// protection set, which would delete generations vectors still read from.
-pub(super) async fn run_code_generation_retention(
-    graph: &TraceDecay,
-    cancellation: &crate::application::context::CancellationToken,
-) -> bool {
+pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
     use crate::retention::code_index_generations::{
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-        execute_code_generation_retention, plan_next_code_generation_retention_cancellable,
-        recover_code_generation_retention,
+        run_code_generation_retention as run_retention,
     };
+    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
     use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
 
-    if cancellation.is_cancelled() {
-        log_code_generation_retention_degraded("retention_cancelled");
-        return false;
-    }
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
     // No published generation means nothing has been sealed for this project.
@@ -214,68 +207,12 @@ pub(super) async fn run_code_generation_retention(
         return true;
     }
 
-    let store = match DatabaseVectorGenerationStoreV1::open_legacy_migration(graph.db()).await {
-        Ok(store) => store,
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_generation_store_unavailable");
-            return false;
-        }
-    };
-    let inventory = match store.read_legacy_inventory().await {
-        Ok(inventory) => inventory,
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_inventory_read_failed");
-            return false;
-        }
-    };
-    let witness = match inventory.retention_witness() {
-        Ok(witness) => witness,
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_inventory_unreadable");
-            return false;
-        }
-    };
-    let vector_readable_sources = witness.readable_sources().clone();
-
-    let plan_root = store_root.clone();
-    let plan_cancellation = cancellation.clone();
-    let plan = tokio::task::spawn_blocking(move || {
-        recover_code_generation_retention(&plan_root, &vector_readable_sources)?;
-        plan_next_code_generation_retention_cancellable(
-            &plan_root,
-            &vector_readable_sources,
-            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
-            &|| plan_cancellation.is_cancelled(),
-        )
-    })
-    .await;
-    let plan = match plan {
-        Ok(Ok(plan)) => plan,
-        Ok(Err(
-            crate::retention::code_index_generations::CodeGenerationRetentionErrorV1::Cancelled,
-        )) => {
-            log_code_generation_retention_degraded("retention_cancelled");
-            return false;
-        }
-        Ok(Err(_)) => {
-            log_code_generation_retention_degraded("retention_plan_failed");
-            return false;
-        }
-        Err(_) => {
-            log_code_generation_retention_degraded("retention_task_panicked");
-            return false;
-        }
-    };
-    if plan.collectable_generations.is_empty() {
-        return true;
-    }
-    if cancellation.is_cancelled() {
-        log_code_generation_retention_degraded("retention_cancelled");
-        return false;
-    }
+    // Hold the canonical graph writer lane from the pin read through durable
+    // filesystem publication. A vector-generation writer cannot publish a new
+    // readable source between this inventory snapshot and deletion.
     let writer = match graph
         .db()
-        .begin_write_transaction("code generation retention pin witness")
+        .begin_write_transaction("code generation retention pin fence")
         .await
     {
         Ok(writer) => writer,
@@ -284,36 +221,44 @@ pub(super) async fn run_code_generation_retention(
             return false;
         }
     };
-    if witness.validate(&writer).await.is_err() {
-        if writer.rollback().await.is_err() {
-            log_code_generation_retention_degraded("vector_writer_lane_release_failed");
+    let vector_readable_sources = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
+        Ok(store) => match store.read_legacy_inventory().await {
+            Ok(inventory) => match inventory.read_only_inventory() {
+                Ok(inventory) => inventory.retained_readable_sources(),
+                Err(_) => {
+                    log_code_generation_retention_degraded("vector_inventory_unreadable");
+                    return false;
+                }
+            },
+            Err(_) => {
+                log_code_generation_retention_degraded("vector_inventory_read_failed");
+                return false;
+            }
+        },
+        Err(_) => {
+            log_code_generation_retention_degraded("vector_generation_store_unavailable");
             return false;
         }
-        log_code_generation_retention_degraded("vector_inventory_changed");
-        return false;
-    }
-    if cancellation.is_cancelled() {
-        if writer.rollback().await.is_err() {
-            log_code_generation_retention_degraded("vector_writer_lane_release_failed");
-            return false;
-        }
-        log_code_generation_retention_degraded("retention_cancelled");
-        return false;
-    }
+    };
+
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
-    let report = execute_code_generation_retention(
-        &store_root,
-        plan,
-        CodeGenerationRetentionModeV1::Apply,
-        completed_at,
-    );
+    let report = tokio::task::spawn_blocking(move || {
+        run_retention(
+            &store_root,
+            &vector_readable_sources,
+            DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+            CodeGenerationRetentionModeV1::Apply,
+            completed_at,
+        )
+    })
+    .await;
     if writer.rollback().await.is_err() {
         log_code_generation_retention_degraded("vector_writer_lane_release_failed");
         return false;
     }
 
     match report {
-        Ok(report) => {
+        Ok(Ok(report)) => {
             let reclaimed = report.receipt.as_ref().map_or_else(
                 || {
                     report
@@ -339,8 +284,12 @@ pub(super) async fn run_code_generation_retention(
             }
             true
         }
-        Err(_) => {
+        Ok(Err(_)) => {
             log_code_generation_retention_degraded("retention_pass_failed");
+            false
+        }
+        Err(_) => {
+            log_code_generation_retention_degraded("retention_task_panicked");
             false
         }
     }
@@ -353,7 +302,7 @@ pub(super) async fn run_code_generation_retention(
 /// derives exactly one such scope from the root it was handed. Nothing has ever
 /// enumerated the siblings, so a scope whose project root is gone — a deleted
 /// agent worktree is the ordinary cause — is unreachable by any retention pass
-/// and uncounted by any report. One dogfood repository carried three scope
+/// and uncounted by any report. One large repository carried three scope
 /// directories, two of them orphaned, holding 7.2 GiB nothing could see.
 ///
 /// The pass is fail-closed by construction. It collects only when it can prove

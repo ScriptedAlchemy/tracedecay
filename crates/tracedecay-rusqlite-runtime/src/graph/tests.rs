@@ -263,7 +263,7 @@ fn initialized_graph_abort_closes_handles_and_removes_every_sidecar() {
         .initialize(binding, locator, path.clone(), AdmissionConfigV1::default())
         .unwrap();
     attachment
-        .migration_sql_handle()
+        .exact_sql_handle()
         .unwrap()
         .execute_batch(
             "CREATE TABLE initialized_abort(value INTEGER);

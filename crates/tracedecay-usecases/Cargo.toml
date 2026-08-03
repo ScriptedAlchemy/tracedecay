@@ -37,7 +37,6 @@ fs2 = "0.4"
 gix = { version = "0.81", default-features = false, features = ["revision", "blob-diff", "sha1", "status"] }
 glob = "0.3"
 hex = "0.4"
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup"] }
 regex = "1"
 same-file = "1"
 schemars = "1.2.1"
@@ -54,7 +53,6 @@ tracing = "0.1"
 url = "2"
 zeroize = "1.9.0"
 ignore = "0.4"
-tracedecay-api = { path = "../tracedecay-api", version = "0.1.0" }
 tracedecay-application = { path = "../tracedecay-application", version = "0.1.0", features = ["native-git"] }
 tracedecay-automation = { path = "../tracedecay-automation", version = "0.1.0" }
 tracedecay-code-index = { path = "../tracedecay-code-index", version = "0.1.0", default-features = false }

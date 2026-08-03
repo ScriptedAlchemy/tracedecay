@@ -112,8 +112,6 @@ pub struct RegistryReconstructionDiffReport {
 /// The command crate can request exact registry/session operations without
 /// receiving database handles or reopening owned paths.
 pub struct MigrationRegistryRuntime {
-    registry:
-        crate::root_seam::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
     profile_database: std::sync::Arc<RegisteredGlobalDb>,
 }
 
@@ -162,10 +160,7 @@ impl MigrationRegistryRuntime {
             )
             .await?;
         let profile_database = registry.profile_database().await?;
-        Ok(Self {
-            registry,
-            profile_database,
-        })
+        Ok(Self { profile_database })
     }
 
     pub async fn registered_project_paths(
@@ -229,29 +224,6 @@ impl MigrationRegistryRuntime {
         } else {
             registry_gc_report(self.profile_database.as_ref(), profile_root, prefix).await
         }
-    }
-
-    pub async fn repair_project_sessions(
-        &self,
-        project_id: &str,
-        project_root: &Path,
-        expected_database_path: &Path,
-    ) -> tracedecay_runtime_core::errors::Result<()> {
-        let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
-            tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: format!("invalid project identity '{project_id}': {error}"),
-            }
-        })?;
-        let database = self
-            .registry
-            .project_sessions(project_id, [project_root.to_path_buf()])
-            .await?;
-        if database.db_path() != expected_database_path {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
-                message: "registered session database does not match repair manifest".to_string(),
-            });
-        }
-        crate::root_seam::global_db::repair_session_temporal_store(database.as_ref()).await
     }
 }
 

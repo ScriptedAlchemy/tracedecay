@@ -11,20 +11,21 @@ unusable until a later PR.
 
 Earlier enrollment, topology, spool, replica, backup, failover, fixture, and
 packet artifact names are historical evidence, not standalone prerequisites
-or mandatory recreation targets. Published APIs and persisted remote records
-retain compatibility and migration obligations; all other retention is judged
-by the direct offline capture, fenced replay, query, backup/restore, failover,
-platform, and regression behavior below.
+or mandatory recreation targets. Only actually independently released public
+APIs retain protocol compatibility; persisted remote records use the
+fresh-store rule. All other retention is judged by the direct offline capture,
+fenced replay, query, backup/restore, failover, platform, and regression
+behavior below.
 
 No remote enrollment/spool/replica/backup format is established on
 `origin/master` or in a published package/release. Pure source-only/internal
-enrollment helpers may take their final shape in place. Wire-visible enrollment
-revisions retain negotiation until an authorized installed-node/client census
-proves absence. Spool files, replica journals, backup manifests, checkpoints,
-and receipts may exist through dogfood; old readers and migration/recovery
-remain fail-closed until the machine/profile census proves absence.
-Authenticated protocol negotiation remains mandatory because independently
-deployed nodes can differ.
+enrollment helpers, wire-visible V2 enrollment revisions, spool files, replica
+journals, backup manifests, checkpoints, and receipts take their final shape
+in place. Only the exact final persisted shape is accepted; any other database,
+store, spool, file, or projection returns typed `ResetRequired` and requires
+explicit reset or recreation. No storage reader, migration, backfill, dual
+write, or census path exists. Authenticated protocol negotiation remains
+separate for actual independently released nodes.
 
 ## User outcome
 
@@ -196,17 +197,14 @@ finding and remediation identities.
    exercise higher-epoch promotion, atomic publication, rollback before
    publication, and read-only old-authority rejoin from the same operational
    surfaces.
-5. **Preserve evidenced compatibility across the journey.** Existing local capture,
-   query, settings, CLI/API/dashboard/Doctor, stored generations, repository
-   identity, retention/deletion, diagnostics, and health contracts remain
-   supported through the remote application model where `origin/master`,
-   published releases, or live persistence prove the predecessor. Pure
-   source-only/internal enrollment helpers change in place; wire-visible
-   revisions retain negotiation until the installed-node/client census.
-   Potentially persisted spool, cache/replica, backup, and restore records
-   retain readers and migration/recovery until the authorized machine/profile
-   census proves absence; they never silently reinterpret authority, identity,
-   epoch, watermark, or deletion lineage. PR18 adds SDK bindings without
+5. **Keep protocol and storage separate across the journey.** An actual
+   independently released public CLI/API/dashboard/Doctor protocol may retain
+   its documented compatibility surface. Local capture, stored generations,
+   repository identity, retention/deletion, diagnostics, spools, caches,
+   replicas, backups, and restores accept only their exact final persisted
+   shape. Any other shape returns `ResetRequired` before interpretation and
+   requires explicit reset or recreation; it never gains a reader, migration,
+   backfill, dual write, or census path. PR18 adds SDK bindings without
    replacing these PR16 APIs.
 
 ## Replacement and deletion
@@ -217,10 +215,10 @@ finding and remediation identities.
   multi-primary/LWW mutation, automatic offline promotion, and lease-timeout
   claims of exclusive authority.
 - Remove standalone enrollment, topology, spool, replica, backup, or failover
-  contract phases that do not participate in this journey. Retain every
-  capability and fold its necessary persistence, migration, compatibility, and
-  adapters into the first callable enrollment/capture, replay, query,
-  backup/restore, or failover slice that uses it.
+  contract phases that do not participate in this journey. Retain exact final
+  schema validation and explicit reset/recreation in the first callable
+  enrollment/capture, replay, query, backup/restore, or failover slice that
+  uses persisted state.
 - Remove duplicated provider-specific or Plan 37 acceptance matrices. Durable
   saved-content feedback, read-only GitHub-ingested evidence, and CI
   localization use the same fenced replay/query/backup/failover path; overlays
@@ -245,13 +243,13 @@ death, sink fence failure, wrong Brain/shard/generation/epoch/schema/watermark
 cache manifests, interrupted backup/restore publication,
 newer tombstone/quarantine state, insufficient standby frontier, rollback, and
 unavailable shards. Every surface must show the same partial, stale, unknown,
-unavailable, or recovery-required truth. Compatibility checks prove supported
-older local/API/stored-data inputs migrate or fail explicitly without authority
-or project-scope drift. Negative checks prove unsaved overlays and analyzer state
-never become durable remote records and no client or offline path opens
-authority storage. The final PR16 check is the relevant ordinary all-feature
-repository test run, not a separate acceptance gate; PR16 adds no benchmark
-harness or placeholder baseline.
+unavailable, or recovery-required truth. Compatibility checks cover only an
+actually independently released public local/API protocol; every non-final
+stored-data input returns `ResetRequired` before interpretation. Negative
+checks prove unsaved overlays and analyzer state never become durable remote
+records and no client or offline path opens authority storage. The final PR16
+check is the relevant ordinary all-feature repository test run, not a separate
+acceptance gate; PR16 adds no benchmark harness or placeholder baseline.
 
 ## Not in PR16
 

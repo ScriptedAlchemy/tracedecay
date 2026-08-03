@@ -17,7 +17,6 @@ mod db_test;
 mod fact_merge_hydration_test;
 mod global_registry_test;
 mod migrate_inventory_test;
-mod migration_manifest_test;
 mod multi_connection_test;
 mod native_project_alias_test;
 mod profile_storage_migration_test;

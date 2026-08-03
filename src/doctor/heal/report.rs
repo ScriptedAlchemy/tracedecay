@@ -1,8 +1,8 @@
-use super::{HealthPassReport, HealthPassWarning, SessionStoreRepairHealth};
+use super::{HealthPassReport, HealthPassWarning};
 
 pub(super) fn render_missing_profile_report() -> HealthPassReport {
     let report = HealthPassReport {
-        warnings: vec![HealthPassWarning::durable(
+        warnings: vec![HealthPassWarning::new(
             "could not determine the profile data directory",
         )],
         ..HealthPassReport::default()
@@ -13,24 +13,6 @@ pub(super) fn render_missing_profile_report() -> HealthPassReport {
 
 /// Prints the doctor-style summary for a computed report.
 pub(super) fn render_health_pass_report(report: &HealthPassReport) {
-    if report.retired_consolidation_manifests.is_empty() {
-        eprintln!("  \x1b[32m✔\x1b[0m No completed consolidation manifests to retire");
-    } else {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Retired {} completed consolidation input manifest(s):",
-            report.retired_consolidation_manifests.len()
-        );
-        for path in &report.retired_consolidation_manifests {
-            eprintln!("      • {}", path.display());
-        }
-    }
-    if report.retired_consolidation_registry_projects > 0 {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Retired {} superseded consolidation registry project(s)",
-            report.retired_consolidation_registry_projects
-        );
-    }
-
     if report.quarantined_branch_meta.is_empty() {
         eprintln!("  \x1b[32m✔\x1b[0m No corrupt branch metadata files");
     } else {
@@ -64,24 +46,6 @@ pub(super) fn render_health_pass_report(report: &HealthPassReport) {
                 eprintln!("        (config: {})", config_path.display());
             }
         }
-    }
-
-    match report.session_store_repair {
-        Some(SessionStoreRepairHealth::NotRequired) => {
-            eprintln!("  \x1b[32m✔\x1b[0m Session-store repair not required");
-        }
-        Some(SessionStoreRepairHealth::Pending) => {
-            eprintln!(
-                "  \x1b[33m◌\x1b[0m Session-store repair pending; daemon maintenance will resume it"
-            );
-        }
-        Some(SessionStoreRepairHealth::Complete) => {
-            eprintln!("  \x1b[32m✔\x1b[0m Session-store repair complete");
-        }
-        Some(SessionStoreRepairHealth::Degraded) => {
-            eprintln!("  \x1b[33m!\x1b[0m Session-store repair is degraded");
-        }
-        None => {}
     }
 
     if report.remaining_findings.is_empty() {
