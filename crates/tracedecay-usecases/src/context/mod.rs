@@ -4,14 +4,16 @@
 
 pub mod read_cache;
 pub mod read_modes;
+mod registered_scope;
 pub mod source_read;
 
 use std::fmt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use sha2::{Digest, Sha256};
-use tracedecay_domain::{ProjectId, RefId, RepositoryId, WorktreeId};
+use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
+
+pub use registered_scope::RegisteredScopeResolver;
 
 macro_rules! string_id {
     ($($name:ident),+ $(,)?) => {
@@ -448,9 +450,7 @@ pub fn resolve_exact_root_scope(
     project_root: &Path,
     project_id: &ProjectId,
 ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-    #[allow(deprecated)] // exact-root special case of the consolidated facade
-    let scope = resolve_registered_root_scope(project_root, project_root, project_id);
-    scope
+    RegisteredScopeResolver::resolve(project_root, project_root, project_id)
 }
 
 /// Resolves the exact transport-neutral scope for one already-authorized
@@ -479,81 +479,7 @@ pub fn resolve_registered_root_scope(
     requested_root: &Path,
     project_id: &ProjectId,
 ) -> Result<tracedecay_application::ResolvedScope, ApplicationScopeError> {
-    if !requested_root.is_absolute() {
-        return Err(ApplicationScopeError::RelativeRoot {
-            requested_root: requested_root.display().to_string(),
-        });
-    }
-    if !registered_root.is_absolute() {
-        return Err(ApplicationScopeError::Resolution(format!(
-            "registered root '{}' is not absolute",
-            registered_root.display()
-        )));
-    }
-    let registered_root = registered_root.canonicalize().map_err(|error| {
-        ApplicationScopeError::Resolution(format!(
-            "registered root '{}' could not be canonicalized: {error}",
-            registered_root.display()
-        ))
-    })?;
-    let requested_root = requested_root.canonicalize().map_err(|error| {
-        ApplicationScopeError::Resolution(format!(
-            "requested root '{}' could not be canonicalized: {error}",
-            requested_root.display()
-        ))
-    })?;
-    // A requested root at or inside the registered canonical root names the
-    // registered worktree itself, so the scope anchors to the canonical root.
-    // A requested root outside it is authorized only as the same repository
-    // (a linked worktree shares the git common dir); anything else is an
-    // unauthorized sibling root and fails closed.
-    let scope_root =
-        if requested_root == registered_root || requested_root.starts_with(&registered_root) {
-            registered_root
-        } else {
-            let registered_repository = repository_id_for_root(&registered_root)?;
-            let requested_repository = repository_id_for_root(&requested_root)?;
-            if registered_repository != requested_repository {
-                return Err(ApplicationScopeError::UnauthorizedSiblingRoot {
-                    registered_root: registered_root.display().to_string(),
-                    requested_root: requested_root.display().to_string(),
-                });
-            }
-            requested_root
-        };
-    let repository_id = repository_id_for_root(&scope_root)?;
-    let worktree_id = WorktreeId::new(format!(
-        "worktree.daemon.{}",
-        hex::encode(Sha256::digest(scope_root.to_string_lossy().as_bytes()))
-    ))
-    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-    let reference = tracedecay_runtime_core::branch::current_branch(&scope_root)
-        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
-    let scope = tracedecay_application::ResolvedScope::new(
-        project_id.clone(),
-        repository_id,
-        worktree_id,
-        reference,
-    )
-    .map_err(|error| ApplicationScopeError::Contract(error.to_string()))?;
-    // A scope whose digest does not match its fields is stale or tampered and
-    // must never cross the boundary.
-    scope
-        .validate()
-        .map_err(|error| ApplicationScopeError::InconsistentScope(error.to_string()))?;
-    Ok(scope)
-}
-
-fn repository_id_for_root(
-    root: &Path,
-) -> Result<tracedecay_domain::RepositoryId, ApplicationScopeError> {
-    let common = tracedecay_runtime_core::worktree::git_common_dir(root)
-        .unwrap_or_else(|| root.to_path_buf());
-    RepositoryId::new(format!(
-        "repository.daemon.{}",
-        hex::encode(Sha256::digest(common.to_string_lossy().as_bytes()))
-    ))
-    .map_err(|error| ApplicationScopeError::Resolution(error.to_string()))
+    RegisteredScopeResolver::resolve(registered_root, requested_root, project_id)
 }
 
 /// The explicit failure states when the root orchestration context crosses
@@ -1014,8 +940,30 @@ mod tests {
     #[allow(deprecated)]
     fn exact_root_scope_resolution_is_stable_and_valid() {
         let temp = tempfile::TempDir::new().unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.name", "TraceDecay Test"][..],
+            &["config", "user.email", "test@tracedecay.invalid"][..],
+            &["commit", "--allow-empty", "-qm", "initial"][..],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .current_dir(temp.path())
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
         let root = temp.path().canonicalize().unwrap();
         let project_id = ProjectId::new("project.cli-scope-test").unwrap();
+        assert!(
+            tracedecay_runtime_core::storage::write_repository_identity_marker(
+                &root,
+                project_id.as_str(),
+            )
+            .unwrap()
+        );
 
         let first = resolve_exact_root_scope(&root, &project_id).unwrap();
         let second = resolve_exact_root_scope(&root, &project_id).unwrap();
