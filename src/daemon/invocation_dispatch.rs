@@ -157,8 +157,13 @@ pub(super) async fn resolve_multi_root_projects(
             .root
             .canonicalize()
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-        let scope = tracedecay_usecases::context::RegisteredScopeResolver::resolve(
+        tracedecay_usecases::context::RegisteredScopeResolver::resolve(
             &registered_root,
+            &root,
+            &selector.project_id,
+        )
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
             &root,
             &selector.project_id,
         )

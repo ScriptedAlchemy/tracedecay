@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -17,7 +18,10 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use super::{MESSAGE_SEARCH_ROOT_SESSION_ID, McpServer};
+use super::{
+    MESSAGE_SEARCH_ROOT_SESSION_ID, McpServer, RetainedProjectGraphFuture,
+    RetainedProjectGraphResolver,
+};
 use crate::application::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
 };
@@ -45,6 +49,13 @@ async fn indexed_project() -> (
     PinnedUserDataDir,
 ) {
     let pin = PinnedUserDataDir::new();
+    let (cg, runtime, dir) = indexed_project_with_id(MESSAGE_SEARCH_PROJECT_ID).await;
+    (cg, runtime, dir, pin)
+}
+
+async fn indexed_project_with_id(
+    project_id: &str,
+) -> (TraceDecay, HostAdmissionTestRuntimeV1, TempDir) {
     let dir = TempDir::new().expect("temp project");
     git(dir.path(), &["init", "-q", "-b", "main"]);
     git(dir.path(), &["config", "user.email", "test@example.com"]);
@@ -61,7 +72,7 @@ async fn indexed_project() -> (
     let runtime = HostAdmissionTestRuntimeV1::project(
         crate::config::user_data_dir().expect("isolated profile root"),
         dir.path(),
-        ProjectId::new(MESSAGE_SEARCH_PROJECT_ID).expect("typed project identity"),
+        ProjectId::new(project_id).expect("typed project identity"),
     )
     .await
     .expect("registered message-search runtime");
@@ -69,7 +80,7 @@ async fn indexed_project() -> (
         .initialize_project_graph_for_test(dir.path(), TraceDecayOpenOptions::default())
         .await
         .expect("daemon-owned project init");
-    (cg, runtime, dir, pin)
+    (cg, runtime, dir)
 }
 
 pub(super) async fn server_with_authorities() -> (Arc<McpServer>, TempDir, PinnedUserDataDir) {
@@ -407,6 +418,215 @@ async fn fresh_direct_root_reuses_configuration_session_storage() {
     // authority instead of reopening the path.
     assert!(server.session_db.is_some());
     assert!(server.project_session_retrieval_service.is_some());
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn registered_project_and_linked_worktree_select_their_exact_session_authority() {
+    const ACTIVE_PROJECT_ID: &str = "project.message-search.active";
+    const SELECTED_PROJECT_ID: &str = "project.message-search.selected";
+
+    let _pin = PinnedUserDataDir::new();
+    let (active_graph, active_runtime, active_dir) =
+        indexed_project_with_id(ACTIVE_PROJECT_ID).await;
+    let (selected_graph, selected_runtime, selected_dir) =
+        indexed_project_with_id(SELECTED_PROJECT_ID).await;
+    let linked_owner = TempDir::new().expect("linked worktree owner");
+    let linked_root = linked_owner.path().join("selected-linked");
+    let linked_root_arg = linked_root.to_string_lossy();
+    git(
+        selected_dir.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            linked_root_arg.as_ref(),
+            "-b",
+            "feature/selected-linked",
+        ],
+    );
+    selected_runtime
+        .upsert_project_alias(&linked_root, SELECTED_PROJECT_ID)
+        .await
+        .expect("registered linked-worktree alias");
+    let selected_linked_graph = selected_runtime
+        .initialize_project_graph_for_test(&linked_root, TraceDecayOpenOptions::default())
+        .await
+        .expect("initialize linked-worktree graph");
+
+    for (runtime, project_id, message_id, text) in [
+        (
+            &active_runtime,
+            ACTIVE_PROJECT_ID,
+            "message-active-route",
+            "route identity evidence from active",
+        ),
+        (
+            &selected_runtime,
+            SELECTED_PROJECT_ID,
+            "message-selected-route",
+            "route identity evidence from selected",
+        ),
+    ] {
+        Box::pin(seed_temporal_message(
+            runtime,
+            HostAdmissionScope::Project,
+            project_id,
+            ObservationScopeV1::Project {
+                project_id: ProjectId::new(project_id).expect("fixture project id"),
+            },
+            1,
+            MESSAGE_SEARCH_ROOT_SESSION_ID,
+            "cursor",
+            message_id,
+            text,
+        ))
+        .await;
+        runtime
+            .checkpoint_session_database_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("checkpoint exact project session authority");
+    }
+
+    let selected_graph = Arc::new(selected_graph);
+    let selected_linked_graph = Arc::new(selected_linked_graph);
+    let selected_root = selected_dir.path().to_path_buf();
+    let resolver_linked_root = linked_root.clone();
+    let requested_roots = Arc::new(Mutex::new(Vec::new()));
+    let resolver_requested_roots = Arc::clone(&requested_roots);
+    let resolver: RetainedProjectGraphResolver = Arc::new(move |request| {
+        resolver_requested_roots
+            .lock()
+            .expect("record retained graph request")
+            .push(request.requested_worktree_root.clone());
+        let graph = match request
+            .owner
+            .as_ref()
+            .map(|owner| owner.project.project_id.as_str())
+        {
+            Some(SELECTED_PROJECT_ID) if request.requested_worktree_root == selected_root => {
+                Some(Arc::clone(&selected_graph))
+            }
+            Some(SELECTED_PROJECT_ID)
+                if request.requested_worktree_root == resolver_linked_root =>
+            {
+                Some(Arc::clone(&selected_linked_graph))
+            }
+            _ => None,
+        };
+        Box::pin(async move { Ok(graph) }) as RetainedProjectGraphFuture
+    });
+    let mut context = active_runtime
+        .into_mcp_server_context_for_test(active_graph, None)
+        .expect("active registered MCP context");
+    context.retained_project_graph_resolver = Some(resolver);
+    let server = McpServer::new_with_context(context).await;
+
+    for (selector, expected_root) in [
+        (
+            json!({"project_id": SELECTED_PROJECT_ID}),
+            selected_dir.path(),
+        ),
+        (json!({"project_path": linked_root}), linked_root.as_path()),
+    ] {
+        let mut arguments = selector;
+        let arguments = arguments
+            .as_object_mut()
+            .expect("selector object for message search");
+        arguments.insert("query".to_owned(), json!("route identity evidence"));
+        arguments.insert("limit".to_owned(), json!(10));
+        arguments.insert("format".to_owned(), json!("json"));
+        let payload = message_search(&server, Value::Object(arguments.clone())).await;
+        assert_eq!(payload["count"], 1, "{payload}");
+        assert!(
+            payload["results"][0]["message"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("from selected")),
+            "selected project must read only its registered session authority: {payload}"
+        );
+        assert_eq!(
+            payload["selected_project_root"],
+            Value::String(expected_root.display().to_string()),
+            "retrieval response must identify the exact worktree that answered: {payload}"
+        );
+    }
+    assert_eq!(
+        *requested_roots
+            .lock()
+            .expect("recorded retained graph requests"),
+        vec![selected_dir.path().to_path_buf(), linked_root.clone()],
+        "project-path selection must preserve its linked-worktree identity"
+    );
+
+    let all_registered = message_search(
+        &server,
+        json!({
+            "query": "route identity evidence",
+            "project_scope": "all_registered",
+            "limit": 10,
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(
+        all_registered["searched_project_count"], 2,
+        "{all_registered}"
+    );
+    assert_eq!(all_registered["count"], 2, "{all_registered}");
+    let project_ids = all_registered["results"]
+        .as_array()
+        .expect("multi-root results")
+        .iter()
+        .filter_map(|result| result["project_id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        project_ids,
+        std::collections::BTreeSet::from([ACTIVE_PROJECT_ID, SELECTED_PROJECT_ID])
+    );
+
+    let wrong = message_search(
+        &server,
+        json!({
+            "query": "route identity evidence",
+            "project_id": "project.message-search.unknown",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(wrong["status"], "wrong_scope", "{wrong}");
+    assert_eq!(wrong["outcome"], "wrong_scope", "{wrong}");
+    assert_eq!(
+        wrong["error"]["code"], "session_retrieval_wrong_scope",
+        "{wrong}"
+    );
+    server.shutdown().await;
+    drop((active_dir, selected_dir, linked_owner));
+}
+
+#[tokio::test]
+async fn all_registered_reports_missing_registry_authority_as_typed_unavailable() {
+    let (cg, runtime, _dir, _pin) = indexed_project().await;
+    let mut context = runtime
+        .into_mcp_server_context_for_test(cg, None)
+        .expect("registered MCP context");
+    context.registry_db = None;
+    let server = McpServer::new_with_context(context).await;
+
+    let payload = message_search(
+        &server,
+        json!({
+            "query": "route identity evidence",
+            "project_scope": "all_registered",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(payload["status"], "unavailable", "{payload}");
+    assert_eq!(payload["outcome"], "unavailable", "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "project_registry_unavailable",
+        "{payload}"
+    );
     server.shutdown().await;
 }
 

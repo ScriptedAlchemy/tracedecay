@@ -11,6 +11,7 @@ use tempfile::TempDir;
 use tracedecay_application::{
     CancellationContext, Deadline, MultiRootExecuteRequestV1, MultiRootOperationV1,
     MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasStatusV1, MultiRootScopeSetReadRequestV1,
+    RegisteredRootSelectorV1,
 };
 use tracedecay_domain::{ScopeSetId, UtcMicros};
 
@@ -207,7 +208,6 @@ async fn run_authenticated_multi_root_journey() {
     let second_uri = url::Url::from_file_path(second.path())
         .expect("second URI")
         .to_string();
-
     // A single folder that is not the active project is still refused: a lone
     // sibling hint must not reroute the session.
     let sibling_root_lsp = execute_daemon_invocation(
@@ -244,14 +244,18 @@ async fn run_authenticated_multi_root_journey() {
         ),
     )
     .await;
-    assert!(matches!(
-        single_root_lsp.outcome,
-        DaemonInvocationOutcome::LspOpened {
-            scope_set_id: None,
-            scope_set_digest: None,
-            ..
-        }
-    ));
+    assert!(
+        matches!(
+            single_root_lsp.outcome,
+            DaemonInvocationOutcome::LspOpened {
+                scope_set_id: None,
+                scope_set_digest: None,
+                ..
+            }
+        ),
+        "{:#?}",
+        single_root_lsp.outcome
+    );
     assert_eq!(
         engine
             .invocation
@@ -317,7 +321,12 @@ async fn run_authenticated_multi_root_journey() {
             MultiRootScopeSetCasRequestV1::new(
                 scope_set_id.clone(),
                 None,
-                vec![second_project.clone(), first_project.clone()],
+                vec![
+                    RegisteredRootSelectorV1::new(second_project.clone(), second.path())
+                        .expect("second registered root"),
+                    RegisteredRootSelectorV1::new(first_project.clone(), first.path())
+                        .expect("first registered root"),
+                ],
             )
             .expect("CAS request"),
             observed_at,
