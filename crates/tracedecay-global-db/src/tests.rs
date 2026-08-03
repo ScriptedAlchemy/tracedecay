@@ -48,6 +48,92 @@ async fn row_count(db: &RegisteredGlobalDb, table: &str) -> i64 {
 }
 
 #[tokio::test]
+async fn git_common_dir_aliases_share_one_project_and_store_authority() {
+    let harness = RegisteredGlobalDbHarness::open("common-dir-single-authority").await;
+    let root = harness.storage_root().join("repository");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let common_dir = root.join("common.git");
+    for path in [&primary, &linked, &common_dir] {
+        std::fs::create_dir_all(path).unwrap();
+    }
+
+    harness
+        .registered
+        .upsert_code_project(
+            "proj_primary",
+            &primary,
+            Some(&common_dir),
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    harness
+        .registered
+        .upsert_store_instance(super::StoreInstanceUpsert {
+            store_id: "store:proj_primary:profile_sharded".to_string(),
+            project_id: "proj_primary".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_primary".to_string(),
+            manifest_relpath: None,
+            last_verified_at: None,
+            last_write_at: None,
+        })
+        .await
+        .unwrap();
+
+    let resolved = harness
+        .registered
+        .upsert_code_project(
+            "proj_linked",
+            &linked,
+            Some(&common_dir),
+            None,
+            Some("feature"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resolved.project_id, "proj_primary");
+    assert!(
+        harness
+            .registered
+            .get_code_project("proj_linked")
+            .await
+            .is_none()
+    );
+    let context = harness
+        .registered
+        .project_registry_context_by_identity(&linked, Some(&common_dir))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(context.project.project_id, "proj_primary");
+    assert_eq!(context.stores.len(), 1);
+
+    #[cfg(unix)]
+    {
+        let common_dir_alias = root.join("common-dir-alias");
+        std::os::unix::fs::symlink(&common_dir, &common_dir_alias).unwrap();
+        let aliased = harness
+            .registered
+            .upsert_code_project("proj_symlink", &linked, Some(&common_dir_alias), None, None)
+            .await
+            .unwrap();
+        assert_eq!(aliased.project_id, "proj_primary");
+        assert!(
+            harness
+                .registered
+                .get_code_project("proj_symlink")
+                .await
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn registered_mount_publishes_complete_migrated_schema() {
     let harness = RegisteredGlobalDbHarness::open("complete-migrated-schema").await;
     let snapshot = harness.registered.read_snapshot().await.unwrap();

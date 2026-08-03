@@ -178,6 +178,7 @@ fn recover_without_fence(tracedecay_dir: &Path) {
     recovery.recover(|_| Ok(()), |_| Ok(())).unwrap();
 }
 
+#[test]
 fn partial_rename_failpoint_rolls_back_entire_sqlite_family() {
     let (_temp, project_root, tracedecay_dir) = fixture();
     let db = tracedecay_dir.join("branches/feature.db");

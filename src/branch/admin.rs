@@ -98,37 +98,6 @@ impl PreparedBranchAdminMutation {
         )
     }
 
-    pub(crate) fn commit_with_transaction<P, V, R, C>(
-        self,
-        transaction_id: &str,
-        publish_deleting: P,
-        validate_quarantined_stores: V,
-        rollback_deleting: R,
-        on_commit: C,
-    ) -> crate::errors::Result<BranchAdminReport>
-    where
-        P: FnOnce() -> crate::errors::Result<()>,
-        V: FnOnce(&[PathBuf]) -> crate::errors::Result<()>,
-        R: FnOnce() -> crate::errors::Result<()>,
-        C: FnOnce() -> crate::errors::Result<()>,
-    {
-        let mut on_commit = Some(on_commit);
-        self.commit_with_precommit_hook(
-            Some(transaction_id),
-            publish_deleting,
-            validate_quarantined_stores,
-            rollback_deleting,
-            move |phase| {
-                if phase == transaction::TransactionPhase::AfterCommitBeforeCleanup
-                    && let Some(on_commit) = on_commit.take()
-                {
-                    on_commit()?;
-                }
-                Ok(())
-            },
-        )
-    }
-
     #[cfg(test)]
     fn commit_with_hook<H>(
         self,
@@ -496,10 +465,6 @@ pub(crate) struct PreparedBranchAdminRecovery {
 }
 
 impl PreparedBranchAdminRecovery {
-    pub(crate) fn transaction_id(&self) -> &str {
-        self.pending.transaction_id()
-    }
-
     pub(crate) fn disposition(&self) -> BranchAdminRecoveryDisposition {
         match self.pending.disposition() {
             transaction::RecoveryDisposition::PreCommitRollback => {

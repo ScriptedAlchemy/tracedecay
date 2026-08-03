@@ -70,10 +70,6 @@ pub(super) struct PendingRecovery {
 }
 
 impl PendingRecovery {
-    pub(super) fn transaction_id(&self) -> &str {
-        &self.journal.transaction_id
-    }
-
     pub(super) fn disposition(&self) -> RecoveryDisposition {
         self.disposition
     }

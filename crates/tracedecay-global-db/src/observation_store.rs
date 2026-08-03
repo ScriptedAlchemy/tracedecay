@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use super::project_registry::LegacyPathAliasKind;
+use super::project_registry::ProjectIdentityAliasKind;
 use super::{CodeProjectRecord, RegisteredGlobalDb, StoreInstanceRecord};
 
 /// The already-existing project store authorized to persist sanitized observations.
@@ -218,7 +218,7 @@ impl RegisteredGlobalDb {
             }
         }
         if let Some(project_id) = self
-            .project_id_by_native_path_alias(project_root, LegacyPathAliasKind::ProjectRoot)
+            .project_id_by_path_alias(project_root, ProjectIdentityAliasKind::ProjectRoot)
             .await
             .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
                 project_id: "<unresolved>".to_string(),
@@ -231,7 +231,7 @@ impl RegisteredGlobalDb {
         if let Some(git_common_dir) =
             tracedecay_runtime_core::worktree::git_common_dir(project_root)
             && let Some(project_id) = self
-                .project_id_by_native_path_alias(&git_common_dir, LegacyPathAliasKind::GitCommonDir)
+                .project_id_by_path_alias(&git_common_dir, ProjectIdentityAliasKind::GitCommonDir)
                 .await
                 .map_err(|error| ProjectObservationStoreError::NonCanonicalStore {
                     project_id: "<unresolved>".to_string(),

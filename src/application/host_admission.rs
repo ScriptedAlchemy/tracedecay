@@ -867,7 +867,6 @@ impl HostAdmissionTestRuntimeV1 {
             project_root,
             &open_options,
             self.profile_database.as_ref(),
-            true,
         )
         .await?;
         if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
@@ -931,7 +930,6 @@ impl HostAdmissionTestRuntimeV1 {
             project_root,
             &open_options,
             self.profile_database.as_ref(),
-            true,
         )
         .await?;
         if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
@@ -997,7 +995,6 @@ impl HostAdmissionTestRuntimeV1 {
             project_root,
             open_options,
             self.profile_database.as_ref(),
-            true,
         )
         .await?;
         if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
