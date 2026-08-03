@@ -19,6 +19,7 @@ async fn lcm_schema_migrates_legacy_sessions_db_in_place() {
         "legacy-message",
     )
     .await
+    .expect("raw-message load should succeed")
     .expect("legacy message should be carried into raw store");
     assert_eq!(legacy.provider, "cursor");
     assert_eq!(legacy.message_id, "legacy-message");
@@ -57,6 +58,7 @@ async fn lcm_schema_marks_legacy_truncated_messages() {
         "legacy-message",
     )
     .await
+    .expect("raw-message load should succeed")
     .expect("legacy message should be carried into raw store");
 
     assert_eq!(legacy.content, legacy_text);

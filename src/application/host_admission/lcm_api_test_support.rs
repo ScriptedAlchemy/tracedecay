@@ -134,6 +134,7 @@ impl HostAdmissionTestRuntimeV1 {
             .unwrap_or(self.profile_registered.as_ref())
             .lcm_load_raw_message(provider, message_id)
             .await
+            .expect("test raw-message load must not hide database or receipt failure")
     }
 
     #[doc(hidden)]

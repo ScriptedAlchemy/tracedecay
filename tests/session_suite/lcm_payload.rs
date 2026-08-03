@@ -197,7 +197,10 @@ fn expected_payload_ref(
 
 fn externalized_ref_from_placeholder(text: &str) -> String {
     let marker = "ref=";
-    let start = text.find(marker).expect("placeholder ref") + marker.len();
+    let start = text
+        .find(marker)
+        .unwrap_or_else(|| panic!("placeholder ref missing from {text:?}"))
+        + marker.len();
     let tail = &text[start..];
     let end = tail.find([']', ',', ';']).unwrap_or(tail.len());
     tail[..end].trim().to_string()
@@ -441,7 +444,13 @@ async fn tiny_data_uri_stays_inline_and_lossless() {
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert_eq!(raw.content, content);
-    assert!(raw.metadata_json.is_none());
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert!(
+        metadata["ingest_protection"]["sanitization_receipt"].is_object(),
+        "every durable raw message must carry the canonical sanitizer receipt"
+    );
+    assert!(metadata["ingest_protection"].get("redacted").is_none());
+    assert!(metadata["ingest_protection"].get("lossy").is_none());
     assert_eq!(lcm_fts_count(&db, "tinyiconcanary").await, 1);
 }
 
@@ -499,11 +508,7 @@ async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets()
     assert!(!raw.content.contains("tok12"));
     assert!(
         raw.content
-            .contains("[LCM sensitive redaction: name=api_key")
-    );
-    assert!(
-        raw.content
-            .contains("[LCM sensitive redaction: name=bearer_token")
+            .contains("[TraceDecay redacted: sensitive field]")
     );
     assert!(raw.content.contains("keep jsonkeyredactioncanary"));
 
@@ -513,17 +518,14 @@ async fn json_key_sensitive_redaction_covers_compact_aliases_and_short_secrets()
     let patterns = metadata["ingest_protection"]["redaction_patterns"]
         .as_array()
         .expect("redaction patterns");
-    assert!(patterns.contains(&json!("api_key")));
-    assert!(patterns.contains(&json!("bearer_token")));
+    assert_eq!(patterns, &[json!("sensitive_field")]);
 
     assert_eq!(lcm_fts_count(&db, "shortkey1").await, 0);
     assert_eq!(lcm_fts_count(&db, "jsonkeyredactioncanary").await, 1);
 }
 
-// Parity with Hermes defaults: the JSON-key walk is opt-in; without the
-// config flag the same content stays lossless.
 #[tokio::test]
-async fn json_key_sensitive_redaction_disabled_by_default_keeps_content() {
+async fn json_key_sensitive_redaction_cannot_be_disabled_by_local_metadata() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
@@ -545,12 +547,56 @@ async fn json_key_sensitive_redaction_disabled_by_default_keeps_content() {
         .lcm_load_raw_message("cursor", "json-key-lossless")
         .await
         .expect("raw message should exist");
-    assert_eq!(raw.content, content);
-    assert!(raw.metadata_json.is_none());
+    assert!(!raw.content.contains("shortkey1"));
+    assert!(
+        raw.content
+            .contains("[TraceDecay redacted: sensitive field]")
+    );
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    assert_eq!(metadata["ingest_protection"]["lossy"], true);
 }
 
 #[tokio::test]
-async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
+async fn lcm_ingest_uses_the_canonical_privacy_detector_without_local_policy() {
+    let tmp = TempDir::new().unwrap();
+    let storage_root = tmp.path().join(".tracedecay");
+    let db = open_lcm_db(&tmp).await;
+    assert!(
+        db.upsert_session(&sample_session("cursor", "session-1"))
+            .await
+    );
+
+    let secret = "sk-lcm-canonical-detector-1234567890abcdef";
+    let mut message = raw_message(
+        "cursor",
+        "canonical-lcm-secret",
+        "session-1",
+        "user",
+        &format!("api_key={secret} canonicallcmcanary"),
+    );
+    message.kind = Some("message".to_string());
+
+    db.lcm_store(&storage_root)
+        .ingest_raw_message(&message)
+        .await
+        .expect("LCM message should ingest through the canonical detector");
+
+    let raw = db
+        .lcm_load_raw_message("cursor", "canonical-lcm-secret")
+        .await
+        .expect("raw message should exist");
+    assert!(!raw.content.contains(secret));
+    assert!(raw.content.contains("canonicallcmcanary"));
+    assert_eq!(
+        lcm_fts_count(&db, "canonicaldetector1234567890abcdef").await,
+        0
+    );
+    assert_eq!(lcm_fts_count(&db, "canonicallcmcanary").await, 1);
+}
+
+#[tokio::test]
+async fn sensitive_redaction_is_canonical_lossy_and_not_indexed() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
@@ -590,7 +636,7 @@ async fn sensitive_redaction_is_opt_in_lossy_and_not_indexed() {
     assert!(!raw.content.contains(secret));
     assert!(
         raw.content
-            .contains("[LCM sensitive redaction: name=api_key")
+            .contains("[TraceDecay redacted: credential assignment]")
     );
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["lossy"], true);
@@ -650,7 +696,7 @@ async fn quoted_password_assignment_redacts_full_quoted_value() {
     assert!(!raw.content.contains(secret));
     assert!(
         raw.content
-            .contains("[LCM sensitive redaction: name=password_assignment")
+            .contains("[TraceDecay redacted: credential assignment]")
     );
     assert!(raw.content.contains("keep quotedpasswordcanary"));
     assert_eq!(lcm_fts_count(&db, "battery").await, 0);
@@ -698,7 +744,7 @@ async fn api_alias_assignments_redact_apikey_and_apitoken() {
     assert!(!raw.content.contains(api_token_secret));
     assert!(
         raw.content
-            .contains("[LCM sensitive redaction: name=api_key")
+            .contains("[TraceDecay redacted: credential assignment]")
     );
     assert!(raw.content.contains("keep aliasredactioncanary"));
     assert_eq!(lcm_fts_count(&db, api_key_secret).await, 0);
@@ -749,10 +795,7 @@ async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
     assert!(!raw.content.contains("BEGIN PRIVATE KEY"));
     assert!(!raw.content.contains(private_key_body));
-    assert!(
-        raw.content
-            .contains("[LCM sensitive redaction: name=private_key")
-    );
+    assert!(raw.content.contains("[TraceDecay redacted: private key]"));
     let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
     assert_eq!(metadata["ingest_protection"]["lossy"], true);
     assert_eq!(metadata["ingest_protection"]["redacted"], true);
@@ -765,7 +808,7 @@ async fn private_key_redaction_is_lossy_and_not_indexed_when_enabled() {
 }
 
 #[tokio::test]
-async fn private_key_redaction_disabled_preserves_lossless_content() {
+async fn private_key_redaction_cannot_be_disabled_by_local_metadata() {
     let tmp = TempDir::new().unwrap();
     let storage_root = tmp.path().join(".tracedecay");
     let db = open_lcm_db(&tmp).await;
@@ -794,10 +837,12 @@ async fn private_key_redaction_disabled_preserves_lossless_content() {
         .await
         .expect("raw message should exist");
     assert_eq!(raw.storage_kind, LcmStorageKind::Inline);
-    assert!(raw.content.contains("BEGIN PRIVATE KEY"));
-    assert!(raw.content.contains("LOSSLESSPRIVATEKEY1234567890"));
-    assert!(raw.metadata_json.is_none());
-    assert_eq!(lcm_fts_count(&db, "LOSSLESSPRIVATEKEY1234567890").await, 1);
+    assert!(!raw.content.contains("BEGIN PRIVATE KEY"));
+    assert!(!raw.content.contains("LOSSLESSPRIVATEKEY1234567890"));
+    assert!(raw.content.contains("[TraceDecay redacted: private key]"));
+    let metadata: Value = serde_json::from_str(raw.metadata_json.as_deref().unwrap()).unwrap();
+    assert_eq!(metadata["ingest_protection"]["redacted"], true);
+    assert_eq!(lcm_fts_count(&db, "LOSSLESSPRIVATEKEY1234567890").await, 0);
 }
 
 #[tokio::test]
@@ -982,7 +1027,7 @@ async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_conte
     std::fs::write(payload_dir.join("orphan.payload"), "ORPHAN_PAYLOAD_SECRET").unwrap();
 
     let status = db
-        .lcm_status("cursor", Some("session-1"))
+        .lcm_status_deep_for_test("cursor", Some("session-1"))
         .await
         .expect("status should load");
     let status_json = serde_json::to_value(&status).unwrap();
@@ -992,7 +1037,10 @@ async fn lcm_status_reports_missing_and_orphan_payloads_without_previewing_conte
     assert_eq!(status_json["raw_message_count"], 1);
     assert_eq!(status_json["summary_node_count"], 0);
     assert_eq!(status_json["external_payload_count"], 1);
-    assert_eq!(status_json["missing_payload_count"], 1);
+    assert_eq!(
+        status_json["missing_payload_count"], 1,
+        "unexpected payload status: {status_json:#}"
+    );
     assert_eq!(status_json["unreferenced_payload_count"], 0);
     assert_eq!(status_json["payload"]["externalized_count"], 1);
     assert_eq!(status_json["payload"]["missing_count"], 1);
@@ -1362,7 +1410,7 @@ async fn redaction_applies_before_whole_message_externalization() {
         tracedecay::sessions::lcm::payload::payload_dir(&storage_root).join(&payload_ref);
     let payload_body = std::fs::read_to_string(&payload_path).expect("payload file should exist");
     assert!(!payload_body.contains(secret));
-    assert!(payload_body.contains("[LCM sensitive redaction: name=api_key"));
+    assert!(payload_body.contains("[TraceDecay redacted: credential assignment]"));
     assert!(payload_body.contains("preexternalredactcanary"));
 
     // Neither the secret nor the payload body is searchable.

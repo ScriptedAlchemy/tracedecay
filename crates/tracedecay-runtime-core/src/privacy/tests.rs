@@ -3,9 +3,10 @@ use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
     CanonicalObservationFactV1, CanonicalObservationRelationsV1, CanonicalWorkflowSemanticKindV1,
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
-    ClaudeSourceIdentityV1, ObservationContractError, ObservationId, ObservationOrderingDomainV1,
-    ObservationScopeV1, ObservationSourceIdentityV1, PayloadReferenceV1, ProviderId,
-    RetentionClass, SanitizerDispositionV1, SensitivityV1, SessionId,
+    ClaudeSourceIdentityV1, ComponentVersion, ObservationContractError, ObservationId,
+    ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
+    PayloadReferenceV1, ProviderId, RetentionClass, SanitizerDispositionV1, SensitivityV1,
+    SessionId,
 };
 
 use super::detect::{
@@ -17,8 +18,9 @@ use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
     ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
     MAX_OBSERVATION_RECORD_BYTES, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
-    SanitizationFindingV1, parse_claude_record_v1, parse_normalized_observation_record_v1,
-    parse_observation_record_v1, sanitize_code_source_bytes,
+    SanitizationFindingV1, SanitizedPayloadVerificationError, parse_claude_record_v1,
+    parse_normalized_observation_record_v1, parse_observation_record_v1,
+    sanitize_code_source_bytes, verify_sanitized_json_payload,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -132,6 +134,38 @@ fn code_source_sanitizer_redacts_and_issues_raw_bound_receipts() {
         second.receipt().receipt().receipt_id(),
         "equal sanitized output from different raw secrets needs distinct scan evidence"
     );
+}
+
+#[test]
+fn payload_verifier_rejects_stale_receipts_and_exact_content_mismatch() {
+    let sanitized = sanitize_code_source_bytes(b"let safe = true;\n").expect("sanitize source");
+    let (bytes, receipt) = sanitized.into_parts();
+    let payload = Value::String(String::from_utf8(bytes).expect("sanitized UTF-8"));
+    let revision = ComponentVersion::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("valid revision");
+
+    assert!(verify_sanitized_json_payload(&payload, &receipt, &revision).is_ok());
+    assert_eq!(
+        verify_sanitized_json_payload(
+            &payload,
+            &receipt,
+            &ComponentVersion::new("privacy.code-source.future").expect("valid revision"),
+        ),
+        Err(SanitizedPayloadVerificationError::StaleRevision)
+    );
+    assert_eq!(
+        verify_sanitized_json_payload(&json!({"different": true}), &receipt, &revision),
+        Err(SanitizedPayloadVerificationError::PayloadMismatch)
+    );
+}
+
+#[test]
+fn lcm_payload_sanitization_is_idempotent() {
+    let raw = "api_key=sk-lcm-canonical-detector-1234567890abcdef";
+    let first = super::sanitize_lcm_payload_text(raw).expect("first sanitization");
+    let second =
+        super::sanitize_lcm_payload_text(first.sanitized_text()).expect("second sanitization");
+
+    assert_eq!(second.sanitized_text(), first.sanitized_text());
 }
 
 #[test]

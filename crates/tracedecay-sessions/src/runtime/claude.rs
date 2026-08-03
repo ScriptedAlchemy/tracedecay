@@ -516,7 +516,10 @@ fn read_subagent_meta(transcript_path: &Path) -> ClaudeSubagentMeta {
     else {
         return ClaudeSubagentMeta::default();
     };
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+    let Some(value) = tracedecay_runtime_core::privacy::sanitize_provider_metadata_json(
+        &text,
+        MAX_SNAPSHOT_METADATA_BYTES,
+    ) else {
         return ClaudeSubagentMeta::default();
     };
     let string_field = |key: &str| {

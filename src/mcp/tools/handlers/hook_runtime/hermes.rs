@@ -266,6 +266,10 @@ async fn continue_projectless_hermes_review(
     if session_db
         .lcm_load_raw_message("hermes", &ready.transcript_watermark)
         .await
+        .map_err(|error| crate::errors::TraceDecayError::Database {
+            operation: "read Hermes transcript watermark".to_owned(),
+            message: error.to_string(),
+        })?
         .is_none()
     {
         return Ok(json!({ "action": "hermes_receipt", "status": "awaiting_transcript" }));

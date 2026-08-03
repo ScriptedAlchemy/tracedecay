@@ -266,8 +266,8 @@ impl RegisteredGlobalDb {
         &self,
         provider: &str,
         message_id: &str,
-    ) -> Option<LcmRawMessage> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    ) -> Result<Option<LcmRawMessage>, LcmError> {
+        let snapshot = self.read_snapshot().await?;
         schema::load_raw_message(&snapshot, provider, message_id).await
     }
 

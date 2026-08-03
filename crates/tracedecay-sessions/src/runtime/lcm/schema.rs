@@ -459,37 +459,18 @@ pub async fn load_raw_message(
     conn: &(impl QueryExecutor + ?Sized),
     provider: &str,
     message_id: &str,
-) -> Option<LcmRawMessage> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, message_id, session_id, store_id, role, ordinal,
-                    timestamp, content, content_hash, storage_kind, payload_ref,
-                    legacy_source, legacy_truncated, metadata_json
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND message_id = ?2",
-            params![provider, message_id],
-        )
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    let storage_kind_text: String = row.get(9).ok()?;
-    let content: Option<String> = row.get(7).ok()?;
-    Some(LcmRawMessage {
-        provider: row.get(0).ok()?,
-        message_id: row.get(1).ok()?,
-        session_id: row.get(2).ok()?,
-        store_id: row.get(3).ok()?,
-        role: row.get(4).ok()?,
-        ordinal: row.get(5).ok()?,
-        timestamp: row.get(6).ok()?,
-        content: content.unwrap_or_default(),
-        content_hash: row.get(8).ok()?,
-        storage_kind: LcmStorageKind::from_db(&storage_kind_text)?,
-        payload_ref: row.get(10).ok()?,
-        legacy_source: row.get::<i64>(11).unwrap_or(0) != 0,
-        legacy_truncated: row.get::<i64>(12).unwrap_or(0) != 0,
-        metadata_json: row.get(13).ok()?,
-    })
+) -> Result<Option<LcmRawMessage>, LcmError> {
+    let sql = format!(
+        "SELECT {}
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND message_id = ?2",
+        raw::RAW_MESSAGE_SELECT_COLUMNS
+    );
+    let mut rows = conn.query(&sql, params![provider, message_id]).await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    raw::raw_message_from_row(&row).map(Some)
 }
 
 async fn carry_forward_legacy_messages_in_transaction(
@@ -563,6 +544,57 @@ async fn fetch_i64(
 mod tests {
     use super::*;
     use tracedecay_runtime_core::db::engine::TestConnection;
+    use tracedecay_runtime_core::privacy::sanitize_lcm_payload_text;
+
+    async fn lcm_reader_test_connection() -> Result<(tempfile::TempDir, TestConnection), String> {
+        let temp = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let conn = TestConnection::open(&temp.path().join("sessions.db"));
+        conn.execute_batch(
+            "CREATE TABLE lcm_raw_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                store_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                timestamp INTEGER,
+                content TEXT,
+                content_hash TEXT NOT NULL,
+                storage_kind TEXT NOT NULL,
+                payload_ref TEXT,
+                snippet_text TEXT NOT NULL,
+                index_text TEXT NOT NULL,
+                legacy_source INTEGER NOT NULL DEFAULT 0,
+                legacy_truncated INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT,
+                UNIQUE(provider, message_id)
+            );",
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok((temp, conn))
+    }
+
+    async fn insert_reader_test_message(
+        conn: &TestConnection,
+        content: &str,
+        storage_kind: &str,
+        metadata_json: Option<&str>,
+    ) -> Result<(), String> {
+        conn.execute(
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, content,
+                content_hash, storage_kind, snippet_text, index_text, metadata_json
+             ) VALUES (
+                'cursor', 'message-1', 'session-1', 'user', 1, ?1,
+                'test-hash', ?2, ?1, ?1, ?3
+             )",
+            params![content, storage_kind, metadata_json],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn raw_fts_currency_requires_table_and_every_trigger_contract() -> Result<(), String> {
@@ -822,6 +854,55 @@ mod tests {
             .map_err(|err| err.to_string())?,
             2
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_message_load_propagates_poisoned_storage_kind() -> Result<(), String> {
+        let (_temp, conn) = lcm_reader_test_connection().await?;
+        insert_reader_test_message(&conn, "safe content", "poisoned", None).await?;
+
+        let error = load_raw_message(&*conn, "cursor", "message-1")
+            .await
+            .expect_err("poisoned storage kind must not collapse to absence");
+
+        assert!(matches!(error, LcmError::Db(message) if message.contains("invalid storage_kind")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_message_load_rejects_mismatched_sanitization_receipt() -> Result<(), String> {
+        let (_temp, conn) = lcm_reader_test_connection().await?;
+        let sanitization = sanitize_lcm_payload_text("receipt-bound content")
+            .map_err(|error| error.to_string())?;
+        let metadata = serde_json::json!({
+            "ingest_protection": {
+                "sanitization_receipt": sanitization.receipt()
+            }
+        })
+        .to_string();
+        insert_reader_test_message(&conn, "tampered content", "inline", Some(&metadata)).await?;
+
+        let error = load_raw_message(&*conn, "cursor", "message-1")
+            .await
+            .expect_err("receipt mismatch must not return a raw row");
+
+        assert!(matches!(error, LcmError::Db(message) if message.contains("does not match")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_message_load_propagates_database_failure() -> Result<(), String> {
+        let (_temp, conn) = lcm_reader_test_connection().await?;
+        conn.execute_batch("DROP TABLE lcm_raw_messages")
+            .await
+            .map_err(|error| error.to_string())?;
+
+        let error = load_raw_message(&*conn, "cursor", "message-1")
+            .await
+            .expect_err("database failure must not collapse to absence");
+
+        assert!(matches!(error, LcmError::Db(_)));
         Ok(())
     }
 
