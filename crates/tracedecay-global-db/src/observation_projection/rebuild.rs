@@ -9,19 +9,21 @@ use tracedecay_sessions::compatibility::{
 };
 use tracedecay_store::{
     ObservationProjection, ProjectedObservation, ProjectionPersistOutcome,
-    ProjectionRebuildOutcome, ProjectionSkipReason, ProjectionStoreError, ProjectionStoreResult,
-    SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection, SessionMessageRecord,
-    SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
+    ProjectionRebuildOutcome, ProjectionRetryReason, ProjectionSkipReason, ProjectionStoreError,
+    ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SessionMessageProjection,
+    SessionMessageRecord, SessionRecord, WorkflowFactProjection, workflow_semantic_kind,
 };
 
 use super::super::session_temporal::record_canonical_observation_effect;
 use super::apply::{
-    apply_effect, derive_projection_for_rebuild, derive_projection_with_alias, verify_effect,
+    apply_effect, apply_skip_disposition, derive_projection_for_rebuild,
+    derive_projection_with_alias, verify_effect,
 };
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
-    ensure_projection_output_state_cache, queued_sequence, read_checkpoint, read_message,
-    read_observation, read_session, storage, storage_message, write_checkpoint,
+    ensure_projection_output_state_cache, projection_retry_state, queued_sequence, read_checkpoint,
+    read_message, read_observation, read_session, schedule_projection_retry, storage,
+    storage_message, write_checkpoint,
 };
 use super::transition::{
     MessageTransition, MessageTransitionState, WorkflowFactTarget, WorkflowFactTransition,
@@ -30,6 +32,8 @@ use super::transition::{
 
 const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
+const PROJECTION_RETRY_BASE_MICROS: i64 = 5_000_000;
+const PROJECTION_RETRY_MAX_MICROS: i64 = 300_000_000;
 static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub async fn project_observation_with_engine(
@@ -40,12 +44,117 @@ pub async fn project_observation_with_engine(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| storage("begin projection transaction", error))?;
-    let outcome = project_observation_in_transaction(&transaction, observation_id).await?;
+    let now_micros = tracedecay_application::clock::now_micros().0;
+    if let Some(retry) = projection_retry_state(&transaction, observation_id).await?
+        && retry.next_retry_at_micros > now_micros
+    {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| storage("rollback deferred projection transaction", error))?;
+        return Err(ProjectionStoreError::RetryDeferred {
+            attempt_count: retry.attempt_count,
+            next_retry_at_micros: retry.next_retry_at_micros,
+            reason: retry.reason.ok_or_else(|| {
+                storage_message(
+                    "read deferred projection retry",
+                    "deferred projection retry has no failure reason",
+                )
+            })?,
+        });
+    }
+    match project_observation_in_transaction(&transaction, observation_id).await {
+        Ok(outcome) => match transaction.commit().await {
+            Ok(()) => Ok(outcome),
+            Err(commit_error) => {
+                let error = storage("commit projection transaction", commit_error);
+                persist_projection_retry(conn, observation_id, now_micros).await?;
+                Err(error)
+            }
+        },
+        Err(error) => {
+            transaction.rollback().await.map_err(|rollback_error| {
+                storage("rollback failed projection transaction", rollback_error)
+            })?;
+            if matches!(error, ProjectionStoreError::Storage { .. }) {
+                persist_projection_retry(conn, observation_id, now_micros).await?;
+            } else if let Some(reason) = error.deterministic_rejection_reason() {
+                persist_projection_rejection(conn, observation_id, reason).await?;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn projection_retry_delay_micros(attempt_count: u32) -> i64 {
+    let shift = attempt_count.saturating_sub(1).min(16);
+    PROJECTION_RETRY_BASE_MICROS
+        .saturating_mul(1_i64 << shift)
+        .min(PROJECTION_RETRY_MAX_MICROS)
+}
+
+async fn persist_projection_retry(
+    conn: &Connection,
+    observation_id: &CanonicalObservationIdV1,
+    now_micros: i64,
+) -> ProjectionStoreResult<()> {
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|error| storage("begin projection retry transaction", error))?;
+    let retry = projection_retry_state(&transaction, observation_id)
+        .await?
+        .ok_or(ProjectionStoreError::NotQueued)?;
+    let attempt_count = retry.attempt_count.saturating_add(1);
+    let next_retry_at_micros =
+        now_micros.saturating_add(projection_retry_delay_micros(attempt_count));
+    schedule_projection_retry(
+        &transaction,
+        observation_id,
+        attempt_count,
+        next_retry_at_micros,
+        ProjectionRetryReason::Storage,
+    )
+    .await?;
     transaction
         .commit()
         .await
-        .map_err(|error| storage("commit projection transaction", error))?;
-    Ok(outcome)
+        .map_err(|error| storage("commit projection retry transaction", error))
+}
+
+async fn persist_projection_rejection(
+    conn: &Connection,
+    observation_id: &CanonicalObservationIdV1,
+    reason: ProjectionSkipReason,
+) -> ProjectionStoreResult<()> {
+    let transaction = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .await
+        .map_err(|error| storage("begin projection rejection transaction", error))?;
+    let checkpoint = read_checkpoint(&transaction).await?;
+    let Some((sequence, observation)) = read_observation(&transaction, observation_id).await?
+    else {
+        return Err(ProjectionStoreError::ObservationNotFound);
+    };
+    let expected = checkpoint.last_sequence().saturating_add(1);
+    if sequence > checkpoint.last_sequence() && sequence != expected {
+        return Err(ProjectionStoreError::Gap {
+            expected,
+            actual: sequence,
+        });
+    }
+    if queued_sequence(&transaction, observation_id).await? != Some(sequence) {
+        return Err(ProjectionStoreError::NotQueued);
+    }
+    apply_skip_disposition(&transaction, &observation, reason).await?;
+    consume_projection_queue_item(&transaction, observation_id).await?;
+    if sequence > checkpoint.last_sequence() {
+        write_checkpoint(&transaction, sequence).await?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| storage("commit projection rejection transaction", error))
 }
 
 pub async fn rebuild_projection_with_engine(
@@ -169,7 +278,13 @@ async fn project_observation_in_transaction(
     let mut effect = derive_projection_with_alias(transaction, &observation).await?;
     if sequence <= checkpoint.last_sequence() {
         verify_effect(transaction, &observation, &effect).await?;
-        record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
+        if !matches!(
+            effect,
+            ObservationProjection::Skipped(reason) if reason.is_rejection()
+        ) {
+            record_canonical_observation_effect(transaction, sequence, &observation, &effect)
+                .await?;
+        }
         consume_projection_queue_item(transaction, observation_id).await?;
         return Ok(ProjectionPersistOutcome::ExactDuplicate(checkpoint));
     }
@@ -192,7 +307,12 @@ async fn project_observation_in_transaction(
         &mut effect,
     )
     .await?;
-    record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
+    if !matches!(
+        effect,
+        ObservationProjection::Skipped(reason) if reason.is_rejection()
+    ) {
+        record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
+    }
     consume_projection_queue_item(transaction, observation_id).await?;
     let checkpoint = write_checkpoint(transaction, sequence).await?;
     let output_count = effect.output_count();
@@ -402,7 +522,13 @@ async fn stage_projection_rebuild_batch_transaction(
             &mut effect,
         )
         .await?;
-        record_canonical_observation_effect(transaction, sequence, &observation, &effect).await?;
+        if !matches!(
+            effect,
+            ObservationProjection::Skipped(reason) if reason.is_rejection()
+        ) {
+            record_canonical_observation_effect(transaction, sequence, &observation, &effect)
+                .await?;
+        }
         match &effect {
             ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                 projected_rows = projected_rows.saturating_add(effect.output_count());

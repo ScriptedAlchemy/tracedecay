@@ -1,6 +1,6 @@
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
-    ProjectionCheckpoint, ProjectionStoreError, ProjectionStoreResult,
+    ProjectionCheckpoint, ProjectionRetryReason, ProjectionStoreError, ProjectionStoreResult,
     SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SessionMessageProjection, SessionMessageRecord,
     SessionRecord,
@@ -137,6 +137,98 @@ pub(super) async fn queued_sequence(
         "read projection queue",
     )
     .map(Some)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ProjectionRetryState {
+    pub(super) attempt_count: u32,
+    pub(super) next_retry_at_micros: i64,
+    pub(super) reason: Option<ProjectionRetryReason>,
+}
+
+pub(super) async fn projection_retry_state(
+    conn: &impl QueryExecutor,
+    observation_id: &CanonicalObservationIdV1,
+) -> ProjectionStoreResult<Option<ProjectionRetryState>> {
+    let mut rows = conn
+        .query(
+            "SELECT attempt_count, next_retry_at_micros, last_error_code
+             FROM projection_queue WHERE observation_id = ?1",
+            params![observation_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage("read projection retry state", error))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read projection retry state", error))?
+    else {
+        return Ok(None);
+    };
+    let attempt_count = row
+        .get::<i64>(0)
+        .map_err(|error| storage("read projection retry state", error))?;
+    let attempt_count = u32::try_from(attempt_count).map_err(|_| {
+        storage_message(
+            "read projection retry state",
+            "projection retry attempt count is outside the supported range",
+        )
+    })?;
+    let next_retry_at_micros = row
+        .get::<i64>(1)
+        .map_err(|error| storage("read projection retry state", error))?;
+    if next_retry_at_micros < 0 {
+        return Err(storage_message(
+            "read projection retry state",
+            "projection retry timestamp is negative",
+        ));
+    }
+    let last_error_code = row
+        .get::<Option<String>>(2)
+        .map_err(|error| storage("read projection retry state", error))?;
+    let reason = last_error_code
+        .map(|code| {
+            ProjectionRetryReason::from_durable_str(&code).ok_or_else(|| {
+                storage_message(
+                    "read projection retry state",
+                    "projection retry state has an unknown error code",
+                )
+            })
+        })
+        .transpose()?;
+    Ok(Some(ProjectionRetryState {
+        attempt_count,
+        next_retry_at_micros,
+        reason,
+    }))
+}
+
+pub(super) async fn schedule_projection_retry(
+    conn: &impl Executor,
+    observation_id: &CanonicalObservationIdV1,
+    attempt_count: u32,
+    next_retry_at_micros: i64,
+    reason: ProjectionRetryReason,
+) -> ProjectionStoreResult<()> {
+    let updated = conn
+        .execute(
+            "UPDATE projection_queue
+             SET attempt_count = ?2, next_retry_at_micros = ?3, last_error_code = ?4
+             WHERE observation_id = ?1",
+            params![
+                observation_id.as_str(),
+                i64::from(attempt_count),
+                next_retry_at_micros,
+                reason.as_str(),
+            ],
+        )
+        .await
+        .map_err(|error| storage("schedule projection retry", error))?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(ProjectionStoreError::NotQueued)
+    }
 }
 
 pub(super) async fn consume_projection_queue_item(
