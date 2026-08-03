@@ -5,6 +5,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use tempfile::TempDir;
+use tracedecay_application::CancellationSignal;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphEvidenceAdapterV1, CodeGraphProjectionPublisher, CodeGraphProjectionStore,
+};
 use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
@@ -18,8 +23,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
@@ -229,6 +233,23 @@ fn projection_batch(
             .read_graph_evidence(request)
             .expect("graph read succeeds"),
     )
+}
+
+fn publish_projection(
+    store: &CodeGraphProjectionStore,
+    request: &GraphLaneRequest,
+    edges: &[CanonicalRelationEdgeV1],
+    symbols: &[&str],
+) {
+    let chunks: Vec<_> = symbols
+        .iter()
+        .map(|symbol| projection_chunk(request, &format!("chunk.{symbol}"), symbol))
+        .collect();
+    let cancellation =
+        CancellationSignal::active("cancellation.code-graph.fixture").expect("valid token");
+    store
+        .publish_code_graph(&request.generation, edges, &chunks, &cancellation)
+        .expect("projection publication succeeds");
 }
 
 fn batch(
