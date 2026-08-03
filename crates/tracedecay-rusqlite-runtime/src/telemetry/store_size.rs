@@ -16,7 +16,7 @@ use tracedecay_application::{
 use tracedecay_domain::UtcMicros;
 use tracedecay_store::UnavailableReasonV1;
 
-use crate::migration_sql::MigrationSqlHandle;
+use crate::exact_sql::ExactSqlHandle;
 
 #[derive(Clone, Copy)]
 struct TableWatermark {
@@ -28,7 +28,7 @@ struct TableWatermark {
 /// reader. The adapter is bound to one exact request scope and one store.
 #[derive(Clone)]
 pub struct SqliteStoreSizeTelemetryPort {
-    handle: MigrationSqlHandle,
+    handle: ExactSqlHandle,
     store: StoreKeyV1,
     scope: ResolvedScope,
     reader_wait: Duration,
@@ -38,7 +38,7 @@ pub struct SqliteStoreSizeTelemetryPort {
 impl SqliteStoreSizeTelemetryPort {
     #[must_use]
     pub fn new(
-        handle: MigrationSqlHandle,
+        handle: ExactSqlHandle,
         store: StoreKeyV1,
         scope: ResolvedScope,
         reader_wait: Duration,

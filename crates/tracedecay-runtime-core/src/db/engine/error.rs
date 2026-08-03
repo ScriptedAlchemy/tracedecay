@@ -62,24 +62,24 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-impl From<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError> for Error {
-    fn from(error: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError) -> Self {
-        use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError;
+impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
+    fn from(error: tracedecay_rusqlite_runtime::exact_sql::ExactSqlError) -> Self {
+        use tracedecay_rusqlite_runtime::exact_sql::ExactSqlError;
 
         match error {
-            MigrationSqlError::InvalidStatement => {
+            ExactSqlError::InvalidStatement => {
                 Self::InvalidOperation("SQL statement is empty".to_owned())
             }
-            MigrationSqlError::TransactionControlDenied => Self::InvalidOperation(
+            ExactSqlError::TransactionControlDenied => Self::InvalidOperation(
                 "transaction control SQL is not allowed inside an owned transaction".to_owned(),
             ),
-            MigrationSqlError::TransactionClosed => Self::TransactionClosed,
-            MigrationSqlError::TransactionExpired => Self::TransactionExpired,
-            MigrationSqlError::RequestLimitExceeded => {
+            ExactSqlError::TransactionClosed => Self::TransactionClosed,
+            ExactSqlError::TransactionExpired => Self::TransactionExpired,
+            ExactSqlError::RequestLimitExceeded => {
                 Self::InvalidOperation("SQL request exceeds migration limits".to_owned())
             }
-            MigrationSqlError::AuthorityDenied(message) => Self::InvalidOperation(message),
-            MigrationSqlError::Sqlite {
+            ExactSqlError::AuthorityDenied(message) => Self::InvalidOperation(message),
+            ExactSqlError::Sqlite {
                 operation,
                 code,
                 extended_code,
@@ -90,7 +90,7 @@ impl From<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError> for Err
                 extended_code,
                 message,
             },
-            MigrationSqlError::Busy => Self::Busy,
+            ExactSqlError::Busy => Self::Busy,
             error => Self::Runtime(error.to_string()),
         }
     }

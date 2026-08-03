@@ -1757,6 +1757,24 @@ fn migrate_storage_report_parses_targeted_project() {
 }
 
 #[test]
+fn migrate_cleanup_sources_is_not_a_supported_subcommand() {
+    let err = match Cli::try_parse_from([
+        "tracedecay",
+        "migrate",
+        "cleanup-sources",
+        "--manifest",
+        "/tmp/migration-manifest.json",
+        "--confirm-token",
+        "confirm",
+    ]) {
+        Ok(_) => panic!("cleanup-sources must not parse"),
+        Err(err) => err,
+    };
+
+    assert_eq!(err.kind(), ErrorKind::InvalidSubcommand);
+}
+
+#[test]
 fn branch_remove_requires_a_branch_name() {
     let err = match Cli::try_parse_from(["tracedecay", "branch", "remove"]) {
         Ok(_) => panic!("branch remove should require a name"),

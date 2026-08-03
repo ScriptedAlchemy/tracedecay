@@ -404,8 +404,8 @@ mod tests {
     use tracedecay_runtime_core::memory::types::{
         AddFactRequest, FeedbackAction, FeedbackRequest, MemoryCategory,
     };
-    use tracedecay_rusqlite_runtime::migration_sql::{
-        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    use tracedecay_rusqlite_runtime::exact_sql::{
+        ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     };
     use tracedecay_sessions::admission::HostAdmissionScope;
     use tracedecay_store::{SessionMessageRecord, SessionRecord};
@@ -555,8 +555,8 @@ mod tests {
 
     struct ForeignFixtureWriteAuthority;
 
-    impl MigrationSqlWriteAuthority for ForeignFixtureWriteAuthority {
-        fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+    impl ExactSqlWriteAuthority for ForeignFixtureWriteAuthority {
+        fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
             Ok(())
         }
     }

@@ -1,7 +1,7 @@
 //! Deterministic parity and rollback evidence for the pre-cutover graph adapter.
 //!
 //! These APIs are explicit fixtures. Production attachment does not call them,
-//! and the schema helper must never be used as a migration authority.
+//! and the schema helper must never be used as a exact SQL authority.
 
 use std::{collections::BTreeMap, path::Path};
 

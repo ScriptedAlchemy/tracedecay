@@ -587,6 +587,9 @@ pub(super) const DERIVED_CANDIDATE_QUERY: &str = "
     ORDER BY first_occurrence.knowledge_at DESC, evidence.evidence_id
     LIMIT ?8";
 
+// Fresh stores have no planner statistics. CROSS JOIN pins authorized sessions
+// as the outer loop so SQLite probes evidence by session/generation/kind instead
+// of scanning every evidence row before applying the root boundary.
 pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
     SELECT evidence.evidence_id, evidence.retrieval_anchor_id,
            first_occurrence.knowledge_at,
@@ -594,27 +597,27 @@ pub(super) const ROOT_DERIVED_CANDIDATE_QUERY: &str = "
                 THEN first_occurrence.message_id ELSE NULL END,
            NULL, evidence.session_id, evidence.evidence_kind,
            authority_session.provider
-    FROM session_temporal_generations AS frozen
-    JOIN session_derived_evidence AS evidence
-      ON evidence.session_id = frozen.session_id
-     AND evidence.generation = frozen.generation
-    JOIN session_occurrences AS first_occurrence
-      ON first_occurrence.session_id = evidence.session_id
-     AND first_occurrence.generation = evidence.generation
-     AND first_occurrence.occurrence_id = evidence.first_occurrence_id
-    JOIN observations AS provider_observation
-      ON provider_observation.observation_id = first_occurrence.source_observation_id
-    JOIN retrieval_anchors AS authority_anchor
-      ON authority_anchor.anchor_id = evidence.retrieval_anchor_id
-    JOIN sessions AS authority_session
-      ON authority_session.session_id = evidence.session_id
-     AND authority_session.provider = COALESCE(json_extract(
+    FROM sessions AS authority_session
+    CROSS JOIN session_temporal_generations AS frozen
+    CROSS JOIN session_derived_evidence AS evidence
+    CROSS JOIN session_occurrences AS first_occurrence
+    CROSS JOIN observations AS provider_observation
+    CROSS JOIN retrieval_anchors AS authority_anchor
+    WHERE authority_session.project_key = ?1
+      AND (?3 IS NULL OR authority_session.provider = ?3)
+      AND frozen.session_id = authority_session.session_id
+      AND frozen.state = 'active'
+      AND evidence.session_id = frozen.session_id
+      AND evidence.generation = frozen.generation
+      AND evidence.evidence_kind = ?2
+      AND first_occurrence.session_id = evidence.session_id
+      AND first_occurrence.generation = evidence.generation
+      AND first_occurrence.occurrence_id = evidence.first_occurrence_id
+      AND provider_observation.observation_id = first_occurrence.source_observation_id
+      AND authority_anchor.anchor_id = evidence.retrieval_anchor_id
+      AND authority_session.provider = COALESCE(json_extract(
          provider_observation.observation_json, '$.identity.source.provider'
      ), 'claude')
-     AND authority_session.project_key = ?1
-    WHERE frozen.state = 'active'
-      AND evidence.evidence_kind = ?2
-      AND (?3 IS NULL OR authority_session.provider = ?3)
       AND EXISTS (
           SELECT 1
           FROM session_derived_evidence_members AS member

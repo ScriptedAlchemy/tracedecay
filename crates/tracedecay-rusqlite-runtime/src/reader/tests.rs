@@ -382,7 +382,7 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
 }
 
 #[test]
-fn migration_health_snapshot_retires_its_reader_after_drop() {
+fn exact_sql_health_snapshot_retires_its_reader_after_drop() {
     let store = TestStore::new();
     let pool = ReaderPool::start(
         store.locator(),
@@ -392,7 +392,7 @@ fn migration_health_snapshot_retires_its_reader_after_drop() {
     .unwrap();
 
     let snapshot = pool
-        .begin_migration_health_snapshot(Duration::from_millis(100))
+        .begin_exact_sql_health_snapshot(Duration::from_millis(100))
         .unwrap();
     assert_eq!(pool.snapshot().leased_health, 1);
     drop(snapshot);
@@ -415,7 +415,7 @@ fn application_telemetry_port_reads_real_store_size() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
-        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
         Duration::from_millis(100),
@@ -446,7 +446,7 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
-        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
         Duration::from_millis(100),
@@ -498,7 +498,7 @@ fn application_telemetry_port_marks_new_table_baseline_pending() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
-        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
         Duration::from_millis(100),
@@ -557,7 +557,7 @@ fn application_telemetry_port_reports_denied_table_growth_without_zero() {
     let scope = telemetry_scope();
     let context = telemetry_context(scope.clone());
     let port = SqliteStoreSizeTelemetryPort::new(
-        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        crate::exact_sql::ExactSqlHandle::attach_read_only(&pool),
         StoreKeyV1::new("reader.db").unwrap(),
         scope,
         Duration::from_millis(100),
@@ -921,14 +921,14 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
     let statement = || {
-        crate::migration_sql::MigrationSqlStatement::new(
+        crate::exact_sql::ExactSqlStatement::new(
             "SELECT count(*) FROM markers".to_owned(),
             Vec::new(),
         )
         .unwrap()
     };
 
-    pool.execute_migration_query(
+    pool.execute_exact_sql_query(
         statement(),
         OperationPriorityV1::Foreground,
         Duration::from_millis(200),
@@ -941,14 +941,14 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
     );
 
     let first = pool
-        .begin_migration_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
         .unwrap();
     let second = pool
-        .begin_migration_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
+        .begin_exact_sql_snapshot(OperationPriorityV1::Foreground, Duration::from_millis(200))
         .unwrap();
     assert_eq!(pool.snapshot().leased_general, 2);
     assert!(
-        pool.execute_migration_query(
+        pool.execute_exact_sql_query(
             statement(),
             OperationPriorityV1::Foreground,
             Duration::from_millis(20)
@@ -959,7 +959,7 @@ fn single_statement_reads_release_their_worker_while_pinned_snapshots_hold_it() 
 
     drop(first);
     drop(second);
-    pool.execute_migration_query(
+    pool.execute_exact_sql_query(
         statement(),
         OperationPriorityV1::Foreground,
         Duration::from_secs(2),

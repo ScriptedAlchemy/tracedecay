@@ -3,7 +3,7 @@ use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    migration_sql::MigrationSqlHandle,
+    exact_sql::ExactSqlHandle,
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
 use tracedecay_store::{
@@ -124,7 +124,7 @@ impl ReaderQueryExecutor for NoReads {
         _snapshot: &rusqlite::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, tracedecay_store::StorageRuntimeErrorV1> {
-        unreachable!("engine migration SQL does not use the product read contract")
+        unreachable!("engine exact SQL does not use the product read contract")
     }
 }
 
@@ -168,7 +168,7 @@ fn runtime_fixture() -> Fixture {
         NoReads,
     )
     .unwrap();
-    let connection = Connection::attach(MigrationSqlHandle::attach(&writer, &readers).unwrap());
+    let connection = Connection::attach(ExactSqlHandle::attach(&writer, &readers).unwrap());
     Fixture {
         connection,
         path,

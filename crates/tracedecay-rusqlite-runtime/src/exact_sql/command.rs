@@ -15,59 +15,58 @@ use std::{
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
-use super::guard::{AuthorizedDatabaseOperation, with_migration_guard};
+use super::guard::{AuthorizedDatabaseOperation, with_exact_sql_guard};
 use super::{
-    MAX_MIGRATION_ATTACHMENTS, MIGRATION_SQL_TRANSACTION_IDLE_LIMIT,
-    MIGRATION_SQL_TRANSACTION_LIMIT, MigrationSqlAttachment, MigrationSqlCommitReceipt,
-    MigrationSqlError, MigrationSqlRequest, MigrationSqlResult, MigrationSqlRollbackReceipt,
-    MigrationSqlRows, MigrationSqlStatement, MigrationSqlStepPolicy, MigrationSqlTransactionPolicy,
-    MigrationSqlWriteAuthority, MigrationSqlWriteIntent, attach_database, detach_database,
-    execute_batch, execute_query_unchecked, execute_request, publish_last_insert_rowid,
-    sqlite_error, verify_write_authority,
+    EXACT_SQL_TRANSACTION_IDLE_LIMIT, EXACT_SQL_TRANSACTION_LIMIT, ExactSqlAttachment,
+    ExactSqlCommitReceipt, ExactSqlError, ExactSqlRollbackReceipt, ExactSqlRows, ExactSqlStatement,
+    ExactSqlWriteAuthority, ExactSqlWriteIntent, ExecutionPolicy, MAX_EXACT_SQL_ATTACHMENTS,
+    SqlRequest, SqlResult, TransactionPolicy, attach_database, detach_database, execute_batch,
+    execute_query_unchecked, execute_request, publish_last_insert_rowid, sqlite_error,
+    verify_write_authority,
 };
 use rusqlite::limits::Limit;
 
 pub(crate) enum WriterCommand {
     Dispatch {
-        request: MigrationSqlRequest,
-        reply: SyncSender<Result<MigrationSqlResult, MigrationSqlError>>,
+        request: SqlRequest,
+        reply: SyncSender<Result<SqlResult, ExactSqlError>>,
         last_insert_rowid: Arc<AtomicI64>,
-        authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
+        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     BeginTransaction {
         behavior: TransactionBehavior,
-        policy: MigrationSqlTransactionPolicy,
+        policy: TransactionPolicy,
         receiver: Receiver<TransactionCommand>,
-        reply: SyncSender<Result<(), MigrationSqlError>>,
+        reply: SyncSender<Result<(), ExactSqlError>>,
         last_insert_rowid: Arc<AtomicI64>,
         expired: Arc<AtomicBool>,
-        authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
+        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     CheckpointWalTruncate {
-        reply: SyncSender<Result<MigrationSqlRows, MigrationSqlError>>,
-        authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
+        reply: SyncSender<Result<ExactSqlRows, ExactSqlError>>,
+        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
     Vacuum {
-        reply: SyncSender<Result<(), MigrationSqlError>>,
-        authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
+        reply: SyncSender<Result<(), ExactSqlError>>,
+        authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
     },
 }
 
 pub(crate) enum TransactionCommand {
     Attach {
-        attachment: MigrationSqlAttachment,
-        reply: SyncSender<Result<(), MigrationSqlError>>,
+        attachment: ExactSqlAttachment,
+        reply: SyncSender<Result<(), ExactSqlError>>,
     },
     Dispatch {
-        request: MigrationSqlRequest,
-        step_policy: MigrationSqlStepPolicy,
-        reply: SyncSender<Result<MigrationSqlResult, MigrationSqlError>>,
+        request: SqlRequest,
+        execution_policy: ExecutionPolicy,
+        reply: SyncSender<Result<SqlResult, ExactSqlError>>,
     },
     Commit {
-        reply: SyncSender<Result<MigrationSqlCommitReceipt, MigrationSqlError>>,
+        reply: SyncSender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
     },
     Rollback {
-        reply: SyncSender<Result<MigrationSqlRollbackReceipt, MigrationSqlError>>,
+        reply: SyncSender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
     },
 }
 
@@ -113,16 +112,15 @@ pub(crate) fn run_writer_command(
             expired,
             authority,
         } => {
-            if policy == MigrationSqlTransactionPolicy::AuthorizedLongLease && authority.is_none() {
-                let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
+            if policy == TransactionPolicy::AuthorizedLongLease && authority.is_none() {
+                let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
                     "long-lease transaction requires attached write authority".to_owned(),
                 )));
                 return;
             }
-            if let Err(error) = verify_write_authority(
-                authority.as_deref(),
-                MigrationSqlWriteIntent::BeginTransaction,
-            ) {
+            if let Err(error) =
+                verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::BeginTransaction)
+            {
                 let _ = reply.send(Err(error));
                 return;
             }
@@ -141,7 +139,7 @@ pub(crate) fn run_writer_command(
                     )),
                     Ok(_) => None,
                     Err(error) => {
-                        let _ = reply.send(Err(sqlite_error("begin migration transaction", error)));
+                        let _ = reply.send(Err(sqlite_error("begin exact SQL transaction", error)));
                         None
                     }
                 }
@@ -152,17 +150,22 @@ pub(crate) fn run_writer_command(
         }
         WriterCommand::CheckpointWalTruncate { reply, authority } => {
             if let Err(error) =
-                verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Query)
+                verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Query)
             {
                 let _ = reply.send(Err(error));
                 return;
             }
-            let statement = MigrationSqlStatement::new(
+            let statement = match ExactSqlStatement::new(
                 "PRAGMA wal_checkpoint(TRUNCATE)".to_owned(),
                 Vec::new(),
-            )
-            .expect("fixed WAL checkpoint statement is valid");
-            let result = with_migration_guard(
+            ) {
+                Ok(statement) => statement,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
+            let result = with_exact_sql_guard(
                 connection,
                 false,
                 false,
@@ -180,13 +183,13 @@ pub(crate) fn run_writer_command(
         }
         WriterCommand::Vacuum { reply, authority } => {
             let Some(authority) = authority else {
-                let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
+                let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
                     "exclusive-maintenance vacuum requires attached write authority".to_owned(),
                 )));
                 return;
             };
             if let Err(error) =
-                verify_write_authority(Some(authority.as_ref()), MigrationSqlWriteIntent::Vacuum)
+                verify_write_authority(Some(authority.as_ref()), ExactSqlWriteIntent::Vacuum)
             {
                 let _ = reply.send(Err(error));
                 return;
@@ -202,14 +205,14 @@ pub(crate) fn run_writer_command(
                         return;
                     }
                 };
-            let mut result = with_migration_guard(
+            let mut result = with_exact_sql_guard(
                 connection,
                 false,
                 true,
                 Some(Arc::clone(shutdown_requested)),
                 None,
                 true,
-                Some((Arc::clone(&authority), MigrationSqlWriteIntent::Vacuum)),
+                Some((Arc::clone(&authority), ExactSqlWriteIntent::Vacuum)),
                 crate::connection::authorize_writer,
                 true,
                 Some(AuthorizedDatabaseOperation::Vacuum),
@@ -238,16 +241,16 @@ pub(crate) fn run_writer_command(
 pub(crate) fn reject_writer_command(command: WriterCommand) {
     match command {
         WriterCommand::Dispatch { reply, .. } => {
-            let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
+            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::BeginTransaction { reply, .. } => {
-            let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
+            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::CheckpointWalTruncate { reply, .. } => {
-            let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
+            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
         }
         WriterCommand::Vacuum { reply, .. } => {
-            let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
+            let _ = reply.send(Err(ExactSqlError::WriterUnavailable));
         }
     }
 }
@@ -260,13 +263,13 @@ fn run_transaction(
     shutdown_requested: &Arc<AtomicBool>,
     last_insert_rowid: &AtomicI64,
     expired: &AtomicBool,
-    authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
-    policy: MigrationSqlTransactionPolicy,
+    authority: Option<Arc<dyn ExactSqlWriteAuthority>>,
+    policy: TransactionPolicy,
 ) -> TransactionCompletion {
     let mut attachments = Vec::new();
     let mut previous_attachment_limit = None;
-    let mut idle_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
-    let mut transaction_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_LIMIT;
+    let mut idle_deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
+    let mut transaction_deadline = Instant::now() + EXACT_SQL_TRANSACTION_LIMIT;
     loop {
         if shutdown_requested.load(Ordering::Acquire) {
             let _ = transaction.rollback();
@@ -294,22 +297,22 @@ fn run_transaction(
                 if Instant::now() >= transaction_deadline {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
-                    let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
+                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
                     return TransactionCompletion::abandoned(
                         attachments,
                         previous_attachment_limit,
                     );
                 }
-                if attachments.iter().any(|attached: &MigrationSqlAttachment| {
+                if attachments.iter().any(|attached: &ExactSqlAttachment| {
                     attached
                         .database_name()
                         .eq_ignore_ascii_case(attachment.database_name())
                 }) {
-                    let _ = reply.send(Err(MigrationSqlError::InvalidAttachment));
+                    let _ = reply.send(Err(ExactSqlError::InvalidAttachment));
                     continue;
                 }
                 if let Err(error) =
-                    verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Execute)
+                    verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Execute)
                 {
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(error));
@@ -320,13 +323,13 @@ fn run_transaction(
                 }
                 if previous_attachment_limit.is_none() {
                     match transaction
-                        .set_limit(Limit::SQLITE_LIMIT_ATTACHED, MAX_MIGRATION_ATTACHMENTS)
+                        .set_limit(Limit::SQLITE_LIMIT_ATTACHED, MAX_EXACT_SQL_ATTACHMENTS)
                     {
                         Ok(previous) => previous_attachment_limit = Some(previous),
                         Err(error) => {
                             let _ = transaction.rollback();
                             let _ = reply
-                                .send(Err(sqlite_error("open migration attachment limit", error)));
+                                .send(Err(sqlite_error("open exact SQL attachment limit", error)));
                             return TransactionCompletion::abandoned(attachments, None);
                         }
                     }
@@ -343,7 +346,7 @@ fn run_transaction(
                         attachments.push(attachment);
                         if let Err(error) = verify_write_authority(
                             authority.as_deref(),
-                            MigrationSqlWriteIntent::Execute,
+                            ExactSqlWriteIntent::Execute,
                         ) {
                             let _ = transaction.rollback();
                             let _ = reply.send(Err(error));
@@ -353,7 +356,7 @@ fn run_transaction(
                             );
                         }
                         let _ = reply.send(Ok(()));
-                        idle_deadline = Instant::now() + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
+                        idle_deadline = Instant::now() + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                     }
                     Err(error) => {
                         let _ = transaction.rollback();
@@ -367,13 +370,13 @@ fn run_transaction(
             }
             TransactionCommand::Dispatch {
                 request,
-                step_policy,
+                execution_policy,
                 reply,
             } => {
                 if Instant::now() >= transaction_deadline {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
-                    let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
+                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
                     return TransactionCompletion::abandoned(
                         attachments,
                         previous_attachment_limit,
@@ -387,32 +390,42 @@ fn run_transaction(
                         previous_attachment_limit,
                     );
                 }
-                if step_policy == MigrationSqlStepPolicy::AuthorizedLongSchema
-                    && policy != MigrationSqlTransactionPolicy::AuthorizedLongLease
+                if execution_policy == ExecutionPolicy::AuthorityRevalidated
+                    && policy != TransactionPolicy::AuthorizedLongLease
                 {
-                    let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
-                        "long schema steps require an authority-bound long-lease transaction"
+                    let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
+                        "authority-revalidated batches require an authority-bound long-lease transaction"
                             .to_owned(),
                     )));
                     continue;
                 }
                 let intent = request.intent();
                 let repeated_authority =
-                    (step_policy == MigrationSqlStepPolicy::AuthorizedLongSchema).then(|| {
-                        (
-                            Arc::clone(authority.as_ref().expect("schema authority")),
-                            intent,
-                        )
-                    });
-                let execution_deadline = (step_policy == MigrationSqlStepPolicy::Bounded)
-                    .then_some(transaction_deadline);
+                    if execution_policy == ExecutionPolicy::AuthorityRevalidated {
+                        let Some(authority) = authority.as_ref() else {
+                            let _ = transaction.rollback();
+                            let _ = reply.send(Err(ExactSqlError::AuthorityDenied(
+                                "authority-revalidated batch requires attached write authority"
+                                    .to_owned(),
+                            )));
+                            return TransactionCompletion::abandoned(
+                                attachments,
+                                previous_attachment_limit,
+                            );
+                        };
+                        Some((Arc::clone(authority), intent))
+                    } else {
+                        None
+                    };
+                let execution_deadline =
+                    (execution_policy == ExecutionPolicy::Bounded).then_some(transaction_deadline);
                 let (mut result, inserted) = execute_request(
                     &transaction,
                     request,
                     true,
                     Some(Arc::clone(shutdown_requested)),
                     execution_deadline,
-                    step_policy == MigrationSqlStepPolicy::Bounded,
+                    execution_policy == ExecutionPolicy::Bounded,
                     repeated_authority,
                 );
                 if shutdown_requested.load(Ordering::Acquire) {
@@ -431,7 +444,7 @@ fn run_transaction(
                         previous_attachment_limit,
                     );
                 }
-                if matches!(&result, Err(MigrationSqlError::AuthorityDenied(_))) {
+                if matches!(&result, Err(ExactSqlError::AuthorityDenied(_))) {
                     let _ = transaction.rollback();
                     let _ = reply.send(result);
                     return TransactionCompletion::abandoned(
@@ -439,12 +452,12 @@ fn run_transaction(
                         previous_attachment_limit,
                     );
                 }
-                if step_policy == MigrationSqlStepPolicy::Bounded
+                if execution_policy == ExecutionPolicy::Bounded
                     && Instant::now() >= transaction_deadline
                 {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
-                    let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
+                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
                     return TransactionCompletion::abandoned(
                         attachments,
                         previous_attachment_limit,
@@ -460,14 +473,14 @@ fn run_transaction(
                 let _ = reply.send(result);
                 if succeeded {
                     let renewed_at = Instant::now();
-                    idle_deadline = renewed_at + MIGRATION_SQL_TRANSACTION_IDLE_LIMIT;
+                    idle_deadline = renewed_at + EXACT_SQL_TRANSACTION_IDLE_LIMIT;
                     // A long-lease transaction earns its next lease by
                     // committing progress: full-index replacement writes far
                     // more rows than one fixed lease can carry, but it never
                     // stalls. Idleness, shutdown, and authority revocation
                     // still cancel it, and `Ordinary` never renews.
-                    if policy == MigrationSqlTransactionPolicy::AuthorizedLongLease {
-                        transaction_deadline = renewed_at + MIGRATION_SQL_TRANSACTION_LIMIT;
+                    if policy == TransactionPolicy::AuthorizedLongLease {
+                        transaction_deadline = renewed_at + EXACT_SQL_TRANSACTION_LIMIT;
                     }
                 }
             }
@@ -475,14 +488,14 @@ fn run_transaction(
                 if Instant::now() >= transaction_deadline {
                     expired.store(true, Ordering::Release);
                     let _ = transaction.rollback();
-                    let _ = reply.send(Err(MigrationSqlError::TransactionExpired));
+                    let _ = reply.send(Err(ExactSqlError::TransactionExpired));
                     return TransactionCompletion::abandoned(
                         attachments,
                         previous_attachment_limit,
                     );
                 }
                 if let Err(error) =
-                    verify_write_authority(authority.as_deref(), MigrationSqlWriteIntent::Commit)
+                    verify_write_authority(authority.as_deref(), ExactSqlWriteIntent::Commit)
                 {
                     let _ = transaction.rollback();
                     let _ = reply.send(Err(error));
@@ -494,7 +507,7 @@ fn run_transaction(
                 let changed_rows = transaction.total_changes().saturating_sub(before);
                 let result = transaction
                     .commit()
-                    .map(|()| MigrationSqlCommitReceipt { changed_rows })
+                    .map(|()| ExactSqlCommitReceipt { changed_rows })
                     .map_err(|error| sqlite_error("commit immediate transaction", error));
                 return TransactionCompletion {
                     attachments,
@@ -506,7 +519,7 @@ fn run_transaction(
                 let discarded_changed_rows = transaction.total_changes().saturating_sub(before);
                 let result = transaction
                     .rollback()
-                    .map(|()| MigrationSqlRollbackReceipt {
+                    .map(|()| ExactSqlRollbackReceipt {
                         discarded_changed_rows,
                     })
                     .map_err(|error| sqlite_error("rollback immediate transaction", error));
@@ -521,25 +534,25 @@ fn run_transaction(
 }
 
 struct TransactionCompletion {
-    attachments: Vec<MigrationSqlAttachment>,
+    attachments: Vec<ExactSqlAttachment>,
     previous_attachment_limit: Option<i32>,
     terminal: Option<TransactionTerminal>,
 }
 
 enum TransactionTerminal {
     Commit {
-        reply: SyncSender<Result<MigrationSqlCommitReceipt, MigrationSqlError>>,
-        result: Result<MigrationSqlCommitReceipt, MigrationSqlError>,
+        reply: SyncSender<Result<ExactSqlCommitReceipt, ExactSqlError>>,
+        result: Result<ExactSqlCommitReceipt, ExactSqlError>,
     },
     Rollback {
-        reply: SyncSender<Result<MigrationSqlRollbackReceipt, MigrationSqlError>>,
-        result: Result<MigrationSqlRollbackReceipt, MigrationSqlError>,
+        reply: SyncSender<Result<ExactSqlRollbackReceipt, ExactSqlError>>,
+        result: Result<ExactSqlRollbackReceipt, ExactSqlError>,
     },
 }
 
 impl TransactionCompletion {
     fn abandoned(
-        attachments: Vec<MigrationSqlAttachment>,
+        attachments: Vec<ExactSqlAttachment>,
         previous_attachment_limit: Option<i32>,
     ) -> Self {
         Self {
@@ -549,7 +562,7 @@ impl TransactionCompletion {
         }
     }
 
-    fn finish(self, connection: &Connection) -> Result<(), MigrationSqlError> {
+    fn finish(self, connection: &Connection) -> Result<(), ExactSqlError> {
         let mut cleanup_error = None;
         for attachment in self.attachments.into_iter().rev() {
             if let Err(error) = detach_database(connection, attachment.database_name(), None)
@@ -562,7 +575,7 @@ impl TransactionCompletion {
             && let Err(error) = connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous)
             && cleanup_error.is_none()
         {
-            cleanup_error = Some(sqlite_error("restore migration attachment limit", error));
+            cleanup_error = Some(sqlite_error("restore exact SQL attachment limit", error));
         }
         match self.terminal {
             Some(TransactionTerminal::Commit { reply, result }) => {

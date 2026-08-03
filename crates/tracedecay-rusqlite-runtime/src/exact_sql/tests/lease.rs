@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn dropping_pinned_transaction_rolls_back() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE dropped (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -12,7 +12,7 @@ fn dropping_pinned_transaction_rolls_back() {
         transaction
             .execute(statement(
                 "INSERT INTO dropped VALUES (?)",
-                vec![MigrationSqlValue::Integer(8)],
+                vec![ExactSqlValue::Integer(8)],
             ))
             .unwrap();
     }
@@ -24,13 +24,13 @@ fn dropping_pinned_transaction_rolls_back() {
         )
         .unwrap();
 
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(0)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }
 
 #[test]
 fn writer_shutdown_rolls_back_and_closes_a_leaked_transaction() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let transaction = channel.begin_immediate().unwrap();
     let Fixture {
         _directory,
@@ -46,10 +46,10 @@ fn writer_shutdown_rolls_back_and_closes_a_leaked_transaction() {
 
     receive
         .recv_timeout(Duration::from_secs(1))
-        .expect("writer shutdown must not wait forever on leaked migration transaction");
+        .expect("writer shutdown must not wait forever on leaked exact SQL transaction");
     assert!(matches!(
         transaction.commit(),
-        Err(MigrationSqlError::TransactionClosed)
+        Err(ExactSqlError::TransactionClosed)
     ));
     drop(readers);
     drop(_directory);
@@ -58,14 +58,14 @@ fn writer_shutdown_rolls_back_and_closes_a_leaked_transaction() {
 #[test]
 fn idle_transaction_expires_and_releases_writer() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let transaction = channel.begin_immediate().unwrap();
 
-    std::thread::sleep(MIGRATION_SQL_TRANSACTION_IDLE_LIMIT + Duration::from_millis(100));
+    std::thread::sleep(EXACT_SQL_TRANSACTION_IDLE_LIMIT + Duration::from_millis(100));
 
     assert!(matches!(
         transaction.commit(),
-        Err(MigrationSqlError::TransactionExpired)
+        Err(ExactSqlError::TransactionExpired)
     ));
     channel
         .execute_batch("CREATE TABLE after_idle_expiry (value INTEGER)".to_owned())
@@ -75,7 +75,7 @@ fn idle_transaction_expires_and_releases_writer() {
 #[test]
 fn active_transaction_hits_absolute_lease_and_releases_writer() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let transaction = channel.begin_immediate().unwrap();
     let started = Instant::now();
 
@@ -86,7 +86,7 @@ fn active_transaction_hits_absolute_lease_and_releases_writer() {
         }
     };
 
-    assert!(matches!(error, MigrationSqlError::TransactionExpired));
+    assert!(matches!(error, ExactSqlError::TransactionExpired));
     assert!(started.elapsed() < Duration::from_secs(2));
     channel
         .execute_batch("CREATE TABLE after_absolute_expiry (value INTEGER)".to_owned())
