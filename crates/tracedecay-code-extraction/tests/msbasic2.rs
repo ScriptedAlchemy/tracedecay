@@ -3,7 +3,11 @@ use tracedecay_code_extraction::MsBasic2Extractor;
 use tracedecay_domain::*;
 
 fn extract_fixture() -> ExtractionResult {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bas").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bas"
+    ))
+    .unwrap();
     let extractor = MsBasic2Extractor;
     let result = extractor.extract("sample.bas", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

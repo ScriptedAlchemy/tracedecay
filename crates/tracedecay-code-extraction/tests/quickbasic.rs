@@ -6,7 +6,11 @@ mod quickbasic_tests {
     use tracedecay_domain::*;
 
     fn extract_fixture() -> ExtractionResult {
-        let source = std::fs::read_to_string("../../tests/fixtures/sample.bi").unwrap();
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sample.bi"
+        ))
+        .unwrap();
         let extractor = QuickBasicExtractor;
         let result = extractor.extract("sample.bi", &source);
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

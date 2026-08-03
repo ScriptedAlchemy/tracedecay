@@ -26,7 +26,8 @@ src/
   sync.rs        Incremental sync engine
   main.rs        CLI entry point
 tests/           Integration tests (one per module/language)
-tests/fixtures/  Sample source files for extraction tests
+crates/tracedecay-code-extraction/tests/fixtures/
+                Sample source files for extraction tests
 vendor/          Vendored tree-sitter grammars
 docs/            Design docs and guides
 ```
@@ -51,7 +52,7 @@ cargo nextest run --no-default-features --features lite
 ## Making Changes
 
 1. **Fork and branch** from `master` for stable changes, `beta` for experimental features.
-2. **Write tests.** Every extraction change should have a corresponding test in `tests/`. Follow the existing pattern: create a fixture in `tests/fixtures/` and assert on extracted nodes/edges.
+2. **Write tests.** Every extraction change should have a corresponding test in `crates/tracedecay-code-extraction/tests/`. Follow the existing pattern: create a fixture in `crates/tracedecay-code-extraction/tests/fixtures/` and assert on extracted nodes/edges.
 3. **Run the full test suite** before submitting:
    ```bash
    cargo nextest run --workspace --no-fail-fast
@@ -106,7 +107,7 @@ section so the contributor command and blocking/advisory split still match CI.
 1. Add a tree-sitter grammar dependency (or vendor it under `vendor/`).
 2. Create `src/extraction/{lang}_extractor.rs` implementing the `Extractor` trait.
 3. Register it in the `LanguageRegistry` with a feature flag (e.g., `lang-{name}`).
-4. Add a fixture file `tests/fixtures/sample.{ext}` and a test module `tests/extraction_suite/{lang}.rs`, then register it with a `mod {lang};` declaration in `tests/extraction_suite/main.rs`.
+4. Add a fixture file `crates/tracedecay-code-extraction/tests/fixtures/sample.{ext}` and a test module `crates/tracedecay-code-extraction/tests/{lang}.rs`, then register it with a `mod {lang};` declaration in `crates/tracedecay-code-extraction/tests/main.rs`.
 5. Update the feature flag tables in `Cargo.toml` and this document.
 
 ## Validating Plugins and Skills

@@ -3,7 +3,11 @@ use tracedecay_code_extraction::QBasicExtractor;
 use tracedecay_domain::*;
 
 fn extract_fixture() -> ExtractionResult {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.qb").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.qb"
+    ))
+    .unwrap();
     let extractor = QBasicExtractor;
     let result = extractor.extract("sample.qb", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

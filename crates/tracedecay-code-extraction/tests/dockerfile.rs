@@ -6,7 +6,11 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_dockerfile_file_node_is_root() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let files: Vec<_> = result
@@ -20,7 +24,11 @@ fn test_dockerfile_file_node_is_root() {
 
 #[test]
 fn test_dockerfile_extract_from_stages() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // FROM instructions with AS create named stages -- map to Module nodes
@@ -41,7 +49,11 @@ fn test_dockerfile_extract_from_stages() {
 
 #[test]
 fn test_dockerfile_extract_env_vars() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
@@ -61,7 +73,11 @@ fn test_dockerfile_extract_env_vars() {
 
 #[test]
 fn test_dockerfile_extract_arg_vars() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let consts: Vec<_> = result
@@ -77,7 +93,11 @@ fn test_dockerfile_extract_arg_vars() {
 
 #[test]
 fn test_dockerfile_extract_expose_ports() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     // EXPOSE -> Field node (port declaration)
@@ -94,7 +114,11 @@ fn test_dockerfile_extract_expose_ports() {
 
 #[test]
 fn test_dockerfile_extract_labels() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let fields: Vec<_> = result
@@ -111,7 +135,11 @@ fn test_dockerfile_extract_labels() {
 
 #[test]
 fn test_dockerfile_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let contains: Vec<_> = result
@@ -127,7 +155,11 @@ fn test_dockerfile_contains_edges() {
 
 #[test]
 fn test_dockerfile_copy_from_creates_uses_edge() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.dockerfile").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.dockerfile"
+    ))
+    .unwrap();
     let result = DockerfileExtractor.extract("sample.dockerfile", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let builder = result

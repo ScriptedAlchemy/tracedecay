@@ -475,8 +475,11 @@ fn test_objc_class_method_vs_instance_method() {
 
 #[test]
 fn test_objc_full_sample_file() {
-    let source =
-        std::fs::read_to_string("../../tests/fixtures/sample.m").expect("Failed to read sample.m");
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.m"
+    ))
+    .expect("Failed to read sample.m");
     let extractor = ObjcExtractor;
     let result = extractor.extract("sample.m", &source);
 

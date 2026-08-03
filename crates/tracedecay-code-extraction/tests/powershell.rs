@@ -4,7 +4,11 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_powershell_extract_functions() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -30,7 +34,11 @@ fn test_powershell_extract_functions() {
 
 #[test]
 fn test_powershell_extract_consts() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -53,7 +61,11 @@ fn test_powershell_extract_consts() {
 
 #[test]
 fn test_powershell_extract_imports() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -76,7 +88,11 @@ fn test_powershell_extract_imports() {
 
 #[test]
 fn test_powershell_call_sites() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -113,7 +129,11 @@ fn test_powershell_call_sites() {
 
 #[test]
 fn test_powershell_docstrings() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -169,7 +189,11 @@ fn test_powershell_docstrings() {
 
 #[test]
 fn test_powershell_file_node() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     let files: Vec<_> = result
@@ -183,7 +207,11 @@ fn test_powershell_file_node() {
 
 #[test]
 fn test_powershell_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.ps1").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.ps1"
+    ))
+    .unwrap();
     let extractor = PowerShellExtractor;
     let result = extractor.extract("sample.ps1", &source);
     let contains: Vec<_> = result

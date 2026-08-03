@@ -4,7 +4,11 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_batch_extract_labels_as_functions() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bat"
+    ))
+    .unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -30,7 +34,11 @@ fn test_batch_extract_labels_as_functions() {
 
 #[test]
 fn test_batch_extract_set_consts() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bat"
+    ))
+    .unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -53,7 +61,11 @@ fn test_batch_extract_set_consts() {
 
 #[test]
 fn test_batch_call_sites() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bat"
+    ))
+    .unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -90,7 +102,11 @@ fn test_batch_call_sites() {
 
 #[test]
 fn test_batch_docstrings() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bat"
+    ))
+    .unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -147,7 +163,11 @@ fn test_batch_docstrings() {
 
 #[test]
 fn test_batch_file_node() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bat"
+    ))
+    .unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     let files: Vec<_> = result
@@ -161,7 +181,11 @@ fn test_batch_file_node() {
 
 #[test]
 fn test_batch_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.bat").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.bat"
+    ))
+    .unwrap();
     let extractor = BatchExtractor;
     let result = extractor.extract("sample.bat", &source);
     let contains: Vec<_> = result

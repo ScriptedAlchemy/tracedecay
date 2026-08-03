@@ -23,7 +23,7 @@ fn timed_extract(source: String, timeout: Duration) -> Option<(f64, usize, usize
 fn yaml_frontmatter_hang_reproducer() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/fixtures/markdown_yaml_frontmatter_hang.md"
+        "/tests/fixtures/markdown_yaml_frontmatter_hang.md"
     );
     let src = std::fs::read_to_string(path).expect("fixture missing");
     match timed_extract(src, Duration::from_secs(5)) {

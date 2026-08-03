@@ -3,7 +3,11 @@ use tracedecay_code_extraction::LanguageExtractor;
 use tracedecay_domain::*;
 
 fn extract_fixture() -> ExtractionResult {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.cob").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.cob"
+    ))
+    .unwrap();
     let extractor = CobolExtractor;
     let result = extractor.extract("sample.cob", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);

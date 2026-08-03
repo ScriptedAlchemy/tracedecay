@@ -17,7 +17,7 @@ Each language needs 4 things:
 | 1 | Tree-sitter grammar | `tracedecay-large-treesitters` crate on crates.io | Add dep + register in `all_languages()` |
 | 2 | Extractor | `src/extraction/{lang}_extractor.rs` (~400-700 lines) | Implement `LanguageExtractor` trait |
 | 3 | Wiring | `Cargo.toml` + `src/extraction/mod.rs` | Feature flag, `mod` decl, registry push |
-| 4 | Tests | `tests/fixtures/sample.{ext}` + `tests/{lang}_extraction_test.rs` | Sample file + extraction assertions |
+| 4 | Tests | `crates/tracedecay-code-extraction/tests/fixtures/sample.{ext}` + `crates/tracedecay-code-extraction/tests/{lang}.rs` | Sample file + extraction assertions |
 
 ### The `LanguageExtractor` trait
 

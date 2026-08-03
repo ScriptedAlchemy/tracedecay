@@ -4,7 +4,11 @@ use tracedecay_domain::*;
 
 #[test]
 fn test_bash_extract_functions() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -30,7 +34,11 @@ fn test_bash_extract_functions() {
 
 #[test]
 fn test_bash_extract_readonly_consts() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -53,7 +61,11 @@ fn test_bash_extract_readonly_consts() {
 
 #[test]
 fn test_bash_extract_source_import() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -69,7 +81,11 @@ fn test_bash_extract_source_import() {
 
 #[test]
 fn test_bash_call_sites() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -106,7 +122,11 @@ fn test_bash_call_sites() {
 
 #[test]
 fn test_bash_docstrings() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
@@ -159,7 +179,11 @@ fn test_bash_docstrings() {
 
 #[test]
 fn test_bash_file_node() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     let files: Vec<_> = result
@@ -173,7 +197,11 @@ fn test_bash_file_node() {
 
 #[test]
 fn test_bash_contains_edges() {
-    let source = std::fs::read_to_string("../../tests/fixtures/sample.sh").unwrap();
+    let source = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sample.sh"
+    ))
+    .unwrap();
     let extractor = BashExtractor;
     let result = extractor.extract("sample.sh", &source);
     let contains: Vec<_> = result
