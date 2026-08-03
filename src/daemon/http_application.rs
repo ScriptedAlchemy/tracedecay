@@ -20,7 +20,8 @@ use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
-use tokio::sync::{Mutex, Semaphore};
+use constant_time_eq::constant_time_eq;
+use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use tracedecay_domain::ProjectId;
@@ -208,52 +209,31 @@ async fn require_local_http_admission(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !constant_time_header_eq(
-        request.headers().get(AUTHORIZATION),
-        &admission.authorization,
-    ) {
+    let authorization_matches = request.headers().get(AUTHORIZATION).is_some_and(|actual| {
+        let actual = actual.as_bytes();
+        let expected = admission.authorization.as_bytes();
+        actual.len() == expected.len() && constant_time_eq(actual, expected)
+    });
+    if !authorization_matches {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if !constant_time_header_eq(request.headers().get(ORIGIN), &admission.origin) {
+    let origin_matches = request.headers().get(ORIGIN).is_some_and(|actual| {
+        let actual = actual.as_bytes();
+        let expected = admission.origin.as_bytes();
+        actual.len() == expected.len() && constant_time_eq(actual, expected)
+    });
+    if !origin_matches {
         return StatusCode::FORBIDDEN.into_response();
     }
     next.run(request).await
-}
-
-fn constant_time_header_eq(actual: Option<&HeaderValue>, expected: &HeaderValue) -> bool {
-    let Some(actual) = actual else {
-        return false;
-    };
-    let actual = actual.as_bytes();
-    let expected = expected.as_bytes();
-    let mut difference = actual.len() ^ expected.len();
-    for index in 0..actual.len().max(expected.len()) {
-        difference |= usize::from(
-            actual.get(index).copied().unwrap_or_default()
-                ^ expected.get(index).copied().unwrap_or_default(),
-        );
-    }
-    difference == 0
-}
-
-#[derive(Clone)]
-pub(super) struct DaemonHttpApplicationShutdownSignal {
-    active: Arc<AtomicBool>,
-    cancellation: crate::application::context::CancellationToken,
-}
-
-impl DaemonHttpApplicationShutdownSignal {
-    pub(super) fn cancel(&self) {
-        self.active.store(false, Ordering::Release);
-        self.cancellation.cancel();
-    }
 }
 
 pub(super) struct DaemonHttpApplicationService {
     endpoint: SocketAddr,
     #[cfg(test)]
     origin: String,
-    shutdown: DaemonHttpApplicationShutdownSignal,
+    active: Arc<AtomicBool>,
+    shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<()>>>,
 }
 
@@ -286,17 +266,12 @@ impl DaemonHttpApplicationService {
             admission.clone(),
             require_local_http_admission,
         ));
-        let cancellation = crate::application::context::CancellationToken::new();
-        let shutdown_requested = cancellation.clone();
-        let shutdown = DaemonHttpApplicationShutdownSignal {
-            active: Arc::clone(&active),
-            cancellation,
-        };
+        let (shutdown, shutdown_requested) = oneshot::channel();
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(async move {
             let result = axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    shutdown_requested.cancelled().await;
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_requested.await;
                 })
                 .await
                 .map_err(|error| TraceDecayError::Config {
@@ -309,7 +284,8 @@ impl DaemonHttpApplicationService {
             endpoint,
             #[cfg(test)]
             origin: origin.to_owned(),
-            shutdown,
+            active,
+            shutdown: Some(shutdown),
             task: Some(task),
         })
     }
@@ -318,21 +294,16 @@ impl DaemonHttpApplicationService {
         self.endpoint
     }
 
-    pub(super) fn shutdown_signal(&self) -> DaemonHttpApplicationShutdownSignal {
-        self.shutdown.clone()
-    }
-
-    pub(super) fn cancel(&self) {
-        self.shutdown.cancel();
-    }
-
     #[cfg(test)]
     pub(super) fn origin(&self) -> &str {
         &self.origin
     }
 
     pub(super) async fn shutdown(mut self) -> Result<()> {
-        self.cancel();
+        self.active.store(false, Ordering::Release);
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
         let Some(task) = self.task.take() else {
             return Ok(());
         };
@@ -344,7 +315,10 @@ impl DaemonHttpApplicationService {
 
 impl Drop for DaemonHttpApplicationService {
     fn drop(&mut self) {
-        self.cancel();
+        self.active.store(false, Ordering::Release);
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
         if let Some(task) = self.task.take() {
             task.abort();
         }

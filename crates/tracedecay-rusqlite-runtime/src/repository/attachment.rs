@@ -20,7 +20,7 @@ use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
     PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
-    migration_sql::{MigrationSqlError, MigrationSqlHandle},
+    exact_sql::{ExactSqlError, ExactSqlHandle},
     reader::{
         ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderQueryExecutor,
         ReaderStartError,
@@ -356,19 +356,19 @@ impl RepositoryRuntimePhysicalAttachment {
             .map_err(|error| error.to_string())
     }
 
-    pub fn migration_sql_handle(&self) -> Result<MigrationSqlHandle, MigrationSqlError> {
+    pub fn exact_sql_handle(&self) -> Result<ExactSqlHandle, ExactSqlError> {
         let state = self.lock_state();
         if !state.admission_open || state.closed {
-            return Err(MigrationSqlError::WriterUnavailable);
+            return Err(ExactSqlError::WriterUnavailable);
         }
         let writer = state
             .writer
             .as_deref()
-            .ok_or(MigrationSqlError::WriterUnavailable)?;
+            .ok_or(ExactSqlError::WriterUnavailable)?;
         let readers = state.readers.as_ref().ok_or_else(|| {
-            MigrationSqlError::ReaderUnavailable("repository readers are unavailable".to_owned())
+            ExactSqlError::ReaderUnavailable("repository readers are unavailable".to_owned())
         })?;
-        MigrationSqlHandle::attach(writer, readers)
+        ExactSqlHandle::attach(writer, readers)
     }
 
     pub fn snapshot(&self) -> RepositoryRuntimePhysicalSnapshot {
@@ -728,7 +728,7 @@ mod tests {
     use tracedecay_domain::LocatorDigest;
     use tracedecay_store::{AdmissionConfigV1, StoreIncarnationV1};
 
-    use crate::migration_sql::{MigrationSqlError, MigrationSqlStatement, MigrationSqlValue};
+    use crate::exact_sql::{ExactSqlError, ExactSqlStatement, ExactSqlValue};
 
     use super::*;
 
@@ -756,8 +756,8 @@ mod tests {
         )
     }
 
-    fn statement(sql: &str, params: Vec<MigrationSqlValue>) -> MigrationSqlStatement {
-        MigrationSqlStatement::new(sql.to_owned(), params).unwrap()
+    fn statement(sql: &str, params: Vec<ExactSqlValue>) -> ExactSqlStatement {
+        ExactSqlStatement::new(sql.to_owned(), params).unwrap()
     }
 
     fn create_identity_database(path: &std::path::Path, value: &str) {
@@ -834,7 +834,7 @@ mod tests {
                     AdmissionConfigV1::default(),
                 )
                 .unwrap();
-            let handle = attachment.migration_sql_handle().unwrap();
+            let handle = attachment.exact_sql_handle().unwrap();
             handle
                 .execute_batch(
                     "CREATE TABLE IF NOT EXISTS runtime_lifecycle (
@@ -846,7 +846,7 @@ mod tests {
             handle
                 .execute(statement(
                     "INSERT INTO runtime_lifecycle (cycle) VALUES (?)",
-                    vec![MigrationSqlValue::Integer(cycle)],
+                    vec![ExactSqlValue::Integer(cycle)],
                 ))
                 .unwrap();
             let rows = handle
@@ -858,7 +858,7 @@ mod tests {
             assert_eq!(rows.rows.len(), usize::try_from(cycle + 1).unwrap());
             assert_eq!(
                 rows.rows.last().unwrap().values,
-                vec![MigrationSqlValue::Integer(cycle)]
+                vec![ExactSqlValue::Integer(cycle)]
             );
 
             attachment.drain().unwrap();
@@ -874,20 +874,17 @@ mod tests {
             let write_error = handle
                 .execute(statement(
                     "INSERT INTO runtime_lifecycle (cycle) VALUES (?)",
-                    vec![MigrationSqlValue::Integer(cycle + 10)],
+                    vec![ExactSqlValue::Integer(cycle + 10)],
                 ))
                 .unwrap_err();
-            assert_eq!(write_error, MigrationSqlError::WriterUnavailable);
+            assert_eq!(write_error, ExactSqlError::WriterUnavailable);
             let read_error = handle
                 .query(
                     statement("SELECT cycle FROM runtime_lifecycle", vec![]),
                     Duration::ZERO,
                 )
                 .unwrap_err();
-            assert!(matches!(
-                read_error,
-                MigrationSqlError::ReaderUnavailable(_)
-            ));
+            assert!(matches!(read_error, ExactSqlError::ReaderUnavailable(_)));
         }
     }
 }

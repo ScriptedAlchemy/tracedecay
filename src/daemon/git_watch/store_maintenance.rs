@@ -302,7 +302,7 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
 /// derives exactly one such scope from the root it was handed. Nothing has ever
 /// enumerated the siblings, so a scope whose project root is gone — a deleted
 /// agent worktree is the ordinary cause — is unreachable by any retention pass
-/// and uncounted by any report. One dogfood repository carried three scope
+/// and uncounted by any report. One large repository carried three scope
 /// directories, two of them orphaned, holding 7.2 GiB nothing could see.
 ///
 /// The pass is fail-closed by construction. It collects only when it can prove

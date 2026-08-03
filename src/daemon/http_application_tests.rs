@@ -244,6 +244,24 @@ async fn daemon_http_requires_bearer_before_application_dispatch() {
 }
 
 #[tokio::test]
+async fn daemon_http_rejects_bearer_tokens_that_differ_by_content_or_length() {
+    let (service, calls) = service_with_probe().await;
+    let origin = service.origin().to_owned();
+    let different = format!("Bearer {}", "f".repeat(AUTH_TOKEN.len()));
+    let different_response = request(&service, Some(&different), Some(&origin)).await;
+    assert_eq!(status(&different_response), StatusCode::UNAUTHORIZED);
+
+    let short = "Bearer f";
+    let short_response = request(&service, Some(short), Some(&origin)).await;
+    assert_eq!(status(&short_response), StatusCode::UNAUTHORIZED);
+
+    let empty_response = request(&service, Some(""), Some(&origin)).await;
+    assert_eq!(status(&empty_response), StatusCode::UNAUTHORIZED);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
 async fn daemon_http_requires_exact_local_origin_before_application_dispatch() {
     let (service, calls) = service_with_probe().await;
     let authorization = format!("Bearer {AUTH_TOKEN}");

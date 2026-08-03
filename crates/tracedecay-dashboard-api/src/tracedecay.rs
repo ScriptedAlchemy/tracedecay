@@ -18,7 +18,7 @@ pub trait DashboardProjectRuntime: GraphRuntimePort {
     fn dashboard_database_guard(&self) -> Arc<Database>;
     fn storage_telemetry_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>;
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle>;
     fn retention_config(&self) -> RetentionConfig;
     fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient>;
 }

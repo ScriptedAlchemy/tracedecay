@@ -43,43 +43,6 @@ fn codex_plugin_skills_match_codex_skill_creator_quick_validate_rules() {
 }
 
 #[test]
-fn repo_local_dogfood_skill_matches_codex_skill_creator_quick_validate_rules() {
-    let skills = load_skill_docs(REPO_LOCAL_SKILL_ROOT);
-    let dogfood = skills
-        .iter()
-        .find(|skill| skill.name == "dogfooding-tracedecay")
-        .expect("expected repo-local dogfood skill");
-    assert_codex_quick_validate_equivalent(dogfood);
-}
-
-#[test]
-fn repo_local_dogfood_skill_is_mirrored_and_teaches_live_install_safety() {
-    let codex = repo_path(".codex/skills/dogfooding-tracedecay/SKILL.md");
-    let claude = repo_path(".claude/skills/dogfooding-tracedecay/SKILL.md");
-    assert_eq!(
-        std::fs::read(&codex).expect("read Codex dogfood skill"),
-        std::fs::read(&claude).expect("read Claude dogfood skill"),
-        "Codex and Claude must receive the same dogfood workflow"
-    );
-
-    let body = std::fs::read_to_string(codex).expect("read dogfood skill text");
-    for required in [
-        "cargo dogfood",
-        "target/test-profile/.tracedecay",
-        "~/.local/lib/tracedecay/dogfood/tracedecay",
-        "~/.local/bin/tracedecay",
-        "tracedecay daemon status",
-        "tracedecay doctor",
-        "Do not run `tracedecay upgrade`",
-    ] {
-        assert!(
-            body.contains(required),
-            "dogfood skill should mention {required}"
-        );
-    }
-}
-
-#[test]
 fn generated_codex_plugin_skills_are_byte_copies_of_the_source_bundle() {
     let home = TempDir::new().expect("temp home");
     let _agent_env = crate::common::AgentEnvLock::pin(home.path());

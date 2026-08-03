@@ -2,7 +2,7 @@ use super::{HealthPassReport, HealthPassWarning};
 
 pub(super) fn render_missing_profile_report() -> HealthPassReport {
     let report = HealthPassReport {
-        warnings: vec![HealthPassWarning::durable(
+        warnings: vec![HealthPassWarning::new(
             "could not determine the profile data directory",
         )],
         ..HealthPassReport::default()

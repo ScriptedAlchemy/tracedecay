@@ -1,7 +1,7 @@
 //! Durable workflow authority over the canonical Work registered SQL channel.
 //!
 //! Definitions, handoffs, and execution fencing share the exact
-//! `MigrationSqlHandle` owned by `WorkSqliteStorage`. This module never opens a
+//! `ExactSqlHandle` owned by `WorkSqliteStorage`. This module never opens a
 //! private connection or creates a second Work authority.
 
 use std::time::Duration;
@@ -18,9 +18,9 @@ use tracedecay_domain::{
     WorkflowDefinitionId, WorkflowDefinitionV1, canonical_sha256,
 };
 
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlHandle, MigrationSqlRows, MigrationSqlStatement,
-    MigrationSqlTransaction, MigrationSqlValue,
+use crate::exact_sql::{
+    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlTransaction,
+    ExactSqlValue,
 };
 use crate::work::WorkSqliteStorage;
 
@@ -61,10 +61,10 @@ CREATE TABLE IF NOT EXISTS workflow_executions_v1 (
 ) STRICT;
 ";
 
-/// Workflow persistence on the registered Work migration-SQL handle.
+/// Workflow persistence on the registered Work exact-SQL handle.
 #[derive(Clone)]
 pub struct WorkflowSqliteAuthority {
-    handle: MigrationSqlHandle,
+    handle: ExactSqlHandle,
 }
 
 impl WorkflowSqliteAuthority {
@@ -93,7 +93,7 @@ pub enum WorkflowSqliteAuthorityBuildError {
     Unavailable,
 }
 
-fn definition_unavailable(_: MigrationSqlError) -> WorkflowDefinitionAuthorityError {
+fn definition_unavailable(_: ExactSqlError) -> WorkflowDefinitionAuthorityError {
     WorkflowDefinitionAuthorityError::Unavailable(
         "workflow definition authority unavailable".to_owned(),
     )
@@ -105,7 +105,7 @@ fn definition_codec_unavailable() -> WorkflowDefinitionAuthorityError {
     )
 }
 
-fn handoff_unavailable(_: MigrationSqlError) -> TaskHandoffAuthorityError {
+fn handoff_unavailable(_: ExactSqlError) -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
 }
 
@@ -113,7 +113,7 @@ fn handoff_codec_unavailable() -> TaskHandoffAuthorityError {
     TaskHandoffAuthorityError::Unavailable("workflow handoff authority unavailable".to_owned())
 }
 
-fn execution_unavailable(_: MigrationSqlError) -> WorkflowExecutionAuthorityError {
+fn execution_unavailable(_: ExactSqlError) -> WorkflowExecutionAuthorityError {
     WorkflowExecutionAuthorityError::Unavailable(
         "workflow execution authority unavailable".to_owned(),
     )
@@ -125,23 +125,20 @@ fn execution_codec_unavailable() -> WorkflowExecutionAuthorityError {
     )
 }
 
-fn statement(
-    sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlStatement, MigrationSqlError> {
-    MigrationSqlStatement::new(sql.to_owned(), params)
+fn statement(sql: &str, params: Vec<ExactSqlValue>) -> Result<ExactSqlStatement, ExactSqlError> {
+    ExactSqlStatement::new(sql.to_owned(), params)
 }
 
-fn migration_text(values: &[MigrationSqlValue], index: usize) -> Option<&str> {
+fn exact_sql_text(values: &[ExactSqlValue], index: usize) -> Option<&str> {
     match values.get(index)? {
-        MigrationSqlValue::Text(value) => Some(value),
+        ExactSqlValue::Text(value) => Some(value),
         _ => None,
     }
 }
 
-fn migration_integer(values: &[MigrationSqlValue], index: usize) -> Option<i64> {
+fn exact_sql_integer(values: &[ExactSqlValue], index: usize) -> Option<i64> {
     match values.get(index)? {
-        MigrationSqlValue::Integer(value) => Some(*value),
+        ExactSqlValue::Integer(value) => Some(*value),
         _ => None,
     }
 }
@@ -181,26 +178,26 @@ fn decode_json<T: serde::de::DeserializeOwned>(payload: &str) -> Result<T, ()> {
 }
 
 fn query_handle(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlRows, MigrationSqlError> {
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlRows, ExactSqlError> {
     handle.query(statement(sql, params)?, Duration::from_secs(5))
 }
 
 fn query_tx(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<MigrationSqlRows, MigrationSqlError> {
+    params: Vec<ExactSqlValue>,
+) -> Result<ExactSqlRows, ExactSqlError> {
     transaction.query(statement(sql, params)?)
 }
 
 fn execute_tx(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     sql: &str,
-    params: Vec<MigrationSqlValue>,
-) -> Result<(), MigrationSqlError> {
+    params: Vec<ExactSqlValue>,
+) -> Result<(), ExactSqlError> {
     transaction.execute(statement(sql, params)?).map(|_| ())
 }
 
@@ -222,19 +219,19 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             "SELECT payload, payload_digest FROM workflow_definitions_v1
              WHERE definition_id = ?1 AND definition_version = ?2",
             vec![
-                MigrationSqlValue::Text(definition.definition_id().as_str().to_owned()),
-                MigrationSqlValue::Integer(version),
+                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
+                ExactSqlValue::Integer(version),
             ],
         )
         .map_err(definition_unavailable)?;
         if let Some(row) = existing.rows.first() {
             let existing_digest =
-                migration_text(&row.values, 1).ok_or_else(definition_codec_unavailable)?;
+                exact_sql_text(&row.values, 1).ok_or_else(definition_codec_unavailable)?;
             let outcome = if existing_digest == digest.as_str() {
                 Err(WorkflowDefinitionAuthorityError::AlreadyExists)
             } else {
                 let existing_payload =
-                    migration_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                    exact_sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
                 let existing_definition = decode_definition(existing_payload)?;
                 if &existing_definition == definition {
                     Err(WorkflowDefinitionAuthorityError::AlreadyExists)
@@ -251,10 +248,10 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
                  definition_id, definition_version, payload, payload_digest
              ) VALUES (?1, ?2, ?3, ?4)",
             vec![
-                MigrationSqlValue::Text(definition.definition_id().as_str().to_owned()),
-                MigrationSqlValue::Integer(version),
-                MigrationSqlValue::Text(payload),
-                MigrationSqlValue::Text(digest.as_str().to_owned()),
+                ExactSqlValue::Text(definition.definition_id().as_str().to_owned()),
+                ExactSqlValue::Integer(version),
+                ExactSqlValue::Text(payload),
+                ExactSqlValue::Text(digest.as_str().to_owned()),
             ],
         )
         .map_err(definition_unavailable)?;
@@ -276,8 +273,8 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             "SELECT payload FROM workflow_definitions_v1
              WHERE definition_id = ?1 AND definition_version = ?2",
             vec![
-                MigrationSqlValue::Text(definition_id.as_str().to_owned()),
-                MigrationSqlValue::Integer(version),
+                ExactSqlValue::Text(definition_id.as_str().to_owned()),
+                ExactSqlValue::Integer(version),
             ],
         )
         .map_err(definition_unavailable)?;
@@ -285,7 +282,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .first()
             .map(|row| {
                 let payload =
-                    migration_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                    exact_sql_text(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
                 decode_definition(payload)
             })
             .transpose()
@@ -298,14 +295,14 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         let rows = query_handle(
             &self.handle,
             "SELECT active_version FROM workflow_activations_v1 WHERE definition_id = ?1",
-            vec![MigrationSqlValue::Text(definition_id.as_str().to_owned())],
+            vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
         )
         .map_err(definition_unavailable)?;
         rows.rows
             .first()
             .map(|row| {
                 let version =
-                    migration_integer(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                    exact_sql_integer(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
                 version_u64(version).map_err(|_| definition_codec_unavailable())
             })
             .transpose()
@@ -326,7 +323,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         let rows = query_tx(
             &transaction,
             "SELECT active_version FROM workflow_activations_v1 WHERE definition_id = ?1",
-            vec![MigrationSqlValue::Text(definition_id.as_str().to_owned())],
+            vec![ExactSqlValue::Text(definition_id.as_str().to_owned())],
         )
         .map_err(definition_unavailable)?;
         let current = rows
@@ -334,7 +331,7 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
             .first()
             .map(|row| {
                 let version =
-                    migration_integer(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
+                    exact_sql_integer(&row.values, 0).ok_or_else(definition_codec_unavailable)?;
                 version_u64(version).map_err(|_| definition_codec_unavailable())
             })
             .transpose()?;
@@ -349,8 +346,8 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
              ON CONFLICT(definition_id) DO UPDATE SET
                  active_version = excluded.active_version",
             vec![
-                MigrationSqlValue::Text(definition_id.as_str().to_owned()),
-                MigrationSqlValue::Integer(replacement),
+                ExactSqlValue::Text(definition_id.as_str().to_owned()),
+                ExactSqlValue::Integer(replacement),
             ],
         )
         .map_err(definition_unavailable)?;
@@ -368,7 +365,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         let existing = query_tx(
             &transaction,
             "SELECT 1 FROM workflow_handoffs_v1 WHERE token_digest = ?1",
-            vec![MigrationSqlValue::Text(
+            vec![ExactSqlValue::Text(
                 grant.token_digest().as_str().to_owned(),
             )],
         )
@@ -383,10 +380,10 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
                  token_digest, scope_payload, issued_at, expires_at, consumed
              ) VALUES (?1, ?2, ?3, ?4, 0)",
             vec![
-                MigrationSqlValue::Text(grant.token_digest().as_str().to_owned()),
-                MigrationSqlValue::Text(scope_payload),
-                MigrationSqlValue::Integer(grant.issued_at().0),
-                MigrationSqlValue::Integer(grant.expires_at().0),
+                ExactSqlValue::Text(grant.token_digest().as_str().to_owned()),
+                ExactSqlValue::Text(scope_payload),
+                ExactSqlValue::Integer(grant.issued_at().0),
+                ExactSqlValue::Integer(grant.expires_at().0),
             ],
         )
         .map_err(handoff_unavailable)?;
@@ -407,26 +404,26 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
             &transaction,
             "SELECT scope_payload, expires_at, consumed FROM workflow_handoffs_v1
              WHERE token_digest = ?1",
-            vec![MigrationSqlValue::Text(token_digest.as_str().to_owned())],
+            vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
         )
         .map_err(handoff_unavailable)?;
         let Some(row) = rows.rows.first() else {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Missing);
         };
-        let scope_payload = migration_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
+        let scope_payload = exact_sql_text(&row.values, 0).ok_or_else(handoff_codec_unavailable)?;
         let scope: TaskHandoffScopeV1 =
             decode_json(scope_payload).map_err(|_| handoff_codec_unavailable())?;
         if &scope != expected_scope {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::ScopeMismatch);
         }
-        let expires_at = migration_integer(&row.values, 1).ok_or_else(handoff_codec_unavailable)?;
+        let expires_at = exact_sql_integer(&row.values, 1).ok_or_else(handoff_codec_unavailable)?;
         if consumed_at.0 >= expires_at {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Expired);
         }
-        let consumed = migration_integer(&row.values, 2).ok_or_else(handoff_codec_unavailable)?;
+        let consumed = exact_sql_integer(&row.values, 2).ok_or_else(handoff_codec_unavailable)?;
         if consumed != 0 {
             let _ = transaction.rollback();
             return Ok(TaskHandoffConsumeOutcome::Replay);
@@ -434,7 +431,7 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         execute_tx(
             &transaction,
             "UPDATE workflow_handoffs_v1 SET consumed = 1 WHERE token_digest = ?1 AND consumed = 0",
-            vec![MigrationSqlValue::Text(token_digest.as_str().to_owned())],
+            vec![ExactSqlValue::Text(token_digest.as_str().to_owned())],
         )
         .map_err(handoff_unavailable)?;
         transaction
@@ -452,17 +449,17 @@ struct StoredExecution {
     terminal: Option<WorkflowExecutionTruthV1>,
 }
 
-fn identity_params(identity: &WorkflowExecutionIdentityV1) -> Result<Vec<MigrationSqlValue>, ()> {
+fn identity_params(identity: &WorkflowExecutionIdentityV1) -> Result<Vec<ExactSqlValue>, ()> {
     Ok(vec![
-        MigrationSqlValue::Text(identity.definition_id.as_str().to_owned()),
-        MigrationSqlValue::Integer(version_i64(identity.definition_version)?),
-        MigrationSqlValue::Text(identity.run_id.as_str().to_owned()),
-        MigrationSqlValue::Text(identity.step_id.as_str().to_owned()),
+        ExactSqlValue::Text(identity.definition_id.as_str().to_owned()),
+        ExactSqlValue::Integer(version_i64(identity.definition_version)?),
+        ExactSqlValue::Text(identity.run_id.as_str().to_owned()),
+        ExactSqlValue::Text(identity.step_id.as_str().to_owned()),
     ])
 }
 
 fn load_execution(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     identity: &WorkflowExecutionIdentityV1,
 ) -> Result<Option<StoredExecution>, WorkflowExecutionAuthorityError> {
     let rows = query_tx(
@@ -480,24 +477,24 @@ fn load_execution(
         return Ok(None);
     };
     let plan_digest = ManifestDigest::new(
-        migration_text(&row.values, 0)
+        exact_sql_text(&row.values, 0)
             .ok_or_else(execution_codec_unavailable)?
             .to_owned(),
     )
     .map_err(|_| execution_codec_unavailable())?;
     let attempt_id = AttemptId::new(
-        migration_text(&row.values, 1)
+        exact_sql_text(&row.values, 1)
             .ok_or_else(execution_codec_unavailable)?
             .to_owned(),
     )
     .map_err(|_| execution_codec_unavailable())?;
     let lease_id = WorkLeaseId::new(
-        migration_text(&row.values, 2)
+        exact_sql_text(&row.values, 2)
             .ok_or_else(execution_codec_unavailable)?
             .to_owned(),
     )
     .map_err(|_| execution_codec_unavailable())?;
-    let fence_epoch = migration_integer(&row.values, 3).ok_or_else(execution_codec_unavailable)?;
+    let fence_epoch = exact_sql_integer(&row.values, 3).ok_or_else(execution_codec_unavailable)?;
     let fence = WorkflowExecutionFenceV1 {
         attempt_id,
         lease: WorkLeaseFenceV1::new(
@@ -510,15 +507,15 @@ fn load_execution(
         .map_err(|_| execution_codec_unavailable())?,
     };
     let checkpoint = match row.values.get(4) {
-        Some(MigrationSqlValue::Null) | None => None,
-        Some(MigrationSqlValue::Text(payload)) => {
+        Some(ExactSqlValue::Null) | None => None,
+        Some(ExactSqlValue::Text(payload)) => {
             Some(decode_json(payload).map_err(|_| execution_codec_unavailable())?)
         }
         _ => return Err(execution_codec_unavailable()),
     };
     let terminal = match row.values.get(5) {
-        Some(MigrationSqlValue::Null) | None => None,
-        Some(MigrationSqlValue::Text(payload)) => {
+        Some(ExactSqlValue::Null) | None => None,
+        Some(ExactSqlValue::Text(payload)) => {
             Some(decode_json(payload).map_err(|_| execution_codec_unavailable())?)
         }
         _ => return Err(execution_codec_unavailable()),
@@ -532,17 +529,17 @@ fn load_execution(
 }
 
 fn insert_execution(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     identity: &WorkflowExecutionIdentityV1,
     fence: &WorkflowExecutionFenceV1,
     plan_digest: &ManifestDigest,
 ) -> Result<(), WorkflowExecutionAuthorityError> {
     let mut params = identity_params(identity).map_err(|_| execution_codec_unavailable())?;
     params.extend([
-        MigrationSqlValue::Text(plan_digest.as_str().to_owned()),
-        MigrationSqlValue::Text(fence.attempt_id.as_str().to_owned()),
-        MigrationSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
-        MigrationSqlValue::Integer(
+        ExactSqlValue::Text(plan_digest.as_str().to_owned()),
+        ExactSqlValue::Text(fence.attempt_id.as_str().to_owned()),
+        ExactSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
+        ExactSqlValue::Integer(
             version_i64(fence.lease.epoch().get()).map_err(|_| execution_codec_unavailable())?,
         ),
     ]);
@@ -559,14 +556,14 @@ fn insert_execution(
 }
 
 fn update_execution_fence(
-    transaction: &MigrationSqlTransaction,
+    transaction: &ExactSqlTransaction,
     identity: &WorkflowExecutionIdentityV1,
     fence: &WorkflowExecutionFenceV1,
 ) -> Result<(), WorkflowExecutionAuthorityError> {
     let mut params = vec![
-        MigrationSqlValue::Text(fence.attempt_id.as_str().to_owned()),
-        MigrationSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
-        MigrationSqlValue::Integer(
+        ExactSqlValue::Text(fence.attempt_id.as_str().to_owned()),
+        ExactSqlValue::Text(fence.lease.lease_id().as_str().to_owned()),
+        ExactSqlValue::Integer(
             version_i64(fence.lease.epoch().get()).map_err(|_| execution_codec_unavailable())?,
         ),
     ];
@@ -655,7 +652,7 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             return Err(WorkflowExecutionAuthorityError::Conflict);
         }
         let payload = encode_json(checkpoint).map_err(|_| execution_codec_unavailable())?;
-        let mut params = vec![MigrationSqlValue::Text(payload)];
+        let mut params = vec![ExactSqlValue::Text(payload)];
         params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
         execute_tx(
             &transaction,
@@ -691,7 +688,7 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             return Err(WorkflowExecutionAuthorityError::Conflict);
         }
         let payload = encode_json(truth).map_err(|_| execution_codec_unavailable())?;
-        let mut params = vec![MigrationSqlValue::Text(payload)];
+        let mut params = vec![ExactSqlValue::Text(payload)];
         params.extend(identity_params(identity).map_err(|_| execution_codec_unavailable())?);
         execute_tx(
             &transaction,
