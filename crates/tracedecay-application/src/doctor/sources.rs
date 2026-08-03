@@ -359,9 +359,6 @@ pub enum RemoteOperationalReadV1 {
         pending_spool_items: u64,
         quarantined_spool_items: u64,
         replay_coverage_complete: bool,
-        backup_verified: bool,
-        failover_in_progress: bool,
-        recovery_required: bool,
         coverage: DoctorCoverageCompletenessV1,
     },
     Unconfigured,
@@ -403,59 +400,43 @@ fn remote_operational_finding(
     let family = DoctorFindingFamilyV1::StorageRuntime;
     match read {
         RemoteOperationalReadV1::Observed {
-            listener,
-            authority,
             quarantined_spool_items,
-            replay_coverage_complete,
-            backup_verified,
-            failover_in_progress,
-            recovery_required,
             coverage,
             ..
-        } if *recovery_required || *quarantined_spool_items > 0 => source_finding(
+        } if *quarantined_spool_items > 0 => source_finding(
             family,
             DoctorEvidenceStateV1::Degraded,
             "remote.operational.recovery-required",
             *coverage,
-            "remote HTTPS authority or spool requires recovery",
+            "remote HTTPS authority or spool requires reconciliation",
             Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
         ),
         RemoteOperationalReadV1::Observed {
             listener: RemoteListenerReadV1::Serving,
             authority: RemoteAuthorityReadV1::Available,
             replay_coverage_complete: true,
-            backup_verified: true,
-            failover_in_progress: false,
             coverage,
             ..
         } => clean_finding(
             family,
             "remote.operational.ready",
             *coverage,
-            "remote HTTPS listener, authority, spool, replay, and backup are ready",
+            "remote HTTPS listener, authority, spool, and replay are ready",
         ),
         RemoteOperationalReadV1::Observed {
             coverage,
             listener,
             authority,
             replay_coverage_complete,
-            backup_verified,
-            failover_in_progress,
             ..
         } => {
-            let _ = (
-                listener,
-                authority,
-                replay_coverage_complete,
-                backup_verified,
-                failover_in_progress,
-            );
+            let _ = (listener, authority, replay_coverage_complete);
             source_finding(
                 family,
                 DoctorEvidenceStateV1::Degraded,
                 "remote.operational.partial",
                 *coverage,
-                "remote HTTPS listener, authority, spool, replay, or backup is incomplete",
+                "remote HTTPS listener, authority, spool, or replay is incomplete",
                 Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
             )
         }

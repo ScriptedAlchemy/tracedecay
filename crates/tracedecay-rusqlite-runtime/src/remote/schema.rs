@@ -6,7 +6,6 @@ const REQUIRED_REMOTE_TABLES: &[&str] = &[
     "remote_authorities",
     "remote_enrollment_grants",
     "remote_enrollments",
-    "remote_recovery_journal",
     "remote_spool_frames",
 ];
 
@@ -61,14 +60,6 @@ CREATE TABLE remote_spool_frames (
     UNIQUE (enrollment_id, sequence)
 ) STRICT;
 
-CREATE TABLE remote_recovery_journal (
-    operation_id TEXT PRIMARY KEY,
-    operation_kind TEXT NOT NULL CHECK (operation_kind IN ('backup', 'restore', 'failover')),
-    state TEXT NOT NULL,
-    request_json TEXT NOT NULL,
-    receipt_json TEXT,
-    updated_at INTEGER NOT NULL
-) STRICT;
 ";
 
 /// Canonical repository-store fragment for replay identity and sequencing.
@@ -121,8 +112,6 @@ pub fn validate_remote_schema(
                 key_revision, nonce, ciphertext, state, last_attempt, attempt_started_at,
                 receipt_json, finding, captured_at
          FROM remote_spool_frames LIMIT 0",
-        "SELECT operation_id, operation_kind, state, request_json, receipt_json, updated_at
-         FROM remote_recovery_journal LIMIT 0",
     ] {
         handle
             .query(
@@ -148,6 +137,7 @@ fn remote_tables(
             "remote_enrollment_grants_v1",
             "remote_enrollments_v1",
             "remote_spool_frames_v1",
+            "remote_recovery_journal",
             "remote_recovery_journal_v1",
         ])
         .collect::<Vec<_>>();

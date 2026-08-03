@@ -27,10 +27,6 @@ use tracedecay_application::remote::protocol::{
     RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, RemoteProtocolServiceV1, remote_protocol_problem,
 };
-use tracedecay_application::remote::recovery::{
-    BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
-    StagedRestoreConfirmationV1, StagedRestoreProgressV1,
-};
 use tracedecay_application::remote::replay::{
     RemoteReplayOutcomeV1, RemoteReplayProtocolPortV1, RemoteReplayRequestV1,
 };
@@ -351,9 +347,6 @@ where
         + RemoteAuthorityDiscoveryProtocolPortV1
         + RemoteReplayProtocolPortV1
         + RemoteProtocolPortV1<Query>
-        + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
-        + RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
-        + RemoteProtocolPortV1<PromotionConfirmationV1, Output = PromotionCasReceiptV1>
         + Send
         + Sync
         + 'static,
@@ -368,15 +361,6 @@ where
         .route("/discovery", post(discovery_route::<Port>))
         .route("/replay", post(replay_route::<Port>))
         .route("/query", post(protocol_route::<Port, Query>))
-        .route("/backup", post(protocol_route::<Port, BackupRequestV1>))
-        .route(
-            "/restore",
-            post(protocol_route::<Port, StagedRestoreConfirmationV1>),
-        )
-        .route(
-            "/failover",
-            post(protocol_route::<Port, PromotionConfirmationV1>),
-        )
         .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
         .with_state(state)
 }
@@ -850,27 +834,6 @@ mod tests {
         }
     }
 
-    macro_rules! route_port {
-        ($request:ty, $output:ty) => {
-            impl RemoteProtocolPortV1<$request> for RoutePort {
-                type Output = $output;
-
-                fn execute(
-                    &self,
-                    request: RemoteProtocolRequestV1<$request>,
-                    _credential: OpaqueRemoteCredential,
-                ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
-                {
-                    Ok(problem_route_response(request.request_id, self.outcome))
-                }
-            }
-        };
-    }
-
-    route_port!(BackupRequestV1, BackupOperationStateV1);
-    route_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
-    route_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
-
     macro_rules! validation_port {
         ($request:ty, $output:ty) => {
             impl RemoteProtocolPortV1<$request> for ValidationPort {
@@ -892,9 +855,6 @@ mod tests {
         };
     }
 
-    validation_port!(BackupRequestV1, BackupOperationStateV1);
-    validation_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
-    validation_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
     validation_port!(TestQuery, TestQueryResult);
 
     impl RemoteReplayProtocolPortV1 for RoutePort {
@@ -1192,18 +1152,6 @@ mod tests {
         }
     }
 
-    fn recovery_expectation()
-    -> tracedecay_application::remote::recovery::RecoveryAuthorityExpectationV1 {
-        tracedecay_application::remote::recovery::RecoveryAuthorityExpectationV1 {
-            brain_id: "brain.remote".into(),
-            shard_id: "shard.remote".into(),
-            generation_id: "generation.remote".into(),
-            placement_revision: 1,
-            authority_epoch: 1,
-            frontier_sequence: 0,
-        }
-    }
-
     fn authenticated_headers(enrollment: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1480,53 +1428,6 @@ mod tests {
             ),
             StatusCode::BAD_REQUEST
         );
-        assert_eq!(
-            validation_status(
-                &calls,
-                protocol_request(
-                    "request.remote.backup-validation",
-                    BackupRequestV1 {
-                        operation_id: String::new(),
-                        expected: recovery_expectation(),
-                        expires_at_micros: 10,
-                    },
-                ),
-                true,
-            ),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            validation_status(
-                &calls,
-                protocol_request(
-                    "request.remote.restore-validation",
-                    StagedRestoreConfirmationV1 {
-                        preview_id: "restore.remote".into(),
-                        manifest_digest: [0; 32],
-                        expected_authority_epoch: 1,
-                        expected_policy_digest: [2; 32],
-                    },
-                ),
-                true,
-            ),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            validation_status(
-                &calls,
-                protocol_request(
-                    "request.remote.failover-validation",
-                    PromotionConfirmationV1 {
-                        preview_id: "promotion.remote".into(),
-                        expected_authority_epoch: 0,
-                        expected_placement_revision: 1,
-                        expected_frontier_sequence: 0,
-                    },
-                ),
-                true,
-            ),
-            StatusCode::BAD_REQUEST
-        );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -1620,56 +1521,6 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(calls.load(Ordering::SeqCst), 4);
-        assert_eq!(
-            validation_status(
-                &calls,
-                protocol_request(
-                    "request.remote.valid-backup",
-                    BackupRequestV1 {
-                        operation_id: "backup.remote".into(),
-                        expected: recovery_expectation(),
-                        expires_at_micros: 20,
-                    },
-                ),
-                true,
-            ),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 5);
-        assert_eq!(
-            validation_status(
-                &calls,
-                protocol_request(
-                    "request.remote.valid-restore",
-                    StagedRestoreConfirmationV1 {
-                        preview_id: "restore.remote".into(),
-                        manifest_digest: [1; 32],
-                        expected_authority_epoch: 1,
-                        expected_policy_digest: [2; 32],
-                    },
-                ),
-                true,
-            ),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
-        assert_eq!(
-            validation_status(
-                &calls,
-                protocol_request(
-                    "request.remote.valid-failover",
-                    PromotionConfirmationV1 {
-                        preview_id: "promotion.remote".into(),
-                        expected_authority_epoch: 1,
-                        expected_placement_revision: 1,
-                        expected_frontier_sequence: 0,
-                    },
-                ),
-                true,
-            ),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
