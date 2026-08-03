@@ -291,7 +291,7 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
                     "session-search",
                     "assistant",
                     1,
-                    "dogfood recovery evidence",
+                    "recovery evidence",
                     "message",
                 )
                 .build(),
@@ -303,7 +303,7 @@ fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
     for extra_args in [vec![], vec!["--provider", "cursor"]] {
         let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
-        command.args(["sessions", "search", "dogfood", "--limit", "3"]);
+        command.args(["sessions", "search", "recovery", "--limit", "3"]);
         command.args(extra_args);
         let output = run_with_timeout(command, cli_timeout());
         assert!(

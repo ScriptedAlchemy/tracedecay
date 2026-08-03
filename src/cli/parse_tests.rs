@@ -2,7 +2,7 @@ use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
-    MigrateAction, PackageHookAction, PostUpdateMode, ScoopPackageHookAction, SessionsAction,
+    MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
     SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
@@ -123,29 +123,6 @@ fn every_visible_top_level_subcommand_ships_rich_help() {
             after_help.contains("Related:") || after_help.contains("Notes:"),
             "`tracedecay {name}` after_help must cross-reference related commands \
              or carry agent-relevant notes"
-        );
-    }
-}
-
-/// `dogfood` is how a source checkout reaches the live user environment
-/// without cutting a release, so it must stay discoverable in `--help`. The
-/// machine-invoked plumbing around it stays hidden.
-#[test]
-fn dogfood_is_discoverable_while_plumbing_stays_hidden() {
-    let command = Cli::command();
-    let visible: Vec<String> = command
-        .get_subcommands()
-        .filter(|sub| !sub.is_hide_set())
-        .map(|sub| sub.get_name().to_string())
-        .collect();
-    assert!(
-        visible.iter().any(|name| name == "dogfood"),
-        "`dogfood` must appear in top-level help; visible: {visible:?}"
-    );
-    for hidden in ["post-update", "extract-worker", "hook-stop"] {
-        assert!(
-            !visible.iter().any(|name| name == hidden),
-            "`{hidden}` is machine-invoked plumbing and must stay hidden"
         );
     }
 }
@@ -530,15 +507,6 @@ fn update_and_post_update_parse_no_heal_flag() {
         .expect("post-update --no-heal should parse");
     let post_update_default = Cli::try_parse_from(["tracedecay", "post-update"])
         .expect("post-update should parse without --no-heal");
-    let post_update_strict = Cli::try_parse_from(["tracedecay", "post-update", "--strict"])
-        .expect("post-update --strict should parse");
-    let post_update_forward_only = Cli::try_parse_from([
-        "tracedecay",
-        "post-update",
-        "--mode",
-        "dogfood-forward-only",
-    ])
-    .expect("typed dogfood forward-only mode should parse");
 
     assert!(matches!(
         update.command,
@@ -553,8 +521,6 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: true,
             no_reinstall: false,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
         })
     ));
     assert!(matches!(
@@ -563,19 +529,6 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
-        })
-    ));
-    assert!(matches!(
-        post_update_strict.command,
-        Some(Commands::PostUpdate { strict: true, .. })
-    ));
-    assert!(matches!(
-        post_update_forward_only.command,
-        Some(Commands::PostUpdate {
-            mode: PostUpdateMode::DogfoodForwardOnly,
-            ..
         })
     ));
 }
@@ -632,8 +585,6 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
             no_heal: false,
             no_reinstall: true,
             lifecycle_lease_token: None,
-            strict: false,
-            mode: PostUpdateMode::Normal,
         })
     ));
 

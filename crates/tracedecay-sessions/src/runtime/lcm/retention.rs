@@ -9,7 +9,7 @@
 //! * FTS shadow tables over each (`lcm_raw_messages_fts`,
 //!   `session_messages_fts`), maintained by triggers.
 //!
-//! One dogfood `sessions.db` reached 15 GB carrying both full copies plus their
+//! One observed `sessions.db` reached 15 GB carrying both full copies plus their
 //! FTS shadows. Plan 38 §4 ("one content copy") makes carrying both raw and
 //! projected content indefinitely a defect: the projection must reference the
 //! raw content or be superseded once durable. Plan 38 §3 ("session retention
