@@ -5,6 +5,15 @@ use notify::event::EventAttributes;
 use std::process::Command;
 use tokio::sync::oneshot;
 
+fn test_watch_state(project_root: impl Into<PathBuf>) -> Arc<WatchState> {
+    let project_root = project_root.into();
+    Arc::new(WatchState::new(
+        project_root.clone(),
+        Some(project_root),
+        MaintenanceCoordinator::default(),
+    ))
+}
+
 #[test]
 fn debris_retention_enables_maintenance_without_orphan_gc() {
     let mut retention = crate::config::RetentionConfig::default();
@@ -195,18 +204,7 @@ fn dirty_set_coalesces_and_takes_once() {
 
 #[test]
 fn ref_event_marks_branch_and_delete_marks_gc() {
-    let state = Arc::new(WatchState {
-        project_root: PathBuf::from("/tmp/x"),
-        dirty: Mutex::new(DirtySet::default()),
-        reconciliation_pending: AtomicBool::new(false),
-        wake: Notify::new(),
-        maintenance: MaintenanceCoordinator::default(),
-        health: ProjectHealth::default(),
-        task: Mutex::new(None),
-        entered_debounce: Notify::new(),
-        drained_plans: AtomicU64::new(0),
-        plan_drained: Notify::new(),
-    });
+    let state = test_watch_state("/tmp/x");
     let create = notify::Event {
         kind: EventKind::Create(notify::event::CreateKind::File),
         paths: vec![PathBuf::from("/repo/.git/refs/heads/feat/x")],
@@ -230,18 +228,7 @@ fn ref_event_marks_branch_and_delete_marks_gc() {
 
 #[test]
 fn ref_lock_sidecar_does_not_become_a_branch() {
-    let state = Arc::new(WatchState {
-        project_root: PathBuf::from("/repo"),
-        dirty: Mutex::new(DirtySet::default()),
-        reconciliation_pending: AtomicBool::new(false),
-        wake: Notify::new(),
-        maintenance: MaintenanceCoordinator::default(),
-        health: ProjectHealth::default(),
-        task: Mutex::new(None),
-        entered_debounce: Notify::new(),
-        drained_plans: AtomicU64::new(0),
-        plan_drained: Notify::new(),
-    });
+    let state = test_watch_state("/repo");
     let event = notify::Event {
         kind: EventKind::Create(notify::event::CreateKind::File),
         paths: vec![PathBuf::from("/repo/.git/refs/heads/codex/topic.lock")],
@@ -259,18 +246,7 @@ fn ref_lock_sidecar_does_not_become_a_branch() {
 
 #[tokio::test]
 async fn contended_event_requests_a_bounded_reconciliation() {
-    let state = Arc::new(WatchState {
-        project_root: PathBuf::from("/repo"),
-        dirty: Mutex::new(DirtySet::default()),
-        reconciliation_pending: AtomicBool::new(false),
-        wake: Notify::new(),
-        maintenance: MaintenanceCoordinator::default(),
-        health: ProjectHealth::default(),
-        task: Mutex::new(None),
-        entered_debounce: Notify::new(),
-        drained_plans: AtomicU64::new(0),
-        plan_drained: Notify::new(),
-    });
+    let state = test_watch_state("/repo");
     let event = notify::Event {
         kind: EventKind::Modify(notify::event::ModifyKind::Data(
             notify::event::DataChange::Content,
@@ -318,18 +294,21 @@ fn heartbeat_staleness() {
         last_heartbeat: now_secs(),
         last_sync: 0,
         degraded: false,
+        ..ProjectHealthSnapshot::default()
     };
     assert!(!fresh.heartbeat_stale());
     let never = ProjectHealthSnapshot {
         last_heartbeat: 0,
         last_sync: 0,
         degraded: false,
+        ..ProjectHealthSnapshot::default()
     };
     assert!(never.heartbeat_stale());
     let old = ProjectHealthSnapshot {
         last_heartbeat: now_secs().saturating_sub(HEARTBEAT_STALE_SECS + 10),
         last_sync: 0,
         degraded: false,
+        ..ProjectHealthSnapshot::default()
     };
     assert!(old.heartbeat_stale());
 }
@@ -479,7 +458,7 @@ fn temp_repo() -> tempfile::TempDir {
 }
 
 async fn ready_registered_state(watcher: &GitWatcher, repo: &Path) -> Arc<WatchState> {
-    let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let canonical = watcher_key(repo);
     let projects = watcher.inner.projects.lock().await;
     Arc::clone(projects.get(&canonical).expect("project registered"))
 }
@@ -620,6 +599,211 @@ async fn ensure_watching_registers_dedups_and_caps() {
 
     watcher.ensure_watching(repo_c.path()).await;
     assert_eq!(watcher.health_report().await.len(), 2);
+}
+
+#[tokio::test]
+async fn common_dir_collapses_aliases_but_retains_worktree_snapshots() {
+    let repo = temp_repo();
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked_root = linked_parent.path().join("linked");
+    let linked = linked_root.to_string_lossy().into_owned();
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "feature/watcher", &linked],
+    );
+
+    let alias = repo.path().join(".");
+
+    let watcher = GitWatcher::new(fast_watch_config());
+    watcher.ensure_watching(repo.path()).await;
+    watcher.ensure_watching(&alias).await;
+    watcher.ensure_watching(&linked_root).await;
+
+    let report = watcher.health_report().await;
+    assert_eq!(report.len(), 1, "one git common dir owns one OS watcher");
+    assert_eq!(
+        report[0].1.active_snapshot_roots, 2,
+        "canonical aliases collapse while linked worktree snapshots remain distinct"
+    );
+    assert_eq!(
+        report[0].1.deduplicated_activations, 2,
+        "both the alias and linked worktree reuse the common-dir watcher"
+    );
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn removed_worktree_snapshot_root_is_pruned() {
+    let repo = temp_repo();
+    let state = test_watch_state(repo.path());
+    let removed = repo.path().join("removed-linked-worktree");
+    state.snapshot_roots.lock().await.insert(removed);
+
+    state.prune_missing_roots().await;
+
+    assert_eq!(state.roots().await, vec![repo.path().to_path_buf()]);
+}
+
+#[test]
+fn snapshot_generation_ignores_dirty_tree_and_index_until_head_moves() {
+    let repo = temp_repo();
+    let before = snapshot_generation(repo.path()).unwrap();
+    assert_eq!(snapshot_generation(repo.path()).unwrap(), before);
+
+    std::fs::write(repo.path().join("a.txt"), "next\n").unwrap();
+    assert_eq!(snapshot_generation(repo.path()).unwrap(), before);
+
+    git(repo.path(), &["add", "a.txt"]);
+    assert_eq!(snapshot_generation(repo.path()).unwrap(), before);
+
+    git(repo.path(), &["commit", "-m", "next"]);
+
+    let after = snapshot_generation(repo.path()).unwrap();
+    assert_ne!(after, before);
+    assert_eq!(after.root, before.root);
+    assert_eq!(after.branch.as_deref(), Some("main"));
+}
+
+#[test]
+fn snapshot_generation_changes_when_head_ref_changes_at_same_commit() {
+    let repo = temp_repo();
+    let before = snapshot_generation(repo.path()).unwrap();
+
+    git(repo.path(), &["checkout", "-b", "feature/generation"]);
+
+    let after = snapshot_generation(repo.path()).unwrap();
+    assert_ne!(after, before);
+    assert_eq!(after.root, before.root);
+    assert_eq!(after.branch.as_deref(), Some("feature/generation"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn generation_gate_skips_success_and_backs_off_failure() {
+    let root = PathBuf::from("/repo");
+    let first = SnapshotGeneration::test(root.clone(), "main", "a");
+    let second = SnapshotGeneration::test(root, "main", "b");
+    let mut gate = GenerationGate::default();
+    let now = Instant::now();
+
+    let first_reservation = gate
+        .reserve(&first, now)
+        .expect("first generation should claim the sync lane");
+    assert_eq!(gate.decision(&first, now), GenerationDecision::InFlight);
+    gate.record_success(first.clone());
+    drop(first_reservation);
+    assert_eq!(gate.decision(&first, now), GenerationDecision::Unchanged);
+    let second_reservation = gate
+        .reserve(&second, now)
+        .expect("new generation should claim the sync lane");
+
+    gate.record_failure(second.clone(), now);
+    drop(second_reservation);
+    assert!(matches!(
+        gate.decision(&second, now),
+        GenerationDecision::Backoff { .. }
+    ));
+    tokio::time::advance(SYNC_RETRY_INITIAL).await;
+    assert!(
+        gate.reserve(&second, Instant::now()).is_ok(),
+        "a backoff-expired generation should claim the sync lane"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn generation_gate_serializes_different_generations() {
+    let first = SnapshotGeneration::test("/repo", "main", "a");
+    let second = SnapshotGeneration::test("/repo", "main", "b");
+    let mut gate = GenerationGate::default();
+    let now = Instant::now();
+
+    let first_reservation = gate
+        .reserve(&first, now)
+        .expect("first generation should claim the sync lane");
+    assert!(
+        matches!(gate.reserve(&second, now), Err(ReservationError::InFlight)),
+        "a newer generation must not replace the receipt for an active sync"
+    );
+    gate.record_success(first);
+    drop(first_reservation);
+    assert!(
+        gate.reserve(&second, now).is_ok(),
+        "the newer generation remains eligible after the active sync finishes"
+    );
+}
+
+#[test]
+fn canceled_generation_reservation_reopens_the_sync_lane() {
+    let generation = SnapshotGeneration::test("/repo", "main", "a");
+    let mut gate = GenerationGate::default();
+
+    let reservation = gate
+        .reserve(&generation, Instant::now())
+        .expect("first generation reservation should start a sync");
+    assert_eq!(
+        gate.decision(&generation, Instant::now()),
+        GenerationDecision::InFlight
+    );
+
+    drop(reservation);
+
+    assert!(
+        gate.reserve(&generation, Instant::now()).is_ok(),
+        "cancelling a watcher task must not strand the generation gate"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn generation_failure_backoff_is_bounded_and_resets_on_new_generation() {
+    let first = SnapshotGeneration::test("/repo", "main", "a");
+    let second = SnapshotGeneration::test("/repo", "main", "b");
+    let mut gate = GenerationGate::default();
+    let mut expected_delay = SYNC_RETRY_INITIAL;
+
+    for _ in 0..10 {
+        let now = Instant::now();
+        let reservation = gate
+            .reserve(&first, now)
+            .expect("the elapsed retry should claim the sync lane");
+        gate.record_failure(first.clone(), now);
+        drop(reservation);
+        assert_eq!(
+            gate.decision(&first, now),
+            GenerationDecision::Backoff {
+                remaining: expected_delay
+            }
+        );
+        tokio::time::advance(expected_delay).await;
+        expected_delay = (expected_delay * 2).min(Duration::from_mins(1));
+    }
+    assert_eq!(expected_delay, Duration::from_mins(1));
+
+    let now = Instant::now();
+    let reservation = gate
+        .reserve(&second, now)
+        .expect("a new generation should claim the sync lane");
+    gate.record_failure(second.clone(), now);
+    drop(reservation);
+    assert_eq!(
+        gate.decision(&second, now),
+        GenerationDecision::Backoff {
+            remaining: SYNC_RETRY_INITIAL
+        },
+        "a new (root, branch, HEAD) generation resets retry delay"
+    );
+}
+
+#[test]
+fn unchanged_generation_churn_never_reopens_the_sync_lane() {
+    let generation = SnapshotGeneration::test("/repo", "main", "same");
+    let mut gate = GenerationGate::default();
+    gate.record_success(generation.clone());
+
+    for _ in 0..10_000 {
+        assert_eq!(
+            gate.decision(&generation, Instant::now()),
+            GenerationDecision::Unchanged
+        );
+    }
 }
 
 #[tokio::test]
@@ -777,6 +961,9 @@ async fn debounce_loop_coalesces_and_drains_events() {
         1,
         "one event burst must produce exactly one coalesced plan"
     );
+    let health = state.health.snapshot();
+    assert_eq!(health.events_received, 5);
+    assert_eq!(health.plans_drained, 1);
     assert!(
         state.dirty.lock().await.is_clean(),
         "draining the coalesced plan must clear the dirty set"
