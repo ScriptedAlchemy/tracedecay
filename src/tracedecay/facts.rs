@@ -41,13 +41,8 @@ impl TraceDecay {
         project_memory_owner_from_layout_id(self.store_layout.identity.project_id.as_deref())
     }
 
-    /// Opens the project-wide memory store. Project facts are project-wide by
-    /// contract; when this instance serves a branch-sharded database, memory
-    /// reads and writes must still target the shared project store, or
-    /// branch shards accumulate diverging fact stores and the daemon repairs
-    /// the wrong file. This is the single resolver for that routing
-    /// decision — the MCP memory handlers' no-selector arm calls this method
-    /// directly instead of re-deriving the predicate.
+    /// Opens the sole project fact authority selected by the retained project
+    /// layout. Code-index routing never changes this database identity.
     pub(crate) async fn project_memory_db(&self) -> Result<ProjectMemoryDbHandle<'_>> {
         if self.db_path() == self.store_layout.graph_db_path {
             Ok(ProjectMemoryDbHandle::Active(&self.db))
