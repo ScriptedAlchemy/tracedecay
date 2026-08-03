@@ -172,6 +172,7 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
         .project_observation(candidate.observation_id())
         .await
         .expect_err("injected projection failure must schedule durable retry");
+    let exact_error = error.durable_detail();
     assert!(
         matches!(error, ProjectionStoreError::Storage { .. }),
         "initial storage failure surfaced as {error:?}"
@@ -186,7 +187,7 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
     let retry_conn = rusqlite::Connection::open(&database_path).unwrap();
     let retry = retry_conn
         .query_row(
-            "SELECT attempt_count, next_retry_at_micros, last_error_code
+            "SELECT attempt_count, next_retry_at_micros, last_error
              FROM projection_queue WHERE observation_id = ?1",
             [candidate.observation_id().as_str()],
             |row| {
@@ -200,7 +201,7 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
         .unwrap();
     assert_eq!(retry.0, 1);
     assert!(retry.1 > tracedecay_application::clock::now_micros().0);
-    assert_eq!(retry.2, "storage");
+    assert_eq!(retry.2, exact_error);
     assert!(
         reopened_store
             .next_queued_observation()
@@ -222,17 +223,14 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
         .project_observation(candidate.observation_id())
         .await
         .expect_err("restart must honor durable retry backoff");
-    assert!(
-        matches!(
-            second_error,
-            ProjectionStoreError::RetryDeferred {
-                attempt_count: 1,
-                reason: ProjectionRetryReason::Storage,
-                ..
-            }
-        ),
-        "deferred retry surfaced as {second_error:?}"
-    );
+    match &second_error {
+        ProjectionStoreError::RetryDeferred {
+            attempt_count: 1,
+            last_error,
+            ..
+        } => assert_eq!(last_error, &exact_error),
+        _ => panic!("deferred retry surfaced as {second_error:?}"),
+    }
     let unchanged_attempts = retry_conn
         .query_row(
             "SELECT attempt_count FROM projection_queue WHERE observation_id = ?1",
@@ -244,6 +242,50 @@ async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
         unchanged_attempts, 1,
         "deferred retry must not re-run projection or mutate retry state"
     );
+
+    for expected_attempt in 2..=9 {
+        retry_conn
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = 0
+                 WHERE observation_id = ?1",
+                [candidate.observation_id().as_str()],
+            )
+            .unwrap();
+        let before = tracedecay_application::clock::now_micros().0;
+        let retry_error = reopened_store
+            .project_observation(candidate.observation_id())
+            .await
+            .expect_err("injected projection failure must remain retryable");
+        let after = tracedecay_application::clock::now_micros().0;
+        assert_eq!(retry_error.durable_detail(), exact_error);
+        let state = retry_conn
+            .query_row(
+                "SELECT attempt_count, next_retry_at_micros, last_error
+                 FROM projection_queue WHERE observation_id = ?1",
+                [candidate.observation_id().as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state.0, expected_attempt);
+        assert!(state.1 > before);
+        assert!(
+            state.1 <= after.saturating_add(300_000_000),
+            "retry delay exceeded its five-minute bound: {state:?}"
+        );
+        if expected_attempt >= 7 {
+            assert!(
+                state.1 >= before.saturating_add(300_000_000),
+                "retry delay did not saturate at five minutes: {state:?}"
+            );
+        }
+        assert_eq!(state.2, exact_error);
+    }
 }
 
 #[tokio::test]

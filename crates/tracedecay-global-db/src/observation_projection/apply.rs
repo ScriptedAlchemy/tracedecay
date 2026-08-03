@@ -188,7 +188,10 @@ async fn derive_projection_with_alias_from_generation(
 ) -> ProjectionStoreResult<ObservationProjection> {
     if let Some(reason) =
         durable_projection_disposition(conn, observation.observation_id().as_str()).await?
-        && (reason == ProjectionSkipReason::OutputCollision || reason.is_rejection())
+        && matches!(
+            reason,
+            ProjectionSkipReason::OutputCollision | ProjectionSkipReason::InvalidContract
+        )
     {
         return Ok(ObservationProjection::Skipped(reason));
     }

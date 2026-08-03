@@ -932,11 +932,11 @@ impl<'a> HostAdmissionFacade<'a> {
             let projected = match store.project_observation(&observation_id).await {
                 Ok(projected) => projected,
                 Err(ProjectionStoreError::RetryDeferred { .. }) => break,
-                Err(error) if error.deterministic_rejection_reason().is_some() => {
+                Err(error @ ProjectionStoreError::Contract(_)) => {
                     tracing::warn!(
                         %error,
                         observation = observation_id.as_str(),
-                        "deterministic projection rejection committed"
+                        "deterministic projection contract rejection committed"
                     );
                     outcome.skipped = outcome.skipped.saturating_add(1);
                     continue;
@@ -1170,18 +1170,24 @@ const fn projection_error_outcome(error: &ProjectionStoreError) -> HostAdmission
         ProjectionStoreError::RetryDeferred { .. } => {
             HostAdmissionOutcome::retained_backpressured("projection_retry_deferred")
         }
-        ProjectionStoreError::Gap { .. }
+        ProjectionStoreError::SequenceOverflow(_)
+        | ProjectionStoreError::Gap { .. }
         | ProjectionStoreError::NotQueued
         | ProjectionStoreError::ObservationNotFound
-        | ProjectionStoreError::InvalidRebuildFrontier { .. } => {
+        | ProjectionStoreError::InvalidRebuildFrontier { .. }
+        | ProjectionStoreError::ProvenanceCollision
+        | ProjectionStoreError::Anchor(_) => {
             HostAdmissionOutcome::degraded("projection_state_invalid")
         }
-        ProjectionStoreError::SequenceOverflow(_)
-        | ProjectionStoreError::UnsupportedProvider(_)
-        | ProjectionStoreError::OutputCollision { .. }
-        | ProjectionStoreError::ProvenanceCollision
-        | ProjectionStoreError::Contract(_)
-        | ProjectionStoreError::Anchor(_) => HostAdmissionOutcome::degraded("projection_rejected"),
+        ProjectionStoreError::UnsupportedProvider(_) => {
+            HostAdmissionOutcome::degraded("projection_provider_unsupported")
+        }
+        ProjectionStoreError::OutputCollision { .. } => {
+            HostAdmissionOutcome::degraded("projection_output_collision")
+        }
+        ProjectionStoreError::Contract(_) => {
+            HostAdmissionOutcome::degraded("projection_contract_rejected")
+        }
     }
 }
 

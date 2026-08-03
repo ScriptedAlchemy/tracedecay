@@ -71,11 +71,7 @@ pub enum ProjectionSkipReason {
     /// binder keeps the output; this observation converges as a durable,
     /// auditable skip instead of wedging the projection queue.
     OutputCollision,
-    UnsupportedProvider,
     InvalidContract,
-    InvalidAnchor,
-    ProvenanceCollision,
-    InvalidSequence,
 }
 
 impl ProjectionSkipReason {
@@ -83,11 +79,7 @@ impl ProjectionSkipReason {
         match self {
             Self::NonConversationalRecord => "non_conversational_record",
             Self::OutputCollision => "output_collision",
-            Self::UnsupportedProvider => "unsupported_provider",
             Self::InvalidContract => "invalid_contract",
-            Self::InvalidAnchor => "invalid_anchor",
-            Self::ProvenanceCollision => "provenance_collision",
-            Self::InvalidSequence => "invalid_sequence",
         }
     }
 
@@ -95,35 +87,7 @@ impl ProjectionSkipReason {
         match value {
             "non_conversational_record" => Some(Self::NonConversationalRecord),
             "output_collision" => Some(Self::OutputCollision),
-            "unsupported_provider" => Some(Self::UnsupportedProvider),
             "invalid_contract" => Some(Self::InvalidContract),
-            "invalid_anchor" => Some(Self::InvalidAnchor),
-            "provenance_collision" => Some(Self::ProvenanceCollision),
-            "invalid_sequence" => Some(Self::InvalidSequence),
-            _ => None,
-        }
-    }
-
-    pub fn is_rejection(self) -> bool {
-        !matches!(self, Self::NonConversationalRecord | Self::OutputCollision)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectionRetryReason {
-    Storage,
-}
-
-impl ProjectionRetryReason {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Storage => "storage",
-        }
-    }
-
-    pub fn from_durable_str(value: &str) -> Option<Self> {
-        match value {
-            "storage" => Some(Self::Storage),
             _ => None,
         }
     }
@@ -604,26 +568,23 @@ pub enum ProjectionStoreError {
     RetryDeferred {
         attempt_count: u32,
         next_retry_at_micros: i64,
-        reason: ProjectionRetryReason,
+        last_error: String,
     },
 }
 
 impl ProjectionStoreError {
-    pub fn deterministic_rejection_reason(&self) -> Option<ProjectionSkipReason> {
-        match self {
-            Self::SequenceOverflow(_) => Some(ProjectionSkipReason::InvalidSequence),
-            Self::UnsupportedProvider(_) => Some(ProjectionSkipReason::UnsupportedProvider),
-            Self::OutputCollision { .. } => Some(ProjectionSkipReason::OutputCollision),
-            Self::ProvenanceCollision => Some(ProjectionSkipReason::ProvenanceCollision),
-            Self::Contract(_) => Some(ProjectionSkipReason::InvalidContract),
-            Self::Anchor(_) => Some(ProjectionSkipReason::InvalidAnchor),
-            Self::Gap { .. }
-            | Self::NotQueued
-            | Self::ObservationNotFound
-            | Self::InvalidRebuildFrontier { .. }
-            | Self::Storage { .. }
-            | Self::RetryDeferred { .. } => None,
+    pub fn durable_detail(&self) -> String {
+        let mut detail = self.to_string();
+        let mut source = self.source();
+        while let Some(current) = source {
+            let message = current.to_string();
+            if !detail.ends_with(&message) {
+                detail.push_str(": ");
+                detail.push_str(&message);
+            }
+            source = current.source();
         }
+        detail
     }
 }
 
