@@ -42,9 +42,9 @@ import { packTrack, type LoomSpan } from './tracks.ts';
  * A session as the weave needs to read it.
  *
  * Two contracted routes serve session rows and they are not the same shape:
- * `/api/loom/temporal` serves `LoomSessionRow`, which records a session end and
+ * `/api/loom/temporal` serves `LoomSessionRowV1`, which records a session end and
  * whether edits were captured, while `/api/plugins/savings/sessions` serves
- * `SavingsSessionRow`, which carries token accounting and neither of those two.
+ * `SavingsSessionRowV1`, which carries token accounting and neither of those two.
  * Both satisfy this, so the placement logic reads what a row actually has and
  * the absent quantities stay absent — which is exactly the distinction the
  * open-tail idiom below depends on.

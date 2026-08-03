@@ -41,10 +41,6 @@ impl McpToolLifecyclePolicy {
         self.maximum_duration
     }
 
-    pub(crate) const fn externally_cancellable(self) -> bool {
-        self.externally_cancellable
-    }
-
     pub(crate) fn bounded_by(mut self, remaining: Duration) -> Self {
         self.maximum_duration = self.maximum_duration.min(remaining);
         self

@@ -1793,3 +1793,8 @@ pub fn doctor_detected_scopes(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[path = "skill_materialization_tests.rs"]
+mod skill_materialization_tests;

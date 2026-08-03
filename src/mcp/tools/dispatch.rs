@@ -4,7 +4,7 @@
 //! into the typed fields below before this module runs. No handler, query,
 //! store, or renderer is selected here.
 
-use serde_json::json;
+use serde_json::{Map, Value};
 use tracedecay_application::{
     CancellationSignal, Deadline, InvocationTarget, PageRequest, RequestId,
 };
@@ -17,68 +17,120 @@ use crate::application_surface::{
     resolve_application_surface_dispatch_with_controls,
 };
 use crate::daemon_client::{DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat};
-
-use super::ToolDefinition;
+use crate::mcp::tools::ToolDefinition;
 
 pub(crate) const DISPATCH_METADATA_KEY: &str = "tracedecay/dispatch";
 
-/// Resolve the exact lifecycle policy advertised by the MCP catalog.
-///
-/// Catalog surface bindings keep their declared maximum; root handlers must
-/// have a canonical binding row. Missing or invalid catalog authority is
-/// unavailable, never replaced by fabricated metadata or an implicit timeout.
-pub(crate) fn lifecycle_policy_for_tool(
-    tool_name: &str,
-) -> Result<Option<crate::mcp::server::McpToolLifecyclePolicy>, ApplicationSurfaceAdapterError> {
-    if let Some(policy) = crate::application_surface::resolve_catalog_tool_lifecycle_policy(
-        BindingSurface::Mcp,
-        tool_name,
-    )? {
-        return Ok(Some(crate::mcp::server::McpToolLifecyclePolicy::new(
-            std::time::Duration::from_millis(policy.maximum_millis),
-            policy.externally_cancellable,
-        )));
-    }
-    Ok(super::binding::lifecycle_policy_for_bound_tool(tool_name))
+#[derive(Debug, thiserror::Error)]
+pub enum McpDispatchMetadataError {
+    #[error("application catalog discovery failed: {0}")]
+    Application(#[from] ApplicationSurfaceAdapterError),
+    #[error("MCP dispatch catalog is invalid: {0}")]
+    Catalog(#[from] tracedecay_tool_catalog::McpDispatchCatalogError),
+    #[error("MCP dispatch metadata is invalid: {0}")]
+    CatalogValidation(#[from] tracedecay_tool_catalog::CatalogValidationError),
+    #[error("MCP dispatch catalog initialization failed: {0}")]
+    Initialization(String),
+    #[error("advertised MCP tool '{0}' has no dispatch contract")]
+    MissingContract(String),
 }
 
-pub(crate) fn attach_dispatch_metadata(definitions: &mut [ToolDefinition]) {
+pub(crate) fn attach_dispatch_metadata(
+    definitions: &mut [ToolDefinition],
+) -> Result<(), McpDispatchMetadataError> {
+    let catalog = super::binding::mcp_dispatch_catalog()?;
+    let version = catalog.version();
+    let fingerprint = catalog.fingerprint().to_string();
     for definition in definitions {
-        let policy = match lifecycle_policy_for_tool(&definition.name) {
-            Ok(Some(policy)) => json!({
-                "version": 1,
-                "availability": { "state": "available" },
-                "policy_source": "catalog",
-                "deadline_ms": u64::try_from(policy.maximum_duration().as_millis())
-                    .unwrap_or(u64::MAX),
-                "externally_cancellable": policy.externally_cancellable(),
-            }),
-            Ok(None) => json!({
-                "version": 1,
-                "availability": {
-                    "state": "unavailable",
-                    "reason_code": "catalog_binding_missing",
-                    "retryable": false,
-                },
-                "policy_source": "catalog",
-            }),
-            Err(error) => json!({
-                "version": 1,
-                "availability": {
-                    "state": "unavailable",
-                    "reason_code": "catalog_binding_unavailable",
-                    "retryable": true,
-                    "detail": error.to_string(),
-                },
-                "policy_source": "catalog",
-            }),
-        };
-        let meta = definition.meta.get_or_insert_with(|| json!({}));
-        if let Some(meta) = meta.as_object_mut() {
-            meta.insert(DISPATCH_METADATA_KEY.to_owned(), policy);
-        } else {
-            *meta = json!({ DISPATCH_METADATA_KEY: policy });
+        let contract = catalog
+            .contract(&definition.name)
+            .ok_or_else(|| McpDispatchMetadataError::MissingContract(definition.name.clone()))?;
+        let mut metadata = serde_json::to_value(contract)
+            .map_err(|error| {
+                tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(error.to_string())
+            })?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| {
+                tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(
+                    "MCP dispatch contract did not serialize as an object".to_owned(),
+                )
+            })?;
+        metadata.remove("tool_name");
+        metadata.insert("version".to_owned(), Value::from(version));
+        metadata.insert("fingerprint".to_owned(), Value::from(fingerprint.clone()));
+
+        let annotations = definition
+            .annotations
+            .get_or_insert_with(|| Value::Object(Map::new()));
+        let annotation_map = annotations.as_object_mut().ok_or_else(|| {
+            tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(format!(
+                "MCP tool '{}' annotations are not an object",
+                definition.name
+            ))
+        })?;
+        annotation_map.insert("readOnlyHint".to_owned(), Value::Bool(contract.read_only()));
+
+        let tool_meta = definition
+            .meta
+            .get_or_insert_with(|| Value::Object(Map::new()));
+        let tool_meta = tool_meta.as_object_mut().ok_or_else(|| {
+            tracedecay_tool_catalog::McpDispatchCatalogError::Serialization(format!(
+                "MCP tool '{}' metadata is not an object",
+                definition.name
+            ))
+        })?;
+        tool_meta.insert(DISPATCH_METADATA_KEY.to_owned(), Value::Object(metadata));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn missing_dispatch_contract_fails_closed() {
+        let mut definitions = [ToolDefinition {
+            name: "tracedecay_not_cataloged".to_owned(),
+            description: "test".to_owned(),
+            input_schema: json!({"type": "object"}),
+            annotations: None,
+            meta: None,
+        }];
+        assert!(matches!(
+            attach_dispatch_metadata(&mut definitions),
+            Err(McpDispatchMetadataError::MissingContract(name))
+                if name == "tracedecay_not_cataloged"
+        ));
+    }
+}
+
+/// Resolve the exact lifecycle policy advertised by the MCP catalog.
+///
+/// Advertised tools consume the rich dispatch contract used for discovery.
+/// Server-only tools use their explicit root binding policy. Missing or invalid
+/// catalog authority is unavailable, never replaced by an implicit timeout.
+pub(crate) fn lifecycle_policy_for_tool(
+    tool_name: &str,
+) -> Result<Option<crate::mcp::server::McpToolLifecyclePolicy>, McpDispatchMetadataError> {
+    match super::binding::mcp_dispatch_contract(tool_name) {
+        Ok(contract) => Ok(Some(crate::mcp::server::McpToolLifecyclePolicy::new(
+            std::time::Duration::from_millis(contract.deadline().maximum_millis()),
+            matches!(
+                contract.cancellation(),
+                tracedecay_tool_catalog::CancellationContract::Cooperative { .. }
+            ),
+        ))),
+        Err(McpDispatchMetadataError::MissingContract(_))
+            if super::handlers::INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name) =>
+        {
+            Ok(super::binding::lifecycle_policy_for_bound_tool(tool_name))
         }
+        Err(McpDispatchMetadataError::MissingContract(_)) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 

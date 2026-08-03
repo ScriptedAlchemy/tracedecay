@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import { Waypoints } from 'lucide-react';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
-import type { WireEnvelope } from '../../contracts/wire.ts';
+import type { DashboardEnvelopeV1 } from '../../contracts/generated.ts';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
 import {
   Legend,
@@ -27,11 +27,11 @@ import {
   type PlacedThread,
 } from './weave.ts';
 import {
-  LcmTimelinePayloadSchema,
-  type LoomSourceStatus,
-  type LoomTemporalPayload,
-  LoomTemporalPayloadSchema,
-} from '../../contracts/wire.ts';
+  LcmTimelinePayloadV1Schema,
+  type LoomSourceStatusV1,
+  type LoomTemporalPayloadV1,
+  LoomTemporalPayloadV1Schema,
+} from '../../contracts/generated.ts';
 
 /**
  * Loom — time and causality.
@@ -40,8 +40,7 @@ import {
  * linking prompts, reasoning, tools, subagents, code changes, branches,
  * commits, PRs, and outcomes". The daemon serves the first half of that
  * sentence. The temporal read now serves its persisted causal half with
- * provider-qualified rows; only Delivery-owned outcomes remain a named shared
- * dependency. The reasoning, in full, is in `weave.ts`:
+ * provider-qualified rows. The reasoning, in full, is in `weave.ts`:
  *
  *   - Threads are real. Every mark is one session at its real start time, as
  *     thick as its real message count, in its host's column.
@@ -59,15 +58,15 @@ export function LoomPage() {
   const temporal = useQuery({
     queryKey: ['loom', 'temporal', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope<LoomTemporalPayload>(
+      fetchEnvelope<LoomTemporalPayloadV1>(
         scopedUrl(scope, '/api/loom/temporal?limit=200'),
-        LoomTemporalPayloadSchema,
+        LoomTemporalPayloadV1Schema,
       ),
   });
   const timeline = useLegacy(
     ['loom', 'timeline'],
     '/api/plugins/hermes-lcm/timeline',
-    LcmTimelinePayloadSchema,
+    LcmTimelinePayloadV1Schema,
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -292,8 +291,8 @@ function TemporalBoundary({
   children,
 }: {
   pending: boolean;
-  result: EnvelopeResult<LoomTemporalPayload> | undefined;
-  children: (envelope: WireEnvelope<LoomTemporalPayload>) => ReactNode;
+  result: EnvelopeResult<LoomTemporalPayloadV1> | undefined;
+  children: (envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>) => ReactNode;
 }) {
   // The three ways this read produces no envelope differ only in the chip they
   // carry; the plate they are centred on is one plate, written once.
@@ -310,7 +309,7 @@ function TemporalBoundary({
   return children(result.envelope);
 }
 
-function sourceDetail(source: LoomSourceStatus): string {
+function sourceDetail(source: LoomSourceStatusV1): string {
   if (source.required_authority) return source.required_authority;
   const parts = [
     source.authority,
@@ -326,7 +325,7 @@ function sourceDetail(source: LoomSourceStatus): string {
   return parts.filter((part): part is string => part != null && part.length > 0).join(' · ');
 }
 
-function coverageDetail(envelope: WireEnvelope<LoomTemporalPayload>): string {
+function coverageDetail(envelope: DashboardEnvelopeV1<LoomTemporalPayloadV1>): string {
   const { coverage } = envelope;
   const denominator =
     coverage.denominator == null
@@ -336,7 +335,7 @@ function coverageDetail(envelope: WireEnvelope<LoomTemporalPayload>): string {
 }
 
 function freshnessKind(
-  state: WireEnvelope<LoomTemporalPayload>['freshness']['state'],
+  state: DashboardEnvelopeV1<LoomTemporalPayloadV1>['freshness']['state'],
 ): 'ready' | 'stale' | 'unknown' | 'unsupported' {
   switch (state) {
     case 'fresh':

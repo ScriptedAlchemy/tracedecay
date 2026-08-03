@@ -5,7 +5,7 @@ import { LegacyBoundary } from '../../ui/ReadSection.tsx';
 import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { AnalyticsUsageSummarySchema } from '../../contracts/wire.ts';
+import { AnalyticsUsageSummaryV1Schema } from '../../contracts/generated.ts';
 import { logFraction } from '../../viz/scale.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
@@ -109,7 +109,7 @@ export function AgentsPage() {
   const usage = useLegacy(
     ['analytics', 'usage'],
     `${BASE}/usage`,
-    AnalyticsUsageSummarySchema,
+    AnalyticsUsageSummaryV1Schema,
   );
   const hints = useLegacy(['analytics', 'underused'], `${BASE}/underused`, HintsPayload);
   const diagnostics = useLegacy(

@@ -12,7 +12,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, waitFor, cleanup } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EnvelopeSchema, StorageFindingsPayloadSchema } from '../../contracts/wire.ts';
+import { DashboardEnvelopeV1Schema, StorageFindingsPayloadV1Schema } from '../../contracts/generated.ts';
 import {
   STORAGE_FINDINGS_REFETCH_MS,
   STORAGE_FINDINGS_URL,
@@ -104,7 +104,7 @@ describe('the Doctor findings read, shared by two surfaces', () => {
     // Guards the two tests below: they distinguish decoded answers from
     // transport outcomes, which only means something while this fixture is one
     // the contract admits.
-    expect(EnvelopeSchema(StorageFindingsPayloadSchema).safeParse(findingsBody()).success).toBe(
+    expect(DashboardEnvelopeV1Schema(StorageFindingsPayloadV1Schema).safeParse(findingsBody()).success).toBe(
       true,
     );
   });

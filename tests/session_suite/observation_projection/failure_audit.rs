@@ -111,7 +111,10 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
 
         let trigger_conn = rusqlite::Connection::open(&database_path).unwrap();
         trigger_conn
-            .execute_batch(&format!("DROP TRIGGER fail_projection_{stage};"))
+            .execute_batch(&format!(
+                "DROP TRIGGER fail_projection_{stage};
+                 UPDATE projection_queue SET next_retry_at_micros = 0;"
+            ))
             .unwrap();
         drop(trigger_conn);
         reopened_store
@@ -134,6 +137,231 @@ async fn projection_failure_rolls_back_effect_fts_provenance_checkpoint_and_queu
         ));
         assert_eq!(projection_counts(&tmp).await, recovered_counts);
     }
+}
+
+#[tokio::test]
+async fn projection_failure_persists_restart_backoff_before_rehashing_head() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let database_path = runtime
+        .database_path(HostAdmissionScope::Profile)
+        .unwrap()
+        .to_path_buf();
+    let candidate = observation(
+        "session-restart-backoff",
+        0,
+        100,
+        "receipt.restart-backoff",
+        conversational_payload("message-restart-backoff", "restart backoff canary"),
+    );
+    persist(&store, candidate.clone(), None).await;
+
+    let raw_conn = rusqlite::Connection::open(&database_path).unwrap();
+    raw_conn
+        .execute_batch(
+            "CREATE TRIGGER fail_projection_restart_backoff
+             BEFORE INSERT ON observation_projection_checkpoints BEGIN
+                SELECT RAISE(ABORT, 'injected restart backoff failure');
+             END;",
+        )
+        .unwrap();
+    let error = store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("injected projection failure must schedule durable retry");
+    let exact_error = error.durable_detail();
+    assert!(
+        matches!(error, ProjectionStoreError::Storage { .. }),
+        "initial storage failure surfaced as {error:?}"
+    );
+    drop(raw_conn);
+    drop(runtime);
+
+    let reopened_runtime = profile_runtime(&tmp).await;
+    let reopened_store = reopened_runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let retry_conn = rusqlite::Connection::open(&database_path).unwrap();
+    let retry = retry_conn
+        .query_row(
+            "SELECT attempt_count, next_retry_at_micros, last_error
+             FROM projection_queue WHERE observation_id = ?1",
+            [candidate.observation_id().as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(retry.0, 1);
+    assert!(retry.1 > tracedecay_application::clock::now_micros().0);
+    assert_eq!(retry.2, exact_error);
+    assert!(
+        reopened_store
+            .next_queued_observation()
+            .await
+            .unwrap()
+            .is_none(),
+        "catch-up must stop at a deferred head after restart"
+    );
+    assert!(
+        reopened_store
+            .next_queued_observation()
+            .await
+            .unwrap()
+            .is_none(),
+        "repeated catch-up must not expose the unchanged deferred head"
+    );
+
+    let second_error = reopened_store
+        .project_observation(candidate.observation_id())
+        .await
+        .expect_err("restart must honor durable retry backoff");
+    match &second_error {
+        ProjectionStoreError::RetryDeferred {
+            attempt_count: 1,
+            last_error,
+            ..
+        } => assert_eq!(last_error, &exact_error),
+        _ => panic!("deferred retry surfaced as {second_error:?}"),
+    }
+    let unchanged_attempts = retry_conn
+        .query_row(
+            "SELECT attempt_count FROM projection_queue WHERE observation_id = ?1",
+            [candidate.observation_id().as_str()],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(
+        unchanged_attempts, 1,
+        "deferred retry must not re-run projection or mutate retry state"
+    );
+
+    for expected_attempt in 2..=9 {
+        retry_conn
+            .execute(
+                "UPDATE projection_queue SET next_retry_at_micros = 0
+                 WHERE observation_id = ?1",
+                [candidate.observation_id().as_str()],
+            )
+            .unwrap();
+        let before = tracedecay_application::clock::now_micros().0;
+        let retry_error = reopened_store
+            .project_observation(candidate.observation_id())
+            .await
+            .expect_err("injected projection failure must remain retryable");
+        let after = tracedecay_application::clock::now_micros().0;
+        assert_eq!(retry_error.durable_detail(), exact_error);
+        let state = retry_conn
+            .query_row(
+                "SELECT attempt_count, next_retry_at_micros, last_error
+                 FROM projection_queue WHERE observation_id = ?1",
+                [candidate.observation_id().as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(state.0, expected_attempt);
+        assert!(state.1 > before);
+        assert!(
+            state.1 <= after.saturating_add(300_000_000),
+            "retry delay exceeded its five-minute bound: {state:?}"
+        );
+        if expected_attempt >= 7 {
+            assert!(
+                state.1 >= before.saturating_add(300_000_000),
+                "retry delay did not saturate at five minutes: {state:?}"
+            );
+        }
+        assert_eq!(state.2, exact_error);
+    }
+}
+
+#[tokio::test]
+async fn deterministic_contract_rejection_records_disposition_and_checkpoint() {
+    let tmp = TempDir::new().unwrap();
+    let runtime = profile_runtime(&tmp).await;
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let provider = ProviderId::new("codex").unwrap();
+    let source = ObservationSourceIdentityV1::for_provider(
+        provider,
+        SessionId::new("session.invalid-contract").unwrap(),
+    )
+    .unwrap();
+    let generation = ObservationSourceGenerationV1::new(1).unwrap();
+    let range = ObservationSourceRangeV1::new(0, 1).unwrap();
+    let record_id = ObservationId::new("record.invalid-contract").unwrap();
+    let payload = json!({"not": "a canonical observation envelope"});
+    let invalid = DurableObservationV1::new(
+        ObservationIdentityMaterialV1::for_native_record(
+            source,
+            ObservationScopeV1::Profile,
+            generation,
+            range,
+            ObservationOrderingDomainV1::SnapshotOrder,
+            record_id,
+        )
+        .unwrap(),
+        receipt("receipt.invalid-contract", &payload),
+        RetentionClass::new("retention.projection-test").unwrap(),
+        payload,
+    )
+    .unwrap();
+    store
+        .persist_observation(canonical_write(invalid.clone()))
+        .await
+        .unwrap();
+
+    let error = store
+        .project_observation(invalid.observation_id())
+        .await
+        .expect_err("invalid canonical payload must retain its typed contract failure");
+    assert!(matches!(error, ProjectionStoreError::Contract(_)));
+    assert_eq!(
+        store.projection_checkpoint().await.unwrap().last_sequence(),
+        1
+    );
+    assert_eq!(table_count(&tmp, "projection_queue").await, 0);
+    let conn = rusqlite::Connection::open(isolated_lcm_db_path(&tmp)).unwrap();
+    let reason = conn
+        .query_row(
+            "SELECT reason FROM observation_projection_dispositions
+             WHERE observation_id = ?1",
+            [invalid.observation_id().as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    assert_eq!(reason, ProjectionSkipReason::InvalidContract.as_str());
+    drop(conn);
+    drop(runtime);
+
+    let reopened_runtime = profile_runtime(&tmp).await;
+    let reopened_store = reopened_runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let rebuilt = rebuild_projection_to_completion(&reopened_store, 1).await;
+    assert!(rebuilt.is_complete());
+    let replay = reopened_store
+        .project_observation(invalid.observation_id())
+        .await
+        .unwrap();
+    assert!(matches!(
+        replay,
+        ProjectionPersistOutcome::ExactDuplicate(_)
+    ));
 }
 
 #[tokio::test]

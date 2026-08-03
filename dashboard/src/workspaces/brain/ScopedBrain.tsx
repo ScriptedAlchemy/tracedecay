@@ -11,14 +11,14 @@ import { useProjectEntry } from '../../data/query/projectRegistry.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { relativeTime } from './BrainPage.tsx';
 import {
-  AnalyticsOverviewPayloadSchema,
-  GraphOverviewPayloadSchema,
-  GraphSubgraphPayloadSchema,
-  MemoryStatusPayloadSchema,
-  type GraphSubgraphPayload,
-  type ProjectContextPayload,
+  AnalyticsOverviewPayloadV1Schema,
+  GraphOverviewPayloadV1Schema,
+  GraphSubgraphPayloadV1Schema,
+  MemoryStatusPayloadV1Schema,
+  type GraphSubgraphPayloadV1,
+  type ProjectContextPayloadV1,
   type ProjectStoreContext,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -62,22 +62,22 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   const subgraph = useLegacy(
     ['brain', 'subgraph'],
     '/api/plugins/graph/subgraph',
-    GraphSubgraphPayloadSchema,
+    GraphSubgraphPayloadV1Schema,
   );
   const overview = useLegacy(
     ['brain', 'graph-overview'],
     '/api/plugins/graph/overview',
-    GraphOverviewPayloadSchema,
+    GraphOverviewPayloadV1Schema,
   );
   const memory = useLegacy(
     ['brain', 'memory-status'],
     '/api/plugins/holographic/status',
-    MemoryStatusPayloadSchema,
+    MemoryStatusPayloadV1Schema,
   );
   const analytics = useLegacy(
     ['brain', 'analytics'],
     '/api/plugins/analytics/overview',
-    AnalyticsOverviewPayloadSchema,
+    AnalyticsOverviewPayloadV1Schema,
   );
 
   const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
@@ -269,7 +269,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
  * text ("cannot distinguish empty data from query failure") was false either
  * way, since the status code distinguishes them.
  */
-function EmptySlice({ slice, label }: { slice: GraphSubgraphPayload; label: string }) {
+function EmptySlice({ slice, label }: { slice: GraphSubgraphPayloadV1; label: string }) {
   if (slice.mode === 'default') {
     return (
       <CenteredState title={`No symbols are indexed for ${label}`} kind="complete_zero_findings" />
@@ -319,7 +319,7 @@ function ScopedReadout({
 /** The registry backbone, rendered: stores, the branches indexed inside each,
  * the artifacts they weigh, and the paths this project has been checked out
  * at. Available for every registered project, mounted or not. */
-function ProjectHoldings({ data }: { data: ProjectContextPayload }) {
+function ProjectHoldings({ data }: { data: ProjectContextPayloadV1 }) {
   // The route's own discriminant, honoured before its arrays are read. A
   // non-`ok` body sends `project: null` with empty `stores`/`aliases`, which
   // rendered as a project that simply holds nothing — the same picture a real
