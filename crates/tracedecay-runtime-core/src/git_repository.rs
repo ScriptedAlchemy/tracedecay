@@ -451,9 +451,14 @@ impl GitRepositoryAuthority {
         let mut commits = Vec::with_capacity(max_count.saturating_add(1));
         let scan_limit = max_count.saturating_mul(1024).clamp(1024, 100_000);
         let mut scanned = 0usize;
+        let mut scan_truncated = false;
 
         for info in walk {
-            if scanned >= scan_limit || commits.len() > max_count {
+            if scanned >= scan_limit {
+                scan_truncated = true;
+                break;
+            }
+            if commits.len() > max_count {
                 break;
             }
             scanned += 1;
@@ -469,7 +474,7 @@ impl GitRepositoryAuthority {
             commits.push(commit_metadata(&commit)?);
         }
 
-        let truncated = commits.len() > max_count || scanned >= scan_limit;
+        let truncated = commits.len() > max_count || scan_truncated;
         if commits.len() > max_count {
             commits.truncate(max_count);
         }
