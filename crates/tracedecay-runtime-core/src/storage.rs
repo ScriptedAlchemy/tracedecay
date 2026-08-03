@@ -448,25 +448,25 @@ pub fn matching_legacy_profile_layouts(
     profile_root: &Path,
     excluded_project_id: Option<&str>,
 ) -> Result<(Vec<StoreLayout>, bool)> {
-    matching_legacy_profile_layouts_with_git_resolver(
+    matching_legacy_profile_layouts_with_git_identity_resolver(
         project_root,
         profile_root,
         excluded_project_id,
         crate::worktree::is_detached_linked_worktree,
-        crate::worktree::git_common_dir,
+        crate::worktree::git_repo_identity_outcome,
     )
 }
 
-fn matching_legacy_profile_layouts_with_git_resolver<D, G>(
+fn matching_legacy_profile_layouts_with_git_identity_resolver<D, G>(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
     mut is_detached_linked_worktree: D,
-    mut git_common_dir: G,
+    mut git_identity: G,
 ) -> Result<(Vec<StoreLayout>, bool)>
 where
     D: FnMut(&Path) -> bool,
-    G: FnMut(&Path) -> Option<PathBuf>,
+    G: FnMut(&Path) -> crate::worktree::GitRepoIdentityOutcome,
 {
     let projects_root = profile_root.join("projects");
     let Ok(entries) = fs::read_dir(&projects_root) else {
@@ -507,7 +507,13 @@ where
         selected_manifest_matches_exact_root && exact_manifests.is_empty();
     let matching_manifests = if exact_manifests.is_empty() {
         let project_git_common_dir = (!is_detached_linked_worktree(project_root))
-            .then(|| git_common_dir(project_root))
+            .then(|| match git_identity(project_root) {
+                crate::worktree::GitRepoIdentityOutcome::Resolved(identity) => {
+                    Some(identity.common_dir)
+                }
+                crate::worktree::GitRepoIdentityOutcome::Unknown
+                | crate::worktree::GitRepoIdentityOutcome::NotFound => None,
+            })
             .flatten();
         let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
         non_exact_manifests
@@ -520,7 +526,13 @@ where
                             manifest
                                 .project_root
                                 .is_dir()
-                                .then(|| git_common_dir(&manifest.project_root))
+                                .then(|| match git_identity(&manifest.project_root) {
+                                    crate::worktree::GitRepoIdentityOutcome::Resolved(identity) => {
+                                        Some(identity.common_dir)
+                                    }
+                                    crate::worktree::GitRepoIdentityOutcome::Unknown
+                                    | crate::worktree::GitRepoIdentityOutcome::NotFound => None,
+                                })
                                 .flatten()
                         })
                         .as_deref()
@@ -1315,6 +1327,67 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn legacy_shared_git_probe_skips_timeout_and_unresolvable_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("repo");
+        let legacy_root = dir.path().join("legacy");
+        let profile_root = dir.path().join("profile");
+        let data_root = profile_root.join("projects").join("proj_legacy");
+        for root in [&project_root, &legacy_root, &data_root] {
+            fs::create_dir_all(root).unwrap();
+        }
+        write_store_manifest_to_path(
+            &data_root.join(STORE_MANIFEST_FILENAME),
+            &StoreManifest {
+                schema_version: STORE_MANIFEST_SCHEMA_VERSION,
+                project_id: Some("proj_legacy".to_string()),
+                store_kind: StoreKind::CodeProject,
+                storage_mode: StorageMode::ProfileSharded,
+                project_root: legacy_root.clone(),
+                data_root,
+                graph_db_relpath: "tracedecay.db".into(),
+                sessions_db_relpath: "sessions.db".into(),
+                branch_meta_relpath: "branch-meta.json".into(),
+            },
+        )
+        .unwrap();
+
+        let (layouts, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
+            &project_root,
+            &profile_root,
+            None,
+            |_| false,
+            |_| crate::worktree::GitRepoIdentityOutcome::Unknown,
+        )
+        .unwrap();
+        assert!(layouts.is_empty(), "a timed-out current root cannot match");
+
+        let (layouts, _) = matching_legacy_profile_layouts_with_git_identity_resolver(
+            &project_root,
+            &profile_root,
+            None,
+            |_| false,
+            |root| {
+                if root == project_root {
+                    crate::worktree::GitRepoIdentityOutcome::Resolved(
+                        crate::worktree::GitRepoIdentity {
+                            worktree_root: project_root.clone(),
+                            common_dir: dir.path().join("shared.git"),
+                        },
+                    )
+                } else {
+                    crate::worktree::GitRepoIdentityOutcome::NotFound
+                }
+            },
+        )
+        .unwrap();
+        assert!(
+            layouts.is_empty(),
+            "an unresolvable legacy root cannot be selected"
+        );
+    }
+
+    #[test]
     fn exact_root_manifest_overrides_shared_git_discovery() {
         fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
             let data_root = profile_root.join("projects").join(project_id);
@@ -1347,14 +1420,19 @@ mod tests {
 
         let resolver_calls = RefCell::new(Vec::new());
         let (layouts, selected_is_sole_exact_root) =
-            matching_legacy_profile_layouts_with_git_resolver(
+            matching_legacy_profile_layouts_with_git_identity_resolver(
                 &project_root,
                 &profile_root,
                 None,
                 |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
-                    Some(dir.path().join("shared.git"))
+                    crate::worktree::GitRepoIdentityOutcome::Resolved(
+                        crate::worktree::GitRepoIdentity {
+                            worktree_root: root.to_path_buf(),
+                            common_dir: dir.path().join("shared.git"),
+                        },
+                    )
                 },
             )
             .unwrap();
@@ -1371,14 +1449,19 @@ mod tests {
 
         resolver_calls.borrow_mut().clear();
         let (layouts, selected_is_sole_exact_root) =
-            matching_legacy_profile_layouts_with_git_resolver(
+            matching_legacy_profile_layouts_with_git_identity_resolver(
                 &project_root,
                 &profile_root,
                 Some("proj_exact"),
                 |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
-                    Some(dir.path().join("shared.git"))
+                    crate::worktree::GitRepoIdentityOutcome::Resolved(
+                        crate::worktree::GitRepoIdentity {
+                            worktree_root: root.to_path_buf(),
+                            common_dir: dir.path().join("shared.git"),
+                        },
+                    )
                 },
             )
             .unwrap();
@@ -1422,12 +1505,12 @@ mod tests {
         )
         .unwrap();
 
-        let error = matching_legacy_profile_layouts_with_git_resolver(
+        let error = matching_legacy_profile_layouts_with_git_identity_resolver(
             &project_root,
             &profile_root,
             None,
             |_| false,
-            |_| None,
+            |_| crate::worktree::GitRepoIdentityOutcome::NotFound,
         )
         .expect_err("missing project_id must fail closed");
         assert!(error.to_string().contains("project_id is missing"));
@@ -1468,14 +1551,19 @@ mod tests {
 
         let resolver_calls = RefCell::new(Vec::new());
         let (layouts, selected_is_sole_exact_root) =
-            matching_legacy_profile_layouts_with_git_resolver(
+            matching_legacy_profile_layouts_with_git_identity_resolver(
                 &worktree_root,
                 &profile_root,
                 Some("proj_selected"),
                 |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
-                    Some(dir.path().join("shared.git"))
+                    crate::worktree::GitRepoIdentityOutcome::Resolved(
+                        crate::worktree::GitRepoIdentity {
+                            worktree_root: root.to_path_buf(),
+                            common_dir: dir.path().join("shared.git"),
+                        },
+                    )
                 },
             )
             .unwrap();

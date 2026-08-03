@@ -37,9 +37,9 @@ use rayon::prelude::*;
 use serde_json::{Map, Value};
 
 use crate::runtime::shared::{
-    NewRows, ProjectRootMatcher, StoredCursor, TranscriptIngestStats, TranscriptLocation,
-    TranscriptLocationMetadataKeys, append_location_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, preview_title, title_from_messages,
+    NewRows, ProjectMembership, ProjectRootMatcher, StoredCursor, TranscriptIngestStats,
+    TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+    content_storage_text_and_tools, path_belongs_to_project, preview_title, title_from_messages,
 };
 use crate::{SessionMessageRecord, SessionRecord};
 
@@ -532,7 +532,13 @@ async fn try_ingest_state_db_for_projects(
             &destination_matchers,
             source,
             &mut destination_routes,
-        );
+        )
+        .map_err(|_| {
+            format!(
+                "could not classify Hermes rows from '{}' because project membership is unknown",
+                state_db.display()
+            )
+        })?;
         for (state_index, state) in states
             .iter_mut()
             .enumerate()
@@ -949,12 +955,17 @@ struct DestinationTurnLocations {
     row_indices: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationRoutingError {
+    UnknownMembership,
+}
+
 fn turn_project_locations_for_destinations(
     rows: &[HermesRow],
     destination_matchers: &[ProjectRootMatcher],
     source: &HermesProfileSource,
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) -> Vec<DestinationTurnLocations> {
+) -> Result<Vec<DestinationTurnLocations>, DestinationRoutingError> {
     let mut by_session: HashMap<&str, Vec<&HermesRow>> = HashMap::new();
     let row_indices = rows
         .iter()
@@ -986,7 +997,7 @@ fn turn_project_locations_for_destinations(
         let mut fallbacks = vec![None; destination_matchers.len()];
         for (cwd, provenance) in fallback_candidates {
             for destination_index in
-                matching_destinations(&cwd, destination_matchers, destination_routes)
+                matching_destinations(&cwd, destination_matchers, destination_routes)?
             {
                 fallbacks[destination_index].get_or_insert_with(|| HermesSessionLocation {
                     cwd: cwd.clone(),
@@ -1004,7 +1015,7 @@ fn turn_project_locations_for_destinations(
                     &row_indices,
                     &mut locations,
                     destination_routes,
-                );
+                )?;
                 turn.clear();
             }
             turn.push(row);
@@ -1016,12 +1027,12 @@ fn turn_project_locations_for_destinations(
             &row_indices,
             &mut locations,
             destination_routes,
-        );
+        )?;
     }
     for destination in &mut locations {
         destination.row_indices.sort_unstable();
     }
-    locations
+    Ok(locations)
 }
 
 fn assign_turn_locations_for_destinations(
@@ -1031,7 +1042,7 @@ fn assign_turn_locations_for_destinations(
     row_indices: &HashMap<i64, usize>,
     locations: &mut [DestinationTurnLocations],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) {
+) -> Result<(), DestinationRoutingError> {
     let explicit_paths = rows
         .iter()
         .rev()
@@ -1043,7 +1054,7 @@ fn assign_turn_locations_for_destinations(
     } else {
         for path in explicit_paths {
             for destination_index in
-                matching_destinations(&path, destination_matchers, destination_routes)
+                matching_destinations(&path, destination_matchers, destination_routes)?
             {
                 selected[destination_index].get_or_insert_with(|| HermesSessionLocation {
                     cwd: path.clone(),
@@ -1063,23 +1074,29 @@ fn assign_turn_locations_for_destinations(
             }
         }
     }
+    Ok(())
 }
 
 fn matching_destinations(
     path: &Path,
     destination_matchers: &[ProjectRootMatcher],
     destination_routes: &mut HashMap<PathBuf, Vec<usize>>,
-) -> Vec<usize> {
+) -> Result<Vec<usize>, DestinationRoutingError> {
     if let Some(indices) = destination_routes.get(path) {
-        return indices.clone();
+        return Ok(indices.clone());
     }
-    let indices = destination_matchers
-        .iter()
-        .enumerate()
-        .filter_map(|(index, matcher)| matcher.contains(path).then_some(index))
-        .collect::<Vec<_>>();
+    let mut indices = Vec::new();
+    for (index, matcher) in destination_matchers.iter().enumerate() {
+        match matcher.contains_status(path) {
+            ProjectMembership::Match => indices.push(index),
+            ProjectMembership::NoMatch => {}
+            ProjectMembership::Unknown => {
+                return Err(DestinationRoutingError::UnknownMembership);
+            }
+        }
+    }
     destination_routes.insert(path.to_path_buf(), indices.clone());
-    indices
+    Ok(indices)
 }
 
 fn assign_turn_location(
@@ -1392,4 +1409,93 @@ fn file_mtime_secs(path: &Path) -> u64 {
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |duration| duration.as_secs())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    static IDENTITY_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn retrying_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        if IDENTITY_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+            return crate::worktree::GitRepoIdentityOutcome::Unknown;
+        }
+        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
+            worktree_root: root.to_path_buf(),
+            common_dir: root.join(".git"),
+        })
+    }
+
+    fn row_with_cwd(cwd: &Path) -> HermesRow {
+        HermesRow {
+            id: 1,
+            session_id: "session".to_string(),
+            role: "user".to_string(),
+            content: Some("retry me".to_string()),
+            tool_name: None,
+            tool_calls: None,
+            timestamp: None,
+            session_title: None,
+            session_model: None,
+            parent_session_id: None,
+            session_started_at: None,
+            session_ended_at: None,
+            session_source: None,
+            session_cwd: Some(cwd.to_string_lossy().to_string()),
+            session_input_tokens: None,
+            session_output_tokens: None,
+            session_cache_read_tokens: None,
+            session_cache_write_tokens: None,
+            session_reasoning_tokens: None,
+            active: 1,
+        }
+    }
+
+    #[test]
+    fn unknown_destination_route_retries_without_advancing_cursor() {
+        IDENTITY_ATTEMPTS.store(0, Ordering::SeqCst);
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        let rows = vec![row_with_cwd(&cwd)];
+        let source = HermesProfileSource {
+            state_db: temp.path().join("state.db"),
+            profile: None,
+            legacy_project_pin: None,
+        };
+        let previous = StoredCursor::default();
+        let mut persisted = previous;
+        let mut routes = HashMap::new();
+
+        let first_matchers = vec![ProjectRootMatcher::new_with_identity_resolver(
+            &project_root,
+            retrying_identity,
+        )];
+        assert!(
+            turn_project_locations_for_destinations(&rows, &first_matchers, &source, &mut routes,)
+                .is_err()
+        );
+        assert_eq!(persisted, previous);
+        assert!(routes.is_empty(), "unknown routes must not be cached");
+
+        let retry_matchers = vec![ProjectRootMatcher::new_with_identity_resolver(
+            &project_root,
+            retrying_identity,
+        )];
+        let locations =
+            turn_project_locations_for_destinations(&rows, &retry_matchers, &source, &mut routes)
+                .expect("the same source rows should route after identity recovers");
+        assert_eq!(locations[0].row_indices, vec![0]);
+        persisted.position = rows[0].id as u64;
+        assert!(persisted.position > previous.position);
+        assert_eq!(IDENTITY_ATTEMPTS.load(Ordering::SeqCst), 3);
+    }
 }

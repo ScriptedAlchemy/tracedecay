@@ -27,9 +27,10 @@ use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 
 use crate::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptIngestStats, TranscriptLocation, TranscriptLocationMetadataKeys,
-    append_location_metadata, append_tool_calls_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptIngestStats,
+    TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
+    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
+    title_from_messages,
 };
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptIngestStore, TranscriptSource,
@@ -52,6 +53,7 @@ pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl KiroSource {
@@ -69,6 +71,7 @@ impl KiroSource {
             agent_dir: data_dir.join("User/globalStorage/kiro.kiroagent"),
             workspace_storage_dir: data_dir.join("User/workspaceStorage"),
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -89,11 +92,13 @@ impl TranscriptSource for KiroSource {
             let mut out = collect_user_workspace_session_files(
                 &self.agent_dir.join("workspace-sessions"),
                 registered_roots,
+                &self.project_matchers,
             );
             out.extend(collect_user_agent_storage_files(
                 &self.agent_dir,
                 &self.workspace_storage_dir,
                 registered_roots,
+                &self.project_matchers,
             ));
             return out;
         }
@@ -101,11 +106,13 @@ impl TranscriptSource for KiroSource {
         out.extend(collect_workspace_session_files(
             &self.agent_dir.join("workspace-sessions"),
             project_root,
+            &self.project_matchers,
         ));
         out.extend(collect_agent_storage_files(
             &self.agent_dir,
             &self.workspace_storage_dir,
             project_root,
+            &self.project_matchers,
         ));
         out
     }
@@ -119,13 +126,18 @@ impl TranscriptSource for KiroSource {
     ) -> Option<ParsedTranscript> {
         let location_cwd = transcript_location_path(path, &self.workspace_storage_dir)?;
         if let Some(roots) = &self.user_registered_roots {
-            if roots
-                .iter()
-                .any(|root| path_belongs_to_project(&location_cwd, root))
+            if self
+                .project_matchers
+                .membership_against_roots(&location_cwd, roots)
+                != ProjectMembership::NoMatch
             {
                 return None;
             }
-        } else if !path_belongs_to_project(&location_cwd, project_root) {
+        } else if self
+            .project_matchers
+            .membership(&location_cwd, project_root)
+            != ProjectMembership::Match
+        {
             return None;
         }
 
@@ -190,6 +202,7 @@ impl TranscriptSource for KiroSource {
 fn collect_user_workspace_session_files(
     sessions_root: &Path,
     registered_roots: &[PathBuf],
+    project_matchers: &ProjectRootMatcherCache,
 ) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
@@ -203,9 +216,8 @@ fn collect_user_workspace_session_files(
             }
             let workspace =
                 decode_workspace_sessions_dir(entry.file_name().to_string_lossy().as_ref())?;
-            if registered_roots
-                .iter()
-                .any(|root| path_belongs_to_project(&workspace, root))
+            if project_matchers.membership_against_roots(&workspace, registered_roots)
+                != ProjectMembership::NoMatch
             {
                 return None;
             }
@@ -279,7 +291,11 @@ fn empty_changed_transcript(
     }
 }
 
-fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) -> Vec<PathBuf> {
+fn collect_workspace_session_files(
+    sessions_root: &Path,
+    project_root: &Path,
+    project_matchers: &ProjectRootMatcherCache,
+) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sessions_root) else {
         return Vec::new();
     };
@@ -294,7 +310,7 @@ fn collect_workspace_session_files(sessions_root: &Path, project_root: &Path) ->
         else {
             continue;
         };
-        if !path_belongs_to_project(&workspace, project_root) {
+        if project_matchers.membership(&workspace, project_root) != ProjectMembership::Match {
             continue;
         }
         let Ok(session_entries) = std::fs::read_dir(&encoded_dir) else {
@@ -314,6 +330,7 @@ fn collect_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
     project_root: &Path,
+    project_matchers: &ProjectRootMatcherCache,
 ) -> Vec<PathBuf> {
     let mut workspace_dirs: Vec<(u64, PathBuf, PathBuf)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
@@ -332,7 +349,7 @@ fn collect_agent_storage_files(
         let Some(workspace) = workspace_path_from_hash(workspace_storage_dir, &name) else {
             continue;
         };
-        if !path_belongs_to_project(&workspace, project_root) {
+        if project_matchers.membership(&workspace, project_root) != ProjectMembership::Match {
             continue;
         }
         let mtime = entry
@@ -362,6 +379,7 @@ fn collect_user_agent_storage_files(
     agent_dir: &Path,
     workspace_storage_dir: &Path,
     registered_roots: &[PathBuf],
+    project_matchers: &ProjectRootMatcherCache,
 ) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(agent_dir) else {
         return Vec::new();
@@ -380,9 +398,8 @@ fn collect_user_agent_storage_files(
                 return None;
             }
             let workspace = workspace_path_from_hash(workspace_storage_dir, &name)?;
-            if registered_roots
-                .iter()
-                .any(|root| path_belongs_to_project(&workspace, root))
+            if project_matchers.membership_against_roots(&workspace, registered_roots)
+                != ProjectMembership::NoMatch
             {
                 return None;
             }

@@ -18,9 +18,9 @@ use serde_json::Value;
 
 use crate::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, append_location_metadata, append_tool_calls_metadata,
+    append_usage_metadata, content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
@@ -40,6 +40,7 @@ const VIBE_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMet
 pub struct VibeSource {
     session_root: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl VibeSource {
@@ -61,6 +62,7 @@ impl VibeSource {
         Self {
             session_root: vibe_home.join("logs").join("session"),
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -106,13 +108,18 @@ impl TranscriptSource for VibeSource {
         let meta_path = path.parent()?.join("meta.json");
         let meta = read_meta(&meta_path)?;
         if let Some(roots) = &self.user_registered_roots {
-            if roots
-                .iter()
-                .any(|root| path_belongs_to_project(&meta.working_directory, root))
+            if self
+                .project_matchers
+                .membership_against_roots(&meta.working_directory, roots)
+                != ProjectMembership::NoMatch
             {
                 return None;
             }
-        } else if !path_belongs_to_project(&meta.working_directory, project_root) {
+        } else if self
+            .project_matchers
+            .membership(&meta.working_directory, project_root)
+            != ProjectMembership::Match
+        {
             return None;
         }
 

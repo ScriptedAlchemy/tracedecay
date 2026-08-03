@@ -27,10 +27,10 @@ use tracedecay_runtime_core::timeutil::parse_rfc3339_timestamp;
 
 use crate::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, preview_truncated,
-    title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, append_location_metadata_cached, append_tool_calls_metadata,
+    append_tool_event_metadata, append_usage_metadata, content_storage_text_and_tools,
+    preview_truncated, title_from_messages,
 };
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptIngestStore, TranscriptSource,
@@ -82,6 +82,7 @@ pub(crate) const CWD_PROBE_LINES: usize = 8;
 pub struct ClaudeSource {
     projects_dir: PathBuf,
     user_scope: Option<UserClaudeScope>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 struct UserClaudeScope {
@@ -102,6 +103,7 @@ impl ClaudeSource {
         Self {
             projects_dir: home.join(".claude").join("projects"),
             user_scope: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -200,24 +202,44 @@ impl TranscriptSource for ClaudeSource {
         // summary alongside the per-row marker rows / metadata.
         let mut accumulator = SessionAccumulator::default();
         let mut messages = Vec::new();
+        let project_matcher = self
+            .user_scope
+            .is_none()
+            .then(|| self.project_matchers.get(project_root));
+        let registered_root_matchers = self
+            .user_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .registered_roots
+                    .iter()
+                    .map(|root| self.project_matchers.get(root))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for line in &new.lines {
             let record = &line.value;
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include = self.user_scope.as_ref().map_or_else(
-                || {
-                    line_cwd
-                        .as_deref()
-                        .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
-                },
-                |scope| {
-                    line_cwd.as_deref().is_none_or(|cwd| {
-                        !scope
-                            .registered_roots
-                            .iter()
-                            .any(|root| path_belongs_to_project(cwd, root))
-                    })
-                },
-            );
+            let include = if self.user_scope.is_none() {
+                line_cwd.as_deref().map_or(Some(false), |cwd| {
+                    project_matcher
+                        .as_ref()
+                        .map(|matcher| matcher.contains_status(cwd).definitive())
+                        .unwrap_or(Some(false))
+                })
+            } else {
+                line_cwd.as_deref().map_or(Some(true), |cwd| {
+                    let mut unknown = false;
+                    for matcher in &registered_root_matchers {
+                        match matcher.contains_status(cwd) {
+                            ProjectMembership::Match => return Some(false),
+                            ProjectMembership::NoMatch => {}
+                            ProjectMembership::Unknown => unknown = true,
+                        }
+                    }
+                    (!unknown).then_some(true)
+                })
+            }?;
             if !include {
                 continue;
             }
@@ -232,6 +254,7 @@ impl TranscriptSource for ClaudeSource {
                 line.offset,
                 session_cwd.as_deref(),
                 &mut accumulator,
+                &self.project_matchers,
             )
             .or_else(|| {
                 system_hook_message_from_line(
@@ -281,6 +304,7 @@ impl TranscriptSource for ClaudeSource {
                 session_cwd.as_deref(),
                 subagent.as_ref(),
                 &accumulator,
+                &self.project_matchers,
             ))
             .ok(),
             parent_session_id: subagent.as_ref().map(|info| info.parent_session_id.clone()),
@@ -509,6 +533,7 @@ fn message_from_line(
     offset: i64,
     session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Option<SessionMessageRecord> {
     let kind = record.get("type").and_then(Value::as_str)?;
     if kind != "user" && kind != "assistant" {
@@ -582,6 +607,7 @@ fn message_from_line(
             content,
             session_cwd,
             accumulator,
+            location_cache,
         ))
         .ok(),
     })
@@ -1115,16 +1141,18 @@ fn session_metadata(
     session_cwd: Option<&Path>,
     subagent: Option<&ClaudeSubagentInfo>,
     accumulator: &SessionAccumulator,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Value {
     let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_transcript".to_string()),
     );
-    append_location_metadata(
+    append_location_metadata_cached(
         &mut metadata,
         CLAUDE_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(session_cwd, "transcript_session"),
+        location_cache,
     );
 
     // Subagent spawn provenance (from the sibling agent-<id>.meta.json and the
@@ -1176,6 +1204,7 @@ fn message_metadata(
     content: &Value,
     session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Value {
     let mut metadata = Map::new();
     metadata.insert(
@@ -1189,10 +1218,11 @@ fn message_metadata(
     } else {
         (session_cwd, "transcript_session")
     };
-    append_location_metadata(
+    append_location_metadata_cached(
         &mut metadata,
         CLAUDE_MESSAGE_LOCATION_KEYS,
         TranscriptLocation::new(location_cwd, location_provenance),
+        location_cache,
     );
     if let Some(branch) = record
         .get("gitBranch")
@@ -1346,8 +1376,26 @@ fn record_cwd(record: &Value) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use serde_json::json;
+
+    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn retrying_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 1 {
+            return crate::worktree::GitRepoIdentityOutcome::Unknown;
+        }
+        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
+            worktree_root: root.to_path_buf(),
+            common_dir: root.join(".git"),
+        })
+    }
 
     #[test]
     fn structured_git_operation_becomes_host_commit_evidence() {
@@ -1404,8 +1452,16 @@ mod tests {
         let path = Path::new("/tmp/sess.jsonl");
 
         let mut accumulator = SessionAccumulator::default();
-        let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator)
-            .expect("assistant message row");
+        let message = message_from_line(
+            &record,
+            "sess",
+            path,
+            10,
+            None,
+            &mut accumulator,
+            &ProjectRootMatcherCache::default(),
+        )
+        .expect("assistant message row");
         assert_eq!(message.message_id, "msg_1");
         assert_eq!(message.kind.as_deref(), Some("message"));
         assert!(!message.text.contains("First I inspect the parser"));
@@ -1432,6 +1488,97 @@ mod tests {
         assert_eq!(metadata["parent_message_id"], "msg_1");
         assert_eq!(metadata["thinking_blocks"], 2);
         assert!(metadata.get("redacted_thinking_blocks").is_none());
+    }
+
+    #[test]
+    fn claude_message_metadata_reuses_worktree_for_repeated_cwd() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let record = assistant_record(&json!([{"type": "text", "text": "Repeated cwd metadata."}]));
+        let path = temp.path().join("session.jsonl");
+        let cache = ProjectRootMatcherCache::default();
+        let mut accumulator = SessionAccumulator::default();
+        let first = message_from_line(
+            &record,
+            "sess",
+            &path,
+            10,
+            Some(&nested_cwd),
+            &mut accumulator,
+            &cache,
+        )
+        .expect("first message");
+        let first_metadata: Value =
+            serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+        let first_worktree = first_metadata["claude_message_worktree"].clone();
+        assert!(first_worktree.is_string());
+
+        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
+            .expect("hide git metadata after first lookup");
+
+        let second = message_from_line(
+            &record,
+            "sess",
+            &path,
+            20,
+            Some(&nested_cwd),
+            &mut accumulator,
+            &cache,
+        )
+        .expect("second message");
+        let second_metadata: Value =
+            serde_json::from_str(second.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(second_metadata["claude_message_worktree"], first_worktree);
+    }
+
+    #[test]
+    fn claude_unknown_membership_retries_without_advancing_cursor() {
+        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let transcript = temp.path().join("retry.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "user",
+                    "sessionId": "retry",
+                    "cwd": nested_cwd,
+                    "message": {"role": "user", "content": "retry me"}
+                })
+            ),
+        )
+        .expect("write transcript");
+        let mut source = ClaudeSource::with_home(temp.path());
+        source.project_matchers =
+            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
+
+        let previous = StoredCursor::default();
+        assert!(
+            source
+                .parse_new(&transcript, previous, &project_root, None)
+                .is_none(),
+            "unknown membership must abort before a new cursor can be persisted"
+        );
+
+        let retried = source
+            .parse_new(&transcript, previous, &project_root, None)
+            .expect("unknown membership must be resolved again on retry");
+        assert_eq!(retried.messages.len(), 1);
+        assert!(retried.new_cursor.position > previous.position);
+        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
 
     #[test]

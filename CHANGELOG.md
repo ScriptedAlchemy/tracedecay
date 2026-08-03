@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.68](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.67...v0.0.68) - 2026-08-03
+
+### Fixed
+
+- *(cargo)* isolate nested worktrees without dropping packaged dashboard assets
+- *(grep)* scope generated path glob traversal
+- *(grep)* honor generated directory path globs
+- *(grep)* bound filesystem scans
+- *(sessions)* preserve and retry uncertain worktree membership
+- *(sessions)* defer uncertain session routing
+- *(storage)* bound legacy worktree probing
+- *(worktrees)* avoid blocking Git discovery
+
+### Performance
+
+- *(sessions)* cache worktree metadata resolution
+
 ## [0.0.67](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.66...v0.0.67) - 2026-07-27
 
 ### Fixed

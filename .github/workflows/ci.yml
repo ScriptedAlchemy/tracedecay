@@ -29,6 +29,14 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install commit message lint dependencies
+        run: npm ci
+
       - name: Reject tracked ignored files
         run: scripts/check-release-pr-integrity.sh HEAD HEAD
 
@@ -37,7 +45,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: scripts/check-conventional-commits.sh "$BASE_SHA..$HEAD_SHA"
+        run: npm run lint:commit -- --from "$BASE_SHA" --to "$HEAD_SHA"
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
@@ -48,14 +56,13 @@ jobs:
           set -euo pipefail
           if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
             if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              RANGE="${HEAD_SHA}^..${HEAD_SHA}"
+              npm run lint:commit -- --from "${HEAD_SHA}^" --to "$HEAD_SHA"
             else
-              RANGE="$HEAD_SHA"
+              git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
             fi
           else
-            RANGE="${BEFORE_SHA}..${HEAD_SHA}"
+            npm run lint:commit -- --from "$BEFORE_SHA" --to "$HEAD_SHA"
           fi
-          scripts/check-conventional-commits.sh "$RANGE"
 
   release-version-drift:
     name: Release Version Drift

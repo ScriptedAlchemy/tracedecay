@@ -6,19 +6,21 @@
 //! absolute path exactly once (cached in a [`OnceLock`]) and hands every product
 //! spawn site that cached path, so the long-running daemon never re-walks `PATH`.
 //!
-//! The gix-first read paths in the application branch and worktree modules are
-//! unaffected: they still prefer in-process `gix` and only reach a `git`
-//! subprocess as a gated fallback. This module only changes *which* program those
-//! fallbacks (and the one-shot spawn sites) exec.
+//! The public gix-first read paths in [`crate::branch`] and [`crate::worktree`]
+//! are unaffected: they still prefer in-process `gix` and only reach a `git`
+//! subprocess as a gated fallback.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// The literal used when resolution fails, preserving today's behavior (the OS
 /// PATH-walks per spawn, but callers keep working).
 const GIT_LITERAL: &str = "git";
+const GIT_CAPTURE_AT_TIMEOUT: Duration = Duration::from_secs(2);
+const CHILD_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Returns the resolved `git` program to spawn, as a cached `&'static OsStr`.
 ///
@@ -129,6 +131,95 @@ pub fn git_capture(repo_root: &Path, args: &[&str]) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+/// Outcome of the bounded `git -C` capture used by repository identity lookup.
+#[derive(Debug)]
+pub(crate) enum GitCaptureAtResult {
+    Captured(String),
+    Failed,
+    TimedOut,
+}
+
+/// Runs `git -C <repo_root> <args>` without setting the child process working
+/// directory to `repo_root`.
+///
+/// Some network-backed or otherwise unhealthy project roots can block inside
+/// the child's initial `getcwd` when passed through [`Command::current_dir`].
+/// Git's `-C` resolves the repository after process startup and avoids that
+/// pre-argument cwd lookup. The child is killed and reaped at the hard deadline.
+pub(crate) fn git_capture_at(repo_root: &Path, args: &[&str]) -> GitCaptureAtResult {
+    let mut command = git_command_at(repo_root, args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let Ok(child) = command.spawn() else {
+        return GitCaptureAtResult::Failed;
+    };
+    match capture_child_with_deadline(child, GIT_CAPTURE_AT_TIMEOUT) {
+        ChildCaptureResult::Completed(output) if output.status.success() => {
+            let Ok(text) = String::from_utf8(output.stdout) else {
+                return GitCaptureAtResult::Failed;
+            };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                GitCaptureAtResult::Failed
+            } else {
+                GitCaptureAtResult::Captured(trimmed.to_string())
+            }
+        }
+        ChildCaptureResult::TimedOut => GitCaptureAtResult::TimedOut,
+        ChildCaptureResult::Completed(_) | ChildCaptureResult::Failed => GitCaptureAtResult::Failed,
+    }
+}
+
+fn git_command_at(repo_root: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(git_program());
+    command.env_remove("GIT_DIR");
+    command.env_remove("GIT_WORK_TREE");
+    command.env_remove("GIT_COMMON_DIR");
+    command.arg("-C").arg(repo_root).args(args);
+    command
+}
+
+#[derive(Debug)]
+enum ChildCaptureResult {
+    Completed(Output),
+    Failed,
+    TimedOut,
+}
+
+fn capture_child_with_deadline(mut child: Child, timeout: Duration) -> ChildCaptureResult {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map(ChildCaptureResult::Completed)
+                    .unwrap_or(ChildCaptureResult::Failed);
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return ChildCaptureResult::Failed;
+            }
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            return if child.wait().is_ok() {
+                ChildCaptureResult::TimedOut
+            } else {
+                ChildCaptureResult::Failed
+            };
+        }
+        std::thread::sleep(
+            deadline
+                .saturating_duration_since(now)
+                .min(CHILD_WAIT_POLL_INTERVAL),
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -148,6 +239,69 @@ mod tests {
             resolved == Path::new(GIT_LITERAL) || resolved.is_file(),
             "git_program() should be the \"git\" fallback or an existing file, got {}",
             resolved.display()
+        );
+    }
+
+    #[test]
+    fn git_at_command_uses_dash_c_without_target_current_dir() {
+        let repo_root = Path::new("/problematic/project/root");
+        let command = git_command_at(
+            repo_root,
+            &["rev-parse", "--show-toplevel", "--git-common-dir"],
+        );
+
+        assert!(
+            command.get_current_dir().is_none(),
+            "git -C must inherit the safe daemon cwd instead of entering the target root"
+        );
+        assert_eq!(
+            command
+                .get_args()
+                .map(std::ffi::OsStr::to_os_string)
+                .collect::<Vec<_>>(),
+            vec![
+                OsString::from("-C"),
+                repo_root.as_os_str().to_os_string(),
+                OsString::from("rev-parse"),
+                OsString::from("--show-toplevel"),
+                OsString::from("--git-common-dir"),
+            ]
+        );
+    }
+
+    #[test]
+    fn git_at_command_clears_repository_selection_overrides() {
+        let command = git_command_at(Path::new("/problematic/project/root"), &["status"]);
+
+        for key in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
+            assert_eq!(
+                command
+                    .get_envs()
+                    .find(|(candidate, _)| *candidate == OsStr::new(key))
+                    .map(|(_, value)| value),
+                Some(None),
+                "git -C must resolve the supplied root rather than inherited {key}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_capture_deadline_kills_and_reaps_child() {
+        let child = Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleeping child");
+        let started = std::time::Instant::now();
+
+        let result = capture_child_with_deadline(child, std::time::Duration::from_millis(25));
+
+        let ChildCaptureResult::TimedOut = result else {
+            panic!("sleeping child should time out, got {result:?}");
+        };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "deadline must stop and reap the child promptly"
         );
     }
 

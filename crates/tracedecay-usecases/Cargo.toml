@@ -1,6 +1,6 @@
 [package]
 name = "tracedecay-usecases"
-version = "0.0.67"
+version = "0.1.0"
 publish = false
 edition = "2024"
 description = "Root-free reusable TraceDecay operations"

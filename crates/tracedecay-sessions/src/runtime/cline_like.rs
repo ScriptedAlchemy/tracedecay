@@ -22,9 +22,9 @@ use serde_json::{Map, Value};
 
 use crate::SessionMessageRecord;
 use crate::runtime::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_usage_metadata, content_storage_text_and_tools,
-    path_belongs_to_project, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, append_location_metadata, append_tool_calls_metadata,
+    append_usage_metadata, content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, read_changed_with_companion,
@@ -46,6 +46,7 @@ pub struct ClineLikeSource {
     provider: &'static str,
     storage_roots: Vec<PathBuf>,
     user_registered_roots: Option<Vec<PathBuf>>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl ClineLikeSource {
@@ -78,6 +79,7 @@ impl ClineLikeSource {
                     .join("User/globalStorage/saoudrizwan.claude-dev/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -89,6 +91,7 @@ impl ClineLikeSource {
                     .join("User/globalStorage/rooveterinaryinc.roo-cline/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -100,6 +103,7 @@ impl ClineLikeSource {
                 home.join(".kilocode/cli/global/tasks"),
             ],
             user_registered_roots: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -136,15 +140,15 @@ impl TranscriptSource for ClineLikeSource {
         let metadata = read_task_metadata(task_dir)?;
         let location_cwd = if let Some(roots) = &self.user_registered_roots {
             let paths = metadata_project_paths(&metadata);
-            if paths
-                .iter()
-                .any(|path| roots.iter().any(|root| path_belongs_to_project(path, root)))
-            {
+            if paths.iter().any(|path| {
+                self.project_matchers.membership_against_roots(path, roots)
+                    != ProjectMembership::NoMatch
+            }) {
                 return None;
             }
             paths.into_iter().next()?
         } else {
-            metadata_project_location(&metadata, project_root)?
+            metadata_project_location(&metadata, project_root, &self.project_matchers)?
         };
 
         let document: Value = match serde_json::from_str(&changed.contents) {
@@ -309,10 +313,24 @@ fn read_task_metadata(task_dir: &Path) -> Option<Value> {
     None
 }
 
-fn metadata_project_location(metadata: &Value, project_root: &Path) -> Option<PathBuf> {
-    metadata_project_paths(metadata)
-        .into_iter()
-        .find(|path| path_belongs_to_project(path, project_root))
+fn metadata_project_location(
+    metadata: &Value,
+    project_root: &Path,
+    project_matchers: &ProjectRootMatcherCache,
+) -> Option<PathBuf> {
+    let mut matched = None;
+    for path in metadata_project_paths(metadata) {
+        match project_matchers.membership(&path, project_root) {
+            ProjectMembership::Match => {
+                if matched.is_none() {
+                    matched = Some(path);
+                }
+            }
+            ProjectMembership::NoMatch => {}
+            ProjectMembership::Unknown => return None,
+        }
+    }
+    matched
 }
 
 fn metadata_project_paths(value: &Value) -> Vec<PathBuf> {

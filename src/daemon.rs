@@ -1203,15 +1203,17 @@ async fn resolve_daemon_initialize_route(
                     break;
                 }
             }
-            if let Some(git_root) = crate::worktree::git_worktree_root(root) {
-                let git_common_dir = crate::worktree::git_common_dir(&git_root);
+            if let Some(identity) = crate::worktree::git_repo_identity(root) {
                 if registry
-                    .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
+                    .project_registry_context_by_identity(
+                        &identity.worktree_root,
+                        Some(&identity.common_dir),
+                    )
                     .await
                     .is_some()
                 {
                     return Some(InitializeRouteMetadata {
-                        project_path: git_root,
+                        project_path: identity.worktree_root,
                         allow_init: false,
                     });
                 }
@@ -1234,10 +1236,10 @@ async fn resolve_daemon_initialize_route(
                 allow_init: false,
             });
         }
-        if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
-            let allow_init = crate::config::load_sync_config(&git_root).auto_init;
+        if let Some(identity) = crate::worktree::git_repo_identity(&root) {
+            let allow_init = crate::config::load_sync_config(&identity.worktree_root).auto_init;
             return Some(InitializeRouteMetadata {
-                project_path: git_root,
+                project_path: identity.worktree_root,
                 allow_init,
             });
         }

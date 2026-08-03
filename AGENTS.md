@@ -35,7 +35,8 @@ cargo test-all
 
 ## Git
 
-- Every non-merge commit subject must pass `scripts/check-conventional-commits.sh` before push.
+- Every non-merge commit subject must pass
+  `npm run lint:commit -- --from origin/master --to HEAD` before push.
 - Use `<type>: <subject>` or `<type>(<scope>): <subject>` with one of:
   `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
 - Keep the subject at 72 characters or fewer. Example: `fix(doctor): avoid false orphan warnings`.

@@ -316,3 +316,52 @@ async fn kiro_user_scope_includes_only_unregistered_sessions() {
     let extensionless = db.get_session("kiro", "user-extensionless").await.unwrap();
     assert_eq!(extensionless.project_key, "user");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn kiro_unknown_project_membership_defers_persistence_and_offset() {
+    const CHILD_ENV: &str = "TRACEDECAY_KIRO_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let transcript = write_workspace_session_json(&home, &nested, "unknown-kiro");
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let source = KiroSource::with_home(&home).for_user_scope(vec![project]);
+        assert_eq!(
+            ingest_source(&db, &source, tmp.path(), None)
+                .await
+                .messages_upserted,
+            0
+        );
+        assert!(db.get_session("kiro", "unknown-kiro").await.is_none());
+        assert!(
+            db.get_parse_offset(transcript.to_string_lossy().as_ref())
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    let fake_git = tmp.path().join("git-timeout");
+    std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("kiro::kiro_unknown_project_membership_defers_persistence_and_offset")
+        .arg("--exact")
+        .env(CHILD_ENV, "1")
+        .env("GIT", fake_git)
+        .env("GIT_DIR", "/nonexistent/tracedecay-kiro-timeout-git-dir")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "child must defer unknown project membership"
+    );
+}

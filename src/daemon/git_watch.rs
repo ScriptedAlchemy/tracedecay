@@ -466,14 +466,54 @@ async fn supervise_project(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) 
 /// One project's event loop: build the notify watcher over git metadata, then
 /// debounce raw events into coalesced syncs. On watcher construction/death,
 /// fall back to a 5-minute mtime poll for THIS project only.
+enum IdentityDiscoveryDisposition {
+    Watch(crate::worktree::GitRepoIdentity),
+    Degraded,
+    Retry,
+}
+
+fn identity_discovery_disposition(
+    outcome: crate::worktree::GitRepoIdentityOutcome,
+) -> IdentityDiscoveryDisposition {
+    match outcome {
+        crate::worktree::GitRepoIdentityOutcome::Resolved(identity) => {
+            IdentityDiscoveryDisposition::Watch(identity)
+        }
+        crate::worktree::GitRepoIdentityOutcome::NotFound => IdentityDiscoveryDisposition::Degraded,
+        crate::worktree::GitRepoIdentityOutcome::Unknown => IdentityDiscoveryDisposition::Retry,
+    }
+}
+
 async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
-    let Some(common_dir) = crate::worktree::git_common_dir(&state.project_root) else {
-        // Not a resolvable git repo (yet). Degrade to polling so a later `git
-        // init` / clone is still eventually covered.
-        state.health.set_degraded(true);
-        degraded_poll_loop(&inner, &state, None).await;
-        return;
+    let mut discovery_backoff = Duration::from_millis(500);
+    let identity = loop {
+        match identity_discovery_disposition(crate::worktree::git_repo_identity_outcome(
+            &state.project_root,
+        )) {
+            IdentityDiscoveryDisposition::Watch(identity) => break identity,
+            IdentityDiscoveryDisposition::Degraded => {
+                // Definitively not a git repo (yet). Degrade to polling so a
+                // later `git init` / clone is still eventually covered.
+                state.health.set_degraded(true);
+                degraded_poll_loop(&inner, &state, None).await;
+                return;
+            }
+            IdentityDiscoveryDisposition::Retry => {
+                state.health.set_degraded(true);
+                state.health.beat();
+                log_daemon_event(
+                    "git_watch_discovery_retry",
+                    &[
+                        ("project", state.project_root.display().to_string()),
+                        ("backoff_ms", discovery_backoff.as_millis().to_string()),
+                    ],
+                );
+                tokio::time::sleep(discovery_backoff).await;
+                discovery_backoff = (discovery_backoff * 2).min(RESTART_BACKOFF_MAX);
+            }
+        }
     };
+    let common_dir = identity.common_dir;
 
     // Build the raw watcher. Its callback pushes into the dirty set and wakes
     // the debounce loop — it never blocks and never syncs inline.

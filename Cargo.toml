@@ -15,10 +15,11 @@ members = [
     "crates/tracedecay-usecases",
 ]
 resolver = "3"
+exclude = [".worktrees", ".codex-worktrees"]
 
 [package]
 name = "tracedecay"
-version = "0.0.67"
+version = "0.0.68"
 publish = false
 edition = "2024"
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"
@@ -28,6 +29,7 @@ homepage = "https://github.com/ScriptedAlchemy/tracedecay"
 readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
+
 # Explicit whitelist so `cargo package`/`cargo publish` ship everything the
 # build needs — including the PREBUILT dashboard dist bundles, which are
 # gitignored (an `exclude`-style package can never pick them up). Run

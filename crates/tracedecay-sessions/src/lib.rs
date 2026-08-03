@@ -6,6 +6,11 @@ pub mod compatibility;
 pub mod provider;
 pub mod runtime;
 
+#[cfg(test)]
+mod worktree {
+    pub use tracedecay_runtime_core::worktree::*;
+}
+
 pub mod git_correlation {
     pub use crate::runtime::git_correlation::*;
 }

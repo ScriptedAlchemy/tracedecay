@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use libsql::{Builder, OpenFlags};
 use serde_json::{Value, json};
 
-use crate::runtime::shared::path_belongs_to_project;
+use crate::runtime::shared::{ProjectMembership, ProjectRootMatcherCache};
 use crate::runtime::source::{StoredCursor, TranscriptIngestStore};
 use crate::{SessionMessageRecord, SessionRecord};
 
@@ -84,6 +84,7 @@ impl CursorComposerSweepOutcome {
 pub struct CursorComposerSource {
     state_db_path: PathBuf,
     chats_dir: PathBuf,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 impl CursorComposerSource {
@@ -104,6 +105,7 @@ impl CursorComposerSource {
                 .join("globalStorage")
                 .join("state.vscdb"),
             chats_dir: home.join(".cursor").join("chats"),
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -217,20 +219,23 @@ impl CursorComposerSource {
                     .or_insert_with(|| project.path.clone());
             }
             let selected_project = match project_root {
-                Some(root) if path_belongs_to_project(Path::new(&project.path), root) => {
-                    ComposerProject {
-                        path: project.path.clone(),
-                    }
-                }
-                Some(_) => continue,
-                None if registered_roots
-                    .iter()
-                    .any(|root| path_belongs_to_project(Path::new(&project.path), root)) =>
+                Some(root) => match self
+                    .project_matchers
+                    .membership(Path::new(&project.path), root)
                 {
-                    continue;
-                }
-                None => ComposerProject {
-                    path: "user".to_string(),
+                    ProjectMembership::Match => ComposerProject {
+                        path: project.path.clone(),
+                    },
+                    ProjectMembership::NoMatch | ProjectMembership::Unknown => continue,
+                },
+                None => match self
+                    .project_matchers
+                    .membership_against_roots(Path::new(&project.path), registered_roots)
+                {
+                    ProjectMembership::NoMatch => ComposerProject {
+                        path: "user".to_string(),
+                    },
+                    ProjectMembership::Match | ProjectMembership::Unknown => continue,
                 },
             };
             // Own this session for JSONL dedupe regardless of the per-pass cap.
@@ -332,18 +337,20 @@ impl CursorComposerSource {
             let ws_hash = ws_entry.file_name().to_string_lossy().to_string();
             // Scope by ws-hash -> project mapping harvested from the envelopes.
             let project_path = match (workspace_paths.get(&ws_hash), project_root) {
-                (Some(path), Some(root)) if path_belongs_to_project(Path::new(path), root) => {
-                    path.clone()
+                (Some(path), Some(root)) => {
+                    match self.project_matchers.membership(Path::new(path), root) {
+                        ProjectMembership::Match => path.clone(),
+                        ProjectMembership::NoMatch | ProjectMembership::Unknown => continue,
+                    }
                 }
-                (Some(_), Some(_)) | (None, _) => continue,
-                (Some(path), None)
-                    if registered_roots
-                        .iter()
-                        .any(|root| path_belongs_to_project(Path::new(path), root)) =>
+                (None, _) => continue,
+                (Some(path), None) => match self
+                    .project_matchers
+                    .membership_against_roots(Path::new(path), registered_roots)
                 {
-                    continue;
-                }
-                (Some(_), None) => "user".to_string(),
+                    ProjectMembership::NoMatch => "user".to_string(),
+                    ProjectMembership::Match | ProjectMembership::Unknown => continue,
+                },
             };
             let Ok(agent_entries) = std::fs::read_dir(ws_entry.path()) else {
                 continue;

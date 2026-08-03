@@ -542,3 +542,56 @@ async fn cline_like_user_scope_includes_only_unregistered_tasks() {
     assert_eq!(session.project_key, "user");
     assert_eq!(session.project_path, "user");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cline_like_unknown_project_membership_defers_persistence_and_offset() {
+    const CHILD_ENV: &str = "TRACEDECAY_CLINE_UNKNOWN_MEMBERSHIP_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        let tmp = TempDir::new().unwrap();
+        let (home, project) = setup(&tmp);
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let api = write_task(
+            &vscode_storage_root(&home, "saoudrizwan.claude-dev"),
+            &nested,
+            "unknown-cline",
+        );
+
+        let db = open_project_session_db(&project).await.unwrap();
+        let source = ClineLikeSource::cline_with_home(&home).for_user_scope(vec![project.clone()]);
+        assert_eq!(
+            ingest_source(&db, &source, tmp.path(), None)
+                .await
+                .messages_upserted,
+            0
+        );
+        assert!(db.get_session("cline", "unknown-cline").await.is_none());
+        assert!(
+            parse_offset_for_task_history(&db, &project, &api)
+                .await
+                .is_none()
+        );
+        return;
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let tmp = TempDir::new().unwrap();
+    let fake_git = tmp.path().join("git-timeout");
+    std::fs::write(&fake_git, "#!/bin/sh\nexec /bin/sleep 3\n").unwrap();
+    std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .arg("cline_like::cline_like_unknown_project_membership_defers_persistence_and_offset")
+        .arg("--exact")
+        .env(CHILD_ENV, "1")
+        .env("GIT", fake_git)
+        .env("GIT_DIR", "/nonexistent/tracedecay-cline-timeout-git-dir")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "child must defer unknown project membership"
+    );
+}

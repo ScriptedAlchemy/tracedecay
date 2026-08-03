@@ -161,11 +161,12 @@ scripts/install-git-hooks.sh
 CI validates commit subjects with:
 
 ```bash
-scripts/check-conventional-commits.sh origin/master..HEAD
+npm ci
+npm run lint:commit -- --from origin/master --to HEAD
 ```
 
 Run the same command locally before pushing to lint every non-merge commit in a
-branch range. Merge commits are skipped to match CI behavior.
+branch range. Commitlint exempts merge commits to match CI behavior.
 
 ## Pull Requests
 
