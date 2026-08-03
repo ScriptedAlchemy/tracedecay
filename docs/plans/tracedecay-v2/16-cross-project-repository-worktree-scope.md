@@ -11,18 +11,18 @@ owns Git preflight, apply, receipts, and recovery over the exact resolved scope.
 
 Earlier collection, stack, resolver, fixture, and migration artifact names are
 historical evidence, not prerequisites or mandatory recreation targets.
-Published selectors and persisted collection or stack records retain their
-compatibility and migration obligations; all other retention is evaluated
-through the direct scope, inventory, Git, platform, and regression behavior
-below.
+Only actually independently released public selectors retain protocol
+compatibility; persisted collection or stack records use the fresh-store rule.
+All other retention is evaluated through the direct scope, inventory, Git,
+platform, and regression behavior below.
 
 No Plan 16 multi-root selector, collection, or stack contract is established on
 `origin/master` or in a published package/release. Pure source-only/internal
-selector helpers finalize in place. Wire-visible selector revisions retain
-negotiation until an authorized installed-client/host census proves absence.
-Collection/stack records, resolved-scope snapshots, journals, checkpoints, and
-receipts may exist in dogfood stores; their readers and migration/recovery
-remain required until the registered-store/profile census proves absence.
+selector helpers, wire-visible V2 selector revisions, and branch-local V2
+collection/stack records finalize in place. Only their exact final persisted
+shape is accepted; any other database, store, spool, file, or projection
+returns typed `ResetRequired` and requires explicit reset or recreation. No
+storage reader, migration, backfill, dual write, or census path exists.
 Single-root behavior proven on released surfaces remains supported.
 
 **Local identity correction (2026-07-26).** Repository-level project/store
@@ -226,13 +226,13 @@ create a second watcher, parser, chunker, vector store, or scheduler.
   enumerates hidden worktrees.
 - `QueryCollection` and `WorkspaceCollection` remain persisted,
   reference-only, immutable-revision selectors with canonical member ordering,
-  CAS publication, optional defaults, source-binding integration, and
-  compatibility migration from valid legacy saved sets. They may store
+  CAS publication, optional defaults, and source-binding integration. Only
+  their exact final persisted shape is admitted; any older or malformed
+  saved-set returns `ResetRequired` and requires explicit reset or recreation.
+  They may store
   references and display metadata, never copied project/source data,
   credentials, capabilities, paths, store locators, nested collections, or
-  authorization. Invalid path/alias/provider-key legacy rows remain
-  quarantined; valid canonical members migrate idempotently without changing
-  effective authority.
+  authorization.
 - The branch-stack registry remains a reference-only projection used by
   inventory, read-only topology, Plan 37 proximity, and Plan 36 preflight/apply.
   Registry publication validates exact repository/ref/commit/worktree
@@ -253,10 +253,9 @@ create a second watcher, parser, chunker, vector store, or scheduler.
    `QueryCollection`/`WorkspaceCollection` revisions, optional defaults, and
    source bindings; prove typed relationships, authorize every member and
    capability, pin snapshots, and return one frozen scope plus truthful
-   coverage. Fold identity/collection persistence and compatibility migration
-   into this callable path; legacy path-, alias-, provider-key-, and store-name
-   routes remain unresolved locator evidence unless canonical/native proof
-   succeeds.
+   coverage. Fold final-shape identity/collection persistence into this
+   callable path; legacy path-, alias-, provider-key-, and store-name routes
+   remain unresolved locator evidence unless canonical/native proof succeeds.
 2. **Execute federated query and exact continuation.** Feed the frozen scope
    directly to Plan 05 query execution, preserve root provenance and owner
    anchors, preserve score semantics, hydrate exact results, and bind
@@ -274,26 +273,27 @@ create a second watcher, parser, chunker, vector store, or scheduler.
    source/destination or declared visible edge to Plan 36. A stale scope,
    inventory, stack, ref, or policy requires a fresh resolution and preview;
    no consumer may rediscover roots or infer edges.
-5. **Preserve compatibility on the production path.** Existing explicit-target,
-   saved-set, default, source-binding, inventory, stack, and transport entry
-   points delegate to the shared resolver and keep published API/stored-data
-   compatibility. Migration quarantines unverifiable identity or topology
-   without deleting it or manufacturing authority.
+5. **Preserve released protocol compatibility on the production path.** An
+   actual independently released explicit-target, default, source-binding,
+   inventory, stack, or transport protocol may delegate to the shared resolver.
+   Source-only and branch-era shapes change in place. Persisted saved sets
+   always use final-shape admission; a mismatch returns `ResetRequired` rather
+   than being converted, retained, or quarantined.
 
 ## Replacement and deletion
 
 - Remove per-surface scope resolution, CWD/default-checkout fallback, store-path
   routing, and any query or LSP code that silently chooses the first root.
 - Remove standalone delivery milestones whose only result is a collection or
-  stack schema, port, table, migration, fixture framework, or declaration.
+  stack schema, port, table, fixture framework, or declaration.
   Retain the complete collection and branch-stack capabilities above by
   implementing their necessary storage/adapters inside the first production
   resolver, query, inventory, cleanup, or Git journey that calls them.
 - Remove recursive worktree discovery and hidden-root counts. Inventory is a
   filtered observation of native Git state, not a discovery-based grant.
-- Keep compatibility entry points as supported delegates to the shared
-  resolver; they retain behavior, published API, and stored-data compatibility
-  while sharing the canonical scope and authorization logic.
+- Keep only independently released public protocol entry points as supported
+  delegates to the shared resolver. Persisted saved sets have no compatibility
+  route and share the canonical final-shape admission and authorization logic.
 
 ## Direct acceptance
 
@@ -321,7 +321,7 @@ applies only an exact separately authorized eligible preview with a durable
 terminal receipt. Focused negative cases cover path/CWD substitution,
 authorization revocation between pages, hidden-root enumeration, incomplete
 inventory, unsafe cleanup, collection membership/default/source-binding drift,
-invalid legacy migration, cyclic/inferred stack edges, ref/worktree recreation,
+non-final saved-set admission, cyclic/inferred stack edges, ref/worktree recreation,
 and ambiguous targets.
 
 The PR15 stack-fanout branch drives bursts across visible and denied roots and

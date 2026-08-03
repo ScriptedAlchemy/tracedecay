@@ -230,29 +230,6 @@ const TEMPORAL = {
             'provider-qualified session_git_spans rows for the displayed session page',
         },
       },
-      {
-        id: 'delivery_outcomes',
-        label: 'Pull request, review, CI & release outcomes',
-        state: 'unsupported',
-        authority: null,
-        granularity: 'Delivery projection row',
-        providers: [],
-        item_count: null,
-        reason:
-          'the shared Delivery overview is mounted, but its outcome projections are unavailable or unsupported and do not expose session-linked rows; Loom does not duplicate them',
-        required_authority:
-          'GET /api/delivery/overview with session-linked pull_requests, review_comments, ci_checks, failure_localization, and releases rows',
-        coverage: {
-          completeness: 'unsupported',
-          eligible: null,
-          examined: null,
-          matched: null,
-          omitted: null,
-          unit: null,
-          reason:
-            'coverage belongs to the shared Delivery projection once it serves session-linked rows',
-        },
-      },
     ],
     commits: [
       {
@@ -334,6 +311,15 @@ afterEach(() => {
 });
 
 describe('LoomPage', () => {
+  it('does not present unfed Delivery outcomes as a Loom relation', async () => {
+    renderLoom();
+
+    const row = await screen.findByText('Deliver Git primitive runtime');
+    await userEvent.click(row);
+
+    expect(screen.queryByText('→ delivery outcomes')).toBeNull();
+  });
+
   it('draws the weave from the typed Loom temporal read', async () => {
     const fetchMock = serve(HAPPY);
     vi.stubGlobal('fetch', fetchMock);
@@ -389,11 +375,6 @@ describe('LoomPage', () => {
     expect(
       screen.queryByText(/no session→file or session→commit route/),
     ).toBeNull();
-    expect(
-      screen.getAllByText(
-        /GET \/api\/delivery\/overview with session-linked pull_requests/,
-      ).length,
-    ).toBeGreaterThanOrEqual(1);
   });
 
   it('states which threads have no recorded extent, with the real count', async () => {
@@ -430,7 +411,6 @@ describe('LoomPage', () => {
     expect(screen.getByText('Session ↔ commit')).toBeTruthy();
     expect(screen.getByText('Session → edited file')).toBeTruthy();
     expect(screen.getByText('Branch & worktree spans')).toBeTruthy();
-    expect(screen.getByText('Pull request, review, CI & release outcomes')).toBeTruthy();
     expect(screen.getByText(/commit_sessions/)).toBeTruthy();
   });
 

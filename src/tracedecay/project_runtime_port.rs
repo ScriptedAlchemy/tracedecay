@@ -85,7 +85,7 @@ impl DashboardProjectRuntime for TraceDecay {
 
     fn storage_telemetry_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle> {
         TraceDecay::storage_telemetry_handle(self)
     }
 

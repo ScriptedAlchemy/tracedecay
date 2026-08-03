@@ -16,9 +16,7 @@ use tracedecay_store::{
 };
 
 use crate::connection::{self, ConnectionMode, OpenedDatabaseFile};
-use crate::migration_sql::{
-    MigrationSqlError, MigrationSqlRows, MigrationSqlStatement, execute_query,
-};
+use crate::exact_sql::{ExactSqlError, ExactSqlRows, ExactSqlStatement, execute_query};
 
 use super::{ExistingReaderLocator, ReaderStartError};
 
@@ -95,9 +93,9 @@ enum SnapshotCommand {
         request: Box<RuntimeReadRequestV1>,
         reply: SyncSender<Result<RuntimeReadOutcomeV1, ReaderWorkerError>>,
     },
-    MigrationQuery {
-        request: MigrationSqlStatement,
-        reply: SyncSender<Result<MigrationSqlRows, MigrationSqlError>>,
+    ExactSqlQuery {
+        request: ExactSqlStatement,
+        reply: SyncSender<Result<ExactSqlRows, ExactSqlError>>,
     },
     StoreSize {
         reply: SyncSender<Result<StoreSizeTelemetrySample, ReaderWorkerError>>,
@@ -144,20 +142,20 @@ impl WorkerClient {
         Ok(())
     }
 
-    pub fn pin_migration(&self) -> Result<(), MigrationSqlError> {
+    pub fn pin_exact_sql(&self) -> Result<(), ExactSqlError> {
         let sender = self
             .snapshot_sender()
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender.send(SnapshotCommand::Pin { reply }).map_err(|_| {
-            MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+            ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
         })?;
         receive
             .recv()
             .map_err(|_| {
-                MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+                ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
             })?
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))
     }
 
     pub fn execute(
@@ -176,23 +174,23 @@ impl WorkerClient {
         self.receive_with_probe(receive, probe)
     }
 
-    pub fn execute_migration_query(
+    pub fn execute_exact_sql_query(
         &self,
-        request: MigrationSqlStatement,
-    ) -> Result<MigrationSqlRows, MigrationSqlError> {
+        request: ExactSqlStatement,
+    ) -> Result<ExactSqlRows, ExactSqlError> {
         let sender = self
             .snapshot_sender()
-            .map_err(|error| MigrationSqlError::ReaderUnavailable(error.to_string()))?;
+            .map_err(|error| ExactSqlError::ReaderUnavailable(error.to_string()))?;
         let (reply, receive) = mpsc::sync_channel(1);
         sender
-            .send(SnapshotCommand::MigrationQuery { request, reply })
+            .send(SnapshotCommand::ExactSqlQuery { request, reply })
             .map_err(|_| {
-                MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+                ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
             })?;
         receive
             .recv()
             .map_err(|_| {
-                MigrationSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
+                ExactSqlError::ReaderUnavailable(ReaderWorkerError::WorkerClosed.to_string())
             })
             .and_then(std::convert::identity)
     }
@@ -403,7 +401,7 @@ fn run_snapshot<E: ReaderQueryExecutor>(
                     .map_err(ReaderWorkerError::Storage);
                 let _ = reply.send(result);
             }
-            SnapshotCommand::MigrationQuery { request, reply } => {
+            SnapshotCommand::ExactSqlQuery { request, reply } => {
                 let _ = reply.send(execute_query(&transaction, request));
             }
             SnapshotCommand::StoreSize { reply } => {

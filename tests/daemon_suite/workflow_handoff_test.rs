@@ -4,7 +4,7 @@
 //! fencing all share the registered Work SQLite channel
 //! (`RegisteredGlobalDb::workflow_storage`). This drops the whole
 //! `HostAdmissionTestRuntimeV1` — the daemon's admitted composition root, not
-//! just the migration-SQL handle — and reopens it at the same profile/project
+//! just the exact-SQL handle — and reopens it at the same profile/project
 //! paths, so a real physical restart (not a logical replay) is what proves
 //! durability here.
 

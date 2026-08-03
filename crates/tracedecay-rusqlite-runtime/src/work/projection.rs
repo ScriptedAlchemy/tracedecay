@@ -31,7 +31,7 @@ impl WorkProjectionReadPort for WorkSqliteStorage {
 }
 
 pub(crate) fn exact_snapshot_registered(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
     task_id: &TaskId,
 ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
@@ -50,7 +50,7 @@ pub(crate) fn exact_snapshot_registered(
 }
 
 pub(crate) fn snapshot_registered(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
     page_size: u32,
 ) -> Result<WorkProjectionSnapshotV1, WorkProjectionPortError> {
@@ -74,7 +74,7 @@ pub(crate) fn snapshot_registered(
          ORDER BY task_id LIMIT ?6",
         authority_params_owned(authority)
             .into_iter()
-            .chain([MigrationSqlValue::Integer(i64::from(page_size))])
+            .chain([ExactSqlValue::Integer(i64::from(page_size))])
             .collect(),
     )
     .map_err(|_| WorkProjectionPortError::Unavailable)?;
@@ -101,7 +101,7 @@ pub(crate) fn snapshot_registered(
 }
 
 pub(crate) fn delta_registered(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
     cursor: &WorkProjectionResumeCursorV1,
     page_size: u32,
@@ -124,7 +124,7 @@ pub(crate) fn delta_registered(
                AND actor_id = ?4 AND policy_digest = ?5 AND owner_sequence > ?6",
             authority_params_owned(authority)
                 .into_iter()
-                .chain([MigrationSqlValue::Integer(from_sql)])
+                .chain([ExactSqlValue::Integer(from_sql)])
                 .collect(),
         )
         .map_err(|_| WorkProjectionPortError::Unavailable)?,
@@ -148,8 +148,8 @@ pub(crate) fn delta_registered(
         authority_params_owned(authority)
             .into_iter()
             .chain([
-                MigrationSqlValue::Integer(from_sql),
-                MigrationSqlValue::Integer(i64::from(page_size)),
+                ExactSqlValue::Integer(from_sql),
+                ExactSqlValue::Integer(i64::from(page_size)),
             ])
             .collect(),
     )
@@ -157,12 +157,12 @@ pub(crate) fn delta_registered(
     let mut changed = Vec::new();
     let mut to = from;
     for row in rows.rows {
-        let payload = migration_text(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?;
+        let payload = exact_sql_text(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?;
         changed
             .push(serde_json::from_str(payload).map_err(|_| WorkProjectionPortError::Unavailable)?);
         to = to.max(
             u64::try_from(
-                migration_integer(&row.values, 1).ok_or(WorkProjectionPortError::Unavailable)?,
+                exact_sql_integer(&row.values, 1).ok_or(WorkProjectionPortError::Unavailable)?,
             )
             .map_err(|_| WorkProjectionPortError::Unavailable)?,
         );
@@ -194,7 +194,7 @@ pub(crate) fn delta_registered(
 }
 
 pub(crate) fn registered_owner_cursor(
-    handle: &MigrationSqlHandle,
+    handle: &ExactSqlHandle,
     authority: &WorkAuthority,
 ) -> Result<u64, WorkProjectionPortError> {
     let rows = registered_work_query(
@@ -208,30 +208,30 @@ pub(crate) fn registered_owner_cursor(
     match rows.rows.first() {
         None => Ok(0),
         Some(row) => u64::try_from(
-            migration_integer(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?,
+            exact_sql_integer(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?,
         )
         .map_err(|_| WorkProjectionPortError::Unavailable),
     }
 }
 
-pub(crate) fn registered_count(rows: &MigrationSqlRows) -> Result<u32, WorkProjectionPortError> {
+pub(crate) fn registered_count(rows: &ExactSqlRows) -> Result<u32, WorkProjectionPortError> {
     u32::try_from(
         rows.rows
             .first()
-            .and_then(|row| migration_integer(&row.values, 0))
+            .and_then(|row| exact_sql_integer(&row.values, 0))
             .ok_or(WorkProjectionPortError::Unavailable)?,
     )
     .map_err(|_| WorkProjectionPortError::Unavailable)
 }
 
 pub(crate) fn decode_registered_projections(
-    rows: MigrationSqlRows,
+    rows: ExactSqlRows,
 ) -> Result<Vec<WorkProjection>, WorkProjectionPortError> {
     rows.rows
         .into_iter()
         .map(|row| {
             serde_json::from_str(
-                migration_text(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?,
+                exact_sql_text(&row.values, 0).ok_or(WorkProjectionPortError::Unavailable)?,
             )
             .map_err(|_| WorkProjectionPortError::Unavailable)
         })

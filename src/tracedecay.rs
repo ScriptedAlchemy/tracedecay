@@ -31,7 +31,7 @@ mod queries;
 mod scan;
 
 pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
-pub use indexing::{MigrationReindexAvailabilityV1, MigrationReindexStatusV1};
+pub use indexing::{GraphRebuildAvailabilityV1, GraphRebuildStatusV1};
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 
 #[doc(hidden)]
@@ -90,7 +90,7 @@ struct MountedContextScoutClaimAuthorityV1 {
 impl TraceDecay {
     pub(crate) fn storage_telemetry_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle> {
         self.db.storage_telemetry_handle()
     }
 

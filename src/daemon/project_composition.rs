@@ -748,10 +748,6 @@ pub(super) async fn production_project_server(
             let registered_project_session_db = store_administration
                 .registered_project_session_database(cg.project_root(), cg.store_layout())
                 .await?;
-            crate::global_db::advance_required_session_temporal_state_repair(
-                registered_project_session_db.as_ref(),
-            )
-            .await?;
             log_daemon_event(
                 "project_open_phase",
                 &[
