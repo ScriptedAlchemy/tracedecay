@@ -8,23 +8,23 @@ Role: PR7 establishes stable evidence anchors for captured observations. Later q
 search, API, and UI slices preserve and resolve those anchors. This plan does not
 create a research-management system.
 
-Earlier type/file names, table and index inventories, migration labels, fixture
+Earlier type/file names, table and index inventories, cutover labels, fixture
 paths, packet gates, and implementation allocations are historical evidence,
-not prerequisites or artifacts that later work must recreate. Published wire
-types and persisted records retain compatibility and migration obligations;
-all other retention is judged by the direct anchor identity, resolution,
+not prerequisites or artifacts that later work must recreate. Only actually
+independently released public wire types may retain protocol compatibility.
+Persisted records accept only their exact final shape; all other retention is
+judged by the direct anchor identity, resolution,
 authorization, lineage, deletion, Git, platform, and regression behavior
 below.
 
 The anchor/evidence V2/V3 shapes described below were introduced on this
 integration branch and have no predecessor on `origin/master` or in a published
-package/release. That does not prove live/profile stores contain no rows:
-registered-store admission and dogfood may have persisted them. Preserve V2/V3
-decoding, backward reads, migration, and recovery until a separately authorized
-census of every registered live/profile store proves the predecessor absent.
-This plan authorizes no live-store inspection. Pure source-only/internal
-request helpers may converge in place; wire-visible request revisions retain
-negotiation until an authorized installed-client/host census proves absence.
+package/release. They use the V2 fresh-store cutover: every non-final database,
+store, spool, file, or projection returns typed `ResetRequired` and requires
+explicit reset or recreation. No storage reader, migration, backfill, dual
+write, or census path survives. This plan authorizes no live-store inspection.
+Pure source-only/internal request helpers and wire-visible V2 request revisions
+may converge in place.
 `V1` may identify an initial final wire record.
 
 **Status (2026-07-23):** Landed on this branch. PR7/Plan 13's core — `RetrievalAnchorId`
@@ -342,7 +342,7 @@ validation (`validate_anchor_lineage_v3`) rejects prose/score/label sources
 (`crates/tracedecay-domain/src/research/anchor.rs`). Task-to-anchor edges stay Plan 24's
 `TaskEvidenceLinkRevision`; Plan 13 stores no `TaskId`.
 
-### Persistence, migration, and direct acceptance
+### Persistence and direct acceptance
 
 Domain validation owns identity and closed errors; the store owns append-only
 publication and resolution; the application reauthorizes and resolves owner
@@ -350,22 +350,21 @@ receipts; and the infrastructure adapter owns persistence. None invokes Git,
 GitHub, CI, host processes, task mutation, or workflow execution.
 
 Persisted records remain immutable, owner/privacy-bound, payload-free, and
-ordered where source membership is meaningful. Migration and backfill require
-exact Plan 36 capture/object or Plan 27 provider-observation identity and
-complete owner/privacy binding. Path-, branch-, timestamp-, label-, name-, or
-digest-only legacy records remain `UnverifiableLegacy`; migration never
-consults ambient `HEAD`, follows a symlink, fetches a provider, copies an owner
-receipt, or synthesizes identity. Mismatch rolls back atomically, and published
-persisted formats remain readable through their compatibility window.
+ordered where source membership is meaningful. The exact final persisted shape
+is the sole admission format. Any other stored shape returns `ResetRequired`
+before interpretation and requires explicit reset or recreation; it is never
+read, migrated, backfilled, dual-written, or retained pending a census. Public
+wire/API compatibility is separate and applies only to actual independent
+releases.
 
 Direct tests prove deterministic IDs, repository/object-format separation,
 exact object and receipt binding, ref-movement rekeying, ordered membership,
 atomic publish/replay/rollback, immutable records, authorization/disposition
 parity, moved and symlinked worktree non-inference, SHA-1/SHA-256 separation,
 exact PR/check/preflight/integration evidence, TaskId-rooted drilldown with
-typed omissions, idempotent exact-only migration, and absence of copied or
-payload-bearing owner data. Historical schema, index, trigger, migration, and
-test-file names are not mandatory recreation targets.
+typed omissions, exact-final-shape admission with `ResetRequired` refusal, and
+absence of copied or payload-bearing owner data. Historical schema, index,
+trigger, and test-file names are not mandatory recreation targets.
 
 **Status (2026-07-23):** Implemented. Domain records own identity/validation, the store
 owns publish-or-replay and payload-free resolution, and the rusqlite runtime repository
@@ -387,9 +386,9 @@ The persisted V3 contract retains one profile identity type; opaque occurrence,
 set, span, contribution, disposition, replay, and privacy-bound request
 identities; explicit owner binding for child and source lineage; immutable
 source occurrence and evidence-span records; retriever contribution and
-watermark records; and disposition, tombstone, and resolution states. It
-preserves byte-compatible V2 decoding pending the authorized live/profile
-census above. A project may be absent only for
+watermark records; and disposition, tombstone, and resolution states. It does
+not decode a non-final persisted V2 row: that row returns `ResetRequired`
+before interpretation. A project may be absent only for
 explicitly profile-owned evidence; path, CWD, store filename, project label,
 host profile, PID, branch, or ref can never fill owner identity. Historical
 Rust module and helper-type names do not constrain the current implementation.
@@ -513,10 +512,9 @@ redefining `TemporalModeV1`.
 
 `RetrievalAnchorTargetV3` adds `ExactSourceOccurrence(SourceOccurrenceIdV1)`,
 `ExactEvidenceSpan(EvidenceSpanIdV1)`, and
-`RetrieverContribution(RetrieverContributionIdV1)`. Because V2 records may
-have reached registered live/profile stores, `RetrievalAnchorRecordV3` extends
-rather than silently changing V2 wire semantics until the authorized census
-proves otherwise.
+`RetrieverContribution(RetrieverContributionIdV1)`. `RetrievalAnchorRecordV3`
+is the final persisted shape; older stored V2 rows return `ResetRequired`
+rather than being extended, decoded, or converted.
 `derive_exact_source_occurrence_anchor_id`,
 `derive_exact_evidence_span_anchor_id`, and
 `derive_retriever_contribution_anchor_id` call the existing canonical digest
@@ -624,11 +622,9 @@ An unkeyed content/path hash or raw provider locator is not a
 domains or key epochs produces unlinkable aliases.
 
 All new durable lineage uses `AnchorLineageRefV3` with child/source anchor ID
-and explicit canonical owner/privacy binding. V2 rows remain decodable and
-migrate only after exact owner/privacy resolution; unverifiable V2 lineage
-stays typed `UnverifiableLegacy` and cannot serve. Removal of this backward
-path requires the authorized live/profile census above. Publication atomically writes forward and
-reverse lineage. A provider-native copied message remains a distinct source
+and explicit canonical owner/privacy binding. A stored V2 row that is not the
+exact final shape returns `ResetRequired` and cannot serve, decode, or convert.
+Publication atomically writes forward and reverse lineage. A provider-native copied message remains a distinct source
 occurrence and uses `LogicalCopyRecordV1`/`CopiedFrom`; it proves only the copy's
 authorship and cannot impersonate its source. A summary uses
 `SessionSummaryRecordV1` plus exact owner-bound source-span/occurrence anchors.
@@ -651,9 +647,9 @@ terminal state, non-sensitive policy/reason class, effective time, and the minim
 owner-shard routing proof required to prevent ID reuse. It contains no payload,
 snippet, alias, native locator, target coordinate, source ID, query, rank, path,
 timestamp from the source, or hidden-owner coverage. Unauthorized callers receive no
-tombstone or existence distinction. Restore, consolidation, replay, and migration
-apply current dispositions before importing or rebuilding derivatives, so stale
-copies cannot resurrect payload access.
+tombstone or existence distinction. Final-shape restore, consolidation, and
+replay apply current dispositions before rebuilding derivatives, so stale copies
+cannot resurrect payload access.
 
 **Status (2026-07-23):** Implemented. Owner-bound create/resolve, append-only
 `RetrievalAnchorDispositionRecordV1`, and the strict-whitelist
@@ -664,7 +660,7 @@ rules, derivative suppression, newest-disposition-first resolution). `AnchorLine
 lineage (`crates/tracedecay-domain/src/{research/anchor,session}.rs`). Tombstone-expiry
 and revocation are exercised by `tests/session_suite/anchor_tombstone_expiry.rs`.
 
-## Persistence and migration behavior
+## Persistence behavior
 
 Domain records own immutable identity and structural validation; the store
 owns atomic publish-or-replay and payload-free resolution; application
@@ -675,24 +671,23 @@ summary or FTS text, hydrated payloads, query text, paths, arguments, results,
 or embeddings into evidence-assembly records.
 
 Persisted occurrence, canonical-set, span, projection-receipt, contribution,
-lineage, disposition, and replay records preserve the V3 wire and V2 reader
-compatibility until the authorized live/profile census proves no predecessor
-rows exist. They enforce owner/privacy binding, immutable membership
-and order, referential integrity, append-only dispositions, canonical digests,
-and efficient reverse resolution. Physical table, column, index, trigger,
-migration, and source-file names are implementation history rather than
+lineage, disposition, and replay records accept only the exact final shape.
+Any other stored shape returns `ResetRequired` and requires explicit reset or
+recreation; no compatibility reader, migration, backfill, dual write, or
+census applies. Final records enforce owner/privacy binding, immutable
+membership and order, referential integrity, append-only dispositions,
+canonical digests, and efficient reverse resolution. Physical table, column,
+index, trigger, and source-file names are implementation history rather than
 features to recreate.
 
-Migration rejects newer unsupported schemas and backfills only exact anchored,
-owner/privacy-bound, source-ordered occurrences with verified receipt roles;
-creates multi-member runs only from proved adjacency; leaves other legacy
-records `UnverifiableLegacy`; verifies flattened span/set equality, catalog and
-integration bindings, projection-receipt membership, and deterministic digest
-replay; applies dispositions before restore or consolidation; and enables
-reads/writes only after atomicity, authorization, replay-conflict,
-tombstone-whitelist, and payload-free persistence checks pass. Any failure
-leaves the prior read path authoritative and rolls back new records without
-re-enabling deleted or redacted payloads.
+Admission rejects every non-final or unsupported stored shape with
+`ResetRequired` before any read, write, replay, or projection. Final-shape
+records verify owner/privacy binding, source order, receipt roles, flattened
+span/set equality, catalog and integration bindings, projection-receipt
+membership, deterministic digest replay, dispositions, atomicity,
+authorization, replay-conflict, tombstone-whitelist, and payload-free
+persistence. Failure blocks admission without re-enabling deleted or redacted
+payloads.
 
 **Status (2026-07-23):** Implemented. The four-layer split — domain validation, store
 publish-or-replay, application authorization/orchestration
@@ -706,7 +701,7 @@ with immutable inserts and atomic rollback on replay conflict.
   occurrence-set/span/
   contribution identity, owner-bound lineage, replay semantics, resolution states,
   dispositions, and minimum-safe tombstones. Plan 02 owns generic persistence and
-  migration policy/primitives; Plan 13's PR7 owns the evidence-assembly
+  final-shape persistence policy/primitives; Plan 13's PR7 owns the evidence-assembly
   persistence contract and adapter behavior above. Plan 09 owns current authorization and
   transaction orchestration; Plan 18 owns sanitization and disposition policy.
 - Plan 23 owns candidate generation, ranking, temporal selection, summary DAG
@@ -794,17 +789,16 @@ through without defining another reference type (Required behavior 10).
   occupancy, while same-scope changed material returns `ReplayConflict`.
 - Session projection and temporal-retrieval tests prove same-version
   rebuild identity, new-projector `DerivedFrom` lineage, verified adjacency,
-  singleton legacy handling, ranking-independent replay, and contribution -> span
+  singleton boundary handling, ranking-independent replay, and contribution -> span
   -> set -> exact source expansion.
 - Tombstone-expiry and summary-lineage tests prove strict tombstone fields,
   authorization revocation, possession-only denial, and transitive source deletion
   through span -> contribution -> nested summary -> FTS/context.
-- Migration tests prove reader compatibility, integrity and immutability constraints,
-  shape/version refusal, exact-only backfill, dispositions-first
-  restore/consolidation, repeatable migration receipts, rollback, and
-  unconditional no-payload-resurrection safety. The authorized live/profile
-  census may permit reader/migration retirement; it never relaxes
-  no-resurrection safety. Historical migration and schema-object names are not
+- Persistence tests prove exact-final-shape admission, typed `ResetRequired`
+  refusal for every other shape, integrity and immutability constraints,
+  final-shape restore/consolidation, rollback, and unconditional
+  no-payload-resurrection safety. No storage reader, migration, backfill, dual
+  write, or census path exists. Historical schema-object names are not
   acceptance artifacts.
 - Moving refs, rewriting a branch, or removing a checkout does not retarget retained
   commit/tree/blob or captured-state anchors; unavailable objects return a safe typed
