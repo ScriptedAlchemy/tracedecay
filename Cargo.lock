@@ -992,6 +992,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "crossbeam"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1137cd7e7fc0fb5d3c5a8678be38ec56e819125d8d7907411fe24ccb943faca8"
+dependencies = [
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-epoch",
+ "crossbeam-queue",
+ "crossbeam-utils",
+]
+
+[[package]]
 name = "crossbeam-channel"
 version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2746,11 +2759,55 @@ dependencies = [
  "grafeo-common",
  "hashbrown 0.17.1",
  "indexmap",
+ "ordered-float",
  "parking_lot",
+ "rand 0.10.2",
  "serde",
  "smallvec",
  "thiserror",
  "unicode-normalization",
+]
+
+[[package]]
+name = "grafeo-engine"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ede967e6b0a16396c91752febdf037ab04ca69b851f6fb43565ee5f30586ee0d"
+dependencies = [
+ "arcstr",
+ "bincode 2.0.1",
+ "bytes",
+ "crc32fast",
+ "grafeo-adapters",
+ "grafeo-common",
+ "grafeo-core",
+ "grafeo-storage",
+ "hashbrown 0.17.1",
+ "indexmap",
+ "parking_lot",
+ "serde",
+ "smallvec",
+ "thiserror",
+]
+
+[[package]]
+name = "grafeo-storage"
+version = "0.5.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6857029da63e10209ae622ba85a87593ea08646ea17c02d5aa14461c7ff296f7"
+dependencies = [
+ "bincode 2.0.1",
+ "byteorder",
+ "bytes",
+ "crc32fast",
+ "crossbeam",
+ "fs2",
+ "grafeo-common",
+ "memmap2",
+ "parking_lot",
+ "serde",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -3967,6 +4024,15 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "ordered-float"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7d950ca161dc355eaf28f82b11345ed76c6e1f6eb1f4f4479e0323b9e2fbd0e"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "ordered-stream"
@@ -5861,6 +5927,21 @@ dependencies = [
  "tracedecay-tool-catalog",
  "tracing",
  "zeroize",
+]
+
+[[package]]
+name = "tracedecay-graph-db"
+version = "0.1.0"
+dependencies = [
+ "grafeo-common",
+ "grafeo-core",
+ "grafeo-engine",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]
