@@ -33,12 +33,12 @@ fn read_only_clone_cannot_recover_writer_authority() {
 }
 
 #[test]
-fn schema_migration_transaction_requires_attached_write_authority() {
+fn long_lease_transaction_requires_attached_write_authority() {
     let fixture = fixture('a', 'a');
     let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
 
-    let error = match channel.begin_schema_migration_immediate() {
-        Ok(_) => panic!("schema migration must require attached authority"),
+    let error = match channel.begin_authorized_long_lease_immediate() {
+        Ok(_) => panic!("long-lease transaction must require attached authority"),
         Err(error) => error,
     };
 
@@ -165,7 +165,7 @@ fn ordinary_transaction_cannot_request_an_unbounded_schema_step() {
 }
 
 #[test]
-fn schema_migration_renews_its_lease_after_successful_bounded_steps() {
+fn long_lease_transaction_renews_its_lease_after_successful_bounded_steps() {
     let fixture = fixture('a', 'a');
     let base = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     base.execute_batch("CREATE TABLE lease_probe (value INTEGER)".to_owned())
@@ -176,7 +176,7 @@ fn schema_migration_renews_its_lease_after_successful_bounded_steps() {
             true,
         )))))
         .unwrap();
-    let transaction = channel.begin_schema_migration_immediate().unwrap();
+    let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
     let started = Instant::now();
 
     for value in 0..5 {
@@ -210,7 +210,7 @@ fn explicit_schema_step_has_no_guessed_deadline_and_rechecks_authority() {
         .unwrap()
         .with_write_authority(authority.clone())
         .unwrap();
-    let transaction = channel.begin_schema_migration_immediate().unwrap();
+    let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
     let started = Instant::now();
 
     transaction
@@ -241,7 +241,7 @@ fn authority_loss_during_schema_step_rolls_back_transaction() {
             execute_batch_checks: AtomicUsize::new(0),
         }))
         .unwrap();
-    let transaction = channel.begin_schema_migration_immediate().unwrap();
+    let transaction = channel.begin_authorized_long_lease_immediate().unwrap();
 
     let error = transaction
         .execute_schema_batch_step(

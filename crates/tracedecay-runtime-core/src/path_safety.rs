@@ -31,13 +31,19 @@ pub fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
         return Some(canonical);
     }
 
+    // The missing tail is collected outermost-last and re-pushed in order.
+    // Building it with `Path::join` against an empty `PathBuf` instead would
+    // leave a trailing separator on the result, which compares equal as a
+    // `Path` but not as the string form registries and identity records store.
     let mut current = path;
-    let mut missing_suffix = PathBuf::new();
+    let mut missing_suffix: Vec<&std::ffi::OsStr> = Vec::new();
     while let Some(name) = current.file_name() {
-        missing_suffix = Path::new(name).join(missing_suffix);
+        missing_suffix.push(name);
         current = current.parent()?;
         if let Ok(canonical_parent) = current.canonicalize() {
-            return Some(canonical_parent.join(missing_suffix));
+            let mut resolved = canonical_parent;
+            resolved.extend(missing_suffix.iter().rev());
+            return Some(resolved);
         }
     }
 
