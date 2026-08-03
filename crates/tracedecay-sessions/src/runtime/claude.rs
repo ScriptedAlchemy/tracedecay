@@ -608,7 +608,7 @@ fn conversational_message_id(
 /// Emit a separate `kind="reasoning"` row for an assistant message that carries
 /// one or more `thinking` blocks, so the model's reasoning is kind-filterable
 /// and searchable on its own row — matching how Codex
-/// ([`crate::sessions::codex`]) and Cursor ([`crate::sessions::cursor_composer`])
+/// ([`crate::runtime::codex`]) and Cursor ([`crate::runtime::cursor_composer`])
 /// store reasoning as a dedicated row (role "assistant", `kind="reasoning"`)
 /// rather than leaving the thinking text embedded in the serialized
 /// assistant-message content blob.

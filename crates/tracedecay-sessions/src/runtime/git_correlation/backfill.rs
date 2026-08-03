@@ -683,8 +683,7 @@ where
     Ok(())
 }
 
-/// Reads per-session activity windows for the backfill. See
-/// [`crate::global_db::GlobalDb::session_activity_rows`].
+/// Reads per-session activity windows for the [`GitBackfillStore`] adapter.
 pub async fn session_activity_rows(
     conn: &Connection,
     limit: usize,

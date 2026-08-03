@@ -2,7 +2,7 @@
 //!
 //! Cursor's primary chat history does not live in the
 //! `~/.cursor/projects/<slug>/agent-transcripts/**.jsonl` files that
-//! [`crate::sessions::cursor`] sweeps — those cover only a slice of activity.
+//! [`crate::runtime::cursor`] sweeps — those cover only a slice of activity.
 //! The bulk lives in two SQLite-backed stores this module reads **strictly
 //! read-only**:
 //!
@@ -34,7 +34,7 @@
 //! key, so a sweep re-reads a session's bubbles only when it grew. Because a
 //! composer session id equals the stem of its JSONL transcript for ~94% of
 //! sessions, the composer sweep runs *before* the JSONL
-//! [`crate::sessions::cursor::CursorSweepSource`] and hands it the set of
+//! [`crate::runtime::cursor::CursorSweepSource`] and hands it the set of
 //! composer-owned session ids to skip, so the richer composer rows win and no
 //! message row is ever double-ingested.
 

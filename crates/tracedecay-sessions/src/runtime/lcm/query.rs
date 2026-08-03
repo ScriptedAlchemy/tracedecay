@@ -432,7 +432,7 @@ pub async fn grep(
 }
 
 /// Fetch budget before the re-rank stage: over-fetch by the shared
-/// [`RERANK_OVERFETCH_FACTOR`](crate::sessions::message_noise::RERANK_OVERFETCH_FACTOR),
+/// [`RERANK_OVERFETCH_FACTOR`](crate::compatibility::RERANK_OVERFETCH_FACTOR),
 /// bounded by [`MAX_PAGE_LIMIT`].
 fn rerank_fetch_limit(limit: usize) -> usize {
     crate::compatibility::rerank_fetch_limit(limit, MAX_PAGE_LIMIT)
@@ -526,7 +526,7 @@ fn rerank_grep_hits(
 /// Cheap, deterministic heuristic: is this hit a transcript inventory/listing
 /// tool call, an otherwise path-list-dominated message, or a prose branch/
 /// worktree roster rather than substantive conversation? Delegates to the
-/// shared [`message_noise`](crate::sessions::message_noise) classifier so the
+/// shared [`compatibility`](crate::compatibility) classifier so the
 /// lcm/grep and global message-search re-ranks agree. Summary nodes are curated
 /// prose, never raw inventory, so they are exempt.
 fn hit_is_inventory(hit: &LcmGrepHit) -> bool {

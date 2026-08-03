@@ -4,7 +4,7 @@
 //! the LCM raw-message store for phrases that signal a stalled or terminated
 //! run (`session limit`, `blocked`, `interrupted`, `runs:0`) and reports the
 //! matching rows. This complements the structured `workflow_runs` /
-//! `workflow_agents` tables (see [`crate::sessions::workflow_index`]): where
+//! `workflow_agents` tables (see [`crate::runtime::workflow_index`]): where
 //! those record what the workflow harness wrote, this surfaces in-transcript
 //! evidence that a run did not finish cleanly, including for providers/sessions
 //! that never produced a `wf_*` run directory.

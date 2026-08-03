@@ -25,8 +25,8 @@
 //! migration) under its own message ids, so writing raw rows from this sweep
 //! too would duplicate the LCM store.
 //!
-//! [`TranscriptSource`]: crate::sessions::source::TranscriptSource
-//! [`TranscriptBatch`]: crate::global_db::TranscriptBatch
+//! [`TranscriptSource`]: crate::runtime::source::TranscriptSource
+//! [`TranscriptBatch`]: crate::runtime::hermes::TranscriptBatch
 
 use std::collections::{BTreeSet, HashMap};
 use std::future::Future;

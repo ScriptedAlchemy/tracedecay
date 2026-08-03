@@ -176,7 +176,7 @@ pub fn parse_cursor_jsonl(
 /// hooks should pass the resolved project DB from [`open_project_session_db`].
 ///
 /// Ingestion is **incremental**: it resumes from the byte offset recorded in the
-/// DB's `parse_offsets` table (via the shared [`crate::sessions::source`]
+/// DB's `parse_offsets` table (via the shared [`crate::runtime::source`]
 /// driver), so each call only parses and upserts transcript lines appended since
 /// the last run rather than re-reading the whole file. Repeated calls on an
 /// unchanged file are a no-op.
@@ -375,7 +375,7 @@ const SLUG_DECODE_PROBE_BUDGET: u32 = 4096;
 pub struct CursorSweepSource {
     cursor_projects_dir: PathBuf,
     /// Session ids already owned by the richer composer store
-    /// ([`crate::sessions::cursor_composer`]). Transcript files whose stem is
+    /// ([`crate::runtime::cursor_composer`]). Transcript files whose stem is
     /// one of these are skipped so the two Cursor sources never double-ingest.
     skip_session_ids: std::collections::HashSet<String>,
     user_registered_slugs: Option<std::collections::HashSet<String>>,

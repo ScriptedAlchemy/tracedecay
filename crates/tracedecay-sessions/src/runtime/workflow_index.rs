@@ -42,7 +42,7 @@ pub const MAX_WORKFLOW_LIMIT: usize = MAX_SESSIONS_FOR_LIMIT;
 
 /// Errors from the workflow-index store.
 ///
-/// Shaped like [`crate::sessions::git_correlation::GitCorrelationError`] so
+/// Shaped like [`crate::runtime::git_correlation::GitCorrelationError`] so
 /// callers and `?`-conversions read the same across both stores.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkflowIndexError {
@@ -212,7 +212,7 @@ fn matches_token(value: &str, tokens: &[&str]) -> bool {
 
 /// Ensures the workflow-index tables exist in the session store. Version-gated
 /// through the shared `session_schema_migrations` table exactly like
-/// [`crate::sessions::git_correlation::ensure_git_correlation_schema`], so both
+/// [`crate::runtime::git_correlation::ensure_git_correlation_schema`], so both
 /// stores register under their own migration name in one table.
 pub async fn ensure_workflow_index_schema(conn: &Connection) -> Result<(), WorkflowIndexError> {
     if schema_version(conn)
@@ -296,7 +296,7 @@ async fn schema_version(conn: &Connection) -> Option<i64> {
 /// True when both workflow tables are present, so a query against a store that
 /// predates this schema can short-circuit to empty instead of hitting a
 /// `no such table` error. Mirrors
-/// [`crate::sessions::git_correlation::tables_present`].
+/// [`crate::runtime::git_correlation::tables_present`].
 pub async fn tables_present(conn: &Connection) -> Result<bool, WorkflowIndexError> {
     let mut rows = conn
         .query(
@@ -315,7 +315,7 @@ pub async fn tables_present(conn: &Connection) -> Result<bool, WorkflowIndexErro
 /// `workflow_index_meta` key holding the newest run-file mtime (unix seconds)
 /// the ingest sweep has already processed. Runs whose files are no newer than
 /// this value are skipped on the next sweep. See
-/// [`crate::sessions::workflow_ingest`].
+/// [`crate::runtime::workflow_ingest`].
 pub const INGEST_WATERMARK_KEY: &str = "ingest_watermark_mtime";
 
 /// Reads the ingest watermark (max processed run-file mtime, unix seconds), or

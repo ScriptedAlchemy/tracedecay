@@ -9,9 +9,8 @@
 //! ## Incremental cursors
 //!
 //! Sources differ in how they store transcripts, so three cursor kinds are
-//! supported, all persisted through the existing `parse_offsets` table
-//! ([`GlobalDb::get_parse_offset`]/[`GlobalDb::set_parse_offset`]) keyed by file
-//! path. The stored [`StoredCursor`] is `(position, mtime)` where `position`
+//! supported, all persisted through a [`TranscriptIngestStore`] adapter keyed
+//! by file path. The stored [`StoredCursor`] is `(position, mtime)` where `position`
 //! means:
 //!
 //! * [`stream_new_jsonl`] — **`ByteOffset`**: append-only JSONL (Cursor, Claude,
@@ -28,7 +27,7 @@
 //!
 //! All three are fail-open: any I/O or parse error yields "nothing new" rather
 //! than propagating, so ingestion never blocks an agent. Shared cursor/title/
-//! content helpers live in [`crate::sessions::shared`] so the Hermes `SQLite`
+//! content helpers live in [`crate::runtime::shared`] so the Hermes `SQLite`
 //! sweep can reuse them without importing from this driver module.
 
 use std::future::Future;

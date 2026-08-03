@@ -1,7 +1,7 @@
 //! Shared session-ingest abstractions and provider-neutral transcript helpers.
 //!
 //! These types and helpers sit below any particular session source adapter:
-//! file-backed [`crate::sessions::source`] drivers and the Hermes `SQLite` sweep
+//! file-backed [`crate::runtime::source`] drivers and the Hermes `SQLite` sweep
 //! both depend on them so they do not need to import from each other.
 
 use std::io;
