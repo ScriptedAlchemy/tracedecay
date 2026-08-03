@@ -11,13 +11,7 @@ use tracedecay_tool_catalog::{
     UseCaseId,
 };
 
-use tracedecay_domain::WorkflowDefinitionV1;
-
-use crate::{
-    TaskHandoffGrantV1, TaskHandoffIssueRequestV1, TaskHandoffRedeemRequestV1,
-    TaskHandoffRedeemedV1, WorkflowActivationV1, WorkflowDefinitionActivateRequestV1,
-    WorkflowDefinitionRegisterRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
-};
+use crate::WorkflowFanOutRequestV1;
 
 const WORKFLOW_SERVICE_ID: &str = "service.workflow";
 
@@ -51,28 +45,25 @@ pub const WORKFLOW_APPLICATION_OPERATION_IDS_V1: [(&str, &str, &str); 5] = [
 
 pub fn workflow_executable_binding_registry()
 -> Result<ExecutableBindingRegistryV1, CatalogValidationError> {
-    ExecutableBindingRegistryV1::new(vec![
-        available::<WorkflowDefinitionRegisterRequestV1, WorkflowDefinitionV1>(
-            "register_definition",
-            "/application/workflow/register-definition",
-        )?,
-        available::<WorkflowDefinitionActivateRequestV1, WorkflowActivationV1>(
-            "activate_definition",
-            "/application/workflow/activate-definition",
-        )?,
-        available::<WorkflowFanOutRequestV1, WorkflowExecutionTruthV1>(
-            "execute_fan_out",
-            "/application/workflow/execute-fan-out",
-        )?,
-        available::<TaskHandoffIssueRequestV1, TaskHandoffGrantV1>(
-            "handoff_issue",
-            "/application/workflow/handoff-issue",
-        )?,
-        available::<TaskHandoffRedeemRequestV1, TaskHandoffRedeemedV1>(
-            "handoff_redeem",
-            "/application/workflow/handoff-redeem",
-        )?,
-    ])
+    ExecutableBindingRegistryV1::new(
+        WORKFLOW_APPLICATION_OPERATION_IDS_V1
+            .iter()
+            .map(|(operation, _, _)| {
+                if *operation == "execute_fan_out" {
+                    available::<WorkflowFanOutRequestV1, tracedecay_domain::WorkflowRunProjectionV1>(
+                        operation,
+                        "/application/workflow/execute-fan-out",
+                    )
+                } else {
+                    Ok(ExecutableBindingAvailabilityV1::Unavailable {
+                        operation_id: OperationId::new(format!("operation.workflow.{operation}"))
+                            .expect("static Workflow operation ID is valid"),
+                        disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
+                    })
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+    )
 }
 
 fn available<Request, Output>(

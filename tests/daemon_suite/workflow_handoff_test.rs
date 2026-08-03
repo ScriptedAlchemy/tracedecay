@@ -1,7 +1,6 @@
-//! Workflow/handoff runtime: a direct daemon restart journey.
+//! Workflow definition and handoff durability across a direct daemon restart.
 //!
-//! Definitions, activations, single-use handoff tokens, and fan-out execution
-//! fencing all share the registered Work SQLite channel
+//! Definitions, activations, and single-use handoff tokens share the registered Work SQLite channel
 //! (`RegisteredGlobalDb::workflow_storage`). This drops the whole
 //! `HostAdmissionTestRuntimeV1` — the daemon's admitted composition root, not
 //! just the exact-SQL handle — and reopens it at the same profile/project
@@ -12,13 +11,10 @@ use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay_application::{
     TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffGrantV1, TaskHandoffScopeV1,
-    WorkflowChildRecordV1, WorkflowDefinitionAuthorityPort, WorkflowExecutionAdmissionV1,
-    WorkflowExecutionAuthorityPort, WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1,
-    WorkflowFanOutCheckpointV1,
+    WorkflowDefinitionAuthorityPort,
 };
 use tracedecay_domain::{
-    ActorId, AttemptId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId,
-    UtcMicros, WorkAttemptIdentityV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
+    ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
     WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowOperationRef, WorkflowOutputName,
     WorkflowStepId, WorkflowStepV1, WorktreeId, canonical_sha256,
 };
@@ -82,26 +78,6 @@ fn token_digest(secret: &str) -> ManifestDigest {
     canonical_sha256(&("tracedecay.application.task-handoff.v1", secret)).unwrap()
 }
 
-fn execution_identity() -> WorkflowExecutionIdentityV1 {
-    WorkflowExecutionIdentityV1 {
-        definition_id: id("workflow.definition.daemon-restart"),
-        definition_version: 1,
-        run_id: id::<RunId>("run.workflow.daemon-restart"),
-        step_id: id::<WorkflowStepId>("prepare"),
-    }
-}
-
-fn fence(epoch: u64, attempt: &str) -> WorkflowExecutionFenceV1 {
-    WorkflowExecutionFenceV1 {
-        attempt_id: id::<AttemptId>(attempt),
-        lease: WorkLeaseFenceV1::new(
-            id::<WorkLeaseId>("lease.workflow.daemon-restart"),
-            WorkFenceEpochV1::new(epoch).unwrap(),
-        )
-        .unwrap(),
-    }
-}
-
 /// Opens the admitted daemon composition root at `profile_root`/`project_root`.
 ///
 /// Calling this twice at the same paths — dropping the first runtime before
@@ -122,7 +98,7 @@ async fn open_daemon_runtime(
 }
 
 #[tokio::test]
-async fn workflow_definition_handoff_and_execution_survive_a_daemon_restart() {
+async fn workflow_definition_and_handoff_survive_a_daemon_restart() {
     let tmp = TempDir::new().unwrap();
     let profile_root = tmp.path().join("profile");
     let project_root = tmp.path().join("project");
@@ -137,11 +113,7 @@ async fn workflow_definition_handoff_and_execution_survive_a_daemon_restart() {
         UtcMicros(1_000_000),
     )
     .unwrap();
-    let identity = execution_identity();
-    let plan = digest('p');
-    let first_fence = fence(1, "attempt.workflow.daemon-restart.1");
-
-    // --- First admission: definitions, handoff, and fan-out execution. ---
+    // --- First admission: definitions and handoff. ---
     {
         let runtime = open_daemon_runtime(&profile_root, &project_root).await;
         let authority = runtime
@@ -165,36 +137,6 @@ async fn workflow_definition_handoff_and_execution_survive_a_daemon_restart() {
 
         TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
 
-        assert_eq!(
-            WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan)
-                .unwrap(),
-            WorkflowExecutionAdmissionV1::Execute
-        );
-        let checkpoint = WorkflowFanOutCheckpointV1 {
-            plan_digest: plan.clone(),
-            children: vec![WorkflowChildRecordV1 {
-                task_id: id::<TaskId>("task.workflow.daemon-restart.child"),
-                attempt_identity: WorkAttemptIdentityV1::new(
-                    id::<TaskId>("task.workflow.daemon-restart.child"),
-                    id::<RunId>("run.workflow.daemon-restart"),
-                    id::<AttemptId>("attempt.workflow.daemon-restart.child"),
-                )
-                .unwrap(),
-                lease: WorkLeaseFenceV1::new(
-                    id::<WorkLeaseId>("lease.workflow.daemon-restart.child"),
-                    WorkFenceEpochV1::new(1).unwrap(),
-                )
-                .unwrap(),
-                receipt: None,
-            }],
-        };
-        WorkflowExecutionAuthorityPort::checkpoint(
-            &authority,
-            &identity,
-            &first_fence,
-            &checkpoint,
-        )
-        .unwrap();
         // Consume the handoff token before the restart, so the restart proves
         // the single-use "consumed" fact durably survives, not just the grant.
         assert_eq!(
@@ -240,39 +182,5 @@ async fn workflow_definition_handoff_and_execution_survive_a_daemon_restart() {
             .unwrap(),
         TaskHandoffConsumeOutcome::Replay,
         "a consumed handoff token must never be redeemable again after a restart"
-    );
-
-    // A durable child intent remains recoverable after restart. Terminal truth
-    // is published only by the canonical Work-backed daemon operation journey.
-    let expected_checkpoint = WorkflowFanOutCheckpointV1 {
-        plan_digest: plan.clone(),
-        children: vec![WorkflowChildRecordV1 {
-            task_id: id::<TaskId>("task.workflow.daemon-restart.child"),
-            attempt_identity: WorkAttemptIdentityV1::new(
-                id::<TaskId>("task.workflow.daemon-restart.child"),
-                id::<RunId>("run.workflow.daemon-restart"),
-                id::<AttemptId>("attempt.workflow.daemon-restart.child"),
-            )
-            .unwrap(),
-            lease: WorkLeaseFenceV1::new(
-                id::<WorkLeaseId>("lease.workflow.daemon-restart.child"),
-                WorkFenceEpochV1::new(1).unwrap(),
-            )
-            .unwrap(),
-            receipt: None,
-        }],
-    };
-    assert_eq!(
-        WorkflowExecutionAuthorityPort::begin(
-            &authority,
-            &identity,
-            &fence(2, "attempt.workflow.daemon-restart.1"),
-            &plan,
-        )
-        .unwrap(),
-        WorkflowExecutionAdmissionV1::Recover {
-            checkpoint: expected_checkpoint
-        },
-        "a checkpointed child intent must remain recoverable after restart"
     );
 }

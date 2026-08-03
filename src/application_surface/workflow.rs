@@ -2,13 +2,7 @@ use std::sync::Arc;
 
 use axum::response::Response;
 use tracedecay_api::WorkflowOperation;
-use tracedecay_application::{
-    TaskHandoffGrantV1, TaskHandoffIssueRequestV1, TaskHandoffRedeemRequestV1,
-    TaskHandoffRedeemedV1, WorkflowActivationV1, WorkflowDefinitionActivateRequestV1,
-    WorkflowDefinitionRegisterRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
-};
-use tracedecay_domain::WorkflowDefinitionV1;
-use tracedecay_tool_catalog::RouteExposureV1;
+use tracedecay_application::WorkflowFanOutRequestV1;
 
 use super::{ApplicationSurfaceAdapterError, invoke_registered_http};
 use crate::daemon_client::DaemonInvocationExecutor;
@@ -150,7 +144,7 @@ async fn invoke_operation(
                 controls.deadline.clone(),
                 controls.cancellation.context(),
             );
-            invoke_registered_http::<WorkflowExecutionTruthV1, _>(
+            invoke_registered_http::<tracedecay_domain::WorkflowRunProjectionV1, _>(
                 executor,
                 operation,
                 request_id,

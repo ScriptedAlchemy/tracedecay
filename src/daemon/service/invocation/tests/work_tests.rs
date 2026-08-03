@@ -578,6 +578,10 @@ for line in sys.stdin:
             // The Work runtime rejects any child envelope whose configuration
             // digest differs from the one the runtime was registered with.
             configuration_digest: configuration_digest.clone(),
+            topology_digest: digest('8'),
+            provider_registry_digest: digest('9'),
+            worktree_placement: tracedecay_domain::configuration::safe_work_topology_policy_v1()
+                .placement,
             reference: None,
             commit: tracedecay_domain::CommitId::new("0123456789abcdef0123456789abcdef01234567")
                 .expect("commit"),
@@ -604,14 +608,19 @@ for line in sys.stdin:
         panic!("fan-out must return a Workflow effect: {first:?}");
     };
     let first = first.payload.expect("fan-out truth");
-    let tracedecay_application::WorkflowExecutionTruthV1::Completed {
-        checkpoint: ref first_checkpoint,
-    } = first
-    else {
-        panic!("canonical workflow child must complete: {first:?}");
-    };
-    assert_eq!(first_checkpoint.children.len(), 1);
-    let child_attempt = &first_checkpoint.children[0].attempt_identity;
+    assert_eq!(
+        first.status(),
+        tracedecay_domain::WorkflowRunStatusV1::Completed
+    );
+    let first_step = first
+        .step(&tracedecay_domain::WorkflowStepId::new("fan-out").expect("step id"))
+        .expect("completed workflow step");
+    let output = first_step
+        .outputs()
+        .get(&tracedecay_domain::WorkflowOutputName::new("created-work").expect("output name"))
+        .expect("journaled workflow output");
+    assert_eq!(output.artifacts().len(), 1);
+    let child_attempt = output.artifacts()[0].attempt_identity();
     let stored_attempt = database
         .work_storage()
         .expect("Work storage")
@@ -725,13 +734,17 @@ for line in sys.stdin:
         panic!("settled child reconciliation must complete: {reconciled:?}");
     };
     let reconciled = reconciled.payload.expect("reconciled workflow truth");
-    let tracedecay_application::WorkflowExecutionTruthV1::Completed { checkpoint } = reconciled
-    else {
-        panic!("reconciled settlement must be completed: {reconciled:?}");
-    };
     assert_eq!(
-        checkpoint.children[0].attempt_identity,
-        settled_plan.children[0].attempt_identity
+        reconciled.status(),
+        tracedecay_domain::WorkflowRunStatusV1::Completed
+    );
+    assert_eq!(
+        reconciled
+            .step(&tracedecay_domain::WorkflowStepId::new("fan-out").expect("reconciled step id"),)
+            .and_then(|step| step.outputs().values().next())
+            .and_then(|output| output.artifacts().first())
+            .map(tracedecay_domain::WorkflowOutputArtifactV1::attempt_identity),
+        Some(&settled_plan.children[0].attempt_identity)
     );
 
     interrupted_fan_out.run_id =
@@ -792,12 +805,17 @@ for line in sys.stdin:
         panic!("durable child intent retry must complete: {resumed:?}");
     };
     let resumed = resumed.payload.expect("resumed workflow truth");
-    let tracedecay_application::WorkflowExecutionTruthV1::Completed { checkpoint } = resumed else {
-        panic!("resumed workflow child must complete: {resumed:?}");
-    };
     assert_eq!(
-        checkpoint.children[0].attempt_identity,
-        interrupted_plan.children[0].attempt_identity
+        resumed.status(),
+        tracedecay_domain::WorkflowRunStatusV1::Completed
+    );
+    assert_eq!(
+        resumed
+            .step(&cancelled_fan_out.step_id)
+            .and_then(|step| step.outputs().values().next())
+            .and_then(|output| output.artifacts().first())
+            .map(tracedecay_domain::WorkflowOutputArtifactV1::attempt_identity),
+        Some(&interrupted_plan.children[0].attempt_identity)
     );
 
     let mut failed_fan_out = cancelled_fan_out.clone();
@@ -830,10 +848,10 @@ for line in sys.stdin:
         panic!("pre-cancelled workflow must return canonical truth: {cancelled:?}");
     };
     let cancelled_truth = cancelled.payload.expect("pre-cancelled workflow truth");
-    assert!(matches!(
-        &cancelled_truth,
-        tracedecay_application::WorkflowExecutionTruthV1::Cancelled { .. }
-    ));
+    assert_eq!(
+        cancelled_truth.status(),
+        tracedecay_domain::WorkflowRunStatusV1::Cancelled
+    );
     assert!(
         database
             .work_storage()
@@ -920,10 +938,10 @@ for line in sys.stdin:
         panic!("provider failure must return canonical workflow truth: {failed:?}");
     };
     let failed_truth = failed.payload.expect("provider failure workflow truth");
-    assert!(matches!(
-        &failed_truth,
-        tracedecay_application::WorkflowExecutionTruthV1::Failed { .. }
-    ));
+    assert_eq!(
+        failed_truth.status(),
+        tracedecay_domain::WorkflowRunStatusV1::Failed
+    );
     let failed_attempt = database
         .work_storage()
         .expect("Work storage")

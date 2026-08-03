@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,17 +9,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
     RequestContext, ReviewProposalCommand, WORKFLOW_CANONICAL_WORK_OPERATION_V1,
-    WorkExecutionError, WorkflowChildReceiptV1, WorkflowChildRecordV1,
-    WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
-    WorkflowExecutionTruthV1, WorkflowFailurePolicyV1, WorkflowFanOutPlanV1,
-    WorkflowFanOutRequestV1, WorkflowFanOutRuntimeError, WorkflowPlannedChildV1,
-    prepare_workflow_fan_out, validate_workflow_checkpoint, workflow_checkpoint, workflow_truth,
+    WorkExecutionError, WorkflowFailurePolicyV1, WorkflowFanOutPlanV1, WorkflowFanOutRequestV1,
+    WorkflowFanOutRuntimeError, WorkflowPlannedChildV1, WorkflowRunService,
+    WorkflowRunServiceError, WorkflowRunStorageError, WorkflowRunStoragePort,
+    prepare_workflow_fan_out,
 };
 use tracedecay_domain::{
     ManifestDigest, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
     WorkAttemptStateV1, WorkAttemptV1, WorkCancellationRequestId, WorkCancellationRequestV1,
-    WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkRecoveryStateV1,
-    WorkTerminalEvidenceV1, WorkflowOperationRef, canonical_sha256,
+    WorkCommandId, WorkExecutionEnvelopeV1, WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId,
+    WorkRecoveryStateV1, WorkTerminalEvidenceV1, WorkflowOperationRef, WorkflowOutputArtifactV1,
+    WorkflowRunCommandV1, WorkflowRunEventContextV1, WorkflowRunProjectionV1,
+    WorkflowStepEffectOutcomeV1, WorkflowStepEffectReceiptV1, WorkflowStepOutputV1,
+    WorkflowStepStatusV1, canonical_sha256,
 };
 
 use super::work_runtime::DaemonWorkRuntimeV1;
@@ -56,94 +58,110 @@ pub(crate) async fn execute_canonical_workflow(
     context: &RequestContext,
     project_root: &Path,
     request: WorkflowFanOutRequestV1,
-) -> Result<WorkflowExecutionTruthV1, WorkflowFanOutRuntimeError> {
+) -> Result<WorkflowRunProjectionV1, WorkflowFanOutRuntimeError> {
     validate_active_definition(database, context, &request)?;
     let plan = prepare_workflow_fan_out(&request)?;
     if plan.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION_V1 {
         return Err(WorkflowFanOutRuntimeError::InvalidPlan);
     }
-    let authority = database
-        .workflow_storage()
-        .map_err(|_| authority_unavailable())?;
-    let admission = authority
-        .begin(&plan.identity, &request.fence, &plan.plan_digest)
-        .map_err(authority_error)?;
-    let mut records = match admission {
-        WorkflowExecutionAdmissionV1::Execute => BTreeMap::new(),
-        WorkflowExecutionAdmissionV1::Recover { checkpoint } => {
-            validate_workflow_checkpoint(&plan, &checkpoint)?;
-            checkpoint
-                .children
-                .into_iter()
-                .map(|record| (record.task_id.clone(), record))
-                .collect()
+    let authority = workflow_authority(database)?;
+    let run_service = WorkflowRunService::new(authority.clone());
+    let placement = request
+        .provider
+        .placement(request.run_id.clone(), request.step_id.clone())?;
+    let mut projection = match WorkflowRunStoragePort::projection(&authority, &request.run_id) {
+        Ok(projection) => {
+            if projection.definition() != &request.definition
+                || projection.pinned_topology_digest() != &request.provider.topology_digest
+                || projection.pinned_provider_registry_digest()
+                    != &request.provider.provider_registry_digest
+            {
+                return Err(WorkflowFanOutRuntimeError::PlanConflict);
+            }
+            projection
         }
-        WorkflowExecutionAdmissionV1::Replay(truth) => {
-            let checkpoint = truth.checkpoint();
-            validate_workflow_checkpoint(&plan, checkpoint)?;
-            validate_terminal_replay(runtime, context, project_root, &request, &plan, &truth)?;
-            return Ok(truth);
-        }
-        WorkflowExecutionAdmissionV1::PlanConflict => {
-            return Err(WorkflowFanOutRuntimeError::PlanConflict);
-        }
-        WorkflowExecutionAdmissionV1::StaleLease => {
-            return Err(WorkflowFanOutRuntimeError::StaleFence);
-        }
+        Err(WorkflowRunStorageError::NotFound) => run_service
+            .admit(
+                request.run_id.clone(),
+                request.definition.clone(),
+                tracedecay_application::WorkflowAdmissionSnapshotV1 {
+                    policy_digest: context.grant().digest.clone(),
+                    configuration_digest: request.provider.configuration_digest.clone(),
+                    catalog_digest: request.definition.pinned_catalog_digest().clone(),
+                    topology_digest: request.provider.topology_digest.clone(),
+                    provider_registry_digest: request.provider.provider_registry_digest.clone(),
+                },
+                run_event_context(
+                    &request.run_id,
+                    "admit",
+                    plan.plan_digest.clone(),
+                    request.admitted_at,
+                )?,
+            )
+            .map_err(run_service_error)?,
+        Err(error) => return Err(run_storage_error(error)),
     };
 
+    if projection.status().is_terminal() {
+        return Ok(projection);
+    }
+
     if request.cancellation.is_cancelled() {
-        records.clear();
-        for child in &plan.children {
-            let Some(mut attempt) = runtime
-                .attempt(&child.attempt_identity)
-                .map_err(work_error)?
-            else {
-                continue;
-            };
-            validate_existing_attempt(
-                context,
-                project_root,
-                &request,
-                &plan.operation,
-                child,
-                &attempt,
-            )?;
-            let lease = child_lease(&request.fence, child)?;
-            if !attempt.is_terminal() {
-                if attempt.lease().lease_id() != lease.lease_id()
-                    || attempt.lease().epoch() > lease.epoch()
-                {
-                    return Err(WorkflowFanOutRuntimeError::StaleFence);
-                }
-                if attempt.lease().epoch() < lease.epoch() {
-                    runtime
-                        .renew_lease(&child.attempt_identity, attempt.lease(), lease.clone())
-                        .map_err(work_error)?;
-                }
-                attempt = cancel_child(
-                    runtime,
-                    &RunningChild {
-                        child: child.clone(),
-                        identity: child.attempt_identity.clone(),
-                        lease: lease.clone(),
+        projection = run_service
+            .apply(
+                &request.run_id,
+                projection.sequence(),
+                WorkflowRunCommandV1::RequestCancellation,
+                run_event_context(
+                    &request.run_id,
+                    "cancel-request",
+                    plan.plan_digest.clone(),
+                    request.admitted_at,
+                )?,
+            )
+            .map_err(run_service_error)?;
+        return run_service
+            .apply(
+                &request.run_id,
+                projection.sequence(),
+                WorkflowRunCommandV1::ReconcileCancelled,
+                run_event_context(
+                    &request.run_id,
+                    "cancel-reconciled",
+                    plan.plan_digest,
+                    request.admitted_at,
+                )?,
+            )
+            .map_err(run_service_error);
+    }
+
+    let step = projection
+        .step(&request.step_id)
+        .ok_or(WorkflowFanOutRuntimeError::StepNotFound)?;
+    match step.status() {
+        WorkflowStepStatusV1::Ready => {
+            projection = run_service
+                .apply(
+                    &request.run_id,
+                    projection.sequence(),
+                    WorkflowRunCommandV1::StartStep {
+                        step_id: request.step_id.clone(),
+                        placement,
                     },
+                    run_event_context(
+                        &request.run_id,
+                        "step-start",
+                        plan.plan_digest.clone(),
+                        request.admitted_at,
+                    )?,
                 )
-                .await?;
-            }
-            attach_terminal_evidence(database, context, &request, child, &attempt)?;
-            let record = child_record(&plan.plan_digest, child, attempt.lease(), Some(&attempt))?;
-            upsert_child_record(&mut records, record)?;
+                .map_err(run_service_error)?;
         }
-        let checkpoint = workflow_checkpoint(plan.plan_digest, records.into_values().collect());
-        let truth = WorkflowExecutionTruthV1::Cancelled {
-            checkpoint,
-            cancellation: request.cancellation,
-        };
-        authority
-            .complete(&plan.identity, &request.fence, &truth)
-            .map_err(authority_error)?;
-        return Ok(truth);
+        WorkflowStepStatusV1::Running => {}
+        WorkflowStepStatusV1::Succeeded
+        | WorkflowStepStatusV1::Failed
+        | WorkflowStepStatusV1::Cancelled => return Ok(projection),
+        WorkflowStepStatusV1::Blocked => return Err(WorkflowFanOutRuntimeError::InvalidPlan),
     }
 
     let mut pending = plan.children.iter().cloned().collect::<VecDeque<_>>();
@@ -172,16 +190,6 @@ pub(crate) async fn execute_canonical_workflow(
             .await?
             {
                 PreparedChild::Running(running) => {
-                    let record =
-                        child_record(&plan.plan_digest, &running.child, &running.lease, None)?;
-                    upsert_child_record(&mut records, record)?;
-                    checkpoint_children(
-                        &authority,
-                        &plan.identity,
-                        &request.fence,
-                        &plan.plan_digest,
-                        &records,
-                    )?;
                     runtime
                         .start(
                             &running.identity,
@@ -194,9 +202,6 @@ pub(crate) async fn execute_canonical_workflow(
                 }
                 PreparedChild::Terminal { child, attempt } => {
                     attach_terminal_evidence(database, context, &request, &child, &attempt)?;
-                    let record =
-                        child_record(&plan.plan_digest, &child, attempt.lease(), Some(&attempt))?;
-                    upsert_child_record(&mut records, record)?;
                     terminal_attempts.push(*attempt);
                     fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicyV1::FailFast)
                         && !matches!(
@@ -205,13 +210,6 @@ pub(crate) async fn execute_canonical_workflow(
                                 .and_then(tracedecay_domain::WorkAttemptV1::terminal),
                             Some(WorkTerminalEvidenceV1::Succeeded { .. })
                         );
-                    checkpoint_children(
-                        &authority,
-                        &plan.identity,
-                        &request.fence,
-                        &plan.plan_digest,
-                        &records,
-                    )?;
                     if fail_fast {
                         break;
                     }
@@ -237,28 +235,180 @@ pub(crate) async fn execute_canonical_workflow(
                     "injected crash after Work settlement before Workflow checkpoint",
                 ));
             }
-            let record = child_record(&plan.plan_digest, &child, attempt.lease(), Some(&attempt))?;
-            upsert_child_record(&mut records, record)?;
-            terminal_attempts.push(attempt);
-            checkpoint_children(
-                &authority,
-                &plan.identity,
-                &request.fence,
-                &plan.plan_digest,
-                &records,
-            )?;
         }
         if fail_fast {
             break;
         }
     }
 
-    let checkpoint = workflow_checkpoint(plan.plan_digest, records.into_values().collect());
-    let truth = workflow_truth(plan.failure_policy, checkpoint, &terminal_attempts)?;
-    authority
-        .complete(&plan.identity, &request.fence, &truth)
-        .map_err(authority_error)?;
-    Ok(truth)
+    let outputs = completed_outputs(&request, &plan, &terminal_attempts)?;
+    let succeeded = terminal_attempts.len() == plan.children.len()
+        && terminal_attempts.iter().all(|attempt| {
+            matches!(
+                attempt.terminal(),
+                Some(WorkTerminalEvidenceV1::Succeeded { .. })
+            )
+        });
+    let effect_digest = canonical_sha256(&(
+        "tracedecay.daemon.workflow-step-effect.v1",
+        &plan.plan_digest,
+        &terminal_attempts,
+        &outputs,
+    ))
+    .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
+    let placement_digest = projection
+        .step(&request.step_id)
+        .and_then(|step| step.placement_receipt())
+        .map(|placement| placement.placement_digest().clone())
+        .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
+    let effect_receipt = WorkflowStepEffectReceiptV1::new(
+        request.run_id.clone(),
+        request.step_id.clone(),
+        placement_digest,
+        if succeeded {
+            WorkflowStepEffectOutcomeV1::Completed
+        } else {
+            WorkflowStepEffectOutcomeV1::Failed
+        },
+        effect_digest,
+        &outputs,
+    )
+    .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
+    let command = if succeeded {
+        WorkflowRunCommandV1::CompleteStep {
+            step_id: request.step_id.clone(),
+            outputs,
+            effect_receipt,
+        }
+    } else {
+        WorkflowRunCommandV1::FailStep {
+            step_id: request.step_id.clone(),
+            effect_receipt,
+        }
+    };
+    run_service
+        .apply(
+            &request.run_id,
+            projection.sequence(),
+            command,
+            run_event_context(
+                &request.run_id,
+                "step-terminal",
+                plan.plan_digest,
+                request.admitted_at,
+            )?,
+        )
+        .map_err(run_service_error)
+}
+
+fn workflow_authority(
+    database: &RegisteredGlobalDb,
+) -> Result<WorkflowAuthority, WorkflowFanOutRuntimeError> {
+    let work = database
+        .work_storage()
+        .map_err(|_| authority_unavailable())?;
+    WorkflowAuthority::from_work_storage(&work).map_err(|error| match error {
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::ResetRequired => {
+            WorkflowFanOutRuntimeError::ResetRequired
+        }
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::Unavailable => {
+            authority_unavailable()
+        }
+    })
+}
+
+fn run_event_context(
+    run_id: &tracedecay_domain::RunId,
+    transition: &str,
+    input_digest: ManifestDigest,
+    occurred_at: UtcMicros,
+) -> Result<WorkflowRunEventContextV1, WorkflowFanOutRuntimeError> {
+    let command_digest = canonical_sha256(&(
+        "tracedecay.daemon.workflow-run-command.v1",
+        run_id,
+        transition,
+        &input_digest,
+    ))
+    .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?;
+    Ok(WorkflowRunEventContextV1 {
+        command_id: WorkCommandId::new(format!(
+            "workflow-run-{transition}:{}",
+            command_digest.as_str()
+        ))
+        .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
+        input_digest,
+        occurred_at,
+    })
+}
+
+fn completed_outputs(
+    request: &WorkflowFanOutRequestV1,
+    plan: &WorkflowFanOutPlanV1,
+    attempts: &[WorkAttemptV1],
+) -> Result<Vec<WorkflowStepOutputV1>, WorkflowFanOutRuntimeError> {
+    let step = request
+        .definition
+        .steps()
+        .iter()
+        .find(|step| step.step_id == request.step_id)
+        .ok_or(WorkflowFanOutRuntimeError::StepNotFound)?;
+    if attempts.len() > plan.children.len() {
+        return Err(WorkflowFanOutRuntimeError::InvalidPlan);
+    }
+    let succeeded = attempts
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                attempt.terminal(),
+                Some(WorkTerminalEvidenceV1::Succeeded { .. })
+            )
+        })
+        .collect::<Vec<_>>();
+    if succeeded.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut outputs = Vec::with_capacity(step.outputs.len());
+    for (ordinal, output_name) in step.outputs.iter().enumerate() {
+        let artifacts = succeeded
+            .iter()
+            .map(|attempt| {
+                let artifact = attempt
+                    .artifacts()
+                    .get(ordinal)
+                    .cloned()
+                    .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
+                Ok(WorkflowOutputArtifactV1::new(
+                    attempt.identity().clone(),
+                    artifact,
+                ))
+            })
+            .collect::<Result<Vec<_>, WorkflowFanOutRuntimeError>>()?;
+        outputs.push(
+            WorkflowStepOutputV1::new(output_name.clone(), artifacts)
+                .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
+        );
+    }
+    Ok(outputs)
+}
+
+fn run_storage_error(error: WorkflowRunStorageError) -> WorkflowFanOutRuntimeError {
+    match error {
+        WorkflowRunStorageError::VersionConflict => WorkflowFanOutRuntimeError::StaleFence,
+        WorkflowRunStorageError::IdempotencyConflict => WorkflowFanOutRuntimeError::PlanConflict,
+        WorkflowRunStorageError::NotFound
+        | WorkflowRunStorageError::InvalidHistory
+        | WorkflowRunStorageError::Unavailable => authority_unavailable(),
+    }
+}
+
+fn run_service_error(error: WorkflowRunServiceError) -> WorkflowFanOutRuntimeError {
+    match error {
+        WorkflowRunServiceError::Storage(error) => run_storage_error(error),
+        WorkflowRunServiceError::PolicyDigestMismatch
+        | WorkflowRunServiceError::ConfigurationDigestMismatch
+        | WorkflowRunServiceError::CatalogDigestMismatch
+        | WorkflowRunServiceError::State(_) => WorkflowFanOutRuntimeError::InvalidPlan,
+    }
 }
 
 fn validate_active_definition(
@@ -558,169 +708,6 @@ fn attach_terminal_evidence(
     Ok(())
 }
 
-fn child_record(
-    plan_digest: &ManifestDigest,
-    child: &WorkflowPlannedChildV1,
-    lease: &WorkLeaseFenceV1,
-    attempt: Option<&WorkAttemptV1>,
-) -> Result<WorkflowChildRecordV1, WorkflowFanOutRuntimeError> {
-    let receipt = match attempt {
-        Some(attempt)
-            if attempt.identity() == &child.attempt_identity && attempt.lease() == lease =>
-        {
-            let terminal = attempt
-                .terminal()
-                .ok_or_else(|| child_unavailable("Work checkpoint lacks terminal evidence"))?;
-            Some(WorkflowChildReceiptV1 {
-                observation_digest: canonical_sha256(&(
-                    "tracedecay.daemon.workflow-child-checkpoint.v1",
-                    plan_digest,
-                    &child.attempt_identity,
-                    lease,
-                    terminal,
-                    attempt.artifacts(),
-                ))
-                .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
-                terminal_receipt_digest: canonical_sha256(&(
-                    "tracedecay.daemon.workflow-child-terminal.v1",
-                    plan_digest,
-                    &child.attempt_identity,
-                    lease,
-                    terminal,
-                ))
-                .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
-            })
-        }
-        Some(_) => {
-            return Err(child_unavailable(
-                "Work checkpoint conflicts with the planned child fence",
-            ));
-        }
-        None => None,
-    };
-    Ok(WorkflowChildRecordV1 {
-        task_id: child.task_id.clone(),
-        attempt_identity: child.attempt_identity.clone(),
-        lease: lease.clone(),
-        receipt,
-    })
-}
-
-fn upsert_child_record(
-    records: &mut BTreeMap<TaskId, WorkflowChildRecordV1>,
-    candidate: WorkflowChildRecordV1,
-) -> Result<(), WorkflowFanOutRuntimeError> {
-    if let Some(stored) = records.get(&candidate.task_id) {
-        let advances = stored.attempt_identity == candidate.attempt_identity
-            && stored.lease.lease_id() == candidate.lease.lease_id()
-            && stored.lease.epoch().get() <= candidate.lease.epoch().get()
-            && match (&stored.receipt, &candidate.receipt) {
-                (None, _) => true,
-                (Some(stored_receipt), Some(candidate_receipt)) => {
-                    stored.lease == candidate.lease && stored_receipt == candidate_receipt
-                }
-                (Some(_), None) => false,
-            };
-        if !advances {
-            return Err(WorkflowFanOutRuntimeError::PlanConflict);
-        }
-    }
-    records.insert(candidate.task_id.clone(), candidate);
-    Ok(())
-}
-
-fn checkpoint_children(
-    authority: &WorkflowAuthority,
-    identity: &tracedecay_application::WorkflowExecutionIdentityV1,
-    fence: &tracedecay_application::WorkflowExecutionFenceV1,
-    plan_digest: &ManifestDigest,
-    records: &BTreeMap<TaskId, WorkflowChildRecordV1>,
-) -> Result<(), WorkflowFanOutRuntimeError> {
-    let checkpoint = workflow_checkpoint(plan_digest.clone(), records.values().cloned().collect());
-    authority
-        .checkpoint(identity, fence, &checkpoint)
-        .map_err(authority_error)
-}
-
-fn validate_terminal_replay(
-    runtime: &DaemonWorkRuntimeV1<WorkStorage>,
-    context: &RequestContext,
-    project_root: &Path,
-    request: &WorkflowFanOutRequestV1,
-    plan: &WorkflowFanOutPlanV1,
-    truth: &WorkflowExecutionTruthV1,
-) -> Result<(), WorkflowFanOutRuntimeError> {
-    let checkpoint = truth.checkpoint();
-    let mut attempts = Vec::with_capacity(checkpoint.children.len());
-    for record in &checkpoint.children {
-        let child = plan
-            .children
-            .iter()
-            .find(|child| {
-                child.task_id == record.task_id && child.attempt_identity == record.attempt_identity
-            })
-            .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
-        let attempt = runtime
-            .attempt(&record.attempt_identity)
-            .map_err(work_error)?
-            .ok_or_else(|| {
-                child_unavailable("terminal workflow replay references a missing Work attempt")
-            })?;
-        validate_existing_attempt(
-            context,
-            project_root,
-            request,
-            &plan.operation,
-            child,
-            &attempt,
-        )?;
-        if !attempt.is_terminal() {
-            return Err(child_unavailable(
-                "terminal workflow replay references a non-terminal Work attempt",
-            ));
-        }
-        let canonical_record =
-            child_record(&plan.plan_digest, child, attempt.lease(), Some(&attempt))?;
-        if &canonical_record != record {
-            return Err(child_unavailable(
-                "terminal workflow replay conflicts with its durable child receipt",
-            ));
-        }
-        attempts.push(attempt);
-    }
-    validate_terminal_attempts(checkpoint, &attempts)?;
-    if !matches!(truth, WorkflowExecutionTruthV1::Cancelled { .. }) {
-        let canonical =
-            workflow_truth(plan.failure_policy, checkpoint.clone(), attempts.as_slice())?;
-        if &canonical != truth {
-            return Err(child_unavailable(
-                "workflow terminal replay conflicts with canonical Work attempts",
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn validate_terminal_attempts(
-    checkpoint: &tracedecay_application::WorkflowFanOutCheckpointV1,
-    attempts: &[WorkAttemptV1],
-) -> Result<(), WorkflowFanOutRuntimeError> {
-    if attempts.len() != checkpoint.children.len()
-        || checkpoint.children.iter().any(|record| {
-            !attempts.iter().any(|attempt| {
-                attempt.identity() == &record.attempt_identity
-                    && attempt.is_terminal()
-                    && record.receipt.is_some()
-            })
-        })
-    {
-        return Err(child_unavailable(
-            "workflow terminal replay conflicts with canonical Work attempts",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_existing_attempt(
     context: &RequestContext,
     project_root: &Path,
@@ -798,15 +785,6 @@ fn work_error(error: WorkExecutionError) -> WorkflowFanOutRuntimeError {
         }
         WorkExecutionError::StaleLease => WorkflowFanOutRuntimeError::StaleFence,
         _ => child_unavailable("canonical Work attempt lifecycle failed"),
-    }
-}
-
-fn authority_error(error: WorkflowExecutionAuthorityError) -> WorkflowFanOutRuntimeError {
-    match error {
-        WorkflowExecutionAuthorityError::Conflict => WorkflowFanOutRuntimeError::StaleFence,
-        WorkflowExecutionAuthorityError::Unavailable(message) => {
-            WorkflowFanOutRuntimeError::AuthorityUnavailable(message)
-        }
     }
 }
 
