@@ -7,14 +7,14 @@ type ShutdownJoin = Pin<Box<dyn Future<Output = ShutdownStatus> + Send + 'static
 type ShutdownJoinFactory = Box<dyn FnOnce(Instant) -> ShutdownJoin + Send + 'static>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) enum ShutdownStatus {
+pub(crate) enum ShutdownStatus {
     Clean,
     Failed(String),
     TimedOut,
 }
 
 impl ShutdownStatus {
-    pub(super) fn is_clean(&self) -> bool {
+    pub(crate) fn is_clean(&self) -> bool {
         matches!(self, Self::Clean)
     }
 }
@@ -129,6 +129,7 @@ impl ShutdownReceipt {
     }
 }
 
+#[cfg(test)]
 pub(super) async fn join_shutdown_owners(
     deadline: Instant,
     owners: Vec<ShutdownOwner>,
@@ -136,6 +137,7 @@ pub(super) async fn join_shutdown_owners(
     join_shutdown_owner_phases(deadline, vec![owners]).await
 }
 
+#[cfg(test)]
 pub(super) async fn join_shutdown_owner_phases(
     deadline: Instant,
     phases: Vec<Vec<ShutdownOwner>>,

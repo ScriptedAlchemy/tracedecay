@@ -10,7 +10,10 @@ use super::shutdown_coordination::{
     ShutdownOwner, ShutdownReceipt, ShutdownStatus, prepare_shutdown_owner_phases,
 };
 use super::store_shutdown::ShutdownTaskReceipt;
-use super::{DAEMON_CLIENT_DRAIN_DEADLINE, DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle};
+use super::{
+    DAEMON_CLIENT_DRAIN_DEADLINE, DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle,
+    core_lifecycle::DaemonShutdownClaim,
+};
 use crate::errors::Result;
 
 type ProjectServerShutdown = Pin<Box<dyn Future<Output = ShutdownTaskReceipt> + Send + 'static>>;
@@ -55,6 +58,17 @@ impl DaemonShutdownReceipt {
             project_servers: ShutdownTaskReceipt::failed("shutdown_coordinator", error),
         }
     }
+
+    pub(super) fn is_retryable(&self) -> bool {
+        matches!(self.in_flight, ShutdownStatus::TimedOut)
+            || matches!(self.clients, ShutdownStatus::TimedOut)
+            || self
+                .background
+                .owners
+                .iter()
+                .any(|owner| owner.status == ShutdownStatus::TimedOut)
+            || self.project_servers.status() == ShutdownStatus::TimedOut
+    }
 }
 
 pub(super) async fn coordinate_daemon_shutdown<Prepare>(
@@ -66,35 +80,43 @@ where
     Prepare: Future<Output = DaemonShutdownPlan> + Send + 'static,
 {
     lifecycle.begin_draining();
-    if lifecycle.claim_shutdown_coordination() {
-        let coordinator_lifecycle = lifecycle.clone();
-        let runner_lifecycle = lifecycle.clone();
-        tokio::spawn(async move {
-            let runner = tokio::spawn(async move {
-                run_daemon_shutdown(runner_lifecycle, prepare.await, shutdown_deadline).await
-            });
-            let receipt = match runner.await {
-                Ok(receipt) => receipt,
-                Err(error) => {
-                    DaemonShutdownReceipt::coordinator_failed(shutdown_deadline, error.to_string())
-                }
-            };
-            coordinator_lifecycle.publish_shutdown_receipt(Arc::new(receipt));
-        });
-    } else {
-        drop(prepare);
-    }
-
-    match lifecycle.wait_for_shutdown_receipt().await {
-        Ok(receipt) => receipt,
-        Err(error) => {
-            let receipt = Arc::new(DaemonShutdownReceipt::coordinator_failed(
-                shutdown_deadline,
-                error,
-            ));
-            lifecycle.publish_shutdown_receipt(Arc::clone(&receipt));
-            receipt
+    let attempt = match lifecycle.claim_shutdown_coordination() {
+        DaemonShutdownClaim::Terminal(receipt) => {
+            drop(prepare);
+            return receipt;
         }
+        DaemonShutdownClaim::Wait(attempt) => {
+            drop(prepare);
+            attempt
+        }
+        DaemonShutdownClaim::Run(attempt) => {
+            let coordinator_lifecycle = lifecycle.clone();
+            let runner_lifecycle = lifecycle.clone();
+            let coordinator_attempt = Arc::clone(&attempt);
+            tokio::spawn(async move {
+                let runner = tokio::spawn(async move {
+                    run_daemon_shutdown(runner_lifecycle, prepare.await, shutdown_deadline).await
+                });
+                let receipt = match runner.await {
+                    Ok(receipt) => receipt,
+                    Err(error) => DaemonShutdownReceipt::coordinator_failed(
+                        shutdown_deadline,
+                        error.to_string(),
+                    ),
+                };
+                coordinator_lifecycle
+                    .finish_shutdown_attempt(&coordinator_attempt, Arc::new(receipt));
+            });
+            attempt
+        }
+    };
+
+    match attempt.wait_for_receipt().await {
+        Ok(receipt) => receipt,
+        Err(error) => Arc::new(DaemonShutdownReceipt::coordinator_failed(
+            shutdown_deadline,
+            error,
+        )),
     }
 }
 
@@ -311,5 +333,71 @@ mod tests {
         }
         assert!(!receipt.background.unfinished().is_empty());
         assert!(!receipt.project_servers.is_clean());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_shutdown_receipt_allows_one_non_overlapping_retry() {
+        let lifecycle = DaemonLifecycle::default();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let cancellations = Arc::new(AtomicUsize::new(0));
+        let first_attempts = Arc::clone(&attempts);
+        let first_cancellations = Arc::clone(&cancellations);
+        let first_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let first = tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            async move {
+                coordinate_daemon_shutdown(&lifecycle, first_deadline, async move {
+                    first_attempts.fetch_add(1, Ordering::AcqRel);
+                    DaemonShutdownPlan::new(
+                        JoinSet::new(),
+                        vec![vec![ShutdownOwner::new(
+                            "uncooperative_owner",
+                            move || {
+                                first_cancellations.fetch_add(1, Ordering::AcqRel);
+                            },
+                            std::future::pending(),
+                        )]],
+                        async { ShutdownTaskReceipt::default() },
+                    )
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(tokio::time::Duration::from_secs(1)).await;
+        let first = first.await.expect("timed-out shutdown attempt");
+        assert_eq!(first.background.owners[0].status, ShutdownStatus::TimedOut);
+
+        let retry_attempts = Arc::clone(&attempts);
+        let retry_cancellations = Arc::clone(&cancellations);
+        let retry_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let retry = coordinate_daemon_shutdown(&lifecycle, retry_deadline, async move {
+            retry_attempts.fetch_add(1, Ordering::AcqRel);
+            DaemonShutdownPlan::new(
+                JoinSet::new(),
+                vec![vec![ShutdownOwner::new(
+                    "cooperative_owner",
+                    move || {
+                        retry_cancellations.fetch_add(1, Ordering::AcqRel);
+                    },
+                    async {},
+                )]],
+                async { ShutdownTaskReceipt::default() },
+            )
+        })
+        .await;
+        let duplicate_attempts = Arc::clone(&attempts);
+        let duplicate = coordinate_daemon_shutdown(&lifecycle, retry_deadline, async move {
+            duplicate_attempts.fetch_add(1, Ordering::AcqRel);
+            panic!("terminal receipt must not prepare a duplicate shutdown");
+        })
+        .await;
+
+        assert!(!Arc::ptr_eq(&first, &retry));
+        assert!(Arc::ptr_eq(&retry, &duplicate));
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(cancellations.load(Ordering::Acquire), 2);
+        assert!(retry.background.unfinished().is_empty());
+        assert!(retry.project_servers.is_clean());
     }
 }

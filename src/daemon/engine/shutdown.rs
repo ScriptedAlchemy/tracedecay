@@ -3,14 +3,17 @@
 use std::sync::Arc;
 
 use super::DaemonEngine;
+#[cfg(test)]
+use crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
 use crate::daemon::shutdown_coordination::ShutdownOwner;
+#[cfg(test)]
 use crate::daemon::shutdown_orchestration::{
     DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
 use crate::daemon::store_shutdown;
 use crate::daemon::{
-    DAEMON_SHUTDOWN_DEADLINE, cancel_project_server_startup_ingests, project_open_tasks,
-    project_servers_for_shutdown, shutdown_project_servers,
+    cancel_project_server_startup_ingests, project_open_tasks, project_servers_for_shutdown,
+    shutdown_project_servers,
 };
 
 impl DaemonEngine {

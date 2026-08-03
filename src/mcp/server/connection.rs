@@ -5,6 +5,98 @@ use super::*;
 
 const MAX_PENDING_CANCELLABLE_REQUEST_LINES: usize = 64;
 
+#[derive(Default)]
+pub(super) struct McpShutdownCompletion {
+    running: AtomicBool,
+    done: AtomicBool,
+    terminal: std::sync::Mutex<Option<crate::daemon::ShutdownStatus>>,
+    changed: tokio::sync::Notify,
+}
+
+struct McpShutdownRunGuard<'a> {
+    completion: &'a McpShutdownCompletion,
+    released: bool,
+}
+
+impl McpShutdownCompletion {
+    async fn coordinate_until<Work>(
+        &self,
+        deadline: tokio::time::Instant,
+        work: Work,
+    ) -> crate::daemon::ShutdownStatus
+    where
+        Work: Future<Output = crate::daemon::ShutdownStatus>,
+    {
+        let mut work = Some(work);
+        loop {
+            if let Some(status) = self
+                .terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return status;
+            }
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .running
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let guard = McpShutdownRunGuard {
+                    completion: self,
+                    released: false,
+                };
+                let Some(work) = work.take() else {
+                    return crate::daemon::ShutdownStatus::Failed(
+                        "shutdown work ownership was unavailable".to_owned(),
+                    );
+                };
+                let status = match tokio::time::timeout_at(deadline, work).await {
+                    Ok(status) => status,
+                    Err(_) => crate::daemon::ShutdownStatus::TimedOut,
+                };
+                if status != crate::daemon::ShutdownStatus::TimedOut {
+                    *self
+                        .terminal
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status.clone());
+                    self.done.store(true, Ordering::Release);
+                }
+                guard.release();
+                return status;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return crate::daemon::ShutdownStatus::TimedOut;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+}
+
+impl McpShutdownRunGuard<'_> {
+    fn release(mut self) {
+        self.completion.running.store(false, Ordering::Release);
+        self.completion.changed.notify_waiters();
+        self.released = true;
+    }
+}
+
+impl Drop for McpShutdownRunGuard<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.completion.running.store(false, Ordering::Release);
+            self.completion.changed.notify_waiters();
+        }
+    }
+}
+
 fn queued_cancellable_request_key(
     pending_lines: &VecDeque<String>,
     request_id: &Value,
@@ -672,21 +764,35 @@ impl McpServer {
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
     pub async fn shutdown(&self) {
-        // Idempotency guard: only run the persistence path once.
-        if self.shutdown_done.swap(true, Ordering::SeqCst) {
-            return;
+        let deadline = tokio::time::Instant::now() + crate::daemon::DAEMON_SHUTDOWN_DEADLINE;
+        let status = self.shutdown_until(deadline).await;
+        if !status.is_clean() {
+            tracing::warn!(?status, "MCP server shutdown did not complete cleanly");
         }
+    }
 
+    pub(crate) async fn shutdown_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> crate::daemon::ShutdownStatus {
+        self.shutdown
+            .coordinate_until(deadline, self.run_shutdown())
+            .await
+    }
+
+    async fn run_shutdown(&self) -> crate::daemon::ShutdownStatus {
         self.shutdown_background_tasks().await;
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
         let tokens_saved = self.tokens_saved.load(Ordering::Relaxed);
 
+        let mut failures = Vec::new();
         let cg = self.cg_snapshot().await;
         // Persist final tokens-saved value
         if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
             tracing::warn!(error = %e, "failed to persist tokens saved during shutdown");
+            failures.push(format!("persist tokens saved: {e}"));
         }
 
         if let Some(ref gdb) = self.accounting_db {
@@ -722,14 +828,20 @@ impl McpServer {
         // Checkpoint WAL to merge it into the main database file
         if let Err(e) = cg.checkpoint().await {
             tracing::warn!(error = %e, "failed to checkpoint WAL during shutdown");
+            failures.push(format!("code graph checkpoint: {e}"));
         }
 
-        tracing::info!(
-            tool_calls,
-            tokens_saved,
-            uptime_secs = uptime.as_secs(),
-            "MCP server shutdown complete"
-        );
+        if failures.is_empty() {
+            tracing::info!(
+                tool_calls,
+                tokens_saved,
+                uptime_secs = uptime.as_secs(),
+                "MCP server shutdown complete"
+            );
+            crate::daemon::ShutdownStatus::Clean
+        } else {
+            crate::daemon::ShutdownStatus::Failed(failures.join("; "))
+        }
     }
 
     pub(crate) async fn shutdown_background_tasks(&self) {
@@ -927,6 +1039,8 @@ impl McpServer {
 
 #[cfg(test)]
 mod cancellable_queue_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
 
     #[test]
@@ -958,5 +1072,63 @@ mod cancellable_queue_tests {
         assert!(
             queued_cancellable_request_key(&pending, &serde_json::json!(2), "connection").is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_shutdown_attempt_is_not_done_and_can_be_retried_once() {
+        let completion = Arc::new(McpShutdownCompletion::default());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let first_completion = Arc::clone(&completion);
+        let first_attempts = Arc::clone(&attempts);
+        let first_entered = Arc::clone(&entered);
+        let first = tokio::spawn(async move {
+            first_completion
+                .coordinate_until(
+                    tokio::time::Instant::now() + Duration::from_secs(5),
+                    async move {
+                        first_attempts.fetch_add(1, Ordering::AcqRel);
+                        first_entered.notify_one();
+                        std::future::pending().await
+                    },
+                )
+                .await
+        });
+        entered.notified().await;
+        assert!(!completion.is_done());
+        first.abort();
+        assert!(
+            first
+                .await
+                .expect_err("cancel first shutdown")
+                .is_cancelled()
+        );
+        assert!(!completion.is_done());
+
+        let retry_attempts = Arc::clone(&attempts);
+        let retry = completion
+            .coordinate_until(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                async move {
+                    retry_attempts.fetch_add(1, Ordering::AcqRel);
+                    crate::daemon::ShutdownStatus::Clean
+                },
+            )
+            .await;
+        let duplicate_attempts = Arc::clone(&attempts);
+        let duplicate = completion
+            .coordinate_until(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                async move {
+                    duplicate_attempts.fetch_add(1, Ordering::AcqRel);
+                    panic!("completed shutdown must not run twice");
+                },
+            )
+            .await;
+
+        assert_eq!(retry, crate::daemon::ShutdownStatus::Clean);
+        assert_eq!(retry, duplicate);
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert!(completion.is_done());
     }
 }

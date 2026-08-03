@@ -952,14 +952,32 @@ impl StoreAdministration {
         let reaper_termination = Arc::clone(&termination);
         let reaper = tokio::spawn(async move {
             let _finalizer = finalizer;
-            let _ = registered.await;
-            let status = match task.await {
+            let registration_error = registered
+                .await
+                .err()
+                .map(|error| format!("retirement reaper registration failed: {error}"));
+            let task_status = match task.await {
                 Ok(()) => super::shutdown_coordination::ShutdownStatus::Clean,
                 Err(error) if error.is_cancelled() => {
                     super::shutdown_coordination::ShutdownStatus::Clean
                 }
                 Err(error) => {
                     super::shutdown_coordination::ShutdownStatus::Failed(error.to_string())
+                }
+            };
+            let status = match (registration_error, task_status) {
+                (None, status) => status,
+                (Some(error), super::shutdown_coordination::ShutdownStatus::Clean) => {
+                    super::shutdown_coordination::ShutdownStatus::Failed(error)
+                }
+                (
+                    Some(registration_error),
+                    super::shutdown_coordination::ShutdownStatus::Failed(task_error),
+                ) => super::shutdown_coordination::ShutdownStatus::Failed(format!(
+                    "{registration_error}; {task_error}"
+                )),
+                (Some(error), super::shutdown_coordination::ShutdownStatus::TimedOut) => {
+                    super::shutdown_coordination::ShutdownStatus::Failed(error)
                 }
             };
             reaper_termination.record_status(status);

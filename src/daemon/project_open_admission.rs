@@ -9,9 +9,9 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
-use super::store_shutdown::{
-    ShutdownTaskOutcome, ShutdownTaskReceipt, ShutdownTaskStatus, join_shutdown_tasks_until,
-};
+#[cfg(test)]
+use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskStatus};
+use super::store_shutdown::{ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -395,7 +395,12 @@ impl ProjectOpenTasks {
                 (
                     format!("project_open[{ordinal}]"),
                     Some(task_abort),
-                    async move { entry.task.await.map_err(|error| error.to_string()) },
+                    async move {
+                        match entry.task.await {
+                            Ok(()) => ShutdownTaskStatus::Clean,
+                            Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
+                        }
+                    },
                 )
             }),
         )

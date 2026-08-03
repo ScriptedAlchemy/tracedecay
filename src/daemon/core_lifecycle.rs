@@ -25,25 +25,38 @@ struct DaemonLifecycleInner {
     active: AtomicUsize,
     idle: tokio::sync::Notify,
     draining_notify: tokio::sync::Notify,
-    shutdown_claimed: AtomicBool,
-    shutdown_receipt: tokio::sync::watch::Sender<Option<Arc<DaemonShutdownReceipt>>>,
+    shutdown: std::sync::Mutex<DaemonShutdownCoordinator>,
 }
 
 pub(crate) struct DaemonActivity {
     inner: Arc<DaemonLifecycleInner>,
 }
 
+#[derive(Default)]
+struct DaemonShutdownCoordinator {
+    in_flight: Option<Arc<DaemonShutdownAttempt>>,
+    terminal: Option<Arc<DaemonShutdownReceipt>>,
+}
+
+pub(super) struct DaemonShutdownAttempt {
+    receipt: tokio::sync::watch::Sender<Option<Arc<DaemonShutdownReceipt>>>,
+}
+
+pub(super) enum DaemonShutdownClaim {
+    Run(Arc<DaemonShutdownAttempt>),
+    Wait(Arc<DaemonShutdownAttempt>),
+    Terminal(Arc<DaemonShutdownReceipt>),
+}
+
 impl Default for DaemonLifecycle {
     fn default() -> Self {
-        let (shutdown_receipt, _) = tokio::sync::watch::channel(None);
         Self {
             inner: Arc::new(DaemonLifecycleInner {
                 draining: AtomicBool::new(false),
                 active: AtomicUsize::new(0),
                 idle: tokio::sync::Notify::new(),
                 draining_notify: tokio::sync::Notify::new(),
-                shutdown_claimed: AtomicBool::new(false),
-                shutdown_receipt,
+                shutdown: std::sync::Mutex::new(DaemonShutdownCoordinator::default()),
             }),
         }
     }
@@ -97,21 +110,54 @@ impl DaemonLifecycle {
         }
     }
 
-    pub(super) fn claim_shutdown_coordination(&self) -> bool {
-        self.inner
-            .shutdown_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    pub(super) fn claim_shutdown_coordination(&self) -> DaemonShutdownClaim {
+        let mut shutdown = self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(receipt) = &shutdown.terminal {
+            return DaemonShutdownClaim::Terminal(Arc::clone(receipt));
+        }
+        if let Some(attempt) = &shutdown.in_flight {
+            return DaemonShutdownClaim::Wait(Arc::clone(attempt));
+        }
+        let (receipt, _) = tokio::sync::watch::channel(None);
+        let attempt = Arc::new(DaemonShutdownAttempt { receipt });
+        shutdown.in_flight = Some(Arc::clone(&attempt));
+        DaemonShutdownClaim::Run(attempt)
     }
 
-    pub(super) fn publish_shutdown_receipt(&self, receipt: Arc<DaemonShutdownReceipt>) {
-        self.inner.shutdown_receipt.send_replace(Some(receipt));
+    pub(super) fn finish_shutdown_attempt(
+        &self,
+        attempt: &Arc<DaemonShutdownAttempt>,
+        receipt: Arc<DaemonShutdownReceipt>,
+    ) {
+        let mut shutdown = self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if shutdown
+            .in_flight
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, attempt))
+        {
+            shutdown.in_flight = None;
+            if !receipt.is_retryable() {
+                shutdown.terminal = Some(Arc::clone(&receipt));
+            }
+        }
+        drop(shutdown);
+        attempt.receipt.send_replace(Some(receipt));
     }
+}
 
-    pub(super) async fn wait_for_shutdown_receipt(
+impl DaemonShutdownAttempt {
+    pub(super) async fn wait_for_receipt(
         &self,
     ) -> std::result::Result<Arc<DaemonShutdownReceipt>, String> {
-        let mut receipt = self.inner.shutdown_receipt.subscribe();
+        let mut receipt = self.receipt.subscribe();
         loop {
             if let Some(receipt) = receipt.borrow_and_update().clone() {
                 return Ok(receipt);

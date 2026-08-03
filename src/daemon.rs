@@ -193,6 +193,7 @@ pub use core_hooks::*;
 pub(crate) use core_lifecycle::*;
 pub use core_logging::*;
 pub use core_proxy::*;
+pub(crate) use shutdown_coordination::ShutdownStatus;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
@@ -340,8 +341,6 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationRequest, DaemonInvocationResponse,
     parse_daemon_invocation_request,
 };
-#[cfg(all(unix, test))]
-use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
 pub(crate) use service::invocation::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrar,

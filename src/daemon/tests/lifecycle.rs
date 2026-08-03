@@ -929,33 +929,6 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn client_drain_timeout_aborts_and_joins_remaining_work() {
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async {
-        std::future::pending::<()>().await;
-        Ok(())
-    });
-
-    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_millis(5)).await;
-
-    assert!(!drained);
-    assert!(clients.is_empty());
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn client_drain_waits_for_completed_work() {
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async { Ok(()) });
-
-    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_secs(1)).await;
-
-    assert!(drained);
-    assert!(clients.is_empty());
-}
-
-#[cfg(unix)]
-#[tokio::test]
 async fn one_shot_tool_call_aborts_when_daemon_liveness_fails_after_write() {
     let temp = TempDir::new().expect("temp dir");
     let socket = temp.path().join("daemon.sock");
@@ -1203,24 +1176,6 @@ async fn one_shot_tool_call_preserves_response_split_across_liveness_poll() {
     .expect("split-frame response must reassemble across liveness polls");
     assert_eq!(result["status"], json!("split-across-poll"));
     server.await.expect("fake daemon task");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn persistent_idle_client_closes_on_draining_without_timeout() {
-    let lifecycle = DaemonLifecycle::default();
-    let idle_lifecycle = lifecycle.clone();
-    let mut clients = tokio::task::JoinSet::new();
-    clients.spawn(async move {
-        idle_lifecycle.wait_for_draining().await;
-        Ok(())
-    });
-
-    lifecycle.begin_draining();
-    let drained = drain_client_tasks(&mut clients, tokio::time::Duration::from_secs(1)).await;
-
-    assert!(drained);
-    assert!(lifecycle.try_enter().is_none());
 }
 
 #[tokio::test]

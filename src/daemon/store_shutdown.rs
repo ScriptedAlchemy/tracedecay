@@ -89,7 +89,7 @@ pub(super) async fn join_shutdown_tasks_until<Tasks, Task>(
 ) -> ShutdownTaskReceipt
 where
     Tasks: IntoIterator<Item = (String, Option<tokio::task::AbortHandle>, Task)>,
-    Task: Future<Output = std::result::Result<(), String>> + Send + 'static,
+    Task: Future<Output = ShutdownTaskStatus> + Send + 'static,
 {
     let now = tokio::time::Instant::now();
     let cooperative_deadline =
@@ -113,16 +113,13 @@ where
     let mut outcomes = Vec::new();
     while !joins.is_empty() {
         match tokio::time::timeout_at(cooperative_deadline, joins.join_next_with_id()).await {
-            Ok(Some(Ok((id, task_result)))) => {
+            Ok(Some(Ok((id, task_status)))) => {
                 if let Some((ordinal, owner, _, _)) = pending.remove(&id) {
                     outcomes.push((
                         ordinal,
                         ShutdownTaskOutcome {
                             owner,
-                            status: match task_result {
-                                Ok(()) => ShutdownTaskStatus::Clean,
-                                Err(error) => ShutdownTaskStatus::Failed(error),
-                            },
+                            status: task_status,
                         },
                     ));
                 }
@@ -209,7 +206,12 @@ impl StoreAdministration {
                     (
                         format!("project_server_retirement[{ordinal}]"),
                         Some(retirement_abort),
-                        async move { retirement.await.map_err(|error| error.to_string()) },
+                        async move {
+                            match retirement.await {
+                                Ok(()) => ShutdownTaskStatus::Clean,
+                                Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
+                            }
+                        },
                     )
                 }),
         )
@@ -268,6 +270,26 @@ mod tests {
             ShutdownTaskStatus::Failed(_)
         ));
         assert!(!receipt.is_clean());
+    }
+
+    #[tokio::test]
+    async fn retirement_join_preserves_typed_request_drain_failure() {
+        let administration = StoreAdministration::default();
+        let retirement =
+            tokio::spawn(async { Err::<(), String>("project request drain timed out".to_owned()) });
+        *administration.project_server_retirements.lock().await = vec![retirement];
+
+        let receipt = administration
+            .join_project_server_retirements_until(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await;
+
+        assert_eq!(receipt.outcomes.len(), 1);
+        assert_eq!(
+            receipt.outcomes[0].status,
+            ShutdownTaskStatus::Failed("project request drain timed out".to_owned())
+        );
     }
 
     #[tokio::test(start_paused = true)]

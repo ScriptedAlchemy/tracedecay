@@ -12,8 +12,6 @@ use std::sync::Arc;
 
 use tokio::task::JoinSet;
 use tokio::time::Duration;
-#[cfg(unix)]
-use tokio::time::timeout;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -486,31 +484,6 @@ fn log_client_task_result(completed: std::result::Result<Result<()>, tokio::task
     );
 }
 
-#[cfg(unix)]
-pub(super) async fn drain_client_tasks(
-    clients: &mut JoinSet<Result<()>>,
-    deadline: Duration,
-) -> bool {
-    let drained = timeout(deadline, async {
-        while let Some(completed) = clients.join_next().await {
-            log_client_task_result(completed);
-        }
-    })
-    .await
-    .is_ok();
-    if drained {
-        return true;
-    }
-
-    clients.abort_all();
-    let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-        while let Some(completed) = clients.join_next().await {
-            log_client_task_result(completed);
-        }
-    })
-    .await;
-    false
-}
 #[cfg(unix)]
 pub(super) fn set_owner_only_permissions(path: &Path, mode: u32) -> Result<()> {
     let permissions = std::fs::Permissions::from_mode(mode);

@@ -328,10 +328,9 @@ pub struct McpServer {
     /// this holds the relative path prefix (e.g. `"src/mcp"`). Listing tools
     /// use it as the default path filter. `None` when cwd == project root.
     scope_prefix: Option<String>,
-    /// Set to `true` after `shutdown` runs once; makes shutdown idempotent so
-    /// callers can invoke it explicitly after `run` returns without re-running
-    /// persistence logic.
-    shutdown_done: AtomicBool,
+    /// Single-flight terminal shutdown state. A cancelled or timed-out attempt
+    /// returns to retryable state; only a completed attempt becomes terminal.
+    shutdown: connection::McpShutdownCompletion,
     /// When true, every `tools/call` response gains a `_meta.duration_us`
     /// field measuring the handler's pure execution time. Toggled by
     /// `tracedecay serve --timings`. Off by default to keep responses clean.
@@ -914,7 +913,7 @@ impl McpServer {
             }),
             pending_notifications: std::sync::Mutex::new(Vec::new()),
             scope_prefix,
-            shutdown_done: AtomicBool::new(false),
+            shutdown: connection::McpShutdownCompletion::default(),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
             last_staleness_check_at: AtomicI64::new(0),
             last_automation_notice_check_at: AtomicI64::new(0),

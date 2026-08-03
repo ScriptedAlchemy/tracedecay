@@ -93,8 +93,7 @@ pub(super) async fn shutdown_detached_project_servers(
                 )
                 .await;
                 drop(graph);
-                server.shutdown().await;
-                Ok(())
+                server.shutdown_until(deadline).await
             })
         }),
     )
