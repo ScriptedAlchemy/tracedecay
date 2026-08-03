@@ -211,6 +211,7 @@ pub enum WorkflowRunCommandV1 {
     },
     FailStep {
         step_id: WorkflowStepId,
+        outputs: Vec<WorkflowStepOutputV1>,
         effect_receipt: WorkflowStepEffectReceiptV1,
     },
     Pause,
@@ -238,6 +239,7 @@ pub enum WorkflowRunEventKindV1 {
     },
     StepFailed {
         step_id: WorkflowStepId,
+        outputs: Vec<WorkflowStepOutputV1>,
         effect_receipt: WorkflowStepEffectReceiptV1,
     },
     Paused,
@@ -426,12 +428,18 @@ impl WorkflowRunProjectionV1 {
             }
             WorkflowRunCommandV1::FailStep {
                 step_id,
+                outputs,
                 effect_receipt,
             } => {
                 self.require_step_status(&step_id, WorkflowStepStatusV1::Running)?;
-                self.validate_effect_receipt(&step_id, &effect_receipt, None)?;
+                self.validate_failure_outputs(&step_id, &outputs)?;
+                self.validate_effect_receipt(&step_id, &effect_receipt, Some(&outputs))?;
+                if effect_receipt.outcome() != WorkflowStepEffectOutcomeV1::Failed {
+                    return Err(WorkflowRunStateError::InvalidEffectReceipt);
+                }
                 WorkflowRunEventKindV1::StepFailed {
                     step_id,
+                    outputs,
                     effect_receipt,
                 }
             }
@@ -533,13 +541,22 @@ impl WorkflowRunProjectionV1 {
             }
             WorkflowRunEventKindV1::StepFailed {
                 step_id,
+                outputs,
                 effect_receipt,
             } => {
                 next.require_running()?;
                 next.require_step_status(step_id, WorkflowStepStatusV1::Running)?;
-                next.validate_effect_receipt(step_id, effect_receipt, None)?;
+                next.validate_failure_outputs(step_id, outputs)?;
+                next.validate_effect_receipt(step_id, effect_receipt, Some(outputs))?;
+                if effect_receipt.outcome() != WorkflowStepEffectOutcomeV1::Failed {
+                    return Err(WorkflowRunStateError::InvalidEffectReceipt);
+                }
                 let step = next.step_mut(step_id)?;
                 step.status = WorkflowStepStatusV1::Failed;
+                step.outputs = outputs
+                    .iter()
+                    .map(|output| (output.output_name.clone(), output.clone()))
+                    .collect();
                 step.effect_receipt = Some(effect_receipt.clone());
                 next.status = WorkflowRunStatusV1::Failed;
             }
@@ -646,6 +663,17 @@ impl WorkflowRunProjectionV1 {
             return Err(WorkflowRunStateError::InvalidStepOutputs);
         }
         Ok(())
+    }
+
+    fn validate_failure_outputs(
+        &self,
+        step_id: &WorkflowStepId,
+        outputs: &[WorkflowStepOutputV1],
+    ) -> Result<(), WorkflowRunStateError> {
+        if outputs.is_empty() {
+            return Ok(());
+        }
+        self.validate_outputs(step_id, outputs)
     }
 
     fn validate_placement(

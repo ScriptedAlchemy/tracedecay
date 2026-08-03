@@ -47,8 +47,6 @@ impl WorkflowRunAppendOutcomeV1 {
 }
 
 pub trait WorkflowRunStoragePort: Send + Sync {
-    fn load(&self, run_id: &RunId) -> Result<Vec<WorkflowRunEventV1>, WorkflowRunStorageError>;
-
     fn projection(
         &self,
         run_id: &RunId,
@@ -286,6 +284,7 @@ where
                 return self.fail_started_step(
                     &started,
                     step_id,
+                    Vec::new(),
                     error.into_effect_receipt(),
                     contexts.failed,
                 );
@@ -307,9 +306,6 @@ where
                     })?
                     .into_projection(),
             )),
-            Err(WorkflowRunStateError::InvalidStepOutputs) => {
-                self.fail_started_step(&started, step_id, result.effect_receipt, contexts.failed)
-            }
             Err(error) => Err(error.into()),
         }
     }
@@ -318,12 +314,14 @@ where
         &self,
         started: &WorkflowRunProjectionV1,
         step_id: &WorkflowStepId,
+        outputs: Vec<WorkflowStepOutputV1>,
         effect_receipt: WorkflowStepEffectReceiptV1,
         context: WorkflowRunEventContextV1,
     ) -> Result<WorkflowStepExecutionOutcomeV1, WorkflowStepExecutionServiceError> {
         let failed = started.next_event(
             WorkflowRunCommandV1::FailStep {
                 step_id: step_id.clone(),
+                outputs,
                 effect_receipt,
             },
             context,
