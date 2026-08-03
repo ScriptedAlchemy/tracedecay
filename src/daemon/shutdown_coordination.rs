@@ -116,6 +116,17 @@ impl ShutdownReceipt {
     pub(super) fn unfinished(&self) -> &[&'static str] {
         &self.unfinished
     }
+
+    pub(super) fn failed(deadline: Instant, name: &'static str, error: String) -> Self {
+        Self {
+            deadline,
+            owners: vec![ShutdownOwnerReceipt {
+                name,
+                status: ShutdownStatus::Failed(error),
+            }],
+            unfinished: vec![name],
+        }
+    }
 }
 
 pub(super) async fn join_shutdown_owners(

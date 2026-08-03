@@ -177,15 +177,18 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         )],
     ];
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
+    let server_store_administration = store_administration.clone();
     let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
         &lifecycle,
-        &mut clients,
         shutdown_deadline,
-        owner_phases,
-        shutdown_project_servers(shutdown_deadline, &store_administration),
+        async move {
+            shutdown_orchestration::DaemonShutdownPlan::new(clients, owner_phases, async move {
+                shutdown_project_servers(shutdown_deadline, &server_store_administration).await
+            })
+        },
     )
     .await;
-    if !shutdown.in_flight_drained || !shutdown.clients_drained {
+    if !shutdown.in_flight.is_clean() || !shutdown.clients.is_clean() {
         log_daemon_event(
             "daemon_shutdown",
             &[
@@ -404,28 +407,36 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
             "daemon_shutdown",
             &[("socket", socket_path.display().to_string())],
         );
-        let mut owner_phases = engine.shutdown_owner_phases().await;
-        let http_application_owner = shutdown_coordination::ShutdownOwner::with_deadline_result(
-            "http_application",
-            {
-                let signal = http_application_service.shutdown_signal();
-                move || signal.cancel()
-            },
-            move |_| async move { http_application_service.shutdown().await },
-        );
-        match owner_phases.first_mut() {
-            Some(producers) => producers.push(http_application_owner),
-            None => owner_phases.push(vec![http_application_owner]),
-        }
+        let shutdown_lifecycle = engine.lifecycle.clone();
+        let shutdown_engine = engine.clone();
         let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
-            &engine.lifecycle,
-            &mut client_tasks,
+            &shutdown_lifecycle,
             shutdown_deadline,
-            owner_phases,
-            engine.shutdown_servers(shutdown_deadline),
+            async move {
+                let mut owner_phases = shutdown_engine.shutdown_owner_phases().await;
+                let http_application_owner =
+                    shutdown_coordination::ShutdownOwner::with_deadline_result(
+                        "http_application",
+                        {
+                            let signal = http_application_service.shutdown_signal();
+                            move || signal.cancel()
+                        },
+                        move |_| async move { http_application_service.shutdown().await },
+                    );
+                match owner_phases.first_mut() {
+                    Some(producers) => producers.push(http_application_owner),
+                    None => owner_phases.push(vec![http_application_owner]),
+                }
+                let server_engine = shutdown_engine.clone();
+                shutdown_orchestration::DaemonShutdownPlan::new(
+                    client_tasks,
+                    owner_phases,
+                    async move { server_engine.shutdown_servers(shutdown_deadline).await },
+                )
+            },
         )
         .await;
-        if !shutdown.in_flight_drained || !shutdown.clients_drained {
+        if !shutdown.in_flight.is_clean() || !shutdown.clients.is_clean() {
             log_daemon_event(
                 "daemon_shutdown",
                 &[

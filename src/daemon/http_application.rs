@@ -21,7 +21,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
 use constant_time_eq::constant_time_eq;
-use tokio::sync::{Mutex, Semaphore, oneshot};
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use tracedecay_domain::ProjectId;
@@ -228,12 +228,24 @@ async fn require_local_http_admission(
     next.run(request).await
 }
 
+#[derive(Clone)]
+pub(super) struct DaemonHttpApplicationShutdownSignal {
+    active: Arc<AtomicBool>,
+    cancellation: crate::application::context::CancellationToken,
+}
+
+impl DaemonHttpApplicationShutdownSignal {
+    pub(super) fn cancel(&self) {
+        self.active.store(false, Ordering::Release);
+        self.cancellation.cancel();
+    }
+}
+
 pub(super) struct DaemonHttpApplicationService {
     endpoint: SocketAddr,
     #[cfg(test)]
     origin: String,
-    active: Arc<AtomicBool>,
-    shutdown: Option<oneshot::Sender<()>>,
+    shutdown: DaemonHttpApplicationShutdownSignal,
     task: Option<JoinHandle<Result<()>>>,
 }
 
@@ -266,12 +278,17 @@ impl DaemonHttpApplicationService {
             admission.clone(),
             require_local_http_admission,
         ));
-        let (shutdown, shutdown_requested) = oneshot::channel();
+        let cancellation = crate::application::context::CancellationToken::new();
+        let shutdown_requested = cancellation.clone();
+        let shutdown = DaemonHttpApplicationShutdownSignal {
+            active: Arc::clone(&active),
+            cancellation,
+        };
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(async move {
             let result = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_requested.await;
+                .with_graceful_shutdown(async move {
+                    shutdown_requested.cancelled().await;
                 })
                 .await
                 .map_err(|error| TraceDecayError::Config {
@@ -284,8 +301,7 @@ impl DaemonHttpApplicationService {
             endpoint,
             #[cfg(test)]
             origin: origin.to_owned(),
-            active,
-            shutdown: Some(shutdown),
+            shutdown,
             task: Some(task),
         })
     }
@@ -294,16 +310,21 @@ impl DaemonHttpApplicationService {
         self.endpoint
     }
 
+    pub(super) fn shutdown_signal(&self) -> DaemonHttpApplicationShutdownSignal {
+        self.shutdown.clone()
+    }
+
+    pub(super) fn cancel(&self) {
+        self.shutdown.cancel();
+    }
+
     #[cfg(test)]
     pub(super) fn origin(&self) -> &str {
         &self.origin
     }
 
     pub(super) async fn shutdown(mut self) -> Result<()> {
-        self.active.store(false, Ordering::Release);
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
+        self.cancel();
         let Some(task) = self.task.take() else {
             return Ok(());
         };
@@ -315,10 +336,7 @@ impl DaemonHttpApplicationService {
 
 impl Drop for DaemonHttpApplicationService {
     fn drop(&mut self) {
-        self.active.store(false, Ordering::Release);
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(());
-        }
+        self.cancel();
         if let Some(task) = self.task.take() {
             task.abort();
         }

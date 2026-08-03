@@ -16,6 +16,7 @@ use crate::errors::Result;
 
 use super::branch_admin::MaintenanceReaperKind;
 use super::scheduler::{MaintenanceTaskTermination, same_scheduler_owner};
+use super::shutdown_coordination::ShutdownStatus;
 use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event};
 
 pub(super) struct MemoryRepairSchedulerHandle {
@@ -59,8 +60,8 @@ pub(super) struct MemoryRepairSchedulerRetirement {
 }
 
 impl MemoryRepairSchedulerRetirement {
-    pub(super) async fn wait(self) {
-        self.termination.wait().await;
+    pub(super) async fn wait(self) -> ShutdownStatus {
+        self.termination.wait().await
     }
 }
 
@@ -166,11 +167,15 @@ impl DaemonEngine {
                     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let termination = Arc::new(MaintenanceTaskTermination::pending());
                     let administration = self.store_administration.clone();
+                    let shutdown_lifecycle = self.lifecycle.clone();
                     let cg = Arc::clone(&cg);
                     let (published, start) = tokio::sync::oneshot::channel();
                     let task = tokio::spawn(async move {
                         let _ = start.await;
-                        Box::pin(run_memory_repair_scheduler_loop(project_path, cg)).await;
+                        tokio::select! {
+                            () = shutdown_lifecycle.wait_for_draining() => {}
+                            () = Box::pin(run_memory_repair_scheduler_loop(project_path, cg)) => {}
+                        }
                         administration
                             .memory_repair_schedulers()
                             .lock()

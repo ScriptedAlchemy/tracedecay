@@ -1501,9 +1501,9 @@ async fn transport_shutdown_owners_share_one_absolute_deadline() {
 async fn unix_and_portable_shutdown_inputs_share_the_same_phase_order() {
     async fn run(
         owner: &'static str,
-    ) -> super::super::shutdown_orchestration::DaemonShutdownReceipt {
+    ) -> Arc<super::super::shutdown_orchestration::DaemonShutdownReceipt> {
         let lifecycle = DaemonLifecycle::default();
-        let mut clients = tokio::task::JoinSet::new();
+        let clients = tokio::task::JoinSet::new();
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let cancelled_by_owner = Arc::clone(&cancelled);
         let cancelled_before_server = Arc::clone(&cancelled);
@@ -1522,15 +1522,19 @@ async fn unix_and_portable_shutdown_inputs_share_the_same_phase_order() {
 
         super::super::shutdown_orchestration::coordinate_daemon_shutdown(
             &lifecycle,
-            &mut clients,
             deadline,
-            phases,
             async move {
-                assert!(
-                    cancelled_before_server.load(std::sync::atomic::Ordering::Acquire),
-                    "producer cancellation must precede transport-server shutdown"
-                );
-                super::super::store_shutdown::ShutdownTaskReceipt::default()
+                super::super::shutdown_orchestration::DaemonShutdownPlan::new(
+                    clients,
+                    phases,
+                    async move {
+                        assert!(
+                            cancelled_before_server.load(std::sync::atomic::Ordering::Acquire),
+                            "producer cancellation must precede transport-server shutdown"
+                        );
+                        super::super::store_shutdown::ShutdownTaskReceipt::default()
+                    },
+                )
             },
         )
         .await
@@ -1540,8 +1544,8 @@ async fn unix_and_portable_shutdown_inputs_share_the_same_phase_order() {
     let unix = run("unix_transport").await;
 
     for receipt in [portable, unix] {
-        assert!(receipt.in_flight_drained);
-        assert!(receipt.clients_drained);
+        assert!(receipt.in_flight.is_clean());
+        assert!(receipt.clients.is_clean());
         assert!(receipt.background.unfinished().is_empty());
         assert!(receipt.project_servers.is_clean());
     }
@@ -1559,7 +1563,7 @@ async fn retained_client_activity_does_not_skip_final_server_shutdown() {
 
     let lifecycle = DaemonLifecycle::default();
     let activity = lifecycle.try_enter().expect("retain client activity");
-    let mut clients = tokio::task::JoinSet::new();
+    let clients = tokio::task::JoinSet::new();
     let server_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let server_polled_by_future = Arc::clone(&server_polled);
     let server_future_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1568,19 +1572,29 @@ async fn retained_client_activity_does_not_skip_final_server_shutdown() {
 
     let receipt = super::super::shutdown_orchestration::coordinate_daemon_shutdown(
         &lifecycle,
-        &mut clients,
         deadline,
-        vec![Vec::new()],
         async move {
-            let _guard = server_guard;
-            server_polled_by_future.store(true, std::sync::atomic::Ordering::Release);
-            super::super::store_shutdown::ShutdownTaskReceipt::default()
+            super::super::shutdown_orchestration::DaemonShutdownPlan::new(
+                clients,
+                vec![Vec::new()],
+                async move {
+                    let _guard = server_guard;
+                    server_polled_by_future.store(true, std::sync::atomic::Ordering::Release);
+                    super::super::store_shutdown::ShutdownTaskReceipt::default()
+                },
+            )
         },
     )
     .await;
 
-    assert!(!receipt.in_flight_drained);
-    assert!(!receipt.clients_drained);
+    assert_eq!(
+        receipt.in_flight,
+        super::super::shutdown_coordination::ShutdownStatus::TimedOut
+    );
+    assert_eq!(
+        receipt.clients,
+        super::super::shutdown_coordination::ShutdownStatus::TimedOut
+    );
     assert!(receipt.project_servers.is_clean());
     assert!(
         server_polled.load(std::sync::atomic::Ordering::Acquire),
@@ -1625,16 +1639,22 @@ async fn portable_shutdown_aborts_stuck_client_then_uses_remaining_store_budget(
     let shutdown = tokio::spawn(async move {
         super::super::shutdown_orchestration::coordinate_daemon_shutdown(
             &lifecycle,
-            &mut clients,
             shutdown_deadline,
-            vec![Vec::new()],
             async move {
-                *store_started_by_shutdown
-                    .lock()
-                    .expect("store shutdown start") = Some(tokio::time::Instant::now());
-                tokio::time::sleep_until(shutdown_deadline - tokio::time::Duration::from_secs(1))
-                    .await;
-                super::super::store_shutdown::ShutdownTaskReceipt::default()
+                super::super::shutdown_orchestration::DaemonShutdownPlan::new(
+                    clients,
+                    vec![Vec::new()],
+                    async move {
+                        *store_started_by_shutdown
+                            .lock()
+                            .expect("store shutdown start") = Some(tokio::time::Instant::now());
+                        tokio::time::sleep_until(
+                            shutdown_deadline - tokio::time::Duration::from_secs(1),
+                        )
+                        .await;
+                        super::super::store_shutdown::ShutdownTaskReceipt::default()
+                    },
+                )
             },
         )
         .await
@@ -1687,8 +1707,11 @@ async fn portable_shutdown_aborts_stuck_client_then_uses_remaining_store_budget(
     .await;
     let receipt = shutdown.await.expect("portable shutdown coordinator");
 
-    assert!(!receipt.in_flight_drained);
-    assert!(receipt.clients_drained);
+    assert_eq!(
+        receipt.in_flight,
+        super::super::shutdown_coordination::ShutdownStatus::TimedOut
+    );
+    assert!(receipt.clients.is_clean());
     assert!(receipt.background.unfinished().is_empty());
     assert!(receipt.project_servers.is_clean());
     assert!(tokio::time::Instant::now() < hard_backstop_deadline);

@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use super::DaemonEngine;
-use crate::daemon::shutdown_coordination::{
-    ShutdownOwner, ShutdownReceipt, ShutdownStatus, join_shutdown_owner_phases,
+use crate::daemon::shutdown_coordination::ShutdownOwner;
+use crate::daemon::shutdown_orchestration::{
+    DaemonShutdownPlan, DaemonShutdownReceipt, coordinate_daemon_shutdown,
 };
 use crate::daemon::store_shutdown;
 use crate::daemon::{
@@ -77,28 +78,18 @@ impl DaemonEngine {
                     "automation",
                     move || automation_cancel.cancel_automation_schedulers(),
                     move |deadline| async move {
-                        if automation_join
+                        automation_join
                             .shutdown_automation_schedulers_until(deadline)
                             .await
-                        {
-                            ShutdownStatus::Clean
-                        } else {
-                            ShutdownStatus::TimedOut
-                        }
                     },
                 ),
                 ShutdownOwner::with_deadline_status(
                     "memory_repair",
                     move || repair_cancel.cancel_memory_repair_schedulers(),
                     move |deadline| async move {
-                        if repair_join
+                        repair_join
                             .shutdown_memory_repair_schedulers_until(deadline)
                             .await
-                        {
-                            ShutdownStatus::Clean
-                        } else {
-                            ShutdownStatus::TimedOut
-                        }
                     },
                 ),
                 ShutdownOwner::with_deadline(
@@ -121,7 +112,7 @@ impl DaemonEngine {
                 ShutdownOwner::new("git_watcher", move || watcher_cancel.cancel(), async move {
                     watcher_join.shutdown().await
                 }),
-                ShutdownOwner::new(
+                ShutdownOwner::with_deadline_result(
                     "pr_autotrack",
                     move || {
                         if let Some(task) = pr_cancel
@@ -132,14 +123,19 @@ impl DaemonEngine {
                             task.abort();
                         }
                     },
-                    async move {
+                    move |_| async move {
                         let task = pr_join
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .take();
                         if let Some(task) = task {
-                            let _ = task.await;
+                            match task.await {
+                                Ok(()) => {}
+                                Err(error) if error.is_cancelled() => {}
+                                Err(error) => return Err(error.to_string()),
+                            }
                         }
+                        Ok::<(), String>(())
                     },
                 ),
             ],
@@ -159,13 +155,6 @@ impl DaemonEngine {
         ]
     }
 
-    pub(in crate::daemon) async fn shutdown_background_tasks(
-        &self,
-        deadline: tokio::time::Instant,
-    ) -> ShutdownReceipt {
-        join_shutdown_owner_phases(deadline, self.shutdown_owner_phases().await).await
-    }
-
     pub(in crate::daemon) async fn shutdown_servers(
         &self,
         deadline: tokio::time::Instant,
@@ -174,10 +163,19 @@ impl DaemonEngine {
     }
 
     #[cfg(test)]
-    pub(in crate::daemon) async fn shutdown_all(&self) {
-        self.lifecycle.begin_draining();
+    pub(in crate::daemon) async fn shutdown_all(&self) -> Arc<DaemonShutdownReceipt> {
         let deadline = tokio::time::Instant::now() + DAEMON_SHUTDOWN_DEADLINE;
-        let _ = self.shutdown_background_tasks(deadline).await;
-        let _ = self.shutdown_servers(deadline).await;
+        let lifecycle = self.lifecycle.clone();
+        let shutdown_engine = self.clone();
+        coordinate_daemon_shutdown(&lifecycle, deadline, async move {
+            let owner_phases = shutdown_engine.shutdown_owner_phases().await;
+            let server_engine = shutdown_engine.clone();
+            DaemonShutdownPlan::new(
+                tokio::task::JoinSet::<crate::errors::Result<()>>::new(),
+                owner_phases,
+                async move { server_engine.shutdown_servers(deadline).await },
+            )
+        })
+        .await
     }
 }

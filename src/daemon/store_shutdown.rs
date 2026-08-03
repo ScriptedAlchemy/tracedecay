@@ -18,6 +18,15 @@ pub(super) struct ShutdownTaskReceipt {
 }
 
 impl ShutdownTaskReceipt {
+    pub(super) fn failed(owner: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            outcomes: vec![ShutdownTaskOutcome {
+                owner: owner.into(),
+                status: ShutdownTaskStatus::Failed(error.into()),
+            }],
+        }
+    }
+
     pub(super) fn timed_out(owner: impl Into<String>) -> Self {
         Self {
             outcomes: vec![ShutdownTaskOutcome {

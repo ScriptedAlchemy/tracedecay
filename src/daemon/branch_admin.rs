@@ -949,10 +949,20 @@ impl StoreAdministration {
             termination: Arc::clone(&termination),
         };
         let (start, registered) = tokio::sync::oneshot::channel();
+        let reaper_termination = Arc::clone(&termination);
         let reaper = tokio::spawn(async move {
             let _finalizer = finalizer;
             let _ = registered.await;
-            let _ = task.await;
+            let status = match task.await {
+                Ok(()) => super::shutdown_coordination::ShutdownStatus::Clean,
+                Err(error) if error.is_cancelled() => {
+                    super::shutdown_coordination::ShutdownStatus::Clean
+                }
+                Err(error) => {
+                    super::shutdown_coordination::ShutdownStatus::Failed(error.to_string())
+                }
+            };
+            reaper_termination.record_status(status);
             cleanup.await;
         });
         let replaced = state.reapers.insert(

@@ -9,6 +9,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
 
 use super::branch_admin::MaintenanceReaperKind;
+use super::shutdown_coordination::ShutdownStatus;
 use super::{DaemonEngine, DaemonHandshake, ProjectServerKey, log_daemon_event};
 
 pub(super) fn scheduler_task_log_fields(
@@ -190,16 +191,24 @@ impl AutomationSchedulerHandle {
 
 pub(super) struct MaintenanceTaskTermination {
     finished: tokio::sync::watch::Sender<bool>,
+    status: std::sync::Mutex<ShutdownStatus>,
 }
 
 impl MaintenanceTaskTermination {
     pub(super) fn pending() -> Self {
         let (finished, _) = tokio::sync::watch::channel(false);
-        Self { finished }
+        Self {
+            finished,
+            status: std::sync::Mutex::new(ShutdownStatus::Clean),
+        }
     }
 
-    pub(super) async fn wait(&self) {
+    pub(super) async fn wait(&self) -> ShutdownStatus {
         self.wait_for_finish(self.finished.subscribe()).await;
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     async fn wait_for_finish(&self, mut finished: tokio::sync::watch::Receiver<bool>) {
@@ -213,6 +222,13 @@ impl MaintenanceTaskTermination {
     pub(super) fn finish(&self) {
         self.finished.send_replace(true);
     }
+
+    pub(super) fn record_status(&self, status: ShutdownStatus) {
+        *self
+            .status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = status;
+    }
 }
 
 pub(super) struct AutomationSchedulerRetirement {
@@ -220,8 +236,8 @@ pub(super) struct AutomationSchedulerRetirement {
 }
 
 impl AutomationSchedulerRetirement {
-    pub(super) async fn wait(self) {
-        self.termination.wait().await;
+    pub(super) async fn wait(self) -> ShutdownStatus {
+        self.termination.wait().await
     }
 }
 

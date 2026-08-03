@@ -527,6 +527,7 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
     let repair_task = tokio::spawn(async {
         panic!("panicked repair owner");
     });
+    tokio::task::yield_now().await;
     engine
         .store_administration
         .automation_schedulers()
@@ -554,12 +555,31 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
         .retire_memory_repair_scheduler_locked(&repair_key)
         .await
         .expect("panicked repair retirement");
-    tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, async {
-        automation_retirement.wait().await;
-        repair_retirement.wait().await;
-    })
-    .await
-    .expect("panicked scheduler retirements did not complete");
+    let (automation_status, repair_status) =
+        tokio::time::timeout(MAINTENANCE_TEST_DEADLINE, async {
+            (
+                automation_retirement.wait().await,
+                repair_retirement.wait().await,
+            )
+        })
+        .await
+        .expect("panicked scheduler retirements did not complete");
+    assert!(
+        matches!(
+            automation_status,
+            super::super::shutdown_coordination::ShutdownStatus::Failed(error)
+                if error.contains("panicked automation owner")
+        ),
+        "automation panic must remain typed"
+    );
+    assert!(
+        matches!(
+            repair_status,
+            super::super::shutdown_coordination::ShutdownStatus::Failed(error)
+                if error.contains("panicked repair owner")
+        ),
+        "repair panic must remain typed"
+    );
     tokio::time::timeout(
         MAINTENANCE_TEST_DEADLINE,
         engine
@@ -656,5 +676,83 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
     assert!(
         completed_without_gate,
         "normal scheduler shutdown must not queue behind unrelated writer administration"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scheduler_cancellation_remains_synchronous_under_registry_contention() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/shutdown-registry-contention-test"),
+            global_db_path: PathBuf::from("/profiles/shutdown-registry-contention-test/global.db"),
+            project_id: Some("shutdown-registry-contention-test".to_owned()),
+            store_root: PathBuf::from("/stores/shutdown-registry-contention-test"),
+            graph_db_path: PathBuf::from("/stores/shutdown-registry-contention-test/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let automation_lifecycle = engine.lifecycle.clone();
+    let (automation_stopped, automation_stopped_rx) = tokio::sync::oneshot::channel();
+    let automation_task = tokio::spawn(async move {
+        automation_lifecycle.wait_for_draining().await;
+        let _ = automation_stopped.send(());
+    });
+    let repair_lifecycle = engine.lifecycle.clone();
+    let (repair_stopped, repair_stopped_rx) = tokio::sync::oneshot::channel();
+    let repair_task = tokio::spawn(async move {
+        repair_lifecycle.wait_for_draining().await;
+        let _ = repair_stopped.send(());
+    });
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(
+            key.clone(),
+            test_automation_scheduler_handle(automation_task),
+        );
+    engine
+        .store_administration
+        .memory_repair_schedulers()
+        .lock()
+        .await
+        .insert(key, MemoryRepairSchedulerHandle::for_test(repair_task));
+
+    let automation_registry = engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await;
+    let repair_registry = engine
+        .store_administration
+        .memory_repair_schedulers()
+        .lock()
+        .await;
+    engine.cancel_automation_schedulers();
+    engine.cancel_memory_repair_schedulers();
+    tokio::time::timeout(std::time::Duration::from_secs(1), automation_stopped_rx)
+        .await
+        .expect("automation task observed synchronous cancellation")
+        .expect("automation task reported cancellation");
+    tokio::time::timeout(std::time::Duration::from_secs(1), repair_stopped_rx)
+        .await
+        .expect("repair task observed synchronous cancellation")
+        .expect("repair task reported cancellation");
+    drop(repair_registry);
+    drop(automation_registry);
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+    assert_eq!(
+        engine.shutdown_automation_schedulers_until(deadline).await,
+        super::super::shutdown_coordination::ShutdownStatus::Clean
+    );
+    assert_eq!(
+        engine
+            .shutdown_memory_repair_schedulers_until(deadline)
+            .await,
+        super::super::shutdown_coordination::ShutdownStatus::Clean
     );
 }
