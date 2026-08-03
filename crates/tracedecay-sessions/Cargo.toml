@@ -35,7 +35,6 @@ tracedecay-runtime-core = { path = "../tracedecay-runtime-core", version = "0.1.
 tracedecay-rusqlite-runtime = { path = "../tracedecay-rusqlite-runtime", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
 tracedecay-temporal-query = { path = "../tracedecay-temporal-query", version = "0.1.0" }
-tracedecay-tool-catalog = { path = "../tracedecay-tool-catalog", version = "0.1.0" }
 url = "2"
 
 [dev-dependencies]
