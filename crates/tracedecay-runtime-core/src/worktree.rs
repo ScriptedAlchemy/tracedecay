@@ -40,17 +40,10 @@ pub struct WorktreeIndexMismatch {
 /// checkout and each linked worktree report their own distinct directory,
 /// which is exactly the distinction this module relies on.
 pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
-    // gix discovery walks up the same way `git rev-parse` does but without
-    // a subprocess spawn. A discovered bare repo (no workdir) matches
-    // `--show-toplevel` failing.
-    if let Ok(repo) = gix::discover(dir) {
-        return realpath(repo.workdir()?);
-    }
-    if !git_may_resolve_repo(dir) {
-        return None;
-    }
-    let trimmed = crate::git::git_capture(dir, &["rev-parse", "--show-toplevel"])?;
-    realpath(Path::new(&trimmed))
+    crate::git_repository::GitRepositoryAuthority::discover(dir)
+        .ok()?
+        .worktree_root()
+        .map(Path::to_path_buf)
 }
 
 /// Absolute, symlink-resolved path to the repository's git common directory.
@@ -58,26 +51,9 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    if let Ok(repo) = gix::discover(dir) {
-        let common_dir = repo.common_dir().to_path_buf();
-        let resolved = if common_dir.is_absolute() {
-            common_dir
-        } else {
-            dir.join(common_dir)
-        };
-        return Some(resolved.canonicalize().unwrap_or(resolved));
-    }
-    if !git_may_resolve_repo(dir) {
-        return None;
-    }
-    let raw = crate::git::git_capture(dir, &["rev-parse", "--git-common-dir"])?;
-    let common_dir = PathBuf::from(raw);
-    let resolved = if common_dir.is_absolute() {
-        common_dir
-    } else {
-        dir.join(common_dir)
-    };
-    Some(resolved.canonicalize().unwrap_or(resolved))
+    crate::git_repository::GitRepositoryAuthority::discover(dir)
+        .ok()
+        .map(|repository| repository.common_dir().to_path_buf())
 }
 
 /// The checkout that owns `dir`'s **repository** identity, or `None` when
@@ -122,22 +98,9 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
     }
-    let resolve = |raw: String| {
-        let path = PathBuf::from(raw);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            dir.join(path)
-        };
-        path.canonicalize().unwrap_or(path)
-    };
-    // Use Git here deliberately: gix can collapse a linked worktree's git
-    // directory onto its common directory, which loses the per-worktree key.
-    let git_dir = resolve(crate::git::git_capture(dir, &["rev-parse", "--git-dir"])?);
-    let common_dir = resolve(crate::git::git_capture(
-        dir,
-        &["rev-parse", "--git-common-dir"],
-    )?);
+    let repository = crate::git_repository::GitRepositoryAuthority::discover(dir).ok()?;
+    let git_dir = repository.git_dir();
+    let common_dir = repository.common_dir();
     let identity = git_dir.strip_prefix(&common_dir).unwrap_or(&git_dir);
     let mut hasher = Sha256::new();
     hasher.update(crate::os_str_bytes::native_os_str_bytes(
