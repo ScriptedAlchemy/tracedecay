@@ -26,7 +26,7 @@ use crate::tracedecay::current_timestamp;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct MemoryCuratorRunBody {
+pub struct MemoryCuratorRunBody {
     #[serde(default = "default_agent_plan_max_clusters")]
     max_clusters: usize,
     #[serde(default = "default_agent_plan_min_confidence")]
@@ -53,7 +53,7 @@ impl From<MemoryCuratorRunBody> for MemoryCuratorRunRequest {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SessionReflectionRunBody {
+pub struct SessionReflectionRunBody {
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
@@ -87,7 +87,7 @@ impl From<SessionReflectionRunBody> for SessionReflectionRunRequest {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SkillWritingRunBody {
+pub struct SkillWritingRunBody {
     provider: Option<String>,
     query: Option<String>,
     evidence_limit: Option<usize>,
@@ -103,7 +103,7 @@ impl From<SkillWritingRunBody> for SkillWritingRunRequest {
     }
 }
 
-pub(crate) async fn memory_curator(
+pub async fn memory_curator(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<MemoryCuratorRunBody>>,
 ) -> (StatusCode, Json<Value>) {
@@ -126,7 +126,7 @@ pub(crate) async fn memory_curator(
     .await
 }
 
-pub(crate) async fn session_reflection(
+pub async fn session_reflection(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<SessionReflectionRunBody>>,
 ) -> (StatusCode, Json<Value>) {
@@ -149,7 +149,7 @@ pub(crate) async fn session_reflection(
     .await
 }
 
-pub(crate) async fn skill_writing(
+pub async fn skill_writing(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<SkillWritingRunBody>>,
 ) -> (StatusCode, Json<Value>) {
@@ -184,7 +184,7 @@ where
     enqueue_dashboard_run(state, task, run_job).await
 }
 
-pub(crate) async fn artifact_list(
+pub async fn artifact_list(
     State(state): State<DashboardState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -207,7 +207,7 @@ pub(crate) async fn artifact_list(
     }
 }
 
-pub(crate) async fn artifact_payload(
+pub async fn artifact_payload(
     State(state): State<DashboardState>,
     AxumPath((run_id, kind)): AxumPath<(String, String)>,
 ) -> (StatusCode, Json<Value>) {

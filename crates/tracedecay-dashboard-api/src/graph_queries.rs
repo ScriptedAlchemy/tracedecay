@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use super::util::{like_pattern, qmarks, query_i64, query_rows};
 
-pub(crate) const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
+pub const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
        start_line, end_line, start_column, end_column, attrs_start_line,
        docstring AS doc, signature, visibility, is_async,
        branches, loops, returns, max_nesting, unsafe_blocks,
@@ -12,7 +12,7 @@ pub(crate) const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path
 /// `NODE_COLUMNS` qualified with the `n.` alias for joined queries
 /// (`edges e JOIN nodes n ...`), where bare `id`/`kind` would be ambiguous
 /// between the two tables.
-pub(crate) const NODE_COLUMNS_N: &str = "n.id, n.kind, n.name, n.qualified_name, n.file_path,
+pub const NODE_COLUMNS_N: &str = "n.id, n.kind, n.name, n.qualified_name, n.file_path,
        n.start_line, n.end_line, n.start_column, n.end_column, n.attrs_start_line,
        n.docstring AS doc, n.signature, n.visibility, n.is_async,
        n.branches, n.loops, n.returns, n.max_nesting, n.unsafe_blocks,
@@ -30,7 +30,7 @@ fn filtered_degree_union_sql(placeholders: &str) -> String {
     )
 }
 
-pub(crate) async fn overview_file_rows(conn: &Connection) -> Vec<Value> {
+pub async fn overview_file_rows(conn: &Connection) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT path, node_count FROM files ORDER BY path ASC",
@@ -40,23 +40,23 @@ pub(crate) async fn overview_file_rows(conn: &Connection) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-pub(crate) async fn total_nodes(conn: &Connection) -> i64 {
+pub async fn total_nodes(conn: &Connection) -> i64 {
     query_i64(conn, "SELECT COUNT(*) FROM nodes", ()).await
 }
 
-pub(crate) async fn total_edges(conn: &Connection) -> i64 {
+pub async fn total_edges(conn: &Connection) -> i64 {
     query_i64(conn, "SELECT COUNT(*) FROM edges", ()).await
 }
 
-pub(crate) async fn total_files(conn: &Connection) -> i64 {
+pub async fn total_files(conn: &Connection) -> i64 {
     query_i64(conn, "SELECT COUNT(*) FROM files", ()).await
 }
 
-pub(crate) async fn max_edge_id(conn: &Connection) -> i64 {
+pub async fn max_edge_id(conn: &Connection) -> i64 {
     query_i64(conn, "SELECT COALESCE(MAX(id), 0) FROM edges", ()).await
 }
 
-pub(crate) async fn node_counts_by_kind(conn: &Connection) -> Vec<Value> {
+pub async fn node_counts_by_kind(conn: &Connection) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT kind, COUNT(*) AS count
@@ -69,7 +69,7 @@ pub(crate) async fn node_counts_by_kind(conn: &Connection) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-pub(crate) async fn edge_counts_by_kind(conn: &Connection) -> Vec<Value> {
+pub async fn edge_counts_by_kind(conn: &Connection) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT kind, COUNT(*) AS count
@@ -82,7 +82,7 @@ pub(crate) async fn edge_counts_by_kind(conn: &Connection) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-pub(crate) async fn largest_files(conn: &Connection) -> Vec<Value> {
+pub async fn largest_files(conn: &Connection) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT path, node_count, size
@@ -95,7 +95,7 @@ pub(crate) async fn largest_files(conn: &Connection) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-pub(crate) async fn first_node_for_query(conn: &Connection, query: &str) -> Option<String> {
+pub async fn first_node_for_query(conn: &Connection, query: &str) -> Option<String> {
     let trimmed = query.trim();
     let like = like_pattern(trimmed);
     let rows = query_rows(
@@ -118,7 +118,7 @@ pub(crate) async fn first_node_for_query(conn: &Connection, query: &str) -> Opti
         .map(ToOwned::to_owned)
 }
 
-pub(crate) async fn search_total(conn: &Connection, query: &str) -> i64 {
+pub async fn search_total(conn: &Connection, query: &str) -> i64 {
     if query.is_empty() {
         total_nodes(conn).await
     } else {
@@ -137,12 +137,7 @@ pub(crate) async fn search_total(conn: &Connection, query: &str) -> i64 {
     }
 }
 
-pub(crate) async fn search_rows(
-    conn: &Connection,
-    query: &str,
-    limit: i64,
-    offset: i64,
-) -> Vec<Value> {
+pub async fn search_rows(conn: &Connection, query: &str, limit: i64, offset: i64) -> Vec<Value> {
     if query.is_empty() {
         query_rows(
             conn,
@@ -184,7 +179,7 @@ pub(crate) async fn search_rows(
     }
 }
 
-pub(crate) async fn node_rows_by_ids(conn: &Connection, ids: &[String]) -> Vec<Value> {
+pub async fn node_rows_by_ids(conn: &Connection, ids: &[String]) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -200,7 +195,7 @@ pub(crate) async fn node_rows_by_ids(conn: &Connection, ids: &[String]) -> Vec<V
         .unwrap_or_default()
 }
 
-pub(crate) async fn edge_rows_for_ids(conn: &Connection, ids: &[String], limit: i64) -> Vec<Value> {
+pub async fn edge_rows_for_ids(conn: &Connection, ids: &[String], limit: i64) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -224,7 +219,7 @@ pub(crate) async fn edge_rows_for_ids(conn: &Connection, ids: &[String], limit: 
         .unwrap_or_default()
 }
 
-pub(crate) async fn degree_rows_for_ids(conn: &Connection, ids: &[String]) -> Vec<Value> {
+pub async fn degree_rows_for_ids(conn: &Connection, ids: &[String]) -> Vec<Value> {
     if ids.is_empty() {
         return Vec::new();
     }
@@ -242,7 +237,7 @@ pub(crate) async fn degree_rows_for_ids(conn: &Connection, ids: &[String]) -> Ve
         .unwrap_or_default()
 }
 
-pub(crate) async fn degree_pool_rows(conn: &Connection, limit: i64) -> Vec<Value> {
+pub async fn degree_pool_rows(conn: &Connection, limit: i64) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -262,7 +257,7 @@ pub(crate) async fn degree_pool_rows(conn: &Connection, limit: i64) -> Vec<Value
     .unwrap_or_default()
 }
 
-pub(crate) async fn top_connected_rows(conn: &Connection) -> Vec<Value> {
+pub async fn top_connected_rows(conn: &Connection) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -283,7 +278,7 @@ pub(crate) async fn top_connected_rows(conn: &Connection) -> Vec<Value> {
     .unwrap_or_default()
 }
 
-pub(crate) async fn node_row(conn: &Connection, node_id: &str) -> Option<Value> {
+pub async fn node_row(conn: &Connection, node_id: &str) -> Option<Value> {
     query_rows(
         conn,
         &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1 LIMIT 1"),
@@ -295,7 +290,7 @@ pub(crate) async fn node_row(conn: &Connection, node_id: &str) -> Option<Value> 
     .next()
 }
 
-pub(crate) async fn node_exists(conn: &Connection, node_id: &str) -> bool {
+pub async fn node_exists(conn: &Connection, node_id: &str) -> bool {
     query_i64(
         conn,
         "SELECT COUNT(*) FROM nodes WHERE id = ?1",
@@ -305,7 +300,7 @@ pub(crate) async fn node_exists(conn: &Connection, node_id: &str) -> bool {
         > 0
 }
 
-pub(crate) async fn caller_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
+pub async fn caller_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -322,7 +317,7 @@ pub(crate) async fn caller_rows(conn: &Connection, node_id: &str, limit: i64) ->
     .unwrap_or_default()
 }
 
-pub(crate) async fn callee_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
+pub async fn callee_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
     query_rows(
         conn,
         &format!(
@@ -339,11 +334,7 @@ pub(crate) async fn callee_rows(conn: &Connection, node_id: &str, limit: i64) ->
     .unwrap_or_default()
 }
 
-pub(crate) async fn neighborhood_edge_rows(
-    conn: &Connection,
-    node_id: &str,
-    limit: i64,
-) -> Vec<Value> {
+pub async fn neighborhood_edge_rows(conn: &Connection, node_id: &str, limit: i64) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT e.source, e.target, e.kind, e.line,
@@ -361,7 +352,7 @@ pub(crate) async fn neighborhood_edge_rows(
     .unwrap_or_default()
 }
 
-pub(crate) async fn neighborhood_edge_counts(conn: &Connection, node_id: &str) -> Vec<Value> {
+pub async fn neighborhood_edge_counts(conn: &Connection, node_id: &str) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT kind, COUNT(*) AS count
@@ -375,7 +366,7 @@ pub(crate) async fn neighborhood_edge_counts(conn: &Connection, node_id: &str) -
     .unwrap_or_default()
 }
 
-pub(crate) async fn subgraph_candidate_rows(conn: &Connection, seed_id: &str) -> Vec<Value> {
+pub async fn subgraph_candidate_rows(conn: &Connection, seed_id: &str) -> Vec<Value> {
     query_rows(
         conn,
         "SELECT id, MIN(rank) AS rank
@@ -392,7 +383,7 @@ pub(crate) async fn subgraph_candidate_rows(conn: &Connection, seed_id: &str) ->
     .unwrap_or_default()
 }
 
-pub(crate) async fn frontier_edge_rows(conn: &Connection, frontier: &[String]) -> Vec<Value> {
+pub async fn frontier_edge_rows(conn: &Connection, frontier: &[String]) -> Vec<Value> {
     if frontier.is_empty() {
         return Vec::new();
     }

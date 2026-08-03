@@ -57,14 +57,14 @@ fn err(status: StatusCode, message: impl Into<String>) -> LcmResponse {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct OverviewParams {
+pub struct OverviewParams {
     #[serde(default)]
     q: String,
     limit: Option<i64>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct PayloadHealthParams {
+pub struct PayloadHealthParams {
     #[serde(default)]
     provider: String,
     #[serde(default)]
@@ -74,7 +74,7 @@ pub(crate) struct PayloadHealthParams {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct PayloadGcApplyRequest {
+pub struct PayloadGcApplyRequest {
     #[serde(default)]
     provider: String,
     #[serde(default)]
@@ -85,7 +85,7 @@ pub(crate) struct PayloadGcApplyRequest {
 }
 
 /// `GET /api/plugins/hermes-lcm/overview`
-pub(crate) async fn overview(
+pub async fn overview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> LcmResult {
@@ -118,7 +118,7 @@ pub(crate) async fn overview(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SearchParams {
+pub struct SearchParams {
     #[serde(default)]
     q: String,
     limit: Option<i64>,
@@ -136,7 +136,7 @@ pub(crate) struct SearchParams {
 }
 
 /// `GET /api/plugins/hermes-lcm/search`
-pub(crate) async fn search(
+pub async fn search(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> LcmResult {
@@ -162,7 +162,7 @@ pub(crate) async fn search(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SessionParams {
+pub struct SessionParams {
     limit: Option<i64>,
     offset: Option<i64>,
     #[serde(default)]
@@ -170,7 +170,7 @@ pub(crate) struct SessionParams {
 }
 
 /// `GET /api/plugins/hermes-lcm/session/{session_id}`
-pub(crate) async fn session(
+pub async fn session(
     State(state): State<DashboardState>,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
@@ -185,7 +185,7 @@ pub(crate) async fn session(
 
 /// `GET /api/plugins/hermes-lcm/node/{node_id}` — a summary node plus the
 /// exact source items it covers (lossless expand).
-pub(crate) async fn node(
+pub async fn node(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
 ) -> LcmResult {
@@ -194,7 +194,7 @@ pub(crate) async fn node(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct TimelineParams {
+pub struct TimelineParams {
     #[serde(default)]
     bucket: String,
     #[serde(default)]
@@ -203,7 +203,7 @@ pub(crate) struct TimelineParams {
 }
 
 /// `GET /api/plugins/hermes-lcm/timeline`
-pub(crate) async fn timeline(
+pub async fn timeline(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<TimelineParams>,
 ) -> LcmResult {
@@ -214,14 +214,14 @@ pub(crate) async fn timeline(
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CompressionParams {
+pub struct CompressionParams {
     #[serde(default)]
     by: String,
     limit: Option<i64>,
 }
 
 /// `GET /api/plugins/hermes-lcm/compression`
-pub(crate) async fn compression(
+pub async fn compression(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<CompressionParams>,
 ) -> LcmResult {
@@ -232,7 +232,7 @@ pub(crate) async fn compression(
 }
 
 /// `GET /api/plugins/hermes-lcm/payloads/health`
-pub(crate) async fn payloads_health(
+pub async fn payloads_health(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<PayloadHealthParams>,
 ) -> LcmResult {
@@ -290,7 +290,7 @@ pub(crate) async fn payloads_health(
 }
 
 /// `GET /api/plugins/hermes-lcm/payloads/gc`
-pub(crate) async fn payloads_gc_preview(
+pub async fn payloads_gc_preview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<PayloadHealthParams>,
 ) -> LcmResult {
@@ -349,7 +349,7 @@ pub(crate) async fn payloads_gc_preview(
 }
 
 /// `POST /api/plugins/hermes-lcm/payloads/gc`
-pub(crate) async fn payloads_gc_apply(
+pub async fn payloads_gc_apply(
     State(state): State<DashboardState>,
     Json(body): Json<PayloadGcApplyRequest>,
 ) -> LcmResult {

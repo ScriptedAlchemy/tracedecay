@@ -335,7 +335,19 @@ pub(super) async fn handle_analytics(
             .query_analytics_hint_counts(scope.filter.as_deref(), since)
             .await
             .map_err(config_error)?;
-        let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&counts);
+        let dashboard_counts = counts
+            .iter()
+            .map(
+                |count| crate::dashboard::analytics_api::DashboardHintCount {
+                    category: count.category.clone(),
+                    emitted: count.emitted,
+                    followed: count.followed,
+                    ignored: count.ignored,
+                    suppressed: count.suppressed,
+                },
+            )
+            .collect::<Vec<_>>();
+        let hints = crate::dashboard::analytics_api::hint_summary_from_counts(&dashboard_counts);
         if let Some(object) = value.as_object_mut() {
             object.insert("hints".to_string(), hints);
         }

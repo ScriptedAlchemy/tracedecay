@@ -12,17 +12,17 @@ use crate::automation::fact_proposals::{
 };
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ListParams {
+pub struct ListParams {
     state: Option<String>,
     limit: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-pub(crate) struct RejectBody {
+pub struct RejectBody {
     reason: Option<String>,
 }
 
-pub(crate) async fn list(
+pub async fn list(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<ListParams>,
 ) -> (StatusCode, Json<Value>) {
@@ -56,7 +56,7 @@ pub(crate) async fn list(
     }
 }
 
-pub(crate) async fn view(
+pub async fn view(
     State(state): State<DashboardState>,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -73,7 +73,7 @@ pub(crate) async fn view(
     }
 }
 
-pub(crate) async fn apply(
+pub async fn apply(
     State(state): State<DashboardState>,
     AxumPath(id): AxumPath<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -102,7 +102,7 @@ pub(crate) async fn apply(
     }
 }
 
-pub(crate) async fn reject(
+pub async fn reject(
     State(state): State<DashboardState>,
     AxumPath(id): AxumPath<String>,
     body: Option<axum::extract::Json<RejectBody>>,

@@ -41,7 +41,7 @@ const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Cache TTL before a background refresh is attempted: 24 hours.
-pub(crate) const CACHE_TTL_SECS: i64 = 86_400;
+pub const CACHE_TTL_SECS: i64 = 86_400;
 
 /// Set to `1` to disable all network access for pricing.
 const OFFLINE_ENV: &str = "TRACEDECAY_OFFLINE";
@@ -57,21 +57,21 @@ const FALLBACK_JSON: &str = include_str!("model_prices_fallback.json");
 // The shared postfix is the unit; these names are the API contract the
 // frontend price table consumes verbatim.
 #[allow(clippy::struct_field_names)]
-pub(crate) struct ModelPrice {
-    pub(crate) prompt_per_mtok: f64,
-    pub(crate) completion_per_mtok: f64,
-    pub(crate) cache_read_per_mtok: Option<f64>,
-    pub(crate) cache_write_per_mtok: Option<f64>,
+pub struct ModelPrice {
+    pub prompt_per_mtok: f64,
+    pub completion_per_mtok: f64,
+    pub cache_read_per_mtok: Option<f64>,
+    pub cache_write_per_mtok: Option<f64>,
 }
 
 /// A loaded pricing table plus provenance for honest UI labeling.
-pub(crate) struct PriceTable {
+pub struct PriceTable {
     /// `OpenRouter` slug (e.g. `anthropic/claude-fable-5`) → per-MTok prices.
-    pub(crate) models: BTreeMap<String, ModelPrice>,
+    pub models: BTreeMap<String, ModelPrice>,
     /// `"cache"` (disk copy of a live fetch) or `"fallback"` (bundled snapshot).
-    pub(crate) source: &'static str,
+    pub source: &'static str,
     /// Unix mtime of the cache file backing the table (None for the snapshot).
-    pub(crate) fetched_at: Option<i64>,
+    pub fetched_at: Option<i64>,
 }
 
 fn cache_path() -> Option<PathBuf> {
@@ -106,7 +106,7 @@ fn price_per_mtok(pricing: &Value, key: &str) -> Option<f64> {
 /// Parses an `OpenRouter` `/api/v1/models` response (or the bundled snapshot,
 /// which uses the identical shape) into a slug → price map. Returns `None`
 /// when nothing usable was found, so callers never cache garbage.
-pub(crate) fn parse_openrouter_json(body: &str) -> Option<BTreeMap<String, ModelPrice>> {
+pub fn parse_openrouter_json(body: &str) -> Option<BTreeMap<String, ModelPrice>> {
     let parsed: Value = serde_json::from_str(body).ok()?;
     let entries = parsed.get("data")?.as_array()?;
 
@@ -159,7 +159,7 @@ fn file_mtime_unix(path: &std::path::Path) -> Option<i64> {
 /// Loads the current pricing table: disk cache first (served even when
 /// stale), bundled snapshot otherwise. Cheap enough to call per request —
 /// the dashboard is a local single-user server.
-pub(crate) fn load_table() -> PriceTable {
+pub fn load_table() -> PriceTable {
     if let Some(path) = cache_path() {
         if let Ok(body) = std::fs::read_to_string(&path) {
             if let Some(models) = parse_openrouter_json(&body) {
@@ -194,7 +194,10 @@ fn cache_is_stale() -> bool {
 /// Best-effort: validates the payload before writing, returns `false` on any
 /// failure (offline, timeout, bad body, unwritable cache).
 fn refresh_pricing_blocking() -> bool {
-    let agent = crate::cloud::agent_with_timeout(FETCH_TIMEOUT);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(FETCH_TIMEOUT))
+        .build()
+        .into();
     let Ok(mut resp) = agent.get(OPENROUTER_MODELS_URL).call() else {
         return false;
     };
@@ -216,7 +219,7 @@ fn refresh_pricing_blocking() -> bool {
 /// Kicks off at most one background pricing refresh per process, and only
 /// when the cache is stale and networking is allowed. Requests keep serving
 /// the cached/static table while this runs — the fetch never blocks anyone.
-pub(crate) fn ensure_background_refresh() {
+pub fn ensure_background_refresh() {
     static STARTED: AtomicBool = AtomicBool::new(false);
     if offline() || !cache_is_stale() {
         return;
@@ -232,7 +235,7 @@ pub(crate) fn ensure_background_refresh() {
 }
 
 /// JSON payload for `GET /api/plugins/savings/pricing`.
-pub(crate) fn pricing_payload() -> Value {
+pub fn pricing_payload() -> Value {
     let table = load_table();
     let mut models = Map::new();
     for (slug, price) in &table.models {

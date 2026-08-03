@@ -28,7 +28,7 @@ use crate::memory::trust::DEFAULT_MIN_TRUST;
 use crate::memory::types::{MemoryFeedbackFunnel, MemoryRepairStats, MemoryStatus};
 
 #[derive(Deserialize)]
-pub(crate) struct OverviewParams {
+pub struct OverviewParams {
     #[serde(default)]
     q: String,
     limit: Option<i64>,
@@ -36,51 +36,51 @@ pub(crate) struct OverviewParams {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct ProjectionParams {
+pub struct ProjectionParams {
     #[serde(default)]
     q: String,
     limit: Option<i64>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SimilarityParams {
+pub struct SimilarityParams {
     min_similarity: Option<f64>,
     limit: Option<i64>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct LimitParams {
+pub struct LimitParams {
     limit: Option<i64>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct FactProposalParams {
+pub struct FactProposalParams {
     state: Option<String>,
     limit: Option<i64>,
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct FactProposalApplyBody {
+pub struct FactProposalApplyBody {
     reviewer: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
-pub(crate) struct FactProposalRejectBody {
+pub struct FactProposalRejectBody {
     reviewer: Option<String>,
     reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CurateApplyBody {
+pub struct CurateApplyBody {
     ops: Vec<Value>,
 }
 
-pub(crate) fn default_agent_plan_max_clusters() -> usize {
-    crate::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS
+pub fn default_agent_plan_max_clusters() -> usize {
+    super::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS
 }
 
-pub(crate) fn default_agent_plan_min_confidence() -> f64 {
-    crate::dashboard::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE
+pub fn default_agent_plan_min_confidence() -> f64 {
+    super::memory_curate::CURATION_DEFAULT_MIN_CONFIDENCE
 }
 
 async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> {
@@ -95,9 +95,7 @@ async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> 
     Ok(row.get::<i64>(0).unwrap_or(0).max(0))
 }
 
-pub(crate) async fn repair_derived_memory(
-    state: &DashboardState,
-) -> Result<MemoryRepairStats, String> {
+pub async fn repair_derived_memory(state: &DashboardState) -> Result<MemoryRepairStats, String> {
     let store = MemoryStore::new(&state.mem_conn);
     let mut missing_vectors_repaired = 0;
     loop {
@@ -288,7 +286,7 @@ async fn fact_trust_history_payload(
 }
 
 /// `GET /api/plugins/holographic/` — overview + facts + entities + graph.
-pub(crate) async fn overview(
+pub async fn overview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<OverviewParams>,
 ) -> Json<Value> {
@@ -333,7 +331,7 @@ pub(crate) async fn overview(
 /// `GET /api/plugins/holographic/status` — rich holographic-memory health
 /// derived from `TraceDecay::memory_status()` plus the largest-bank utilization
 /// that operators need for the dashboard health card.
-pub(crate) async fn status(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
+pub async fn status(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
     match memory_status_payload(&state).await {
         Ok(payload) => (StatusCode::OK, Json(payload)),
         Err(e) => (
@@ -350,7 +348,7 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> (StatusCode, 
 /// List and projection payloads truncate `content` to 200 chars to keep them
 /// light; detail panels (e.g. the Semantic Map's pinned card) fetch the
 /// complete row — plus linked entities — from here.
-pub(crate) async fn fact_detail(
+pub async fn fact_detail(
     State(state): State<DashboardState>,
     JsonPath(fact_id): JsonPath<i64>,
 ) -> (StatusCode, Json<Value>) {
@@ -366,7 +364,7 @@ pub(crate) async fn fact_detail(
 
 /// `GET /api/plugins/holographic/fact/{fact_id}/trust-history` — append-only
 /// feedback audit rows explaining how a fact's trust changed over time.
-pub(crate) async fn fact_trust_history(
+pub async fn fact_trust_history(
     State(state): State<DashboardState>,
     JsonPath(fact_id): JsonPath<i64>,
 ) -> (StatusCode, Json<Value>) {
@@ -387,7 +385,7 @@ pub(crate) async fn fact_trust_history(
 
 /// `GET /api/plugins/holographic/projection` — 2D PCA of phase vectors,
 /// embedded as `[cos(p), sin(p)]` so wrapped phases compare correctly.
-pub(crate) async fn projection(
+pub async fn projection(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<ProjectionParams>,
 ) -> Json<Value> {
@@ -401,7 +399,7 @@ pub(crate) async fn projection(
 /// `min_similarity` is the single floor parameter; the response still emits
 /// the same value under both the `min_similarity` and legacy `threshold`
 /// keys so the payload shape is unchanged.
-pub(crate) async fn similarity(
+pub async fn similarity(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SimilarityParams>,
 ) -> Json<Value> {
@@ -414,12 +412,12 @@ pub(crate) async fn similarity(
 }
 
 /// `GET /api/plugins/holographic/curation/status` — similarity-dedup curator status.
-pub(crate) async fn curation_status(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn curation_status(State(state): State<DashboardState>) -> Json<Value> {
     Json(memory_service::curation_status_payload(&state).await)
 }
 
 /// `GET /api/plugins/holographic/curation/activity` — recent deterministic curator events.
-pub(crate) async fn curation_activity(
+pub async fn curation_activity(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {
@@ -429,7 +427,7 @@ pub(crate) async fn curation_activity(
 
 /// `GET /api/plugins/holographic/curation/runs` — recent standalone
 /// automation backend runs, loaded from the append-only project sidecar ledger.
-pub(crate) async fn curation_runs(
+pub async fn curation_runs(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {
@@ -455,7 +453,7 @@ pub(crate) async fn curation_runs(
 
 /// `GET /api/plugins/holographic/fact-proposals` — session-reflector fact
 /// proposal telemetry, plus historical applied/rejected decisions.
-pub(crate) async fn fact_proposals(
+pub async fn fact_proposals(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<FactProposalParams>,
 ) -> (StatusCode, Json<Value>) {
@@ -489,7 +487,7 @@ pub(crate) async fn fact_proposals(
 
 /// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/apply` —
 /// applies a stored session-reflector fact proposal.
-pub(crate) async fn fact_proposal_apply(
+pub async fn fact_proposal_apply(
     State(state): State<DashboardState>,
     Path(proposal_id): Path<String>,
     body: Option<axum::extract::Json<FactProposalApplyBody>>,
@@ -523,7 +521,7 @@ pub(crate) async fn fact_proposal_apply(
 
 /// `POST /api/plugins/holographic/fact-proposals/{proposal_id}/reject` —
 /// explicit rejection for a pending session-reflector proposal.
-pub(crate) async fn fact_proposal_reject(
+pub async fn fact_proposal_reject(
     State(state): State<DashboardState>,
     Path(proposal_id): Path<String>,
     body: Option<axum::extract::Json<FactProposalRejectBody>>,
@@ -591,7 +589,7 @@ fn fact_proposal_error(err: &crate::errors::TraceDecayError) -> (StatusCode, Jso
 /// Per-op failures are reported in `results` (status stays 200); the request
 /// only fails wholesale on a malformed body. External planners (e.g. the
 /// LLM-backed Hermes wrapper) build against this contract.
-pub(crate) async fn curate_apply(
+pub async fn curate_apply(
     State(state): State<DashboardState>,
     body: Option<axum::extract::Json<CurateApplyBody>>,
 ) -> (StatusCode, Json<Value>) {
@@ -616,7 +614,7 @@ pub(crate) async fn curate_apply(
 /// store mutation paths (add/update/remove/feedback) and curation applies.
 /// `detail_json` never carries fact content beyond what the op needs
 /// (deletes record a content hash, not the content).
-pub(crate) async fn oplog(
+pub async fn oplog(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<LimitParams>,
 ) -> Json<Value> {

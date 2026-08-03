@@ -6,9 +6,9 @@ use super::DashboardState;
 use super::util::{like_pattern, query_rows};
 use crate::memory::encoding::HolographicEncoder;
 
-pub(crate) type VectorStateFingerprint = (i64, i64, i64, u64);
+pub type VectorStateFingerprint = (i64, i64, i64, u64);
 
-pub(crate) fn normalize_fact_metadata(mut row: Value) -> Value {
+pub fn normalize_fact_metadata(mut row: Value) -> Value {
     if let Some(obj) = row.as_object_mut() {
         if let Some(raw) = obj.get("metadata").and_then(Value::as_str) {
             let parsed = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
@@ -18,7 +18,7 @@ pub(crate) fn normalize_fact_metadata(mut row: Value) -> Value {
     row
 }
 
-pub(crate) async fn fact_rows(
+pub async fn fact_rows(
     state: &DashboardState,
     query: &str,
     limit: i64,
@@ -56,7 +56,7 @@ pub(crate) async fn fact_rows(
     Ok(rows.into_iter().map(normalize_fact_metadata).collect())
 }
 
-pub(crate) async fn entity_rows(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
+pub async fn entity_rows(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT e.entity_id, e.name, e.entity_type, e.aliases, e.created_at,
@@ -71,7 +71,7 @@ pub(crate) async fn entity_rows(state: &DashboardState, limit: i64) -> Result<Ve
     .await
 }
 
-pub(crate) async fn trust_histogram_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn trust_histogram_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT MIN(CAST(MAX(MIN(trust_score, 1.0), 0.0) * 10.0 AS INTEGER), 9) AS bucket,
@@ -84,7 +84,7 @@ pub(crate) async fn trust_histogram_rows(state: &DashboardState) -> Result<Vec<V
     .await
 }
 
-pub(crate) async fn overview_categories(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn overview_categories(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT category, COUNT(*) AS count, AVG(trust_score) AS avg_trust
@@ -96,7 +96,7 @@ pub(crate) async fn overview_categories(state: &DashboardState) -> Result<Vec<Va
     .await
 }
 
-pub(crate) async fn overview_category_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn overview_category_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT category,
@@ -110,7 +110,7 @@ pub(crate) async fn overview_category_rows(state: &DashboardState) -> Result<Vec
     .await
 }
 
-pub(crate) async fn overview_bank_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn overview_bank_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT bank_name, fact_count, hrr_dim AS dim, updated_at FROM memory_banks",
@@ -119,7 +119,7 @@ pub(crate) async fn overview_bank_rows(state: &DashboardState) -> Result<Vec<Val
     .await
 }
 
-pub(crate) async fn overview_entity_types(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn overview_entity_types(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT e.entity_type, COUNT(DISTINCT e.entity_id) AS count
@@ -132,7 +132,7 @@ pub(crate) async fn overview_entity_types(state: &DashboardState) -> Result<Vec<
     .await
 }
 
-pub(crate) async fn live_memory_banks(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn live_memory_banks(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT b.bank_id, b.bank_name, b.hrr_dim AS dim,
@@ -150,7 +150,7 @@ pub(crate) async fn live_memory_banks(state: &DashboardState) -> Result<Vec<Valu
     .await
 }
 
-pub(crate) async fn growth_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn growth_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "WITH bounds AS (
@@ -184,7 +184,7 @@ pub(crate) async fn growth_rows(state: &DashboardState) -> Result<Vec<Value>, St
     .await
 }
 
-pub(crate) async fn graph_entity_rows(
+pub async fn graph_entity_rows(
     state: &DashboardState,
     fact_ids: &[i64],
 ) -> Result<Vec<Value>, String> {
@@ -206,7 +206,7 @@ pub(crate) async fn graph_entity_rows(
     query_rows(&state.mem_conn, &sql, params).await
 }
 
-pub(crate) async fn graph_bank_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
+pub async fn graph_bank_rows(state: &DashboardState) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT bank_name, hrr_dim AS dim, fact_count, updated_at
@@ -218,7 +218,7 @@ pub(crate) async fn graph_bank_rows(state: &DashboardState) -> Result<Vec<Value>
     .await
 }
 
-pub(crate) async fn fact_detail_row(
+pub async fn fact_detail_row(
     state: &DashboardState,
     fact_id: i64,
 ) -> Result<Option<Value>, String> {
@@ -237,10 +237,7 @@ pub(crate) async fn fact_detail_row(
     Ok(rows.into_iter().next().map(normalize_fact_metadata))
 }
 
-pub(crate) async fn fact_entities(
-    state: &DashboardState,
-    fact_id: i64,
-) -> Result<Vec<Value>, String> {
+pub async fn fact_entities(state: &DashboardState, fact_id: i64) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT e.entity_id, e.name, e.entity_type
@@ -253,7 +250,7 @@ pub(crate) async fn fact_entities(
     .await
 }
 
-pub(crate) async fn vector_facts(
+pub async fn vector_facts(
     state: &DashboardState,
     query: &str,
     limit: i64,
@@ -357,7 +354,7 @@ pub(crate) async fn vector_facts(
     Ok(out)
 }
 
-pub(crate) async fn vector_state_fingerprint(
+pub async fn vector_state_fingerprint(
     state: &DashboardState,
 ) -> Result<VectorStateFingerprint, String> {
     let mut rows = state
@@ -396,7 +393,7 @@ pub(crate) async fn vector_state_fingerprint(
     Ok((count, max_updated_at, sum_fact_id, hasher.finish()))
 }
 
-pub(crate) async fn oplog_rows(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
+pub async fn oplog_rows(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
     query_rows(
         &state.mem_conn,
         "SELECT id, ts, op, fact_id, detail_json

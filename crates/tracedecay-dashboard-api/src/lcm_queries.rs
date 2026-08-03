@@ -2,10 +2,10 @@ use serde_json::Value;
 
 use super::util::{qmarks, query_i64, query_rows};
 
-pub(crate) const MESSAGE_TOKEN_ESTIMATE_EXPR: &str =
+pub const MESSAGE_TOKEN_ESTIMATE_EXPR: &str =
     "(LENGTH(COALESCE(content, snippet_text, '')) + 3) / 4";
 
-pub(crate) const NODE_COLUMNS: &str = "n.node_id,
+pub const NODE_COLUMNS: &str = "n.node_id,
        n.session_id,
        n.depth,
        COALESCE(
@@ -26,7 +26,7 @@ pub(crate) const NODE_COLUMNS: &str = "n.node_id,
        COALESCE(n.expand_hint, '') AS expand_hint,
        n.summary_text AS summary";
 
-pub(crate) fn message_columns() -> String {
+pub fn message_columns() -> String {
     format!(
         "m.store_id,
        m.session_id,
@@ -48,7 +48,7 @@ pub(crate) fn message_columns() -> String {
     )
 }
 
-pub(crate) async fn invalid_summary_metadata_node(
+pub async fn invalid_summary_metadata_node(
     conn: &libsql::Connection,
 ) -> Result<Option<String>, String> {
     let rows = query_rows(
@@ -68,7 +68,7 @@ pub(crate) async fn invalid_summary_metadata_node(
     }))
 }
 
-pub(crate) async fn overview_role_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
+pub async fn overview_role_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
         "SELECT role, COUNT(*) AS count
@@ -80,9 +80,7 @@ pub(crate) async fn overview_role_counts(conn: &libsql::Connection) -> Result<Ve
     .await
 }
 
-pub(crate) async fn overview_source_counts(
-    conn: &libsql::Connection,
-) -> Result<Vec<Value>, String> {
+pub async fn overview_source_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
         "SELECT CASE WHEN provider IS NULL OR TRIM(provider) = '' THEN 'unknown' ELSE provider END AS source,
@@ -95,7 +93,7 @@ pub(crate) async fn overview_source_counts(
     .await
 }
 
-pub(crate) async fn overview_depth_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
+pub async fn overview_depth_counts(conn: &libsql::Connection) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
         "SELECT depth, COUNT(*) AS count
@@ -107,10 +105,7 @@ pub(crate) async fn overview_depth_counts(conn: &libsql::Connection) -> Result<V
     .await
 }
 
-pub(crate) async fn latest_sessions(
-    conn: &libsql::Connection,
-    limit: i64,
-) -> Result<Vec<Value>, String> {
+pub async fn latest_sessions(conn: &libsql::Connection, limit: i64) -> Result<Vec<Value>, String> {
     query_rows(
         conn,
         "SELECT session_id,
@@ -126,7 +121,7 @@ pub(crate) async fn latest_sessions(
     .await
 }
 
-pub(crate) async fn latest_summary_nodes(
+pub async fn latest_summary_nodes(
     conn: &libsql::Connection,
     limit: i64,
 ) -> Result<Vec<Value>, String> {
@@ -139,7 +134,7 @@ pub(crate) async fn latest_summary_nodes(
     query_rows(conn, &sql, libsql::params![limit]).await
 }
 
-pub(crate) async fn overview_message_matches(
+pub async fn overview_message_matches(
     conn: &libsql::Connection,
     like: &str,
     limit: i64,
@@ -157,7 +152,7 @@ pub(crate) async fn overview_message_matches(
     query_rows(conn, &sql, libsql::params![like.to_string(), limit]).await
 }
 
-pub(crate) async fn overview_summary_node_matches(
+pub async fn overview_summary_node_matches(
     conn: &libsql::Connection,
     like: &str,
     limit: i64,
@@ -174,7 +169,7 @@ pub(crate) async fn overview_summary_node_matches(
     query_rows(conn, &sql, libsql::params![like.to_string(), limit]).await
 }
 
-pub(crate) async fn search_message_fts(
+pub async fn search_message_fts(
     conn: &libsql::Connection,
     expr: &str,
     facet_clauses: &[String],
@@ -212,7 +207,7 @@ pub(crate) async fn search_message_fts(
     Ok((rows, total))
 }
 
-pub(crate) async fn search_message_like(
+pub async fn search_message_like(
     conn: &libsql::Connection,
     like: &str,
     facet_clauses: &[String],
@@ -254,7 +249,7 @@ pub(crate) async fn search_message_like(
     Ok((rows, total))
 }
 
-pub(crate) async fn search_node_fts(
+pub async fn search_node_fts(
     conn: &libsql::Connection,
     expr: &str,
     node_clauses: &[String],
@@ -293,7 +288,7 @@ pub(crate) async fn search_node_fts(
     Ok((rows, total))
 }
 
-pub(crate) async fn search_node_like(
+pub async fn search_node_like(
     conn: &libsql::Connection,
     like: &str,
     node_clauses: &[String],
@@ -332,7 +327,7 @@ pub(crate) async fn search_node_like(
     Ok((rows, total))
 }
 
-pub(crate) async fn session_messages(
+pub async fn session_messages(
     conn: &libsql::Connection,
     session_id: &str,
     order: &str,
@@ -355,7 +350,7 @@ pub(crate) async fn session_messages(
     .await
 }
 
-pub(crate) async fn session_summary_nodes(
+pub async fn session_summary_nodes(
     conn: &libsql::Connection,
     session_id: &str,
     limit: i64,
@@ -377,10 +372,7 @@ pub(crate) async fn session_summary_nodes(
     .await
 }
 
-pub(crate) async fn node_row(
-    conn: &libsql::Connection,
-    node_id: &str,
-) -> Result<Option<Value>, String> {
+pub async fn node_row(conn: &libsql::Connection, node_id: &str) -> Result<Option<Value>, String> {
     let sql = format!(
         "SELECT {NODE_COLUMNS},
                 n.source_time_start AS earliest_at,
@@ -399,7 +391,7 @@ pub(crate) async fn node_row(
     Ok(rows.into_iter().next())
 }
 
-pub(crate) async fn node_source_rows(
+pub async fn node_source_rows(
     conn: &libsql::Connection,
     node_id: &str,
 ) -> Result<Vec<Value>, String> {
@@ -414,7 +406,7 @@ pub(crate) async fn node_source_rows(
     .await
 }
 
-pub(crate) async fn child_summary_nodes(
+pub async fn child_summary_nodes(
     conn: &libsql::Connection,
     child_node_ids: &[String],
 ) -> Result<Vec<Value>, String> {
@@ -437,7 +429,7 @@ pub(crate) async fn child_summary_nodes(
     query_rows(conn, &sql, params).await
 }
 
-pub(crate) async fn source_messages(
+pub async fn source_messages(
     conn: &libsql::Connection,
     message_ids: &[i64],
 ) -> Result<Vec<Value>, String> {
@@ -459,7 +451,7 @@ pub(crate) async fn source_messages(
     query_rows(conn, &sql, params).await
 }
 
-pub(crate) async fn timeline_message_buckets(
+pub async fn timeline_message_buckets(
     conn: &libsql::Connection,
     fmt: &str,
     session_id: Option<&str>,
@@ -487,7 +479,7 @@ pub(crate) async fn timeline_message_buckets(
     }
 }
 
-pub(crate) async fn timeline_undated_messages(
+pub async fn timeline_undated_messages(
     conn: &libsql::Connection,
     session_id: Option<&str>,
 ) -> Result<Vec<Value>, String> {
@@ -509,7 +501,7 @@ pub(crate) async fn timeline_undated_messages(
     }
 }
 
-pub(crate) async fn timeline_summary_buckets(
+pub async fn timeline_summary_buckets(
     conn: &libsql::Connection,
     fmt: &str,
     session_id: Option<&str>,
@@ -536,7 +528,7 @@ pub(crate) async fn timeline_summary_buckets(
     }
 }
 
-pub(crate) async fn compression_groups(
+pub async fn compression_groups(
     conn: &libsql::Connection,
     by_node: bool,
     limit: i64,

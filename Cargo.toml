@@ -65,7 +65,7 @@ default = ["full", "token-counting"]
 # Embeds the o200k_base/cl100k_base vocabularies (~4 MB of binary weight);
 # vocab decoding is lazy (first count pays it, idle servers never do).
 # Disable for a leaner binary — cost estimation falls back to chars/4.
-token-counting = ["dep:tiktoken-rs"]
+token-counting = ["dep:tiktoken-rs", "tracedecay-dashboard-api/token-counting"]
 
 # Lite tier (11 languages) — always compiled, no feature flag needed:
 # Rust, Go, Java, Scala, TypeScript/JavaScript, Python, C, C++, Kotlin, C#, Swift

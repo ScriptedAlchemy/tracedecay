@@ -29,7 +29,7 @@ type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CreateJobBody {
+pub struct CreateJobBody {
     #[serde(default)]
     id: Option<String>,
     name: String,
@@ -53,7 +53,7 @@ pub(crate) struct CreateJobBody {
 #[allow(clippy::option_option)]
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PatchJobBody {
+pub struct PatchJobBody {
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -87,17 +87,14 @@ fn default_true() -> bool {
     true
 }
 
-pub(crate) async fn list(State(state): State<DashboardState>) -> ApiResult {
+pub async fn list(State(state): State<DashboardState>) -> ApiResult {
     let jobs = load_jobs(&state.dashboard_root)
         .await
         .map_err(|err| internal_error(&err))?;
     Ok(Json(json!({ "jobs": jobs, "count": jobs.len() })))
 }
 
-pub(crate) async fn create(
-    State(state): State<DashboardState>,
-    Json(body): Json<Value>,
-) -> ApiResult {
+pub async fn create(State(state): State<DashboardState>, Json(body): Json<Value>) -> ApiResult {
     let body = serde_json::from_value::<CreateJobBody>(body)
         .map_err(|err| bad_request(&format!("invalid job: {err}")))?;
     let now = current_timestamp();
@@ -134,7 +131,7 @@ pub(crate) async fn create(
     Ok(Json(json!({ "job": job })))
 }
 
-pub(crate) async fn view(
+pub async fn view(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> ApiResult {
@@ -142,7 +139,7 @@ pub(crate) async fn view(
     Ok(Json(json!({ "job": job })))
 }
 
-pub(crate) async fn update(
+pub async fn update(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
     Json(body): Json<Value>,
@@ -192,7 +189,7 @@ pub(crate) async fn update(
     Ok(Json(json!({ "job": updated })))
 }
 
-pub(crate) async fn delete(
+pub async fn delete(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> ApiResult {
@@ -211,7 +208,7 @@ pub(crate) async fn delete(
     Ok(Json(json!({ "deleted": job_id })))
 }
 
-pub(crate) async fn run(
+pub async fn run(
     State(state): State<DashboardState>,
     AxumPath(job_id): AxumPath<String>,
 ) -> std::result::Result<(StatusCode, Json<Value>), JsonError> {

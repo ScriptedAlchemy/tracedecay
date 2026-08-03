@@ -23,12 +23,11 @@ use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
 use super::util::{qmarks, query_rows};
-use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
+use super::{DashboardAccountingMode, DashboardState, code_diagnostics_broker, token_count};
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 use crate::memory::types::MemoryGroomingOperation;
-use crate::tracedecay::TraceDecay;
 
 pub const CURATION_DEFAULT_MAX_CLUSTERS: usize = 12;
 pub const CURATION_DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
@@ -123,43 +122,6 @@ impl Default for MemoryCurateOptions {
     }
 }
 
-/// Minimal dashboard state over the project memory store — no LCM store,
-/// savings DB, or token-count cache warmup (those belong to the server).
-async fn cli_state(cg: &TraceDecay) -> DashboardState {
-    let (mem_conn, mem_db_path, mem_guard) = super::resolve_project_memory_store(cg).await;
-    let store_layout = cg.store_layout();
-    DashboardState {
-        project_id: store_layout.identity.project_id.clone(),
-        graph_conn: cg.dashboard_connection(),
-        _database_guards: std::iter::once(cg.dashboard_database_guard())
-            .chain(mem_guard)
-            .collect(),
-        graph_db_path: cg.dashboard_db_path().display().to_string(),
-        mem_conn,
-        mem_db_path,
-        lcm_conn: None,
-        _global_database_guards: Vec::new(),
-        lcm_db_path: String::new(),
-        lcm_scope: storage_mode_label(&store_layout.storage_mode).to_string(),
-        savings_db: None,
-        savings_db_path: String::new(),
-        project_root: cg.project_root().to_path_buf(),
-        storage_mode: storage_mode_label(&store_layout.storage_mode).to_string(),
-        store_root: store_layout.data_root.clone(),
-        config_path: store_layout.config_path.clone(),
-        dashboard_root: store_layout.dashboard_root.clone(),
-        curation_activity: Arc::new(RwLock::new(Vec::new())),
-        token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
-            cg.project_root().to_path_buf(),
-            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
-        ))),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
-        automation_scheduler_reconciler: None,
-        automation_writer: super::direct_dashboard_automation_writer(),
-    }
-}
-
 fn user_state(
     memory_db: &Database,
     memory_db_path: &std::path::Path,
@@ -170,15 +132,18 @@ fn user_state(
     DashboardState {
         project_id: None,
         graph_conn: conn.clone(),
-        _database_guards: vec![Arc::new(memory_db.clone())],
+        database_guards: vec![Arc::new(memory_db.clone())],
         graph_db_path: memory_db_path.display().to_string(),
         mem_conn: conn,
         mem_db_path: memory_db_path.display().to_string(),
         lcm_conn: None,
-        _global_database_guards: Vec::new(),
+        global_database_guards: Vec::new(),
         lcm_db_path: String::new(),
         lcm_scope: "user".to_string(),
-        savings_db: None,
+        accounting_store: None,
+        accounting_mode: DashboardAccountingMode::default(),
+        release_channel: "stable",
+        pr_autotrack_reader: None,
         savings_db_path: String::new(),
         project_root: profile_root.to_path_buf(),
         storage_mode: "user".to_string(),
@@ -194,13 +159,11 @@ fn user_state(
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
         automation_writer: super::direct_dashboard_automation_writer(),
+        automation_executor: None,
+        skill_analytics_sync: None,
+        project_registry: None,
+        project_state_builder: None,
     }
-}
-
-/// Runs the curate verb and returns the JSON report printed by the CLI.
-pub async fn run_memory_curate(cg: &TraceDecay, options: &MemoryCurateOptions) -> Result<Value> {
-    let state = cli_state(cg).await;
-    run_memory_curate_with_state(&state, options).await
 }
 
 /// Runs memory curation against the profile-level user memory store.
@@ -215,7 +178,7 @@ pub async fn run_user_memory_curate(
     run_memory_curate_with_state(&state, options).await
 }
 
-async fn run_memory_curate_with_state(
+pub async fn run_memory_curate_with_state(
     state: &DashboardState,
     options: &MemoryCurateOptions,
 ) -> Result<Value> {

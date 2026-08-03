@@ -14,11 +14,11 @@ use crate::memory::store::MemoryStore;
 
 const PROJECTION_POINT_CAP: i64 = 2000;
 
-pub(crate) fn projection_point_cap() -> i64 {
+pub fn projection_point_cap() -> i64 {
     PROJECTION_POINT_CAP
 }
 
-pub(crate) fn providers_payload() -> Value {
+pub fn providers_payload() -> Value {
     json!({
         "memory_provider": "tracedecay",
         "memory_options": [
@@ -34,14 +34,14 @@ pub(crate) fn providers_payload() -> Value {
     })
 }
 
-pub(crate) fn coerce_similarity_score(value: Option<f64>, default: f64) -> f64 {
+pub fn coerce_similarity_score(value: Option<f64>, default: f64) -> f64 {
     value
         .filter(|score| score.is_finite())
         .unwrap_or(default)
         .clamp(SIMILARITY_SCORE_MIN, SIMILARITY_SCORE_MAX)
 }
 
-pub(crate) async fn fetch_facts(
+pub async fn fetch_facts(
     state: &DashboardState,
     query: &str,
     limit: i64,
@@ -49,10 +49,7 @@ pub(crate) async fn fetch_facts(
     memory_queries::fact_rows(state, query, limit).await
 }
 
-pub(crate) async fn fetch_entities(
-    state: &DashboardState,
-    limit: i64,
-) -> Result<Vec<Value>, String> {
+pub async fn fetch_entities(state: &DashboardState, limit: i64) -> Result<Vec<Value>, String> {
     memory_queries::entity_rows(state, limit).await
 }
 
@@ -87,7 +84,7 @@ async fn trust_histogram(state: &DashboardState) -> Vec<Value> {
     buckets
 }
 
-pub(crate) async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
+pub async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
     let facts_count =
         super::util::query_i64(&state.mem_conn, "SELECT COUNT(*) FROM memory_facts", ()).await;
     let banks_count =
@@ -170,7 +167,7 @@ pub(crate) async fn overview_payload(state: &DashboardState) -> Result<Value, St
     }))
 }
 
-pub(crate) async fn graph_payload(
+pub async fn graph_payload(
     state: &DashboardState,
     query: &str,
     limit: i64,
@@ -302,7 +299,7 @@ pub(crate) async fn graph_payload(
     }))
 }
 
-pub(crate) async fn fact_detail_payload(
+pub async fn fact_detail_payload(
     state: &DashboardState,
     fact_id: i64,
 ) -> Result<Option<Value>, String> {
@@ -401,7 +398,7 @@ fn compute_projection(
     }
 }
 
-pub(crate) async fn projection_payload(state: &DashboardState, query: &str, limit: i64) -> Value {
+pub async fn projection_payload(state: &DashboardState, query: &str, limit: i64) -> Value {
     let mut obj = Map::new();
     obj.insert("exists".into(), json!(true));
     obj.insert("dim".into(), json!(0));
@@ -459,7 +456,7 @@ fn projection_response(computation: &ProjectionComputation, mut obj: Map<String,
 static SIMILARITY_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<SimilarityComputation>>>> =
     OnceLock::new();
 
-pub(crate) async fn similarity_computation(
+pub async fn similarity_computation(
     state: &DashboardState,
 ) -> Result<Arc<SimilarityComputation>, String> {
     let key = memory_queries::vector_state_fingerprint(state).await?;
@@ -491,7 +488,7 @@ pub(crate) async fn similarity_computation(
     Ok(arc)
 }
 
-pub(crate) async fn similarity_payload(
+pub async fn similarity_payload(
     state: &DashboardState,
     min_similarity: f64,
     pair_cap: usize,
@@ -573,7 +570,7 @@ fn curation_apply_snapshot(index: usize, event: &Value) -> Value {
     })
 }
 
-pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
+pub async fn curation_status_payload(state: &DashboardState) -> Value {
     let activity = state.curation_activity.read().await;
     let apply_finishes: Vec<&Value> = activity
         .iter()
@@ -625,7 +622,7 @@ pub(crate) async fn curation_status_payload(state: &DashboardState) -> Value {
     })
 }
 
-pub(crate) async fn push_curation_activity(
+pub async fn push_curation_activity(
     state: &DashboardState,
     phase: &str,
     message: impl Into<String>,
@@ -634,7 +631,7 @@ pub(crate) async fn push_curation_activity(
     push_curation_activity_with_level(state, phase, message, dry_run, "info").await;
 }
 
-pub(crate) async fn push_curation_activity_with_level(
+pub async fn push_curation_activity_with_level(
     state: &DashboardState,
     phase: &str,
     message: impl Into<String>,
@@ -655,7 +652,7 @@ pub(crate) async fn push_curation_activity_with_level(
     }
 }
 
-pub(crate) async fn curation_activity_payload(state: &DashboardState, limit: i64) -> Value {
+pub async fn curation_activity_payload(state: &DashboardState, limit: i64) -> Value {
     let events = state.curation_activity.read().await;
     let limit = limit.max(0) as usize;
     let start = events.len().saturating_sub(limit);
@@ -664,7 +661,7 @@ pub(crate) async fn curation_activity_payload(state: &DashboardState, limit: i64
     json!({ "events": visible, "count": count, "limit": limit, "error": "" })
 }
 
-pub(crate) async fn build_delete_plan(
+pub async fn build_delete_plan(
     state: &DashboardState,
 ) -> Result<(Vec<Value>, Value, Map<String, Value>, i64), String> {
     let total =
@@ -701,12 +698,12 @@ pub(crate) async fn build_delete_plan(
     Ok((actions, hygiene_candidates, counts, total))
 }
 
-pub(crate) async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
+pub async fn delete_fact(state: &DashboardState, fact_id: i64) -> Result<bool, String> {
     let store = MemoryStore::new(&state.mem_conn);
     store.remove_fact(fact_id).await.map_err(|e| e.to_string())
 }
 
-pub(crate) async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
+pub async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Value, bool) {
     let Some(fact_id) = op.get("fact_id").and_then(Value::as_i64) else {
         return (
             json!({ "op": "delete", "status": "error", "error": "missing or invalid fact_id" }),
@@ -740,7 +737,7 @@ pub(crate) async fn apply_delete_op(state: &DashboardState, op: &Value) -> (Valu
     }
 }
 
-pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value, bool) {
+pub async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value, bool) {
     let Some(winner_id) = op.get("winner_id").and_then(Value::as_i64) else {
         return (
             json!({ "op": "merge", "status": "error", "error": "missing or invalid winner_id" }),
@@ -811,7 +808,7 @@ pub(crate) async fn apply_merge_op(state: &DashboardState, op: &Value) -> (Value
     }
 }
 
-pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) -> Value {
+pub async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) -> Value {
     push_curation_activity(
         state,
         "queued",
@@ -920,7 +917,7 @@ pub(crate) async fn curate_apply_payload(state: &DashboardState, ops: &[Value]) 
     })
 }
 
-pub(crate) async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
+pub async fn oplog_payload(state: &DashboardState, limit: i64) -> Value {
     match memory_queries::oplog_rows(state, limit).await {
         Ok(rows) => {
             let events: Vec<Value> = rows

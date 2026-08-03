@@ -4685,6 +4685,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4971,10 +4972,27 @@ name = "tracedecay-dashboard-api"
 version = "0.1.0"
 dependencies = [
  "axum 0.8.9",
+ "dirs",
+ "glob",
  "libsql",
+ "open",
  "serde",
  "serde_json",
+ "tempfile",
+ "tiktoken-rs",
  "tokio",
+ "tokio-stream",
+ "tower 0.5.3",
+ "tracedecay-agent-hosts",
+ "tracedecay-automation",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-usecases",
+ "tracing",
+ "ureq",
 ]
 
 [[package]]

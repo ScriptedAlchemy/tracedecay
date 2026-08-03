@@ -153,7 +153,7 @@ pub(super) async fn handle_admin_project(
                 max_clusters: max_clusters.clamp(1, 50),
                 min_confidence: min_confidence.clamp(0.0, 1.0),
             };
-            crate::dashboard::memory_curate::run_memory_curate(cg, &options).await?
+            crate::dashboard::run_memory_curate(cg, &options).await?
         }
         AdminProjectAction::Bench {
             queries_toml,

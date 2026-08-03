@@ -9,18 +9,18 @@ use super::DashboardState;
 use super::lcm_queries;
 use super::util::{build_fts_match, http_detail, json_error, json_object, like_pattern};
 
-pub(crate) type LcmErrorResponse = (StatusCode, Json<Value>);
-pub(crate) type LcmServiceResult<T> = Result<T, LcmErrorResponse>;
+pub type LcmErrorResponse = (StatusCode, Json<Value>);
+pub type LcmServiceResult<T> = Result<T, LcmErrorResponse>;
 
-pub(crate) struct SearchPayloadArgs<'a> {
-    pub(crate) query: &'a str,
-    pub(crate) limit: i64,
-    pub(crate) offset: i64,
-    pub(crate) role: &'a str,
-    pub(crate) source: &'a str,
-    pub(crate) session_id: &'a str,
-    pub(crate) since: Option<f64>,
-    pub(crate) until: Option<f64>,
+pub struct SearchPayloadArgs<'a> {
+    pub query: &'a str,
+    pub limit: i64,
+    pub offset: i64,
+    pub role: &'a str,
+    pub source: &'a str,
+    pub session_id: &'a str,
+    pub since: Option<f64>,
+    pub until: Option<f64>,
 }
 
 /// LCM store paths whose summary metadata has already validated clean this
@@ -81,7 +81,7 @@ fn map_query_error<T>(context: &str, result: Result<T, String>) -> LcmServiceRes
     result.map_err(|err| query_error(context, &err))
 }
 
-pub(crate) fn parse_epoch(value: &str) -> Option<f64> {
+pub fn parse_epoch(value: &str) -> Option<f64> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
@@ -112,7 +112,7 @@ fn ambiguous_session_error(session_id: &str) -> LcmErrorResponse {
     )
 }
 
-pub(crate) async fn ensure_valid_summary_metadata(
+pub async fn ensure_valid_summary_metadata(
     state: &DashboardState,
     conn: &libsql::Connection,
     context: &str,
@@ -141,7 +141,7 @@ pub(crate) async fn ensure_valid_summary_metadata(
     Ok(())
 }
 
-pub(crate) async fn overview_payload(
+pub async fn overview_payload(
     state: &DashboardState,
     query: &str,
     limit: i64,
@@ -261,7 +261,7 @@ pub(crate) async fn overview_payload(
     Ok(payload)
 }
 
-pub(crate) async fn search_payload(
+pub async fn search_payload(
     state: &DashboardState,
     args: SearchPayloadArgs<'_>,
 ) -> LcmServiceResult<Map<String, Value>> {
@@ -443,7 +443,7 @@ pub(crate) async fn search_payload(
     Ok(payload)
 }
 
-pub(crate) async fn session_payload(
+pub async fn session_payload(
     state: &DashboardState,
     session_id: &str,
     limit: i64,
@@ -562,7 +562,7 @@ pub(crate) async fn session_payload(
     Ok(payload)
 }
 
-pub(crate) async fn node_payload(
+pub async fn node_payload(
     state: &DashboardState,
     node_id: &str,
 ) -> LcmServiceResult<Map<String, Value>> {
@@ -655,7 +655,7 @@ pub(crate) async fn node_payload(
     Ok(payload)
 }
 
-pub(crate) async fn timeline_payload(
+pub async fn timeline_payload(
     state: &DashboardState,
     by_hour: bool,
     session_id: &str,
@@ -708,7 +708,7 @@ pub(crate) async fn timeline_payload(
     Ok(payload)
 }
 
-pub(crate) async fn compression_payload(
+pub async fn compression_payload(
     state: &DashboardState,
     by_node: bool,
     limit: i64,

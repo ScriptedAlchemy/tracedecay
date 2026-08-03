@@ -10,9 +10,12 @@ use super::backend::{
 use super::config::AutomationConfig;
 use super::lifecycle::{AgentTaskRunContext, SchedulerGate, failed_backend_fallback_report};
 use super::run_ledger::{AutomationRunLedgerRecord, AutomationTrigger};
-use crate::dashboard::memory_curate::{
-    CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
-    run_memory_curate, run_user_memory_curate,
+use crate::dashboard::{
+    memory_curate::{
+        CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
+        run_user_memory_curate,
+    },
+    run_memory_curate,
 };
 use crate::db::Database;
 use crate::errors::{Result, TraceDecayError};

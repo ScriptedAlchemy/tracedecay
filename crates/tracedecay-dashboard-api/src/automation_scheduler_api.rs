@@ -20,16 +20,16 @@ use crate::user_config::UserConfig;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
-pub(crate) async fn status(State(state): State<DashboardState>) -> ApiResult {
+pub async fn status(State(state): State<DashboardState>) -> ApiResult {
     scheduler_status_payload(&state).await
 }
 
-pub(crate) async fn pause(State(state): State<DashboardState>) -> ApiResult {
+pub async fn pause(State(state): State<DashboardState>) -> ApiResult {
     set_scheduler_paused(&state, true).await?;
     scheduler_status_payload(&state).await
 }
 
-pub(crate) async fn resume(State(state): State<DashboardState>) -> ApiResult {
+pub async fn resume(State(state): State<DashboardState>) -> ApiResult {
     set_scheduler_paused(&state, false).await?;
     scheduler_status_payload(&state).await
 }

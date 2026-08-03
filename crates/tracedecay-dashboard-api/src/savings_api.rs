@@ -44,9 +44,7 @@ use super::token_count::{
     MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
 use super::util::{JsonQuery, coerce_limit, i64_field, query_i64, query_rows, str_field};
-use super::{DashboardState, savings_pricing, token_count};
-use crate::accounting::metrics::parse_range;
-use crate::global_db::GlobalDb;
+use super::{DashboardAccountingStore, DashboardState, savings_pricing, token_count};
 
 /// Aggregate SELECT list shared by the per-session and per-model rollups.
 /// "Actual" sums only count usage-bearing messages; estimated sums only count
@@ -63,12 +61,12 @@ const TOKEN_AGG_COLUMNS: &str = "
     SUM(CASE WHEN usage_in IS NULL AND usage_out IS NULL AND role = 'assistant' THEN est_tokens ELSE 0 END) AS estimated_output_tokens";
 
 #[derive(Deserialize)]
-pub(crate) struct RangeParams {
+pub struct RangeParams {
     range: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SessionsParams {
+pub struct SessionsParams {
     range: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -76,7 +74,16 @@ pub(crate) struct SessionsParams {
 
 fn range_since(range: Option<&str>) -> (String, i64) {
     let range = range.unwrap_or("all").to_string();
-    let since = parse_range(&range) as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let since = match range.as_str() {
+        "today" => now - (now % 86_400),
+        "30d" | "month" => now.saturating_sub(30 * 86_400),
+        "all" => 0,
+        _ => now.saturating_sub(7 * 86_400),
+    } as i64;
     (range, since)
 }
 
@@ -207,11 +214,10 @@ fn tokenizer_block(model: &str) -> Value {
 /// the best honest signal the dashboard has: when recording is disabled (or
 /// a long-running MCP server predates ledger recording), the UI can explain
 /// an empty ledger instead of just saying "no events yet".
-fn recording_block() -> Value {
-    let mode = crate::global_db::global_accounting_mode();
+fn recording_block(state: &DashboardState) -> Value {
     json!({
-        "enabled": mode.enabled(),
-        "mode": mode.as_str(),
+        "enabled": state.accounting_mode.enabled,
+        "mode": state.accounting_mode.source,
     })
 }
 
@@ -224,22 +230,22 @@ fn merge(base: Value, extra: Value) -> Value {
 }
 
 /// GET `/api/plugins/savings/overview`
-pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     savings_pricing::ensure_background_refresh();
 
-    let savings = match state.savings_db.as_deref() {
-        Some(gdb) => savings_overview(gdb, &state.savings_db_path).await,
+    let savings = match state.accounting_store.as_deref() {
+        Some(gdb) => savings_overview(gdb, &state).await,
         None => json!({
             "available": false,
             "db": state.savings_db_path,
-            "recording": recording_block(),
+            "recording": recording_block(&state),
         }),
     };
     let sessions = match state.lcm_conn.as_ref() {
         Some(conn) => sessions_overview(conn, &state).await,
         None => json!({ "available": false, "db": state.lcm_db_path }),
     };
-    let turns = match state.savings_db.as_deref() {
+    let turns = match state.accounting_store.as_deref() {
         Some(gdb) => turns_overview(gdb).await,
         None => json!({ "available": false }),
     };
@@ -259,15 +265,15 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     }))
 }
 
-async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
+async fn savings_overview(gdb: &dyn DashboardAccountingStore, state: &DashboardState) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let today = gdb.sum_savings(None, now - (now % 86_400)).await;
-    let week = gdb.sum_savings(None, now - 7 * 86_400).await;
-    let month = gdb.sum_savings(None, now - 30 * 86_400).await;
-    let all_time = gdb.sum_savings(None, 0).await;
+    let today = gdb.sum_savings(now - (now % 86_400)).await;
+    let week = gdb.sum_savings(now - 7 * 86_400).await;
+    let month = gdb.sum_savings(now - 30 * 86_400).await;
+    let all_time = gdb.sum_savings(0).await;
 
     // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
     // and often carry history the event log does not — surface both.
@@ -287,11 +293,11 @@ async fn savings_overview(gdb: &GlobalDb, db_path: &str) -> Value {
     )
     .await;
 
-    let sum_json = |total: &crate::global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
+    let sum_json = |total: &super::DashboardSavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
         "available": true,
-        "db": db_path,
-        "recording": recording_block(),
+        "db": state.savings_db_path,
+        "recording": recording_block(state),
         "ledger": {
             "today": sum_json(&today),
             "last_7d": sum_json(&week),
@@ -343,7 +349,7 @@ async fn sessions_overview(conn: &libsql::Connection, state: &DashboardState) ->
     )
 }
 
-async fn turns_overview(gdb: &GlobalDb) -> Value {
+async fn turns_overview(gdb: &dyn DashboardAccountingStore) -> Value {
     let conn = gdb.dashboard_connection();
     let turn_count = query_i64(&conn, "SELECT COUNT(*) FROM turns", ()).await;
     let total_cost = gdb.total_cost_since(0).await.unwrap_or(0.0);
@@ -358,12 +364,12 @@ async fn turns_overview(gdb: &GlobalDb) -> Value {
 }
 
 /// GET `/api/plugins/savings/ledger?range=today|7d|30d|all`
-pub(crate) async fn ledger(
+pub async fn ledger(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
 ) -> Json<Value> {
     let (range, since) = range_since(params.range.as_deref());
-    let Some(gdb) = state.savings_db.as_deref() else {
+    let Some(gdb) = state.accounting_store.as_deref() else {
         return Json(json!({
             "available": false,
             "db": state.savings_db_path,
@@ -371,8 +377,8 @@ pub(crate) async fn ledger(
         }));
     };
 
-    let total = gdb.sum_savings(None, since).await;
-    let history = gdb.savings_history(None, since).await;
+    let total = gdb.sum_savings(since).await;
+    let history = gdb.savings_history(since).await;
     let conn = gdb.dashboard_connection();
     let by_tool = query_rows(
         &conn,
@@ -426,7 +432,7 @@ pub(crate) async fn ledger(
 /// Sessions without any timestamp (neither `started_at` nor message
 /// timestamps — true for Cursor hook ingests today) are only included in the
 /// default `all` range, since they cannot be placed on a timeline.
-pub(crate) async fn sessions(
+pub async fn sessions(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SessionsParams>,
 ) -> Json<Value> {
@@ -587,7 +593,7 @@ pub(crate) async fn sessions(
 /// timestamped messages, plus the `turns` accounting (per-model cost and
 /// per-day cost — `actual`, computed from transcript usage at ingest by
 /// `tracedecay cost`, reusing [`GlobalDb::cost_by_model_since`]).
-pub(crate) async fn models(
+pub async fn models(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<RangeParams>,
 ) -> Json<Value> {
@@ -599,7 +605,7 @@ pub(crate) async fn models(
         "since": since,
         "models": [],
         "daily": [],
-        "turns": { "available": state.savings_db.is_some(), "by_model": [], "by_day": [] },
+        "turns": { "available": state.accounting_store.is_some(), "by_model": [], "by_day": [] },
     });
 
     if let Some(conn) = state.lcm_conn.as_ref() {
@@ -684,7 +690,7 @@ pub(crate) async fn models(
         );
     }
 
-    if let Some(gdb) = state.savings_db.as_deref() {
+    if let Some(gdb) = state.accounting_store.as_deref() {
         let by_model = gdb.cost_by_model_since(since.max(0) as u64).await;
         payload["turns"]["by_model"] = Value::Array(
             by_model
@@ -739,7 +745,7 @@ pub(crate) async fn models(
 /// GET `/api/plugins/savings/pricing` — the merged model price table with
 /// provenance (`live` data is always served from its disk cache, so `source`
 /// is `"cache"` or `"fallback"`).
-pub(crate) async fn pricing() -> Json<Value> {
+pub async fn pricing() -> Json<Value> {
     savings_pricing::ensure_background_refresh();
     Json(savings_pricing::pricing_payload())
 }

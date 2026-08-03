@@ -16,13 +16,13 @@ use crate::user_config::UserConfig;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
-pub(crate) async fn get_config(State(state): State<DashboardState>) -> ApiResult {
+pub async fn get_config(State(state): State<DashboardState>) -> ApiResult {
     let global = UserConfig::load().automation;
     let project = load_project_or_error(&state).await?;
     config_payload(&state, &global, project.as_ref())
 }
 
-pub(crate) async fn patch_config(
+pub async fn patch_config(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
@@ -45,7 +45,7 @@ pub(crate) async fn patch_config(
     )))
 }
 
-pub(crate) async fn reset_config(State(state): State<DashboardState>) -> ApiResult {
+pub async fn reset_config(State(state): State<DashboardState>) -> ApiResult {
     let global = UserConfig::load().automation;
     clear_project_config(&state.dashboard_root)
         .await

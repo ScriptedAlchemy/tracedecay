@@ -10,14 +10,12 @@ use axum::extract::State;
 use axum::response::Json;
 use serde_json::{Value, json};
 
+use super::DashboardState;
+use super::util::{i64_field, query_i64, query_rows, str_field};
 use crate::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
     underused_tool_family_signals,
 };
-use crate::global_db::{AnalyticsEventQuery, AnalyticsEventRecord, AnalyticsHintCounts, GlobalDb};
-
-use super::DashboardState;
-use super::util::{i64_field, query_i64, query_rows, str_field};
 
 const HINT_CATEGORIES: &[&str] = &[
     "search",
@@ -31,8 +29,6 @@ const HINT_CATEGORIES: &[&str] = &[
     "explore_subagent",
     "subagent_start_context",
 ];
-const ANALYTICS_EVENT_LIMIT: usize = 10_000;
-
 #[derive(Default)]
 struct HintCounts {
     emitted: i64,
@@ -42,7 +38,7 @@ struct HintCounts {
 }
 
 /// `GET /api/plugins/analytics/overview`
-pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let hints = hint_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await;
@@ -118,25 +114,25 @@ fn managed_agent_label_for_session(agent_id: &str, metadata_json: &str) -> Optio
 }
 
 /// `GET /api/plugins/analytics/hints`
-pub(crate) async fn hints(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn hints(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     Json(hint_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/usage`
-pub(crate) async fn usage(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn usage(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     Json(usage_summary(state.lcm_conn.as_ref(), durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
-pub(crate) async fn diagnostics(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn diagnostics(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     Json(diagnostics_summary(&state, durable_events.as_deref()).await)
 }
 
 /// `GET /api/plugins/analytics/underused`
-pub(crate) async fn underused(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn underused(State(state): State<DashboardState>) -> Json<Value> {
     Json(json!({
         "available": state.lcm_conn.is_some(),
         "db": state.lcm_db_path,
@@ -160,39 +156,16 @@ fn empty_hint_rows() -> Vec<Value> {
 }
 
 async fn durable_analytics_rows_for_state(state: &DashboardState) -> Option<Vec<Value>> {
-    durable_analytics_rows(
-        state.savings_db.as_deref(),
-        state.lcm_conn.as_ref(),
-        &GlobalDb::canonical_project_key(&state.project_root),
-    )
-    .await
-}
-
-async fn durable_analytics_rows(
-    global_db: Option<&GlobalDb>,
-    lcm_conn: Option<&libsql::Connection>,
-    project_id: &str,
-) -> Option<Vec<Value>> {
-    if let Some(db) = global_db {
-        if let Ok(events) = db
-            .query_analytics_events(&AnalyticsEventQuery {
-                provider: None,
-                project_id: Some(project_id.to_string()),
-                session_id: None,
-                event_kind: None,
-                since: None,
-                limit: ANALYTICS_EVENT_LIMIT,
-            })
-            .await
-        {
+    if let Some(store) = state.accounting_store.as_ref() {
+        if let Ok(events) = store.analytics_events(state.project_root.clone()).await {
             if !events.is_empty() {
-                return Some(events.iter().map(durable_analytics_event_row).collect());
+                return Some(events);
             }
         }
     }
 
     let rows = query_rows(
-        lcm_conn?,
+        state.lcm_conn.as_ref()?,
         "SELECT provider, timestamp, event_kind, hook_name, tool_name,
                 tool_category, skill_name, hint_category, outcome, metadata_json
          FROM (
@@ -204,29 +177,14 @@ async fn durable_analytics_rows(
              LIMIT 10000
          )
          ORDER BY timestamp, id",
-        libsql::params![project_id],
+        libsql::params![state.project_root.display().to_string()],
     )
     .await
     .ok()?;
     if rows.is_empty() { None } else { Some(rows) }
 }
 
-pub(crate) fn durable_analytics_event_row(event: &AnalyticsEventRecord) -> Value {
-    json!({
-        "provider": &event.provider,
-        "timestamp": event.timestamp,
-        "event_kind": &event.event_kind,
-        "hook_name": &event.hook_name,
-        "tool_name": &event.tool_name,
-        "tool_category": &event.tool_category,
-        "skill_name": &event.skill_name,
-        "hint_category": &event.hint_category,
-        "outcome": &event.outcome,
-        "metadata_json": &event.metadata_json,
-    })
-}
-
-pub(crate) fn hint_summary_from_events(events: &[Value]) -> Value {
+pub fn hint_summary_from_events(events: &[Value]) -> Value {
     let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
@@ -266,7 +224,15 @@ pub(crate) fn hint_summary_from_events(events: &[Value]) -> Value {
     })
 }
 
-pub(crate) fn hint_summary_from_counts(counts: &[AnalyticsHintCounts]) -> Value {
+pub struct DashboardHintCount {
+    pub category: String,
+    pub emitted: i64,
+    pub followed: i64,
+    pub ignored: i64,
+    pub suppressed: i64,
+}
+
+pub fn hint_summary_from_counts(counts: &[DashboardHintCount]) -> Value {
     let mut by_category: BTreeMap<String, HintCounts> = HINT_CATEGORIES
         .iter()
         .map(|category| ((*category).to_string(), HintCounts::default()))
@@ -603,7 +569,7 @@ async fn diagnostics_summary(state: &DashboardState, durable_events: Option<&[Va
     diagnostics_summary_from_parts(message_count, &hook_analytics, durable_events)
 }
 
-pub(crate) fn diagnostics_summary_from_parts(
+pub fn diagnostics_summary_from_parts(
     message_count: i64,
     hook_analytics: &HookAnalyticsRows,
     durable_events: Option<&[Value]>,
@@ -754,9 +720,9 @@ fn count_rows(label: &str, counts: BTreeMap<String, i64>) -> Vec<Value> {
         .collect()
 }
 
-pub(crate) struct HookAnalyticsRows {
-    pub(crate) rows: Vec<Value>,
-    pub(crate) sources: Vec<Value>,
+pub struct HookAnalyticsRows {
+    pub rows: Vec<Value>,
+    pub sources: Vec<Value>,
 }
 
 /// Hooks write `hook_analytics.jsonl` into the project store when they can
@@ -769,7 +735,7 @@ fn read_hook_analytics_rows(state: &DashboardState) -> HookAnalyticsRows {
 
 /// Path-based variant shared with the `tracedecay analytics` CLI. Passing no
 /// `project_root` includes every user-level row instead of filtering.
-pub(crate) fn read_hook_analytics_rows_at(
+pub fn read_hook_analytics_rows_at(
     store_root: Option<&std::path::Path>,
     project_root: Option<&std::path::Path>,
 ) -> HookAnalyticsRows {

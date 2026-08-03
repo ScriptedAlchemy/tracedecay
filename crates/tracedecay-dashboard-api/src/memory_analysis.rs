@@ -8,22 +8,22 @@ use serde_json::{Value, json};
 // Similarity primitives live in `crate::memory::similarity` (shared with the
 // write-time diff check in `MemoryStore::add_fact`); re-exported so dashboard
 // behavior and call sites stay identical.
-pub(crate) use crate::memory::similarity::{
+pub use crate::memory::similarity::{
     lexical_overlap, phase_cosine_similarity, similarity_classification,
 };
 
-pub(crate) const SIMILARITY_FACT_CAP: i64 = 2000;
-pub(crate) const SIMILARITY_DEFAULT_THRESHOLD: f64 = 0.85;
+pub const SIMILARITY_FACT_CAP: i64 = 2000;
+pub const SIMILARITY_DEFAULT_THRESHOLD: f64 = 0.85;
 /// Most pairs any single `/similarity` response can return (`limit` is
 /// clamped to this), and therefore the deepest prefix of the sorted pair set
 /// a request can ever read.
-pub(crate) const SIMILARITY_PAIR_CAP: i64 = 2000;
+pub const SIMILARITY_PAIR_CAP: i64 = 2000;
 /// Lowest score *scored* per computation. All finite phase-cosine pairs feed
 /// the score distribution; only the serveable prefix is retained afterwards
 /// (see [`build_similarity_computation`]).
-pub(crate) const SIMILARITY_PAIR_FLOOR: f64 = -1.0;
-pub(crate) const SIMILARITY_SCORE_MIN: f64 = -1.0;
-pub(crate) const SIMILARITY_SCORE_MAX: f64 = 1.0;
+pub const SIMILARITY_PAIR_FLOOR: f64 = -1.0;
+pub const SIMILARITY_SCORE_MIN: f64 = -1.0;
+pub const SIMILARITY_SCORE_MAX: f64 = 1.0;
 const SIMILARITY_DISTRIBUTION_BINS: usize = 20;
 
 /// Top-2 principal components of the centered feature matrix, computed via
@@ -31,7 +31,7 @@ const SIMILARITY_DISTRIBUTION_BINS: usize = 20;
 /// `PROJECTION_POINT_CAP` (2000), so the Gram build is O(n²·d) — far too
 /// expensive for the async runtime; run this on the blocking pool and cache
 /// the result (see `memory_api::projection`).
-pub(crate) fn pca_scores(features: &[Vec<f64>]) -> Option<Vec<[f64; 2]>> {
+pub fn pca_scores(features: &[Vec<f64>]) -> Option<Vec<[f64; 2]>> {
     let n = features.len();
     let d = features.first()?.len();
     if n < 2 || d == 0 {
@@ -116,7 +116,7 @@ pub(crate) fn pca_scores(features: &[Vec<f64>]) -> Option<Vec<[f64; 2]>> {
 }
 
 /// Score all pairs above `threshold` from decoded vectored facts.
-pub(crate) fn score_similar_pairs(
+pub fn score_similar_pairs(
     decoded: &[(Value, Vec<f64>)],
     threshold: f64,
 ) -> Vec<(f64, usize, usize)> {
@@ -146,7 +146,7 @@ fn round_bin_edge(edge: f64) -> f64 {
 ///
 /// Two passes over the slice, no intermediate allocation: at n = 2000 facts
 /// the input is ~2M pairs, and a per-request copy would be ~16 MB.
-pub(crate) fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
+pub fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
     let mut min_seen = f64::INFINITY;
     let mut max_seen = f64::NEG_INFINITY;
     let mut sum = 0.0_f64;
@@ -242,21 +242,21 @@ pub(crate) fn score_distribution(scored: &[(f64, usize, usize)]) -> Value {
 /// tokenization used to re-run for up to 2000 pairs on every `/similarity`
 /// call and again for every planner pair on `/curate`).
 #[derive(Debug)]
-pub(crate) struct ScoredPair {
-    pub(crate) similarity: f64,
+pub struct ScoredPair {
+    pub similarity: f64,
     /// Indices into [`SimilarityComputation::facts`].
-    pub(crate) a: usize,
-    pub(crate) b: usize,
+    pub a: usize,
+    pub b: usize,
     /// Lexical-overlap payload keys merged into the pair JSON
     /// (`token_overlap`, `overlap_coefficient`, `shared_tokens`, …).
-    pub(crate) overlap: Value,
-    pub(crate) classification: &'static str,
+    pub overlap: Value,
+    pub classification: &'static str,
 }
 
 impl ScoredPair {
     /// Builds the pair from a raw score by running the lexical-overlap
     /// analysis on the two fact contents.
-    pub(crate) fn analyze(facts: &[Value], similarity: f64, a: usize, b: usize) -> Self {
+    pub fn analyze(facts: &[Value], similarity: f64, a: usize, b: usize) -> Self {
         let a_content = facts[a]
             .get("content")
             .and_then(Value::as_str)
@@ -285,33 +285,33 @@ impl ScoredPair {
 /// `key` fingerprints the underlying fact-vector state. Vectors are not
 /// retained — only the fact metadata needed to render pairs and plans.
 #[derive(Debug)]
-pub(crate) struct SimilarityComputation {
+pub struct SimilarityComputation {
     /// Fingerprint of the vectored fact rows at compute time.
-    pub(crate) key: (i64, i64, i64, u64),
-    pub(crate) dim: usize,
+    pub key: (i64, i64, i64, u64),
+    pub dim: usize,
     /// Fact metadata (`fact_id`, content, category, `trust_score`, `retrieval_count`).
-    pub(crate) facts: Vec<Value>,
+    pub facts: Vec<Value>,
     /// Retained pairs, sorted by similarity descending: every pair at or
     /// above [`SIMILARITY_DEFAULT_THRESHOLD`] (the dedup planner walks them
     /// all) plus the top [`SIMILARITY_PAIR_CAP`] overall (the deepest prefix
     /// any `/similarity` request can return). Pairs below that horizon only
     /// contribute to `total_pairs` and `distribution`, so the cache holds
     /// O(cap) pairs instead of all O(n²) (~48 MB at n = 2000).
-    pub(crate) pairs: Vec<ScoredPair>,
+    pub pairs: Vec<ScoredPair>,
     /// Supersession hygiene candidates from every scored pair at or above the
     /// supersession floor where either side carries a negation/state-change cue.
-    pub(crate) supersession_pairs: Vec<ScoredPair>,
+    pub supersession_pairs: Vec<ScoredPair>,
     /// Count of all finite pairs scored, retained or not.
-    pub(crate) total_pairs: i64,
+    pub total_pairs: i64,
     /// [`score_distribution`] over all scored pairs, precomputed so requests
     /// never re-bin the full pair set.
-    pub(crate) distribution: Value,
+    pub distribution: Value,
 }
 
 /// Finalizes a similarity computation from the full scored pair set:
 /// distribution + total over everything, lexical overlap only for the
 /// retained serveable prefix. Runs on the blocking pool with the scoring.
-pub(crate) fn build_similarity_computation(
+pub fn build_similarity_computation(
     key: (i64, i64, i64, u64),
     dim: usize,
     facts: Vec<Value>,
@@ -353,12 +353,12 @@ pub(crate) fn build_similarity_computation(
 /// Above this similarity, a pair is near-identical enough that the
 /// access-count delete-reluctance rule (below) no longer blocks an automatic
 /// dedup proposal.
-pub(crate) const ACCESS_RELUCTANCE_EXTREME_SIMILARITY: f64 = 0.98;
+pub const ACCESS_RELUCTANCE_EXTREME_SIMILARITY: f64 = 0.98;
 
 /// Similarity floor for "possible supersession" hygiene entries: a
 /// negation/state-change cue only signals supersession when the two facts are
 /// substantially similar (mirrors the write-time conflict threshold).
-pub(crate) const SUPERSESSION_SIMILARITY_THRESHOLD: f64 = 0.7;
+pub const SUPERSESSION_SIMILARITY_THRESHOLD: f64 = 0.7;
 const SEMANTIC_FRESHNESS_FIELDS: [&str; 5] = [
     "asserted_at",
     "effective_at",
@@ -396,7 +396,7 @@ fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
 /// LLM/human review instead. (Recall `retrieval_count` now also feeds a small
 /// bounded ranking boost in `combined_score` — see `memory::retrieval`; this
 /// access-reluctance guard is an additional curation-only signal on top of it.)
-pub(crate) fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
+pub fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
     let mut consumed_losers: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut actions: Vec<Value> = Vec::new();
 
@@ -534,7 +534,7 @@ fn candidate_confidence(base: f64, fact: &Value) -> f64 {
 /// into an explicit `/curate/apply` delete/merge op. They are NEVER
 /// auto-applied: the `/curate` apply path only executes the dedup `actions`
 /// list.
-pub(crate) fn propose_hygiene_candidates(
+pub fn propose_hygiene_candidates(
     scan_facts: &[Value],
     pair_facts: &[Value],
     supersession_pairs: &[ScoredPair],

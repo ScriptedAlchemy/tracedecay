@@ -18,7 +18,7 @@ use super::graph_service;
 use super::util::{JsonPath, JsonQuery, coerce_limit, http_detail};
 
 #[derive(Deserialize)]
-pub(crate) struct SearchParams {
+pub struct SearchParams {
     #[serde(default)]
     q: String,
     limit: Option<i64>,
@@ -26,12 +26,12 @@ pub(crate) struct SearchParams {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct NeighborParams {
+pub struct NeighborParams {
     limit: Option<i64>,
 }
 
 #[derive(Deserialize)]
-pub(crate) struct SubgraphParams {
+pub struct SubgraphParams {
     node_id: Option<String>,
     #[serde(default)]
     q: String,
@@ -40,7 +40,7 @@ pub(crate) struct SubgraphParams {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct PathParams {
+pub struct PathParams {
     #[serde(default)]
     from: String,
     #[serde(default)]
@@ -49,12 +49,12 @@ pub(crate) struct PathParams {
 }
 
 /// `GET /api/plugins/graph/overview`
-pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
+pub async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     Json(graph_service::overview_payload(&state).await)
 }
 
 /// `GET /api/plugins/graph/search?q=...&limit=50&offset=0`
-pub(crate) async fn search(
+pub async fn search(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SearchParams>,
 ) -> Json<Value> {
@@ -64,7 +64,7 @@ pub(crate) async fn search(
 }
 
 /// `GET /api/plugins/graph/node/{node_id}`
-pub(crate) async fn node(
+pub async fn node(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
 ) -> (StatusCode, Json<Value>) {
@@ -78,7 +78,7 @@ pub(crate) async fn node(
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/neighbors`
-pub(crate) async fn neighbors(
+pub async fn neighbors(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<NeighborParams>,
@@ -102,7 +102,7 @@ pub(crate) async fn neighbors(
 /// the UI can show how many neighbors remain unexpanded. Without a seed
 /// (`node_id` / `q` both absent) it returns the default overview slice
 /// instead: top-degree hubs plus the edges among them.
-pub(crate) async fn subgraph(
+pub async fn subgraph(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SubgraphParams>,
 ) -> Json<Value> {
@@ -121,7 +121,7 @@ pub(crate) async fn subgraph(
 }
 
 /// `GET /api/plugins/graph/path?from=<id>&to=<id>&max_depth=6`
-pub(crate) async fn path(
+pub async fn path(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<PathParams>,
 ) -> Json<Value> {

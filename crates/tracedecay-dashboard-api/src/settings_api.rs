@@ -66,11 +66,11 @@ struct UserSettingsPatch {
     extraction_timeout_secs: Option<u64>,
 }
 
-pub(crate) async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
+pub async fn get_settings(State(state): State<DashboardState>) -> ApiResult {
     Ok(Json(settings_payload(&state).await?))
 }
 
-pub(crate) async fn patch_project_settings(
+pub async fn patch_project_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
@@ -150,7 +150,7 @@ pub(crate) async fn patch_project_settings(
     Ok(Json(payload))
 }
 
-pub(crate) async fn patch_user_settings(
+pub async fn patch_user_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
@@ -251,7 +251,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "backend": automation.backend,
             "host_mode": automation.host_mode,
         },
-        "environment": environment_payload(),
+        "environment": environment_payload(state),
         "storage": {
             "project_id": state.project_id,
             "project_root": state.project_root.display().to_string(),
@@ -266,7 +266,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
         },
         "version": {
             "version": env!("CARGO_PKG_VERSION"),
-            "channel": if crate::cloud::is_beta() { "beta" } else { "stable" },
+            "channel": state.release_channel,
             "cached_latest_version": non_empty(&user.cached_latest_version),
         },
     }))
@@ -276,34 +276,19 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
 /// from the store's PR-autotrack state sidecar. Empty on non-unix or when the
 /// feature has tracked nothing yet.
 fn pr_autotrack_payload(state: &DashboardState) -> Value {
-    #[cfg(unix)]
-    {
-        let tracked: Vec<Value> = crate::daemon::pr_autotrack::managed_summary(&state.store_root)
-            .into_iter()
-            .map(|entry| {
-                json!({
-                    "branch": entry.branch,
-                    "pr": entry.pr,
-                    "head_branch": entry.head_branch,
-                })
-            })
-            .collect();
-        json!({ "tracked": tracked })
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = state;
-        json!({ "tracked": [] })
-    }
+    let tracked = state
+        .pr_autotrack_reader
+        .as_ref()
+        .map_or_else(Vec::new, |reader| reader(state.store_root.clone()));
+    json!({ "tracked": tracked })
 }
 
-fn environment_payload() -> Value {
-    let accounting_mode = crate::global_db::global_accounting_mode();
+fn environment_payload(state: &DashboardState) -> Value {
     let pricing_offline =
         std::env::var("TRACEDECAY_OFFLINE").is_ok_and(|v| !v.is_empty() && v != "0");
     json!({
-        "global_accounting_mode": accounting_mode.as_str(),
-        "global_accounting_enabled": accounting_mode.enabled(),
+        "global_accounting_mode": state.accounting_mode.source,
+        "global_accounting_enabled": state.accounting_mode.enabled,
         "pricing_offline": pricing_offline,
         "variables": [
             env_variable(

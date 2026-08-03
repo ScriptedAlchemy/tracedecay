@@ -18,7 +18,7 @@ use crate::automation::skill_usage::summarize_skill_usage;
 use crate::errors::Result;
 use crate::tracedecay::current_timestamp;
 
-pub(crate) async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
+pub async fn outcomes(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
     match outcomes_payload(&state).await {
         Ok(payload) => (StatusCode::OK, Json(payload)),
         Err(err) => (

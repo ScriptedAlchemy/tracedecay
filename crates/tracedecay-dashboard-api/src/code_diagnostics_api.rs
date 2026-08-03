@@ -43,13 +43,13 @@ enum CommandOverridePatch {
     Value(String),
 }
 
-pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
+pub async fn overview(State(state): State<DashboardState>) -> ApiResult {
     let snapshot = diagnostics_snapshot(&state).await?;
     maybe_spawn_idle_backfill(&state, &snapshot);
     Ok(Json(json!(snapshot)))
 }
 
-pub(crate) async fn patch_settings(
+pub async fn patch_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
@@ -90,7 +90,7 @@ pub(crate) async fn patch_settings(
     Ok(Json(json!(snapshot)))
 }
 
-pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
+pub async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
     let languages = refreshable_languages(&state).await?;
     for language in languages {
         refresh_one_reconciled(&state, &language).await?;
@@ -99,7 +99,7 @@ pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResul
     Ok(Json(json!(snapshot)))
 }
 
-pub(crate) async fn refresh_language(
+pub async fn refresh_language(
     State(state): State<DashboardState>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {

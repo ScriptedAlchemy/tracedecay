@@ -21,37 +21,24 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
-pub(crate) mod analytics_api;
 pub(crate) mod assets;
-mod automation_config_api;
-mod automation_fact_proposals_api;
-mod automation_jobs_api;
-mod automation_outcomes_api;
-mod automation_run_api;
-mod automation_run_service;
-pub(crate) use automation_run_service::{
-    DashboardAutomationWriter, direct_dashboard_automation_writer,
+pub use tracedecay_dashboard_api::memory_curate;
+pub(crate) use tracedecay_dashboard_api::util;
+pub(crate) use tracedecay_dashboard_api::{
+    AutomationSchedulerReconciler, DashboardAccountingStore, DashboardAccountingStoreHandle,
+    DashboardAutomationExecutor, DashboardAutomationTask, DashboardAutomationWriter,
+    DashboardFuture, DashboardManagedSkillExporter, DashboardPrAutotrackReader,
+    DashboardProfileRootResolver, DashboardProjectContext, DashboardProjectList,
+    DashboardProjectRegistry, DashboardProjectStateBuilder, DashboardSavingsDay,
+    DashboardSavingsTotal, DashboardState, DashboardTokenCount, direct_dashboard_automation_writer,
 };
-mod automation_scheduler_api;
-mod automation_skills_api;
-mod code_diagnostics_api;
-mod graph_api;
-mod graph_queries;
-mod graph_service;
-mod lcm_api;
-mod lcm_queries;
-mod lcm_service;
-mod memory_analysis;
-mod memory_api;
-pub mod memory_curate;
-mod memory_queries;
-mod memory_service;
-mod projects;
-mod savings_api;
-mod savings_pricing;
-mod settings_api;
-mod token_count;
-mod util;
+pub(crate) use tracedecay_dashboard_api::{
+    analytics_api, automation_config_api, automation_fact_proposals_api, automation_jobs_api,
+    automation_outcomes_api, automation_run_api, automation_scheduler_api, automation_skills_api,
+    code_diagnostics_api, code_diagnostics_broker, graph_api, graph_queries, graph_service,
+    lcm_api, lcm_queries, lcm_service, memory_analysis, memory_api, memory_queries, memory_service,
+    projects, savings_api, savings_pricing, settings_api, token_count,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -76,72 +63,427 @@ use crate::global_db::GlobalDb;
 use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
 
-/// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
-/// defaults; override with `--port`).
-pub const DEFAULT_PORT: u16 = 7341;
-pub(crate) type AutomationSchedulerReconciler = Arc<dyn Fn() + Send + Sync + 'static>;
-
-#[derive(Clone)]
-pub(crate) struct DashboardState {
-    /// Registered project id for profile-backed stores, when known.
-    pub(crate) project_id: Option<String>,
-    /// Active code-graph database. This can be branch-specific.
-    pub(crate) graph_conn: libsql::Connection,
-    /// Keeps every project-database authority alive as long as cloned raw
-    /// connections remain reachable through this state.
-    pub(crate) _database_guards: Vec<Arc<Database>>,
-    /// Display path of the active code-graph database.
-    pub(crate) graph_db_path: String,
-    /// Project memory database. This is shared across branches.
-    pub(crate) mem_conn: libsql::Connection,
-    /// Display path of the project memory database.
-    pub(crate) mem_db_path: String,
-    /// LCM session store for the resolved active project store, or the global
-    /// fallback when no project store is available.
-    pub(crate) lcm_conn: Option<libsql::Connection>,
-    /// Keeps session-store authorities alive alongside `lcm_conn`.
-    pub(crate) _global_database_guards: Vec<Arc<GlobalDb>>,
-    /// Display path of the LCM session store actually being served.
-    pub(crate) lcm_db_path: String,
-    /// Which store `lcm_conn` points at, e.g. `"profile_sharded"` or `"global"`.
-    pub(crate) lcm_scope: String,
-    /// Global accounting DB (savings ledger, lifetime counters, turns) used
-    /// by the Savings & Cost tab, when available.
-    pub(crate) savings_db: Option<Arc<GlobalDb>>,
-    /// Display path of the global accounting DB.
-    pub(crate) savings_db_path: String,
-    pub(crate) project_root: PathBuf,
-    /// Storage mode resolved for the active project store.
-    pub(crate) storage_mode: String,
-    /// Resolved active project store root.
-    pub(crate) store_root: PathBuf,
-    /// Resolved `config.json` path for the active project store.
-    pub(crate) config_path: PathBuf,
-    /// Resolved dashboard sidecar root inside the active project store.
-    pub(crate) dashboard_root: PathBuf,
-    /// Recent deterministic curation activity emitted by the standalone dashboard.
-    pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
-    /// In-process BPE token-count cache for the Savings & Cost tab (backed
-    /// by the `dashboard_token_counts` sidecar in the global accounting DB).
-    pub(crate) token_counts: Arc<token_count::TokenCountCache>,
-    /// Dashboard-owned LSP diagnostics broker. This is deliberately not
-    /// exposed to hooks or model-context paths in Phase 1.
-    pub(crate) code_diagnostics: Arc<RwLock<lsp::broker::DiagnosticBroker>>,
-    /// Ensures the dashboard-opened idle backfill pass is scheduled once per
-    /// dashboard server lifetime.
-    pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
-    pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
-    /// Lifetime-owning capability for complete dashboard automation writes.
-    pub(crate) automation_writer: DashboardAutomationWriter,
+struct RootDashboardAccountingStore {
+    db: Arc<GlobalDb>,
 }
 
-impl DashboardState {
-    pub(crate) fn reconcile_automation_scheduler(&self) {
-        if let Some(reconcile) = &self.automation_scheduler_reconciler {
-            reconcile();
-        }
+impl DashboardAccountingStore for RootDashboardAccountingStore {
+    fn dashboard_connection(&self) -> libsql::Connection {
+        self.db.dashboard_connection()
+    }
+
+    fn analytics_events(
+        &self,
+        project_root: PathBuf,
+    ) -> DashboardFuture<std::result::Result<Vec<Value>, String>> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move {
+            let project_id = GlobalDb::canonical_project_key(&project_root);
+            let events = db
+                .query_analytics_events(&crate::global_db::AnalyticsEventQuery {
+                    provider: None,
+                    project_id: Some(project_id),
+                    session_id: None,
+                    event_kind: None,
+                    since: None,
+                    limit: 10_000,
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(events
+                .into_iter()
+                .map(|event| {
+                    json!({
+                        "provider": event.provider,
+                        "timestamp": event.timestamp,
+                        "event_kind": event.event_kind,
+                        "hook_name": event.hook_name,
+                        "tool_name": event.tool_name,
+                        "tool_category": event.tool_category,
+                        "skill_name": event.skill_name,
+                        "hint_category": event.hint_category,
+                        "outcome": event.outcome,
+                        "metadata_json": event.metadata_json,
+                    })
+                })
+                .collect())
+        })
+    }
+
+    fn sum_savings(&self, since: i64) -> DashboardFuture<DashboardSavingsTotal> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move {
+            let total = db.sum_savings(None, since).await;
+            DashboardSavingsTotal {
+                saved_tokens: total.saved_tokens.min(i64::MAX as u64) as i64,
+                calls: total.calls.min(i64::MAX as u64) as i64,
+            }
+        })
+    }
+
+    fn savings_history(&self, since: i64) -> DashboardFuture<Vec<DashboardSavingsDay>> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move {
+            db.savings_history(None, since)
+                .await
+                .into_iter()
+                .map(|day| DashboardSavingsDay {
+                    day: day.day,
+                    saved_tokens: day.saved_tokens.min(i64::MAX as u64) as i64,
+                    calls: day.calls.min(i64::MAX as u64) as i64,
+                })
+                .collect()
+        })
+    }
+
+    fn ensure_token_count_cache(&self) -> DashboardFuture<bool> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move { db.ensure_token_count_cache().await })
+    }
+
+    fn load_token_counts(&self, store: String) -> DashboardFuture<Vec<DashboardTokenCount>> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move {
+            db.load_token_counts(&store)
+                .await
+                .into_iter()
+                .map(
+                    |(provider, message_id, text_len, token_count)| DashboardTokenCount {
+                        provider,
+                        message_id,
+                        text_len,
+                        token_count,
+                        encoder: String::new(),
+                    },
+                )
+                .collect()
+        })
+    }
+
+    fn save_token_counts(
+        &self,
+        store: String,
+        rows: Vec<DashboardTokenCount>,
+    ) -> DashboardFuture<()> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move {
+            let rows = rows
+                .into_iter()
+                .map(|row| crate::global_db::TokenCountUpsert {
+                    provider: row.provider,
+                    message_id: row.message_id,
+                    text_len: row.text_len,
+                    token_count: row.token_count,
+                    encoder: match row.encoder.as_str() {
+                        "cl100k_base" => "cl100k_base",
+                        _ => "o200k_base",
+                    },
+                })
+                .collect::<Vec<_>>();
+            db.save_token_counts(&store, &rows).await;
+        })
+    }
+
+    fn total_cost_since(&self, since: u64) -> DashboardFuture<Option<f64>> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move { db.total_cost_since(since).await })
+    }
+
+    fn total_tokens_since(&self, since: u64) -> DashboardFuture<Option<u64>> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move { db.total_tokens_since(since).await })
+    }
+
+    fn cost_by_model_since(&self, since: u64) -> DashboardFuture<Vec<(String, f64, u64)>> {
+        let db = Arc::clone(&self.db);
+        Box::pin(async move { db.cost_by_model_since(since).await })
     }
 }
+
+struct RootDashboardProjectRegistry;
+
+impl DashboardProjectRegistry for RootDashboardProjectRegistry {
+    fn list(
+        &self,
+        limit: usize,
+        active_project_id: Option<String>,
+    ) -> DashboardFuture<DashboardProjectList> {
+        Box::pin(async move {
+            let Some(db) = GlobalDb::open().await else {
+                return DashboardProjectList::default();
+            };
+            let mut projects = db.list_code_projects(limit + 1).await;
+            let truncated = projects.len() > limit;
+            projects.truncate(limit);
+            let contexts = db.project_registry_contexts_for_projects(&projects).await;
+            let view = crate::project_registry::build_project_registry_view(
+                &contexts,
+                active_project_id.as_deref(),
+                truncated,
+            );
+            let projects = projects
+                .iter()
+                .map(|project| {
+                    serde_json::to_value(crate::project_registry::PublicCodeProject::from_record(
+                        project,
+                        active_project_id.as_deref(),
+                    ))
+                    .unwrap_or(Value::Null)
+                })
+                .collect();
+            DashboardProjectList {
+                truncated,
+                projects,
+                summary: serde_json::to_value(view.summary).unwrap_or(Value::Null),
+                project_tree: serde_json::to_value(view.project_tree).unwrap_or(Value::Null),
+            }
+        })
+    }
+
+    fn context(
+        &self,
+        project_id: String,
+        active_project_id: Option<String>,
+    ) -> DashboardFuture<Option<DashboardProjectContext>> {
+        Box::pin(async move {
+            let db = GlobalDb::open().await?;
+            let context = db.project_registry_context_by_id(&project_id).await?;
+            let public = crate::project_registry::PublicProjectRegistryContext::new(
+                &context,
+                active_project_id.as_deref(),
+            );
+            let payload = json!({
+                "project": public.project,
+                "aliases": public.aliases,
+                "stores": public.stores,
+            });
+            Some(DashboardProjectContext {
+                cache_key: format!("{context:?}"),
+                project_root: PathBuf::from(&context.project.canonical_root),
+                payload,
+            })
+        })
+    }
+}
+
+fn dashboard_project_state_builder() -> DashboardProjectStateBuilder {
+    Arc::new(|project_id, project_root, active| {
+        Box::pin(async move {
+            let cg = TraceDecay::open_read_only(&project_root)
+                .await
+                .map_err(|error| tracedecay_dashboard_api::config_error(error.to_string()))?;
+            if cg.store_layout().identity.project_id.as_deref() != Some(project_id.as_str()) {
+                return Err(tracedecay_dashboard_api::config_error(format!(
+                    "registered project id mismatch for {project_id}: {}",
+                    project_root.display()
+                )));
+            }
+            Ok(build_selected_project_state(&cg, &active).await)
+        })
+    })
+}
+
+fn dashboard_automation_executor(
+    project_root: PathBuf,
+    dashboard_root: PathBuf,
+) -> DashboardAutomationExecutor {
+    Arc::new(move |task| {
+        let project_root = project_root.clone();
+        let dashboard_root = dashboard_root.clone();
+        Box::pin(async move {
+            use crate::automation::backend::CodexAppServerBackend;
+            use crate::automation::config::{
+                AutomationBackend, effective_config, load_project_config,
+            };
+            use crate::automation::run_ledger::AutomationTrigger;
+            use crate::automation::runner::{
+                MemoryCuratorAutomationOptions, SessionReflectorAutomationOptions,
+                SkillWriterAutomationOptions, run_memory_curator_with_backend,
+                run_session_reflector_with_backend, run_skill_writer_with_backend,
+            };
+
+            let cg = TraceDecay::open(&project_root)
+                .await
+                .map_err(|error| error.to_string())?;
+            let global = crate::user_config::UserConfig::load().automation;
+            let project = load_project_config(&dashboard_root)
+                .await
+                .map_err(|error| error.to_string())?;
+            let config =
+                effective_config(&global, project.as_ref()).map_err(|error| error.to_string())?;
+            if config.enabled && config.backend == AutomationBackend::ExternalCommand {
+                return Err(
+                    "automation backend external_command is not implemented yet".to_string()
+                );
+            }
+            let backend = CodexAppServerBackend::from_automation_config(&config);
+
+            match task {
+                DashboardAutomationTask::MemoryCurator {
+                    max_clusters,
+                    min_confidence,
+                    run_id,
+                } => {
+                    let run = run_memory_curator_with_backend(
+                        &cg,
+                        &config,
+                        &backend,
+                        MemoryCuratorAutomationOptions {
+                            trigger: AutomationTrigger::Dashboard,
+                            run_id,
+                            max_clusters,
+                            min_confidence,
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string())?;
+                    Ok(
+                        tracedecay_dashboard_api::automation_run_service::automation_run_payload(
+                            &run.run_id,
+                            &run.report,
+                            &run.ledger_record,
+                            run.backend_response.as_ref(),
+                        ),
+                    )
+                }
+                DashboardAutomationTask::SessionReflection {
+                    provider,
+                    query,
+                    evidence_limit,
+                    scope,
+                    session_id,
+                    include_summaries,
+                    sort,
+                    source,
+                    role,
+                    start_time,
+                    end_time,
+                    run_id,
+                } => {
+                    let mut options = SessionReflectorAutomationOptions {
+                        trigger: AutomationTrigger::Dashboard,
+                        run_id,
+                        ..SessionReflectorAutomationOptions::default()
+                    };
+                    if let Some(provider) = provider {
+                        options.provider = provider;
+                    }
+                    if let Some(query) = query {
+                        options.query = query;
+                    }
+                    if let Some(evidence_limit) = evidence_limit {
+                        options.evidence_limit = evidence_limit;
+                    }
+                    if let Some(scope) = scope {
+                        options.scope = scope;
+                    }
+                    if let Some(session_id) = session_id {
+                        options.session_id = Some(session_id);
+                    }
+                    if let Some(include_summaries) = include_summaries {
+                        options.include_summaries = include_summaries;
+                    }
+                    if let Some(sort) = sort {
+                        options.sort = sort;
+                    }
+                    if let Some(source) = source {
+                        options.source = Some(source);
+                    }
+                    if let Some(role) = role {
+                        options.role = Some(role);
+                    }
+                    options.start_time = start_time;
+                    options.end_time = end_time;
+                    let run = run_session_reflector_with_backend(&cg, &config, &backend, options)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok(
+                        tracedecay_dashboard_api::automation_run_service::automation_run_payload(
+                            &run.run_id,
+                            &run.report,
+                            &run.ledger_record,
+                            run.backend_response.as_ref(),
+                        ),
+                    )
+                }
+                DashboardAutomationTask::SkillWriting {
+                    provider,
+                    query,
+                    evidence_limit,
+                    run_id,
+                } => {
+                    let mut options = SkillWriterAutomationOptions {
+                        trigger: AutomationTrigger::Dashboard,
+                        run_id,
+                        profile_root: None,
+                        ..SkillWriterAutomationOptions::default()
+                    };
+                    if let Some(provider) = provider {
+                        options.provider = provider;
+                    }
+                    if let Some(query) = query {
+                        options.query = query;
+                    }
+                    if let Some(evidence_limit) = evidence_limit {
+                        options.evidence_limit = evidence_limit;
+                    }
+                    let run = run_skill_writer_with_backend(&cg, &config, &backend, options)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                    Ok(
+                        tracedecay_dashboard_api::automation_run_service::automation_run_payload(
+                            &run.run_id,
+                            &run.report,
+                            &run.ledger_record,
+                            run.backend_response.as_ref(),
+                        ),
+                    )
+                }
+            }
+        })
+    })
+}
+
+fn dashboard_profile_root_resolver() -> DashboardProfileRootResolver {
+    Arc::new(|| crate::storage::default_profile_root().map_err(|error| error.to_string()))
+}
+
+fn dashboard_managed_skill_exporter() -> DashboardManagedSkillExporter {
+    Arc::new(|profile_root, project_root| {
+        Box::pin(async move {
+            let Some(home) = crate::agents::home_dir() else {
+                return Vec::new();
+            };
+            tokio::task::spawn_blocking(move || {
+                let reports = crate::agents::export_managed_skills_to_agent_hosts(
+                    &home,
+                    &project_root,
+                    &profile_root,
+                );
+                crate::automation::skill_materialization::reconcile_after_activation(
+                    &profile_root,
+                    &project_root,
+                );
+                reports
+                    .into_iter()
+                    .map(|report| serde_json::to_value(report).unwrap_or(Value::Null))
+                    .collect()
+            })
+            .await
+            .unwrap_or_else(|error| {
+                vec![json!({
+                    "agent": "export-task",
+                    "exports": [],
+                    "error": format!("managed skill export task failed: {error}"),
+                })]
+            })
+        })
+    })
+}
+
+/// Default port for `tracedecay dashboard` (chosen to avoid common dev-server
+/// defaults; override with `--port`).
+pub use tracedecay_dashboard_api::DEFAULT_PORT;
 
 /// The LCM session store the dashboard will serve.
 pub(crate) struct LcmStoreSelection {
@@ -192,15 +534,6 @@ pub(crate) fn storage_mode_label(mode: &StorageMode) -> &'static str {
         StorageMode::ProjectLocal => "project_local",
         StorageMode::ProfileSharded => "profile_sharded",
     }
-}
-
-pub(crate) fn code_diagnostics_broker(
-    project_root: PathBuf,
-    settings: lsp::settings::CodeDiagnosticsSettings,
-) -> lsp::broker::DiagnosticBroker {
-    let mut adapters = lsp::adapters::builtin_adapters();
-    adapters.extend(settings.custom_adapters.clone());
-    lsp::broker::DiagnosticBroker::new(project_root, adapters, settings)
 }
 
 async fn open_dashboard_connection(path: &Path) -> Option<(libsql::Connection, Arc<Database>)> {
@@ -275,24 +608,61 @@ async fn build_state_inner(
         .unwrap_or_default();
     let code_diagnostics =
         code_diagnostics_broker(cg.project_root().to_path_buf(), code_diagnostics_settings);
-    let savings_db = GlobalDb::open().await.map(Arc::new);
+    let accounting_store = GlobalDb::open().await.map(|db| {
+        Arc::new(RootDashboardAccountingStore { db: Arc::new(db) })
+            as DashboardAccountingStoreHandle
+    });
+    let accounting_mode = crate::global_db::global_accounting_mode();
     let savings_db_path = crate::global_db::global_db_path()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     let state = DashboardState {
         project_id: cg.store_layout().identity.project_id.clone(),
         graph_conn: cg.dashboard_connection(),
-        _database_guards: std::iter::once(cg.dashboard_database_guard())
+        database_guards: std::iter::once(cg.dashboard_database_guard())
             .chain(mem_guard)
             .collect(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_conn,
         mem_db_path,
         lcm_conn: lcm.conn,
-        _global_database_guards: lcm.guard.into_iter().collect(),
+        global_database_guards: lcm
+            .guard
+            .into_iter()
+            .map(|guard| guard as Arc<dyn std::any::Any + Send + Sync>)
+            .collect(),
         lcm_db_path: lcm.path,
         lcm_scope: lcm.scope,
-        savings_db,
+        accounting_store,
+        accounting_mode: tracedecay_dashboard_api::DashboardAccountingMode {
+            enabled: accounting_mode.enabled(),
+            source: accounting_mode.as_str(),
+        },
+        release_channel: if crate::cloud::is_beta() {
+            "beta"
+        } else {
+            "stable"
+        },
+        pr_autotrack_reader: Some(Arc::new(|store_root| {
+            #[cfg(unix)]
+            {
+                crate::daemon::pr_autotrack::managed_summary(&store_root)
+                    .into_iter()
+                    .map(|entry| {
+                        json!({
+                            "branch": entry.branch,
+                            "pr": entry.pr,
+                            "head_branch": entry.head_branch,
+                        })
+                    })
+                    .collect()
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = store_root;
+                Vec::new()
+            }
+        }) as DashboardPrAutotrackReader),
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
         storage_mode,
@@ -305,6 +675,15 @@ async fn build_state_inner(
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler,
         automation_writer,
+        automation_executor: Some(dashboard_automation_executor(
+            cg.project_root().to_path_buf(),
+            dashboard_root.clone(),
+        )),
+        skill_analytics_sync: Some(dashboard_skill_analytics_sync()),
+        profile_root_resolver: dashboard_profile_root_resolver(),
+        managed_skill_exporter: dashboard_managed_skill_exporter(),
+        project_registry: Some(Arc::new(RootDashboardProjectRegistry)),
+        project_state_builder: Some(dashboard_project_state_builder()),
     };
     if repair_memory_on_startup {
         if let Err(err) = memory_api::repair_derived_memory(&state).await {
@@ -356,6 +735,59 @@ pub(crate) async fn build_selected_project_state(
         Arc::clone(&active.automation_writer),
     )
     .await
+}
+
+/// Root composition façade for `tracedecay memory curate`.
+pub async fn run_memory_curate(
+    cg: &TraceDecay,
+    options: &memory_curate::MemoryCurateOptions,
+) -> Result<Value> {
+    let (mem_conn, mem_db_path, mem_guard) = resolve_project_memory_store(cg).await;
+    let layout = cg.store_layout();
+    let state = DashboardState {
+        project_id: layout.identity.project_id.clone(),
+        graph_conn: cg.dashboard_connection(),
+        database_guards: std::iter::once(cg.dashboard_database_guard())
+            .chain(mem_guard)
+            .collect(),
+        graph_db_path: cg.dashboard_db_path().display().to_string(),
+        mem_conn,
+        mem_db_path,
+        lcm_conn: None,
+        global_database_guards: Vec::new(),
+        lcm_db_path: String::new(),
+        lcm_scope: storage_mode_label(&layout.storage_mode).to_string(),
+        accounting_store: None,
+        accounting_mode: tracedecay_dashboard_api::DashboardAccountingMode::default(),
+        release_channel: if crate::cloud::is_beta() {
+            "beta"
+        } else {
+            "stable"
+        },
+        pr_autotrack_reader: None,
+        savings_db_path: String::new(),
+        project_root: cg.project_root().to_path_buf(),
+        storage_mode: storage_mode_label(&layout.storage_mode).to_string(),
+        store_root: layout.data_root.clone(),
+        config_path: layout.config_path.clone(),
+        dashboard_root: layout.dashboard_root.clone(),
+        curation_activity: Arc::new(RwLock::new(Vec::new())),
+        token_counts: Arc::new(token_count::TokenCountCache::new()),
+        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
+            cg.project_root().to_path_buf(),
+            lsp::settings::CodeDiagnosticsSettings::default(),
+        ))),
+        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        automation_scheduler_reconciler: None,
+        automation_writer: direct_dashboard_automation_writer(),
+        automation_executor: None,
+        skill_analytics_sync: None,
+        profile_root_resolver: dashboard_profile_root_resolver(),
+        managed_skill_exporter: dashboard_managed_skill_exporter(),
+        project_registry: None,
+        project_state_builder: None,
+    };
+    memory_curate::run_memory_curate_with_state(&state, options).await
 }
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,

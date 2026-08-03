@@ -26,9 +26,8 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use super::DashboardState;
 use super::util::{qmarks, query_rows};
-use crate::global_db::TokenCountUpsert;
+use super::{DashboardState, DashboardTokenCount};
 
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
@@ -67,13 +66,13 @@ pub(super) const MESSAGE_TOKENS_CTE: &str = "
 /// Which BPE vocabulary a model id maps to, and whether the resulting count
 /// is exact (the model's real tokenizer) or a labeled approximation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ModelEncoder {
+pub struct ModelEncoder {
     pub name: &'static str,
     pub exact: bool,
 }
 
-pub(crate) const O200K: &str = "o200k_base";
-pub(crate) const CL100K: &str = "cl100k_base";
+pub const O200K: &str = "o200k_base";
+pub const CL100K: &str = "cl100k_base";
 
 /// Maps a transcript model id to its tokenizer.
 ///
@@ -82,7 +81,7 @@ pub(crate) const CL100K: &str = "cl100k_base";
 /// embeddings use `cl100k_base`. Everything else (Claude, Gemini, Grok, …)
 /// has no public tokenizer, so `o200k_base` is used as an approximation
 /// with `exact: false` so the UI can label it honestly.
-pub(crate) fn encoder_for_model(model: &str) -> ModelEncoder {
+pub fn encoder_for_model(model: &str) -> ModelEncoder {
     let id = model.trim().to_ascii_lowercase();
     let exact_o200k = id.starts_with("gpt-5")
         || id.starts_with("gpt-4o")
@@ -112,7 +111,7 @@ pub(crate) fn encoder_for_model(model: &str) -> ModelEncoder {
 }
 
 /// `true` when the binary was built with the `token-counting` feature.
-pub(crate) fn counting_available() -> bool {
+pub fn counting_available() -> bool {
     cfg!(feature = "token-counting")
 }
 
@@ -120,7 +119,7 @@ pub(crate) fn counting_available() -> bool {
 /// embedded vocabularies lazily, so the first call pays the init cost and
 /// builds without the feature never do.
 #[cfg(feature = "token-counting")]
-pub(crate) fn count_text_tokens(text: &str, model: &str) -> i64 {
+pub fn count_text_tokens(text: &str, model: &str) -> i64 {
     let bpe = match encoder_for_model(model).name {
         CL100K => cl100k_base_singleton(),
         _ => o200k_base_singleton(),
@@ -129,7 +128,7 @@ pub(crate) fn count_text_tokens(text: &str, model: &str) -> i64 {
 }
 
 #[cfg(not(feature = "token-counting"))]
-pub(crate) fn count_text_tokens(_text: &str, _model: &str) -> i64 {
+pub fn count_text_tokens(_text: &str, _model: &str) -> i64 {
     0
 }
 
@@ -157,7 +156,7 @@ struct OverlayCache {
 type OverlayFingerprint = (i64, i64, u64);
 
 /// Process-lifetime token-count cache shared by all savings endpoints.
-pub(crate) struct TokenCountCache {
+pub struct TokenCountCache {
     map: Mutex<HashMap<(String, String), CachedCount>>,
     hydrated: AtomicBool,
     /// Last built non-usage overlay; `/overview`, `/sessions`, and `/models`
@@ -167,7 +166,7 @@ pub(crate) struct TokenCountCache {
 }
 
 impl TokenCountCache {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
             hydrated: AtomicBool::new(false),
@@ -179,7 +178,7 @@ impl TokenCountCache {
 /// One stored message without transcript usage data, carrying its
 /// best-available token count.
 #[derive(Debug, Clone)]
-pub(crate) struct MessageTokens {
+pub struct MessageTokens {
     pub provider: String,
     pub session_id: String,
     /// Normalized like the SQL CTE: `""` when no model id was recorded.
@@ -207,9 +206,7 @@ fn row_str(row: &Value, key: &str) -> String {
 /// `(COUNT(*), MAX(rowid))` fingerprint of `session_messages`; the cache
 /// lock is held across a rebuild so the three savings endpoints firing
 /// concurrently share one scan instead of racing three.
-pub(crate) async fn non_usage_message_tokens(
-    state: &DashboardState,
-) -> Option<Arc<Vec<MessageTokens>>> {
+pub async fn non_usage_message_tokens(state: &DashboardState) -> Option<Arc<Vec<MessageTokens>>> {
     let conn = state.lcm_conn.as_ref()?;
 
     let fingerprint = overlay_fingerprint(conn).await?;
@@ -327,20 +324,26 @@ async fn hydrate_cache(state: &DashboardState) {
     if state.token_counts.hydrated.swap(true, Ordering::SeqCst) {
         return;
     }
-    let Some(gdb) = state.savings_db.as_deref() else {
+    let Some(gdb) = state.accounting_store.as_deref() else {
         return;
     };
     if !gdb.ensure_token_count_cache().await {
         return;
     }
-    let persisted = gdb.load_token_counts(&state.lcm_db_path).await;
+    let persisted = gdb.load_token_counts(state.lcm_db_path.clone()).await;
     let mut map = state
         .token_counts
         .map
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (provider, message_id, text_len, tokens) in persisted {
-        map.insert((provider, message_id), CachedCount { text_len, tokens });
+    for row in persisted {
+        map.insert(
+            (row.provider, row.message_id),
+            CachedCount {
+                text_len: row.text_len,
+                tokens: row.token_count,
+            },
+        );
     }
 }
 
@@ -357,7 +360,7 @@ async fn count_and_store(
     mut misses: Vec<(String, String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
-    let mut computed: Vec<TokenCountUpsert> = Vec::with_capacity(misses.len());
+    let mut computed: Vec<DashboardTokenCount> = Vec::with_capacity(misses.len());
 
     misses.sort_by(|a, b| a.0.cmp(&b.0));
     for chunk in misses
@@ -411,9 +414,9 @@ async fn count_and_store(
             batch
                 .into_iter()
                 .map(
-                    |(provider, message_id, model, len, text)| TokenCountUpsert {
+                    |(provider, message_id, model, len, text)| DashboardTokenCount {
                         token_count: count_text_tokens(&text, &model),
-                        encoder: encoder_for_model(&model).name,
+                        encoder: encoder_for_model(&model).name.to_string(),
                         provider,
                         message_id,
                         text_len: len,
@@ -429,8 +432,9 @@ async fn count_and_store(
     if computed.is_empty() {
         return;
     }
-    if let Some(gdb) = state.savings_db.as_deref() {
-        gdb.save_token_counts(&state.lcm_db_path, &computed).await;
+    if let Some(gdb) = state.accounting_store.as_deref() {
+        gdb.save_token_counts(state.lcm_db_path.clone(), computed.clone())
+            .await;
     }
     let mut map = state
         .token_counts
@@ -449,7 +453,7 @@ async fn count_and_store(
 }
 
 /// Detached warm-up so the first Savings-tab request finds a hot cache.
-pub(crate) fn spawn_warm(state: DashboardState) {
+pub fn spawn_warm(state: DashboardState) {
     if !counting_available() {
         return;
     }

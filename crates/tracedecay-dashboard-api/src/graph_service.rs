@@ -200,7 +200,7 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
     summary
 }
 
-pub(crate) async fn overview_payload(state: &DashboardState) -> Value {
+pub async fn overview_payload(state: &DashboardState) -> Value {
     let files = graph_queries::overview_file_rows(&state.graph_conn).await;
     let summary = degree_summary(state).await;
 
@@ -219,12 +219,7 @@ pub(crate) async fn overview_payload(state: &DashboardState) -> Value {
     })
 }
 
-pub(crate) async fn search_payload(
-    state: &DashboardState,
-    query: &str,
-    limit: i64,
-    offset: i64,
-) -> Value {
+pub async fn search_payload(state: &DashboardState, query: &str, limit: i64, offset: i64) -> Value {
     let total = graph_queries::search_total(&state.graph_conn, query).await;
     let results = graph_queries::search_rows(&state.graph_conn, query, limit, offset).await;
     let ids = collect_node_ids(&results);
@@ -241,11 +236,11 @@ pub(crate) async fn search_payload(
     })
 }
 
-pub(crate) async fn node_exists(state: &DashboardState, node_id: &str) -> bool {
+pub async fn node_exists(state: &DashboardState, node_id: &str) -> bool {
     graph_queries::node_exists(&state.graph_conn, node_id).await
 }
 
-pub(crate) async fn node_payload(state: &DashboardState, node_id: &str) -> Option<Value> {
+pub async fn node_payload(state: &DashboardState, node_id: &str) -> Option<Value> {
     let row = graph_queries::node_row(&state.graph_conn, node_id).await?;
     let degrees = degrees_for_ids(state, &[node_id.to_string()]).await;
     let node = attach_degrees(vec![node_with_span(row)], &degrees)
@@ -255,7 +250,7 @@ pub(crate) async fn node_payload(state: &DashboardState, node_id: &str) -> Optio
     Some(json!({ "node": node }))
 }
 
-pub(crate) async fn neighbors_payload(state: &DashboardState, node_id: &str, limit: i64) -> Value {
+pub async fn neighbors_payload(state: &DashboardState, node_id: &str, limit: i64) -> Value {
     let callers = graph_queries::caller_rows(&state.graph_conn, node_id, limit).await;
     let callees = graph_queries::callee_rows(&state.graph_conn, node_id, limit).await;
     let edges = graph_queries::neighborhood_edge_rows(&state.graph_conn, node_id, limit).await;
@@ -411,7 +406,7 @@ async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i
     })
 }
 
-pub(crate) async fn subgraph_payload(
+pub async fn subgraph_payload(
     state: &DashboardState,
     node_id: Option<String>,
     query: &str,
@@ -480,12 +475,7 @@ pub(crate) async fn subgraph_payload(
 /// Undirected shortest path between two nodes via breadth-first search over
 /// the edges table. Depth defaults to 6 (max 10); the visited set is capped
 /// so pathological graphs cannot stall the server.
-pub(crate) async fn path_payload(
-    state: &DashboardState,
-    from: &str,
-    to: &str,
-    max_depth: i64,
-) -> Value {
+pub async fn path_payload(state: &DashboardState, from: &str, to: &str, max_depth: i64) -> Value {
     let mut payload = json!({
         "from": from,
         "to": to,

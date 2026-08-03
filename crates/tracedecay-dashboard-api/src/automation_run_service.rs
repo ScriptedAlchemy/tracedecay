@@ -4,28 +4,28 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 
-use super::DashboardState;
 use super::memory_service::{push_curation_activity, push_curation_activity_with_level};
+use super::{DashboardAutomationTask, DashboardState};
 use crate::sessions::lcm::{LcmGrepSort, LcmScope};
 
-pub(crate) type DashboardAutomationWriteFuture =
+pub type DashboardAutomationWriteFuture =
     Pin<Box<dyn Future<Output = Result<Value, String>> + Send + 'static>>;
-pub(crate) type DashboardAutomationWriteOperation =
+pub type DashboardAutomationWriteOperation =
     Box<dyn FnOnce() -> DashboardAutomationWriteFuture + Send + 'static>;
-pub(crate) type DashboardAutomationWriter = Arc<
+pub type DashboardAutomationWriter = Arc<
     dyn Fn(DashboardAutomationWriteOperation) -> DashboardAutomationWriteFuture
         + Send
         + Sync
         + 'static,
 >;
 
-pub(crate) fn execute_dashboard_automation_run_direct(
+pub fn execute_dashboard_automation_run_direct(
     operation: DashboardAutomationWriteOperation,
 ) -> DashboardAutomationWriteFuture {
     operation()
 }
 
-pub(crate) fn direct_dashboard_automation_writer() -> DashboardAutomationWriter {
+pub fn direct_dashboard_automation_writer() -> DashboardAutomationWriter {
     Arc::new(execute_dashboard_automation_run_direct)
 }
 
@@ -42,12 +42,12 @@ where
     writer(Box::new(move || Box::pin(operation(state)))).await
 }
 
-pub(crate) struct MemoryCuratorRunRequest {
+pub struct MemoryCuratorRunRequest {
     pub max_clusters: usize,
     pub min_confidence: f64,
 }
 
-pub(crate) async fn memory_curator_run_payload_with_run_id(
+pub async fn memory_curator_run_payload_with_run_id(
     state: &DashboardState,
     request: MemoryCuratorRunRequest,
     run_id: Option<String>,
@@ -63,11 +63,6 @@ async fn memory_curator_run_payload_with_run_id_direct(
     request: MemoryCuratorRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
-        MemoryCuratorAutomationOptions, run_memory_curator_with_backend,
-    };
-
     push_curation_activity(
         state,
         "queued",
@@ -75,28 +70,6 @@ async fn memory_curator_run_payload_with_run_id_direct(
         true,
     )
     .await;
-    let run_context = match dashboard_automation_run_context(state).await {
-        Ok(context) => context,
-        Err(err) => {
-            push_curation_activity_with_level(
-                state,
-                "failure",
-                format!("Could not prepare memory-curator backend context: {err}"),
-                true,
-                "error",
-            )
-            .await;
-            push_curation_activity(
-                state,
-                "finish",
-                "Finished standalone memory-curator automation run with setup failure",
-                true,
-            )
-            .await;
-            return Err(err);
-        }
-    };
-
     push_curation_activity(
         state,
         "evidence",
@@ -115,20 +88,17 @@ async fn memory_curator_run_payload_with_run_id_direct(
         true,
     )
     .await;
-    let run = match run_memory_curator_with_backend(
-        &run_context.cg,
-        &run_context.config,
-        &run_context.backend,
-        MemoryCuratorAutomationOptions {
-            trigger: AutomationTrigger::Dashboard,
-            run_id,
+    let payload = match execute_automation_task(
+        state,
+        DashboardAutomationTask::MemoryCurator {
             max_clusters: request.max_clusters,
             min_confidence: request.min_confidence,
+            run_id,
         },
     )
     .await
     {
-        Ok(run) => run,
+        Ok(payload) => payload,
         Err(err) => {
             push_curation_activity_with_level(
                 state,
@@ -145,10 +115,11 @@ async fn memory_curator_run_payload_with_run_id_direct(
                 true,
             )
             .await;
-            return Err(err.to_string());
+            return Err(err);
         }
     };
-    if run.ledger_record.fallback_status.as_deref() == Some("backend_failed_noop") {
+    let record = payload.get("ledger_record").unwrap_or(&Value::Null);
+    if record.get("fallback_status").and_then(Value::as_str) == Some("backend_failed_noop") {
         push_curation_activity_with_level(
             state,
             "failure",
@@ -162,7 +133,10 @@ async fn memory_curator_run_payload_with_run_id_direct(
             "report",
             format!(
                 "Memory-curator automation run {}: backend unavailable; no changes proposed",
-                run.ledger_record.status.as_str()
+                record
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
             ),
             true,
         )
@@ -174,38 +148,49 @@ async fn memory_curator_run_payload_with_run_id_direct(
             true,
         )
         .await;
-        return Ok(automation_run_payload(
-            &run.run_id,
-            &run.report,
-            &run.ledger_record,
-            run.backend_response.as_ref(),
-        ));
+        return Ok(payload);
     }
     push_curation_activity(
         state,
         "validation",
         format!(
             "Validated backend proposal: {} accepted op(s), {} rejected op(s)",
-            run.ledger_record.accepted_count, run.ledger_record.rejected_count
+            record
+                .get("accepted_count")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+            record
+                .get("rejected_count")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
         ),
         true,
     )
     .await;
-    if run.ledger_record.rejected_count > 0 {
+    if record
+        .get("rejected_count")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        > 0
+    {
         push_curation_activity_with_level(
             state,
             "rejection",
             format!(
                 "Rejected {} backend-proposed op(s) during evidence validation",
-                run.ledger_record.rejected_count
+                record
+                    .get("rejected_count")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
             ),
             true,
             "warning",
         )
         .await;
     }
-    let apply_policy = run
-        .report
+    let apply_policy = payload
+        .get("report")
+        .unwrap_or(&Value::Null)
         .get("automation_apply_policy")
         .cloned()
         .unwrap_or(Value::Null);
@@ -236,9 +221,18 @@ async fn memory_curator_run_payload_with_run_id_direct(
         "report",
         format!(
             "Memory-curator automation run {}: {} accepted op(s), {} rejected op(s)",
-            run.ledger_record.status.as_str(),
-            run.ledger_record.accepted_count,
-            run.ledger_record.rejected_count
+            record
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            record
+                .get("accepted_count")
+                .and_then(Value::as_i64)
+                .unwrap_or_default(),
+            record
+                .get("rejected_count")
+                .and_then(Value::as_i64)
+                .unwrap_or_default()
         ),
         true,
     )
@@ -248,21 +242,19 @@ async fn memory_curator_run_payload_with_run_id_direct(
         "finish",
         format!(
             "Finished standalone memory-curator automation run: {}",
-            run.ledger_record.status.as_str()
+            record
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
         ),
         true,
     )
     .await;
 
-    Ok(automation_run_payload(
-        &run.run_id,
-        &run.report,
-        &run.ledger_record,
-        run.backend_response.as_ref(),
-    ))
+    Ok(payload)
 }
 
-pub(crate) struct SessionReflectionRunRequest {
+pub struct SessionReflectionRunRequest {
     pub provider: Option<String>,
     pub query: Option<String>,
     pub evidence_limit: Option<usize>,
@@ -276,13 +268,13 @@ pub(crate) struct SessionReflectionRunRequest {
     pub end_time: Option<i64>,
 }
 
-pub(crate) struct SkillWritingRunRequest {
+pub struct SkillWritingRunRequest {
     pub provider: Option<String>,
     pub query: Option<String>,
     pub evidence_limit: Option<usize>,
 }
 
-pub(crate) async fn session_reflection_run_payload_with_run_id(
+pub async fn session_reflection_run_payload_with_run_id(
     state: &DashboardState,
     request: SessionReflectionRunRequest,
     run_id: Option<String>,
@@ -298,11 +290,6 @@ async fn session_reflection_run_payload_with_run_id_direct(
     request: SessionReflectionRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{
-        SessionReflectorAutomationOptions, run_session_reflector_with_backend,
-    };
-
     push_dashboard_automation_activity_start(
         state,
         "session-reflector",
@@ -310,62 +297,26 @@ async fn session_reflection_run_payload_with_run_id_direct(
         "Preparing standalone session-reflector backend review",
     )
     .await;
-    let run_context = match dashboard_automation_run_context(state).await {
-        Ok(context) => context,
-        Err(err) => {
-            push_dashboard_automation_activity_failure(
-                state,
-                "session-reflector",
-                format!("Could not prepare session-reflector backend context: {err}"),
-                "setup failure",
-            )
-            .await;
-            return Err(err);
-        }
-    };
-    let mut options = SessionReflectorAutomationOptions {
-        trigger: AutomationTrigger::Dashboard,
-        run_id,
-        ..SessionReflectorAutomationOptions::default()
-    };
-    if let Some(provider) = request.provider {
-        options.provider = provider;
-    }
-    if let Some(query) = request.query {
-        options.query = query;
-    }
-    if let Some(evidence_limit) = request.evidence_limit {
-        options.evidence_limit = evidence_limit;
-    }
-    if let Some(scope) = request.scope {
-        options.scope = scope;
-    }
-    if let Some(session_id) = request.session_id {
-        options.session_id = Some(session_id);
-    }
-    if let Some(include_summaries) = request.include_summaries {
-        options.include_summaries = include_summaries;
-    }
-    if let Some(sort) = request.sort {
-        options.sort = sort;
-    }
-    if let Some(source) = request.source {
-        options.source = Some(source);
-    }
-    if let Some(role) = request.role {
-        options.role = Some(role);
-    }
-    options.start_time = request.start_time;
-    options.end_time = request.end_time;
-    let run = match run_session_reflector_with_backend(
-        &run_context.cg,
-        &run_context.config,
-        &run_context.backend,
-        options,
+    let payload = match execute_automation_task(
+        state,
+        DashboardAutomationTask::SessionReflection {
+            provider: request.provider,
+            query: request.query,
+            evidence_limit: request.evidence_limit,
+            scope: request.scope,
+            session_id: request.session_id,
+            include_summaries: request.include_summaries,
+            sort: request.sort,
+            source: request.source,
+            role: request.role,
+            start_time: request.start_time,
+            end_time: request.end_time,
+            run_id,
+        },
     )
     .await
     {
-        Ok(run) => run,
+        Ok(payload) => payload,
         Err(err) => {
             push_dashboard_automation_activity_failure(
                 state,
@@ -374,20 +325,20 @@ async fn session_reflection_run_payload_with_run_id_direct(
                 "backend failure",
             )
             .await;
-            return Err(err.to_string());
+            return Err(err);
         }
     };
-    push_dashboard_automation_activity_result(state, "session-reflector", &run.ledger_record).await;
+    push_dashboard_automation_activity_result(
+        state,
+        "session-reflector",
+        payload.get("ledger_record").unwrap_or(&Value::Null),
+    )
+    .await;
 
-    Ok(automation_run_payload(
-        &run.run_id,
-        &run.report,
-        &run.ledger_record,
-        run.backend_response.as_ref(),
-    ))
+    Ok(payload)
 }
 
-pub(crate) async fn skill_writing_run_payload_with_run_id(
+pub async fn skill_writing_run_payload_with_run_id(
     state: &DashboardState,
     request: SkillWritingRunRequest,
     run_id: Option<String>,
@@ -403,9 +354,6 @@ async fn skill_writing_run_payload_with_run_id_direct(
     request: SkillWritingRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    use crate::automation::run_ledger::AutomationTrigger;
-    use crate::automation::runner::{SkillWriterAutomationOptions, run_skill_writer_with_backend};
-
     push_dashboard_automation_activity_start(
         state,
         "skill-writer",
@@ -413,43 +361,18 @@ async fn skill_writing_run_payload_with_run_id_direct(
         "Preparing standalone skill-writer backend review",
     )
     .await;
-    let run_context = match dashboard_automation_run_context(state).await {
-        Ok(context) => context,
-        Err(err) => {
-            push_dashboard_automation_activity_failure(
-                state,
-                "skill-writer",
-                format!("Could not prepare skill-writer backend context: {err}"),
-                "setup failure",
-            )
-            .await;
-            return Err(err);
-        }
-    };
-    let mut options = SkillWriterAutomationOptions {
-        trigger: AutomationTrigger::Dashboard,
-        run_id,
-        profile_root: None,
-        ..SkillWriterAutomationOptions::default()
-    };
-    if let Some(provider) = request.provider {
-        options.provider = provider;
-    }
-    if let Some(query) = request.query {
-        options.query = query;
-    }
-    if let Some(evidence_limit) = request.evidence_limit {
-        options.evidence_limit = evidence_limit;
-    }
-    let run = match run_skill_writer_with_backend(
-        &run_context.cg,
-        &run_context.config,
-        &run_context.backend,
-        options,
+    let payload = match execute_automation_task(
+        state,
+        DashboardAutomationTask::SkillWriting {
+            provider: request.provider,
+            query: request.query,
+            evidence_limit: request.evidence_limit,
+            run_id,
+        },
     )
     .await
     {
-        Ok(run) => run,
+        Ok(payload) => payload,
         Err(err) => {
             push_dashboard_automation_activity_failure(
                 state,
@@ -458,17 +381,17 @@ async fn skill_writing_run_payload_with_run_id_direct(
                 "backend failure",
             )
             .await;
-            return Err(err.to_string());
+            return Err(err);
         }
     };
-    push_dashboard_automation_activity_result(state, "skill-writer", &run.ledger_record).await;
+    push_dashboard_automation_activity_result(
+        state,
+        "skill-writer",
+        payload.get("ledger_record").unwrap_or(&Value::Null),
+    )
+    .await;
 
-    Ok(automation_run_payload(
-        &run.run_id,
-        &run.report,
-        &run.ledger_record,
-        run.backend_response.as_ref(),
-    ))
+    Ok(payload)
 }
 
 async fn push_dashboard_automation_activity_start(
@@ -519,10 +442,25 @@ async fn push_dashboard_automation_activity_failure(
 async fn push_dashboard_automation_activity_result(
     state: &DashboardState,
     task_label: &str,
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
+    record: &Value,
 ) {
-    if record.status == crate::automation::run_ledger::AutomationRunStatus::Skipped {
-        let reason = record.error.as_deref().unwrap_or("skipped");
+    let status = record
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let accepted_count = record
+        .get("accepted_count")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    let rejected_count = record
+        .get("rejected_count")
+        .and_then(Value::as_i64)
+        .unwrap_or_default();
+    if status == "skipped" {
+        let reason = record
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("skipped");
         push_curation_activity(
             state,
             "validation",
@@ -560,7 +498,7 @@ async fn push_dashboard_automation_activity_result(
         "validation",
         format!(
             "Validated dashboard {task_label} proposal: {} accepted item(s), {} rejected item(s)",
-            record.accepted_count, record.rejected_count
+            accepted_count, rejected_count
         ),
         true,
     )
@@ -584,9 +522,7 @@ async fn push_dashboard_automation_activity_result(
         "report",
         format!(
             "Dashboard {task_label} automation run {}: {} accepted item(s), {} rejected item(s)",
-            record.status.as_str(),
-            record.accepted_count,
-            record.rejected_count
+            status, accepted_count, rejected_count
         ),
         !mutates_store,
     )
@@ -594,62 +530,32 @@ async fn push_dashboard_automation_activity_result(
     push_curation_activity(
         state,
         "finish",
-        format!(
-            "Finished dashboard {task_label} automation run: {}",
-            record.status.as_str()
-        ),
+        format!("Finished dashboard {task_label} automation run: {}", status),
         !mutates_store,
     )
     .await;
 }
 
-fn automation_record_mutates_store(
-    record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
-) -> bool {
-    let Some(report) = record.validation_report.as_ref() else {
-        return false;
-    };
-    report
+fn automation_record_mutates_store(record: &Value) -> bool {
+    record
         .pointer("/automation_apply_policy/mutates_store")
         .or_else(|| report.pointer("/session_fact_apply_policy/mutates_store"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
 }
 
-struct DashboardAutomationRunContext {
-    cg: crate::tracedecay::TraceDecay,
-    config: crate::automation::config::AutomationConfig,
-    backend: crate::automation::backend::CodexAppServerBackend,
-}
-
-async fn dashboard_automation_run_context(
+async fn execute_automation_task(
     state: &DashboardState,
-) -> Result<DashboardAutomationRunContext, String> {
-    use crate::automation::backend::CodexAppServerBackend;
-    use crate::automation::config::{AutomationBackend, effective_config, load_project_config};
-    use crate::tracedecay::TraceDecay;
-
-    let cg = TraceDecay::open(&state.project_root)
-        .await
-        .map_err(|e| e.to_string())?;
-    let global = crate::user_config::UserConfig::load().automation;
-    let project = load_project_config(&state.dashboard_root)
-        .await
-        .map_err(|e| e.to_string())?;
-    let config = effective_config(&global, project.as_ref()).map_err(|e| e.to_string())?;
-    if config.enabled && config.backend == AutomationBackend::ExternalCommand {
-        return Err("automation backend external_command is not implemented yet".to_string());
-    }
-    let backend = CodexAppServerBackend::from_automation_config(&config);
-
-    Ok(DashboardAutomationRunContext {
-        cg,
-        config,
-        backend,
-    })
+    task: DashboardAutomationTask,
+) -> Result<Value, String> {
+    let executor = state
+        .automation_executor
+        .as_ref()
+        .ok_or_else(|| "dashboard automation executor is unavailable".to_string())?;
+    executor(task).await
 }
 
-fn automation_run_payload(
+pub fn automation_run_payload(
     run_id: &str,
     report: &Value,
     ledger_record: &crate::automation::run_ledger::AutomationRunLedgerRecord,
