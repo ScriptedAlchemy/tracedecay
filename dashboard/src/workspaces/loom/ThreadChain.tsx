@@ -20,7 +20,6 @@ import {
  * This is the "selecting a thread isolates its chain" half of the Loom:
  * prompt → tools comes from session detail, then provider-qualified edits,
  * commits and branch/worktree spans continue from the Loom temporal read.
- * Delivery outcomes terminate in the shared route's typed dependency state.
  *
  * One further honesty point drives the whole layout: the LCM session endpoint
  * may omit `timestamp`, so the chain is always ordered by the store's
@@ -33,7 +32,6 @@ export interface ThreadRelations {
   branchSpans: readonly LoomBranchSpan[];
   commitStatus: LoomSourceStatus | null;
   branchStatus: LoomSourceStatus | null;
-  deliveryStatus: LoomSourceStatus | null;
 }
 
 export function ThreadChain({
@@ -267,7 +265,6 @@ function ChainTerminus({
     branchSpans,
     commitStatus,
     branchStatus,
-    deliveryStatus,
   } = relations;
   return (
     <div className="flex flex-col gap-3">
@@ -356,16 +353,6 @@ function ChainTerminus({
         )}
       </CausalGroup>
 
-      <CausalGroup label="→ delivery outcomes">
-        <StateChip
-          kind={deliveryStatus?.state ?? 'unknown'}
-          detail={
-            deliveryStatus?.required_authority ??
-            deliveryStatus?.reason ??
-            'Loom temporal response omitted the Delivery dependency status'
-          }
-        />
-      </CausalGroup>
     </div>
   );
 }
