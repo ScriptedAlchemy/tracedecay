@@ -566,7 +566,7 @@ fn append_project_report(
     } else {
         GenerationDigestVerificationV1::Full
     };
-    let readable_sources = match crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
+    let readable_sources = match crate::store::vector_generations::retained_vector_source_generations_from_read_only_project_store(
             &data_root,
         ) {
         Ok(readable_sources) => readable_sources,

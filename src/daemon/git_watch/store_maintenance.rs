@@ -197,9 +197,6 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
         CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
         run_code_generation_retention as run_retention,
     };
-    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
-    use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
-
     let layout = graph.hook_store_layout();
     let store_root = code_index_store_root(&layout.data_root, &layout.project_root);
     // No published generation means nothing has been sealed for this project.
@@ -221,25 +218,16 @@ pub(super) async fn run_code_generation_retention(graph: &TraceDecay) -> bool {
             return false;
         }
     };
-    let vector_readable_sources = match DatabaseVectorGenerationStoreV1::open(graph.db()).await {
-        Ok(store) => match store.read_legacy_inventory().await {
-            Ok(inventory) => match inventory.read_only_inventory() {
-                Ok(inventory) => inventory.retained_readable_sources(),
-                Err(_) => {
-                    log_code_generation_retention_degraded("vector_inventory_unreadable");
-                    return false;
-                }
-            },
+    let vector_readable_sources =
+        match DatabaseVectorGenerationStoreV1::retained_source_generations_in_transaction(&writer)
+            .await
+        {
+            Ok(sources) => sources,
             Err(_) => {
                 log_code_generation_retention_degraded("vector_inventory_read_failed");
                 return false;
             }
-        },
-        Err(_) => {
-            log_code_generation_retention_degraded("vector_generation_store_unavailable");
-            return false;
-        }
-    };
+        };
 
     let completed_at = tracedecay_domain::UtcMicros(crate::tracedecay::current_timestamp());
     let report = tokio::task::spawn_blocking(move || {
