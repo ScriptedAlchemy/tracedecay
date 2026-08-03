@@ -333,6 +333,13 @@ impl RegisteredGlobalDb {
         )
     }
 
+    pub fn remote_replay_transaction(&self) -> crate::RegisteredRemoteReplayTransactionV1 {
+        crate::RegisteredRemoteReplayTransactionV1::new(
+            self.runtime.clone(),
+            self.authority.clone(),
+        )
+    }
+
     pub fn authorized_scope_set_storage(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<

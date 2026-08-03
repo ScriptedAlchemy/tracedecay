@@ -5637,6 +5637,7 @@ dependencies = [
  "tower",
  "tracedecay-application",
  "tracedecay-domain",
+ "tracedecay-store",
  "tracedecay-tool-catalog",
 ]
 
@@ -5651,6 +5652,7 @@ dependencies = [
  "thiserror",
  "tracedecay-domain",
  "tracedecay-policy",
+ "tracedecay-store",
  "tracedecay-tool-catalog",
 ]
 

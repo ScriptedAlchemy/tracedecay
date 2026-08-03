@@ -1,15 +1,19 @@
 use serde_json::json;
 use tracedecay_domain::{
-    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
-    ComponentVersion, CoverageReportV1, EvidenceClass, NativeAliasKindV2, ObservationId,
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, AuthorityEpoch, BrainId,
+    BrainNodeId, CapabilityId, ComponentVersion, CoverageReportV1, CurrentRemoteAuthorityV1,
+    EntityId, EvidenceClass, ManifestDigest, NativeAliasKindV2, ObservationId,
     ObservationIdentityMaterialV1, PayloadAccessState, PayloadReferenceV1,
-    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProviderId,
-    ResolutionAuthorizationV1, RetrievalAnchorRecordV2Parts, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, SessionId,
-    UtcMicros, VectorWatermark,
+    PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProjectionGenerationId,
+    ProviderId, RefId, RemotePlacementRevisionV1, RemoteRepositoryScopeV1, RemoteWriterFenceV1,
+    RepositoryId, RepositoryStateSnapshotId, ResolutionAuthorizationV1,
+    RetrievalAnchorRecordV2Parts, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, SessionId, ShardId, UtcMicros,
+    VectorWatermark, WorktreeId, canonical_json_bytes, canonical_sha256,
 };
 
 use super::*;
+use crate::{RemoteObservationReplayPartsV1, RemoteObservationReplayWriteV1};
 
 const DIGEST_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const DIGEST_B: &str = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -156,6 +160,110 @@ fn anchored_write_and_replay_receipt_keep_the_original_anchor() {
     assert_eq!(
         replay.receipt().projection_generation(),
         &projection_generation()
+    );
+}
+
+#[test]
+fn anchored_write_canonical_bytes_and_digest_round_trip_exactly() {
+    let observation = observation("canonical-wire", ObservationScopeV1::Profile);
+    let anchored = AnchoredObservationWrite::new(
+        write(observation.clone()),
+        anchor(&observation, ObservationScopeV1::Profile, vec![], 17),
+        projection_generation(),
+    )
+    .unwrap();
+
+    let bytes = canonical_json_bytes(&anchored).unwrap();
+    let digest = canonical_sha256(&anchored).unwrap();
+    let decoded: AnchoredObservationWrite = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(decoded, anchored);
+    assert_eq!(canonical_json_bytes(&decoded).unwrap(), bytes);
+    assert_eq!(canonical_sha256(&decoded).unwrap(), digest);
+}
+
+#[test]
+fn remote_observation_event_identity_and_canonical_bytes_round_trip_exactly() {
+    let project_id = ProjectId::new("project.remote-wire").unwrap();
+    let observation = observation(
+        "remote-wire",
+        ObservationScopeV1::Project {
+            project_id: project_id.clone(),
+        },
+    );
+    let anchored = AnchoredObservationWrite::new(
+        write(observation.clone()),
+        anchor(
+            &observation,
+            ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
+            vec![],
+            17,
+        ),
+        projection_generation(),
+    )
+    .unwrap();
+    let frame_digest = ManifestDigest::new(
+        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    )
+    .unwrap();
+    let event_id =
+        "remote.event.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned();
+    let replay = RemoteObservationReplayWriteV1::new(
+        RemoteObservationReplayPartsV1 {
+            event_id: event_id.clone(),
+            frame_digest: frame_digest.clone(),
+            enrollment_id: EntityId::new("enrollment.remote-wire").unwrap(),
+            enrollment_revision: 2,
+            node_id: BrainNodeId::new("node.remote-wire").unwrap(),
+            policy_revision: 3,
+            capture_sequence: 1,
+            previous_event_id: None,
+            writer_project_id: project_id.clone(),
+            writer_scope: RemoteRepositoryScopeV1 {
+                project_id,
+                repository_id: RepositoryId::new("repository.remote-wire").unwrap(),
+                worktree_id: WorktreeId::new("worktree.remote-wire").unwrap(),
+                reference: Some(RefId::new("refs/heads/main").unwrap()),
+                snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote-wire").unwrap(),
+            },
+            current_writer: CurrentRemoteAuthorityV1 {
+                fence: RemoteWriterFenceV1 {
+                    brain_id: BrainId::new("brain.remote-wire").unwrap(),
+                    shard_id: ShardId::new("shard.remote-wire").unwrap(),
+                    generation_id: ProjectionGenerationId::new("generation.remote-wire").unwrap(),
+                    placement_revision: RemotePlacementRevisionV1::new(4).unwrap(),
+                    authority_epoch: AuthorityEpoch(5),
+                    authority_node_id: BrainNodeId::new("node.authority").unwrap(),
+                },
+                credential_revision: 6,
+                observed_at: UtcMicros(7),
+            },
+            captured_at: UtcMicros(8),
+        },
+        anchored,
+    )
+    .unwrap();
+
+    let bytes = canonical_json_bytes(&replay).unwrap();
+    let digest = canonical_sha256(&replay).unwrap();
+    let decoded: RemoteObservationReplayWriteV1 = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(decoded, replay);
+    assert_eq!(canonical_json_bytes(&decoded).unwrap(), bytes);
+    assert_eq!(canonical_sha256(&decoded).unwrap(), digest);
+    assert_eq!(
+        replay.idempotency_identity().unwrap().key.as_str(),
+        event_id
+    );
+    assert_eq!(
+        replay
+            .idempotency_identity()
+            .unwrap()
+            .command_digest
+            .as_str(),
+        frame_digest.as_str()
     );
 }
 

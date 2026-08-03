@@ -21,15 +21,19 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::remote::auth::OpaqueRemoteCredential;
 use tracedecay_application::remote::protocol::{
-    EnrollmentRequestV1, REMOTE_PROTOCOL_VERSION_V1, RemoteEnrollmentProtocolPortV1,
-    RemoteProtocolBodyV1, RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
+    REMOTE_PROTOCOL_VERSION_V1, RemoteAuthorityDiscoveryProtocolPortV1,
+    RemoteAuthorityDiscoveryProtocolRequestV1, RemoteEnrollmentProtocolPortV1,
+    RemoteEnrollmentProtocolRequestV1, RemoteProtocolBodyV1, RemoteProtocolExecutionErrorV1,
+    RemoteProtocolFailureV1, RemoteProtocolPortV1, RemoteProtocolRequestV1,
     RemoteProtocolResponseV1, RemoteProtocolServiceV1, remote_protocol_problem,
 };
 use tracedecay_application::remote::recovery::{
     BackupOperationStateV1, BackupRequestV1, PromotionCasReceiptV1, PromotionConfirmationV1,
     StagedRestoreConfirmationV1, StagedRestoreProgressV1,
 };
-use tracedecay_application::remote::replay::{RemoteReplayOutcomeV1, RemoteReplayRequestV1};
+use tracedecay_application::remote::replay::{
+    RemoteReplayOutcomeV1, RemoteReplayProtocolPortV1, RemoteReplayRequestV1,
+};
 use tracedecay_application::{ApplicationProblemKind, RequestId, ResultContractRef};
 use tracedecay_tool_catalog::SchemaId;
 
@@ -112,6 +116,8 @@ pub enum RemoteHttpBoundaryError {
     UnsupportedProtocolVersion,
     #[error("remote request metadata is invalid")]
     InvalidRequest,
+    #[error("remote authority is unavailable")]
+    AuthorityUnavailable(RequestId),
 }
 
 /// Wire request body. Secret material is supplied separately through
@@ -147,12 +153,17 @@ impl<T> RemoteHttpRequestV1<T> {
     }
 }
 
-impl RemoteHttpRequestV1<EnrollmentRequestV1> {
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteEnrollmentHttpRequestV1 {
+    pub request: RemoteEnrollmentProtocolRequestV1,
+}
+
+impl RemoteEnrollmentHttpRequestV1 {
     pub fn admit_with_replacement(
         self,
         credentials: RemoteCredentialPairHeaders,
-    ) -> Result<RemoteHttpCredentialRotationAdmissionV1<EnrollmentRequestV1>, RemoteHttpBoundaryError>
-    {
+    ) -> Result<RemoteHttpCredentialRotationAdmissionV1, RemoteHttpBoundaryError> {
         self.request
             .validate_initial_enrollment_metadata()
             .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
@@ -165,6 +176,27 @@ impl RemoteHttpRequestV1<EnrollmentRequestV1> {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteAuthorityDiscoveryHttpRequestV1 {
+    pub request: RemoteAuthorityDiscoveryProtocolRequestV1,
+}
+
+impl RemoteAuthorityDiscoveryHttpRequestV1 {
+    pub fn admit(
+        self,
+        authorization: RemoteAuthorizationHeader,
+    ) -> Result<RemoteAuthorityDiscoveryHttpAdmissionV1, RemoteHttpBoundaryError> {
+        self.request
+            .validate_metadata()
+            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+        Ok(RemoteAuthorityDiscoveryHttpAdmissionV1 {
+            request: self.request,
+            credential: authorization.into_credential(),
+        })
+    }
+}
+
 /// Non-serializable input handed to the application owner.
 pub struct RemoteHttpAdmissionV1<T> {
     pub request: RemoteProtocolRequestV1<T>,
@@ -172,10 +204,15 @@ pub struct RemoteHttpAdmissionV1<T> {
 }
 
 /// Non-serializable enrollment/rotation input with both opaque credentials.
-pub struct RemoteHttpCredentialRotationAdmissionV1<T> {
-    pub request: RemoteProtocolRequestV1<T>,
+pub struct RemoteHttpCredentialRotationAdmissionV1 {
+    pub request: RemoteEnrollmentProtocolRequestV1,
     pub current: OpaqueRemoteCredential,
     pub replacement: OpaqueRemoteCredential,
+}
+
+pub struct RemoteAuthorityDiscoveryHttpAdmissionV1 {
+    pub request: RemoteAuthorityDiscoveryProtocolRequestV1,
+    pub credential: OpaqueRemoteCredential,
 }
 
 /// HTTP response is a transparent presentation of the versioned canonical
@@ -212,17 +249,36 @@ impl<Port> RemoteHttpProtocolTransportV1<Port> {
         Port: RemoteProtocolPortV1<Request>,
         Request: RemoteProtocolBodyV1,
     {
+        let request_id = request.request.request_id.clone();
         let admission = request.admit(authorization)?;
         let response = self
             .service
             .execute(admission.request, admission.credential)
-            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
+        Ok(response.into())
+    }
+
+    pub async fn execute_replay(
+        &self,
+        request: RemoteHttpRequestV1<RemoteReplayRequestV1>,
+        authorization: RemoteAuthorizationHeader,
+    ) -> Result<RemoteHttpResponseV1<RemoteReplayOutcomeV1>, RemoteHttpBoundaryError>
+    where
+        Port: RemoteReplayProtocolPortV1,
+    {
+        let request_id = request.request.request_id.clone();
+        let admission = request.admit(authorization)?;
+        let response = self
+            .service
+            .execute_replay(admission.request, admission.credential)
+            .await
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
         Ok(response.into())
     }
 
     pub fn execute_enrollment(
         &self,
-        request: RemoteHttpRequestV1<EnrollmentRequestV1>,
+        request: RemoteEnrollmentHttpRequestV1,
         credentials: RemoteCredentialPairHeaders,
     ) -> Result<
         RemoteHttpResponseV1<tracedecay_domain::EnrollmentCredentialRecordV1>,
@@ -231,12 +287,46 @@ impl<Port> RemoteHttpProtocolTransportV1<Port> {
     where
         Port: RemoteEnrollmentProtocolPortV1,
     {
+        let request_id = request.request.request_id.clone();
         let admission = request.admit_with_replacement(credentials)?;
         let response = self
             .service
             .execute_enrollment(admission.request, admission.current, admission.replacement)
-            .map_err(|_| RemoteHttpBoundaryError::InvalidRequest)?;
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
         Ok(response.into())
+    }
+
+    pub fn discover_authority(
+        &self,
+        request: RemoteAuthorityDiscoveryHttpRequestV1,
+        authorization: RemoteAuthorizationHeader,
+    ) -> Result<
+        RemoteHttpResponseV1<tracedecay_domain::CurrentRemoteAuthorityStateV1>,
+        RemoteHttpBoundaryError,
+    >
+    where
+        Port: RemoteAuthorityDiscoveryProtocolPortV1,
+    {
+        let request_id = request.request.request_id.clone();
+        let admission = request.admit(authorization)?;
+        let response = self
+            .service
+            .discover_authority(admission.request, admission.credential)
+            .map_err(|error| remote_execution_boundary_error(error, request_id))?;
+        Ok(response.into())
+    }
+}
+
+fn remote_execution_boundary_error(
+    error: RemoteProtocolExecutionErrorV1,
+    request_id: RequestId,
+) -> RemoteHttpBoundaryError {
+    match error {
+        RemoteProtocolExecutionErrorV1::InvalidRequest => RemoteHttpBoundaryError::InvalidRequest,
+        RemoteProtocolExecutionErrorV1::ClockUnavailable
+        | RemoteProtocolExecutionErrorV1::AuthorityUnavailable => {
+            RemoteHttpBoundaryError::AuthorityUnavailable(request_id)
+        }
     }
 }
 
@@ -258,7 +348,8 @@ impl<Port> Clone for RemoteProtocolRouterStateV1<Port> {
 pub fn remote_protocol_router<Port, Query>(port: Port) -> Router
 where
     Port: RemoteEnrollmentProtocolPortV1
-        + RemoteProtocolPortV1<RemoteReplayRequestV1, Output = RemoteReplayOutcomeV1>
+        + RemoteAuthorityDiscoveryProtocolPortV1
+        + RemoteReplayProtocolPortV1
         + RemoteProtocolPortV1<Query>
         + RemoteProtocolPortV1<BackupRequestV1, Output = BackupOperationStateV1>
         + RemoteProtocolPortV1<StagedRestoreConfirmationV1, Output = StagedRestoreProgressV1>
@@ -274,10 +365,8 @@ where
     };
     Router::new()
         .route("/enrollment", post(enrollment_route::<Port>))
-        .route(
-            "/replay",
-            post(protocol_route::<Port, RemoteReplayRequestV1>),
-        )
+        .route("/discovery", post(discovery_route::<Port>))
+        .route("/replay", post(replay_route::<Port>))
         .route("/query", post(protocol_route::<Port, Query>))
         .route("/backup", post(protocol_route::<Port, BackupRequestV1>))
         .route(
@@ -290,6 +379,28 @@ where
         )
         .layer(DefaultBodyLimit::max(MAX_REMOTE_HTTP_BODY_BYTES))
         .with_state(state)
+}
+
+async fn replay_route<Port>(
+    State(state): State<RemoteProtocolRouterStateV1<Port>>,
+    headers: HeaderMap,
+    payload: Result<Json<RemoteHttpRequestV1<RemoteReplayRequestV1>>, JsonRejection>,
+) -> Response
+where
+    Port: RemoteReplayProtocolPortV1 + Send + Sync + 'static,
+{
+    let authorization = match authorization_header(&headers) {
+        Ok(authorization) => authorization,
+        Err(_) => return concealed_authentication_response(concealed_request_id()),
+    };
+    let Json(request) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return invalid_remote_request_response(),
+    };
+    match state.transport.execute_replay(request, authorization).await {
+        Ok(response) => remote_protocol_response(response),
+        Err(error) => remote_boundary_error_response(error),
+    }
 }
 
 async fn protocol_route<Port, Request>(
@@ -312,14 +423,14 @@ where
     };
     match state.transport.execute(request, authorization) {
         Ok(response) => remote_protocol_response(response),
-        Err(_) => invalid_remote_request_response(),
+        Err(error) => remote_boundary_error_response(error),
     }
 }
 
 async fn enrollment_route<Port>(
     State(state): State<RemoteProtocolRouterStateV1<Port>>,
     headers: HeaderMap,
-    payload: Result<Json<RemoteHttpRequestV1<EnrollmentRequestV1>>, JsonRejection>,
+    payload: Result<Json<RemoteEnrollmentHttpRequestV1>, JsonRejection>,
 ) -> Response
 where
     Port: RemoteEnrollmentProtocolPortV1 + Send + Sync + 'static,
@@ -334,7 +445,29 @@ where
     };
     match state.transport.execute_enrollment(request, credentials) {
         Ok(response) => remote_protocol_response(response),
-        Err(_) => invalid_remote_request_response(),
+        Err(error) => remote_boundary_error_response(error),
+    }
+}
+
+async fn discovery_route<Port>(
+    State(state): State<RemoteProtocolRouterStateV1<Port>>,
+    headers: HeaderMap,
+    payload: Result<Json<RemoteAuthorityDiscoveryHttpRequestV1>, JsonRejection>,
+) -> Response
+where
+    Port: RemoteAuthorityDiscoveryProtocolPortV1 + Send + Sync + 'static,
+{
+    let authorization = match authorization_header(&headers) {
+        Ok(authorization) => authorization,
+        Err(_) => return concealed_authentication_response(concealed_request_id()),
+    };
+    let Json(request) = match payload {
+        Ok(payload) => payload,
+        Err(_) => return invalid_remote_request_response(),
+    };
+    match state.transport.discover_authority(request, authorization) {
+        Ok(response) => remote_protocol_response(response),
+        Err(error) => remote_boundary_error_response(error),
     }
 }
 
@@ -402,6 +535,23 @@ fn invalid_remote_request_response() -> Response {
     ))
 }
 
+fn remote_boundary_error_response(error: RemoteHttpBoundaryError) -> Response {
+    match error {
+        RemoteHttpBoundaryError::AuthorityUnavailable(request_id) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(remote_protocol_problem(
+                remote_result_contract(),
+                request_id,
+                RemoteProtocolFailureV1::AuthorityUnavailable,
+            )),
+        )
+            .into_response(),
+        RemoteHttpBoundaryError::MissingOrInvalidAuthorization
+        | RemoteHttpBoundaryError::UnsupportedProtocolVersion
+        | RemoteHttpBoundaryError::InvalidRequest => invalid_remote_request_response(),
+    }
+}
+
 fn remote_result_contract() -> ResultContractRef {
     ResultContractRef::new(
         SchemaId::new("schema.tracedecay.remote.protocol-result.v1")
@@ -424,8 +574,15 @@ mod tests {
     use axum::body::Body;
     use axum::extract::FromRequest;
     use axum::http::Request;
+    use tracedecay_application::remote::capture::{
+        AdmittedRemoteCaptureV1, RemoteCaptureSequenceV1, RemoteWriterAuthorityV1,
+    };
     use tracedecay_application::remote::protocol::{
-        RemoteProtocolFailureV1, RemoteProtocolPortV1, remote_protocol_problem,
+        CurrentAuthorityRequestV1, EnrollmentRequestV1, RemoteProtocolFailureV1,
+        RemoteProtocolPortV1, remote_protocol_problem,
+    };
+    use tracedecay_application::remote::replay::{
+        RemoteReplayFrameV1, canonical_remote_event_id_v1,
     };
     use tracedecay_application::{
         ApplicationEnvelope, ApplicationResult, AuthorityReceipt, CapabilityGrantId, Deadline,
@@ -435,11 +592,19 @@ mod tests {
     };
     use tracedecay_domain::{
         AuthorityEpoch, BrainId, BrainNodeId, ComponentVersion, CurrentRemoteAuthorityStateV1,
-        CurrentRemoteAuthorityV1, EnrollmentCredentialRecordV1, EntityId, ManifestDigest,
-        ProjectId, ProjectionGenerationId, RefId, RemoteAuthorityUnavailableReasonV1,
+        CurrentRemoteAuthorityV1, DurableObservationV1, EnrollmentCredentialRecordV1, EntityId,
+        ManifestDigest, ObservationId, ObservationIdentityMaterialV1, ObservationOrderingDomainV1,
+        ObservationScopeV1, ObservationSourceCursorV1, ObservationSourceGenerationV1,
+        ObservationSourceIdentityV1, ObservationSourceRangeV1, PayloadReferenceV1, ProjectId,
+        ProjectionGenerationId, ProviderId, RefId, RemoteAuthorityUnavailableReasonV1,
         RemoteCapabilityV1, RemotePlacementRevisionV1, RemoteRepositoryScopeV1,
-        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, UtcMicros,
-        WorktreeId,
+        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, RetentionClass,
+        SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
+        SanitizerDispositionV1, SensitivityV1, SessionId, ShardId, UtcMicros, WorktreeId,
+    };
+    use tracedecay_store::{
+        AnchoredObservationWrite, ObservationWrite, build_observation_resolution_authorization_v1,
+        build_observation_retrieval_anchor_v2,
     };
     use tracedecay_tool_catalog::{SchemaId, SortContractId};
 
@@ -450,7 +615,6 @@ mod tests {
     impl RemoteProtocolBodyV1 for EmptyTestBody {
         fn validate_remote_protocol_body(
             &self,
-            _sent_at: UtcMicros,
         ) -> Result<(), tracedecay_application::ApplicationContractError> {
             Ok(())
         }
@@ -463,7 +627,8 @@ mod tests {
             &self,
             request: RemoteProtocolRequestV1<EmptyTestBody>,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<Self::Output> {
+        ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+        {
             self.0.fetch_add(1, Ordering::SeqCst);
             let request_id = request.request_id;
             RemoteProtocolResponseV1::new(
@@ -478,7 +643,7 @@ mod tests {
                     RemoteProtocolFailureV1::AuthorityUnavailable,
                 )),
             )
-            .unwrap()
+            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
         }
     }
 
@@ -531,7 +696,14 @@ mod tests {
                 "brain_id": "brain.remote",
                 "caller_node_id": "node.remote",
                 "enrollment_revision": 1,
-                "expected_authority": null,
+                "expected_authority": {
+                    "brain_id": "brain.remote",
+                    "shard_id": "shard.remote",
+                    "generation_id": "generation.remote",
+                    "placement_revision": 1,
+                    "authority_epoch": 1,
+                    "authority_node_id": "node.authority"
+                },
                 "sent_at": 10,
                 "body": null
             }
@@ -553,7 +725,7 @@ mod tests {
                 BrainId::new("brain.remote").unwrap(),
                 BrainNodeId::new("node.remote").unwrap(),
                 1,
-                None,
+                available_fence(),
                 UtcMicros(10),
                 EmptyTestBody,
             )
@@ -589,7 +761,6 @@ mod tests {
     impl RemoteProtocolBodyV1 for TestQuery {
         fn validate_remote_protocol_body(
             &self,
-            _sent_at: UtcMicros,
         ) -> Result<(), tracedecay_application::ApplicationContractError> {
             if self.term.trim().is_empty() {
                 return Err(
@@ -617,23 +788,65 @@ mod tests {
     impl RemoteEnrollmentProtocolPortV1 for ValidationPort {
         fn execute_enrollment(
             &self,
-            request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+            request: RemoteEnrollmentProtocolRequestV1,
             _grant_credential: OpaqueRemoteCredential,
             _enrollment_credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
+        ) -> Result<
+            RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
             self.0.fetch_add(1, Ordering::SeqCst);
-            problem_route_response(request.request_id, RouteOutcome::Unavailable)
+            Ok(problem_route_response(
+                request.request_id,
+                RouteOutcome::Unavailable,
+            ))
         }
     }
 
     impl RemoteEnrollmentProtocolPortV1 for RoutePort {
         fn execute_enrollment(
             &self,
-            request: RemoteProtocolRequestV1<EnrollmentRequestV1>,
+            request: RemoteEnrollmentProtocolRequestV1,
             _grant_credential: OpaqueRemoteCredential,
             _enrollment_credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<EnrollmentCredentialRecordV1> {
-            problem_route_response(request.request_id, self.outcome)
+        ) -> Result<
+            RemoteProtocolResponseV1<EnrollmentCredentialRecordV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
+            Ok(problem_route_response(request.request_id, self.outcome))
+        }
+    }
+
+    impl RemoteAuthorityDiscoveryProtocolPortV1 for ValidationPort {
+        fn discover_authority(
+            &self,
+            request: RemoteAuthorityDiscoveryProtocolRequestV1,
+            _credential: OpaqueRemoteCredential,
+        ) -> Result<
+            RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let authority = available_authority();
+            RemoteProtocolResponseV1::new(
+                request.request_id.clone(),
+                authority.clone(),
+                Ok(success_envelope(request.request_id, authority)),
+            )
+            .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
+        }
+    }
+
+    impl RemoteAuthorityDiscoveryProtocolPortV1 for RoutePort {
+        fn discover_authority(
+            &self,
+            request: RemoteAuthorityDiscoveryProtocolRequestV1,
+            _credential: OpaqueRemoteCredential,
+        ) -> Result<
+            RemoteProtocolResponseV1<CurrentRemoteAuthorityStateV1>,
+            RemoteProtocolExecutionErrorV1,
+        > {
+            Ok(problem_route_response(request.request_id, self.outcome))
         }
     }
 
@@ -646,14 +859,14 @@ mod tests {
                     &self,
                     request: RemoteProtocolRequestV1<$request>,
                     _credential: OpaqueRemoteCredential,
-                ) -> RemoteProtocolResponseV1<Self::Output> {
-                    problem_route_response(request.request_id, self.outcome)
+                ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+                {
+                    Ok(problem_route_response(request.request_id, self.outcome))
                 }
             }
         };
     }
 
-    route_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
     route_port!(BackupRequestV1, BackupOperationStateV1);
     route_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
     route_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
@@ -667,19 +880,45 @@ mod tests {
                     &self,
                     request: RemoteProtocolRequestV1<$request>,
                     _credential: OpaqueRemoteCredential,
-                ) -> RemoteProtocolResponseV1<Self::Output> {
+                ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+                {
                     self.0.fetch_add(1, Ordering::SeqCst);
-                    problem_route_response(request.request_id, RouteOutcome::Unavailable)
+                    Ok(problem_route_response(
+                        request.request_id,
+                        RouteOutcome::Unavailable,
+                    ))
                 }
             }
         };
     }
 
-    validation_port!(RemoteReplayRequestV1, RemoteReplayOutcomeV1);
     validation_port!(BackupRequestV1, BackupOperationStateV1);
     validation_port!(StagedRestoreConfirmationV1, StagedRestoreProgressV1);
     validation_port!(PromotionConfirmationV1, PromotionCasReceiptV1);
     validation_port!(TestQuery, TestQueryResult);
+
+    impl RemoteReplayProtocolPortV1 for RoutePort {
+        fn execute_replay(
+            &self,
+            request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+            _credential: OpaqueRemoteCredential,
+        ) -> tracedecay_application::remote::replay::RemoteReplayProtocolFutureV1<'_> {
+            let response = problem_route_response(request.request_id, self.outcome);
+            Box::pin(async move { Ok(response) })
+        }
+    }
+
+    impl RemoteReplayProtocolPortV1 for ValidationPort {
+        fn execute_replay(
+            &self,
+            request: RemoteProtocolRequestV1<RemoteReplayRequestV1>,
+            _credential: OpaqueRemoteCredential,
+        ) -> tracedecay_application::remote::replay::RemoteReplayProtocolFutureV1<'_> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let response = problem_route_response(request.request_id, RouteOutcome::Unavailable);
+            Box::pin(async move { Ok(response) })
+        }
+    }
 
     impl RemoteProtocolPortV1<TestQuery> for RoutePort {
         type Output = TestQueryResult;
@@ -688,7 +927,8 @@ mod tests {
             &self,
             request: RemoteProtocolRequestV1<TestQuery>,
             _credential: OpaqueRemoteCredential,
-        ) -> RemoteProtocolResponseV1<Self::Output> {
+        ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1>
+        {
             let request_id = request.request_id;
             let result = match self.outcome {
                 RouteOutcome::Valid => Ok(success_envelope(
@@ -697,7 +937,8 @@ mod tests {
                 )),
                 outcome => problem_result(request_id.clone(), outcome),
             };
-            RemoteProtocolResponseV1::new(request_id, available_authority(), result).unwrap()
+            RemoteProtocolResponseV1::new(request_id, available_authority(), result)
+                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
         }
     }
 
@@ -791,17 +1032,113 @@ mod tests {
 
     fn available_authority() -> CurrentRemoteAuthorityStateV1 {
         CurrentRemoteAuthorityStateV1::Available(CurrentRemoteAuthorityV1 {
-            fence: RemoteWriterFenceV1 {
-                brain_id: BrainId::new("brain.remote").unwrap(),
-                shard_id: ShardId::new("shard.remote").unwrap(),
-                generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
-                placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
-                authority_epoch: AuthorityEpoch(1),
-                authority_node_id: BrainNodeId::new("node.authority").unwrap(),
-            },
+            fence: available_fence(),
             credential_revision: 1,
             observed_at: UtcMicros(20),
         })
+    }
+
+    fn available_fence() -> RemoteWriterFenceV1 {
+        RemoteWriterFenceV1 {
+            brain_id: BrainId::new("brain.remote").unwrap(),
+            shard_id: ShardId::new("shard.remote").unwrap(),
+            generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+            authority_epoch: AuthorityEpoch(1),
+            authority_node_id: BrainNodeId::new("node.authority").unwrap(),
+        }
+    }
+
+    fn replay_request() -> RemoteReplayRequestV1 {
+        let payload = serde_json::json!({"kind": "assistant_message", "body": "sanitized"});
+        let receipt = SanitizationReceiptV1::new(
+            SanitizationReceiptRefV1::new(
+                SanitizationReceiptId::new("receipt.remote").unwrap(),
+                ComponentVersion::new("sanitizer.remote.v1").unwrap(),
+            )
+            .unwrap(),
+            SanitizerDispositionV1::Accepted,
+            SensitivityV1::NonSensitive,
+            Some(PayloadReferenceV1::for_payload(&payload).unwrap()),
+        )
+        .unwrap();
+        let observation = DurableObservationV1::new(
+            ObservationIdentityMaterialV1::for_native_record(
+                ObservationSourceIdentityV1::for_provider(
+                    ProviderId::new("provider.remote").unwrap(),
+                    SessionId::new("session.remote").unwrap(),
+                )
+                .unwrap(),
+                ObservationScopeV1::Project {
+                    project_id: ProjectId::new("project.remote").unwrap(),
+                },
+                ObservationSourceGenerationV1::new(1).unwrap(),
+                ObservationSourceRangeV1::new(0, 1).unwrap(),
+                ObservationOrderingDomainV1::SqliteRowId,
+                ObservationId::new("observation.remote").unwrap(),
+            )
+            .unwrap(),
+            receipt,
+            RetentionClass::new("retention.remote").unwrap(),
+            payload,
+        )
+        .unwrap();
+        let writer = RemoteWriterAuthorityV1 {
+            project_id: ProjectId::new("project.remote").unwrap(),
+            scope: RemoteRepositoryScopeV1 {
+                project_id: ProjectId::new("project.remote").unwrap(),
+                repository_id: RepositoryId::new("repository.remote").unwrap(),
+                worktree_id: WorktreeId::new("worktree.remote").unwrap(),
+                reference: Some(RefId::new("refs/heads/main").unwrap()),
+                snapshot_id: RepositoryStateSnapshotId::new("snapshot.remote").unwrap(),
+            },
+            authority: match available_authority() {
+                CurrentRemoteAuthorityStateV1::Available(authority) => authority,
+                _ => unreachable!("test authority is available"),
+            },
+        };
+        let identity = observation.identity();
+        let next_cursor = ObservationSourceCursorV1::for_ordering(
+            observation.source().clone(),
+            observation.scope().clone(),
+            identity.generation(),
+            identity.ordering_domain(),
+            identity.position().end(),
+        )
+        .unwrap();
+        let projection_generation = ProjectionGenerationId::new("projection.remote").unwrap();
+        let authorization =
+            build_observation_resolution_authorization_v1(&observation, "remote-test.v1").unwrap();
+        let retrieval_anchor = build_observation_retrieval_anchor_v2(
+            &observation,
+            projection_generation.clone(),
+            UtcMicros(10),
+            authorization,
+        )
+        .unwrap();
+        let capture = AdmittedRemoteCaptureV1 {
+            enrollment_id: EntityId::new("enrollment.remote").unwrap(),
+            enrollment_revision: 1,
+            node_id: BrainNodeId::new("node.remote").unwrap(),
+            writer,
+            policy_revision: 1,
+            sequence: RemoteCaptureSequenceV1 {
+                sequence: 1,
+                previous_event_id: None,
+            },
+            anchored_write: AnchoredObservationWrite::new(
+                ObservationWrite::new(observation, None, next_cursor).unwrap(),
+                retrieval_anchor,
+                projection_generation,
+            )
+            .unwrap(),
+            captured_at: UtcMicros(10),
+        };
+        let event_id = canonical_remote_event_id_v1(&capture).unwrap();
+        RemoteReplayRequestV1 {
+            frame: RemoteReplayFrameV1 { event_id, capture },
+            replay_attempt: 1,
+        }
     }
 
     fn query_request() -> RemoteHttpRequestV1<TestQuery> {
@@ -811,7 +1148,7 @@ mod tests {
                 BrainId::new("brain.remote").unwrap(),
                 BrainNodeId::new("node.remote").unwrap(),
                 1,
-                None,
+                available_fence(),
                 UtcMicros(10),
                 TestQuery {
                     term: "needle".into(),
@@ -828,7 +1165,7 @@ mod tests {
                 BrainId::new("brain.remote").unwrap(),
                 BrainNodeId::new("node.remote").unwrap(),
                 1,
-                None,
+                available_fence(),
                 UtcMicros(10),
                 body,
             )
@@ -910,6 +1247,29 @@ mod tests {
         .status()
     }
 
+    fn replay_validation_status(
+        calls: &Arc<AtomicUsize>,
+        request: RemoteHttpRequestV1<RemoteReplayRequestV1>,
+        authorized: bool,
+    ) -> StatusCode {
+        let state = RemoteProtocolRouterStateV1 {
+            transport: Arc::new(RemoteHttpProtocolTransportV1::new(ValidationPort(
+                Arc::clone(calls),
+            ))),
+        };
+        let headers = if authorized {
+            authenticated_headers(false)
+        } else {
+            HeaderMap::new()
+        };
+        block_on(replay_route::<ValidationPort>(
+            State(state),
+            headers,
+            Ok(Json(request)),
+        ))
+        .status()
+    }
+
     fn enrollment_validation_status(
         calls: &Arc<AtomicUsize>,
         request: EnrollmentRequestV1,
@@ -925,11 +1285,49 @@ mod tests {
         } else {
             HeaderMap::new()
         };
-        let mut request = protocol_request("request.remote.enrollment-validation", request);
-        request.request.enrollment_revision = 0;
+        let request = RemoteEnrollmentHttpRequestV1 {
+            request: RemoteEnrollmentProtocolRequestV1::new_initial_enrollment(
+                RequestId::new("request.remote.enrollment-validation").unwrap(),
+                request.brain_id.clone(),
+                request.node_id.clone(),
+                UtcMicros(10),
+                request,
+            )
+            .unwrap(),
+        };
         block_on(enrollment_route::<ValidationPort>(
             State(state),
             headers,
+            Ok(Json(request)),
+        ))
+        .status()
+    }
+
+    fn discovery_validation_status(calls: &Arc<AtomicUsize>) -> StatusCode {
+        let state = RemoteProtocolRouterStateV1 {
+            transport: Arc::new(RemoteHttpProtocolTransportV1::new(ValidationPort(
+                Arc::clone(calls),
+            ))),
+        };
+        let request = RemoteAuthorityDiscoveryHttpRequestV1 {
+            request: RemoteAuthorityDiscoveryProtocolRequestV1::new(
+                RequestId::new("request.remote.discovery-validation").unwrap(),
+                BrainId::new("brain.remote").unwrap(),
+                BrainNodeId::new("node.remote").unwrap(),
+                1,
+                UtcMicros(10),
+                CurrentAuthorityRequestV1 {
+                    brain_id: BrainId::new("brain.remote").unwrap(),
+                    shard_id: ShardId::new("shard.remote").unwrap(),
+                    generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
+                    placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+                },
+            )
+            .unwrap(),
+        };
+        block_on(discovery_route::<ValidationPort>(
+            State(state),
+            authenticated_headers(false),
             Ok(Json(request)),
         ))
         .status()
@@ -971,15 +1369,13 @@ mod tests {
         raw_body: &str,
         authorized: bool,
     ) -> StatusCode {
-        let payload = block_on(
-            Json::<RemoteHttpRequestV1<EnrollmentRequestV1>>::from_request(
-                Request::builder()
-                    .header("content-type", "application/json")
-                    .body(Body::from(raw_body.to_owned()))
-                    .unwrap(),
-                &(),
-            ),
-        );
+        let payload = block_on(Json::<RemoteEnrollmentHttpRequestV1>::from_request(
+            Request::builder()
+                .header("content-type", "application/json")
+                .body(Body::from(raw_body.to_owned()))
+                .unwrap(),
+            &(),
+        ));
         assert!(payload.is_err());
         let state = RemoteProtocolRouterStateV1 {
             transport: Arc::new(RemoteHttpProtocolTransportV1::new(ValidationPort(
@@ -1053,19 +1449,20 @@ mod tests {
     #[test]
     fn invalid_route_bodies_are_bad_requests_without_port_calls() {
         let calls = Arc::new(AtomicUsize::new(0));
+        let mut invalid_enrollment = enrollment_request(UtcMicros(20));
+        invalid_enrollment.grant_revision = 0;
         assert_eq!(
-            enrollment_validation_status(&calls, enrollment_request(UtcMicros(10)), true),
+            enrollment_validation_status(&calls, invalid_enrollment, true),
             StatusCode::BAD_REQUEST
         );
         assert_eq!(
-            validation_status(
+            replay_validation_status(
                 &calls,
-                protocol_request(
-                    "request.remote.replay-validation",
-                    RemoteReplayRequestV1 {
-                        event_id: "short".into(),
-                    },
-                ),
+                protocol_request("request.remote.replay-validation", {
+                    let mut request = replay_request();
+                    request.frame.event_id = "short".into();
+                    request
+                }),
                 true,
             ),
             StatusCode::BAD_REQUEST
@@ -1089,7 +1486,7 @@ mod tests {
                 protocol_request(
                     "request.remote.backup-validation",
                     BackupRequestV1 {
-                        operation_id: "backup.remote".into(),
+                        operation_id: String::new(),
                         expected: recovery_expectation(),
                         expires_at_micros: 10,
                     },
@@ -1198,20 +1595,17 @@ mod tests {
             StatusCode::SERVICE_UNAVAILABLE
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(discovery_validation_status(&calls), StatusCode::OK);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(
-            validation_status(
+            replay_validation_status(
                 &calls,
-                protocol_request(
-                    "request.remote.valid-replay",
-                    RemoteReplayRequestV1 {
-                        event_id: "remote.event.sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                    },
-                ),
+                protocol_request("request.remote.valid-replay", replay_request(),),
                 true,
             ),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             validation_status(
                 &calls,
@@ -1225,7 +1619,7 @@ mod tests {
             ),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
         assert_eq!(
             validation_status(
                 &calls,
@@ -1241,7 +1635,7 @@ mod tests {
             ),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert_eq!(calls.load(Ordering::SeqCst), 5);
         assert_eq!(
             validation_status(
                 &calls,
@@ -1258,7 +1652,7 @@ mod tests {
             ),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 5);
+        assert_eq!(calls.load(Ordering::SeqCst), 6);
         assert_eq!(
             validation_status(
                 &calls,
@@ -1275,7 +1669,7 @@ mod tests {
             ),
             StatusCode::SERVICE_UNAVAILABLE
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 6);
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

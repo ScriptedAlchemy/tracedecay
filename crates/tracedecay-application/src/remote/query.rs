@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -25,9 +24,9 @@ use super::auth::{
 };
 use super::composition::{ExpectedRemoteShardV1, RemoteQueryCompositionV1, ShardCoverageStateV1};
 use super::protocol::{
-    REMOTE_PROTOCOL_VERSION_V1, RemoteProtocolBodyV1, RemoteProtocolFailureV1,
-    RemoteProtocolPortV1, RemoteProtocolRequestV1, RemoteProtocolResponseV1,
-    remote_protocol_problem,
+    REMOTE_PROTOCOL_VERSION_V1, RemoteClockPortV1, RemoteProtocolBodyV1,
+    RemoteProtocolExecutionErrorV1, RemoteProtocolFailureV1, RemoteProtocolPortV1,
+    RemoteProtocolRequestV1, RemoteProtocolResponseV1, remote_protocol_problem,
 };
 use crate::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOutcome, AuthorityReceipt, Deadline,
@@ -135,10 +134,7 @@ impl RemoteQueryRequestV1 {
 }
 
 impl RemoteProtocolBodyV1 for RemoteQueryRequestV1 {
-    fn validate_remote_protocol_body(
-        &self,
-        _sent_at: UtcMicros,
-    ) -> Result<(), ApplicationContractError> {
+    fn validate_remote_protocol_body(&self) -> Result<(), ApplicationContractError> {
         self.validate()
     }
 }
@@ -386,57 +382,30 @@ pub struct RemoteExactObservationQueryCommandV1 {
 }
 
 pub trait RemoteExactObservationQueryReadPortV1: Send + Sync {
+    fn current_authority(
+        &self,
+        expected: &RemoteWriterFenceV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteExactObservationQueryErrorV1>;
+
     fn read_exact_observation(
         &self,
         command: &RemoteExactObservationQueryCommandV1,
     ) -> Result<RemoteExactObservationQueryOutcomeV1, RemoteExactObservationQueryErrorV1>;
 }
 
-pub trait RemoteQueryClockPortV1: Send + Sync {
-    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1>;
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SystemRemoteQueryClockV1;
-
-impl RemoteQueryClockPortV1 for SystemRemoteQueryClockV1 {
-    fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?
-            .as_micros();
-        i64::try_from(micros)
-            .map(UtcMicros)
-            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
-    }
-}
-
 pub struct RemoteExactObservationQueryServiceV1 {
     credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
     authorization: Arc<dyn RemoteQueryAuthorizationPortV1>,
     read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
-    clock: Arc<dyn RemoteQueryClockPortV1>,
+    clock: Arc<dyn RemoteClockPortV1>,
 }
 
 impl RemoteExactObservationQueryServiceV1 {
-    pub fn new(
-        credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
-        authorization: Arc<dyn RemoteQueryAuthorizationPortV1>,
-        read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
-    ) -> Self {
-        Self::new_with_clock(
-            credentials,
-            authorization,
-            read,
-            Arc::new(SystemRemoteQueryClockV1),
-        )
-    }
-
     pub fn new_with_clock(
         credentials: Arc<dyn RemoteEnrollmentCredentialLookupPortV1>,
         authorization: Arc<dyn RemoteQueryAuthorizationPortV1>,
         read: Arc<dyn RemoteExactObservationQueryReadPortV1>,
-        clock: Arc<dyn RemoteQueryClockPortV1>,
+        clock: Arc<dyn RemoteClockPortV1>,
     ) -> Self {
         Self {
             credentials,
@@ -544,7 +513,10 @@ impl RemoteExactObservationQueryServiceV1 {
         };
         let outcome = self.read.read_exact_observation(&command)?;
         validate_returned_authority(&outcome.authority, &command.expected_authority)?;
-        let publication_observed_at = self.clock.now()?;
+        let publication_observed_at = self
+            .clock
+            .now()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)?;
         if publication_observed_at > command.effective_deadline.expires_at {
             return Err(RemoteExactObservationQueryErrorV1::DeadlineElapsed);
         }
@@ -617,7 +589,16 @@ impl RemoteExactObservationQueryServiceV1 {
     }
 
     fn now(&self) -> Result<UtcMicros, RemoteExactObservationQueryErrorV1> {
-        self.clock.now()
+        self.clock
+            .now()
+            .map_err(|_| RemoteExactObservationQueryErrorV1::AuthorityUnavailable)
+    }
+
+    fn current_authority(
+        &self,
+        expected: &RemoteWriterFenceV1,
+    ) -> Result<CurrentRemoteAuthorityStateV1, RemoteExactObservationQueryErrorV1> {
+        self.read.current_authority(expected)
     }
 }
 
@@ -705,7 +686,7 @@ pub(super) fn validate_returned_observation_identity(
 pub(super) fn validate_protocol_authority_binding(
     request: &RemoteProtocolRequestV1<RemoteQueryRequestV1>,
 ) -> Result<(), RemoteExactObservationQueryErrorV1> {
-    if request.expected_authority.as_ref() != Some(&request.body.expected_authority) {
+    if request.expected_authority != request.body.expected_authority {
         return Err(RemoteExactObservationQueryErrorV1::StaleFence);
     }
     Ok(())
@@ -798,20 +779,16 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
         &self,
         request: RemoteProtocolRequestV1<RemoteQueryRequestV1>,
         credential: OpaqueRemoteCredential,
-    ) -> RemoteProtocolResponseV1<Self::Output> {
+    ) -> Result<RemoteProtocolResponseV1<Self::Output>, RemoteProtocolExecutionErrorV1> {
         let request_id = request.request_id.clone();
-        let observed_at = self.service.now().unwrap_or(UtcMicros(0));
-        let fallback_authority = CurrentRemoteAuthorityStateV1::Partial {
-            known_fence: Some(request.body.expected_authority.clone()),
-            missing: BTreeSet::from([
-                tracedecay_domain::RemoteAuthorityUnavailableReasonV1::FenceUnverified,
-            ]),
-            observed_at,
-        };
+        let observed_at = self
+            .service
+            .now()
+            .map_err(|_| RemoteProtocolExecutionErrorV1::ClockUnavailable)?;
         match self.service.query(&request, &credential) {
             Ok(outcome) => {
                 RemoteProtocolResponseV1::new(request_id, outcome.authority, Ok(outcome.result))
-                    .expect("query owner preserves response identities")
+                    .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
             }
             Err(error) => {
                 let authority = if matches!(
@@ -827,7 +804,9 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                         observed_at,
                     }
                 } else {
-                    fallback_authority
+                    self.service
+                        .current_authority(&request.expected_authority)
+                        .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)?
                 };
                 let failure = query_protocol_failure(error);
                 RemoteProtocolResponseV1::new(
@@ -839,7 +818,7 @@ impl RemoteProtocolPortV1<RemoteQueryRequestV1> for RemoteExactObservationQueryP
                         failure,
                     )),
                 )
-                .expect("query owner preserves problem identities")
+                .map_err(|_| RemoteProtocolExecutionErrorV1::AuthorityUnavailable)
             }
         }
     }

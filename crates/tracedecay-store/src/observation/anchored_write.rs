@@ -150,12 +150,43 @@ impl Default for RepositoryProvenanceAttachmentV1 {
 /// One observation write and its stable V2 retrieval anchor.
 ///
 /// Stores commit every part of this value in one authoritative transaction.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AnchoredObservationWrite {
     write: ObservationWrite,
     retrieval_anchor: RetrievalAnchorRecordV2,
     projection_generation: ProjectionGenerationId,
     repository_provenance: RepositoryProvenanceAttachmentV1,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnchoredObservationWriteWireV1 {
+    write: ObservationWrite,
+    retrieval_anchor: RetrievalAnchorRecordV2,
+    projection_generation: ProjectionGenerationId,
+    repository_provenance: RepositoryProvenanceAttachmentV1,
+}
+
+impl<'de> serde::Deserialize<'de> for AnchoredObservationWrite {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = AnchoredObservationWriteWireV1::deserialize(deserializer)?;
+        Self::new(
+            wire.write,
+            wire.retrieval_anchor,
+            wire.projection_generation,
+        )
+        .and_then(|write| {
+            write.with_repository_provenance_attachment(
+                wire.repository_provenance.availability,
+                wire.repository_provenance.anchor,
+            )
+        })
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl AnchoredObservationWrite {

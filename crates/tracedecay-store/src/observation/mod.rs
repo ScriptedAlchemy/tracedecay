@@ -48,11 +48,31 @@ fn cursor_transition_covers(
 }
 
 /// Validated request to persist one sanitized observation and advance its source cursor.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ObservationWrite {
     observation: DurableObservationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
     next_cursor: ObservationSourceCursorV1,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ObservationWriteWireV1 {
+    observation: DurableObservationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    next_cursor: ObservationSourceCursorV1,
+}
+
+impl<'de> serde::Deserialize<'de> for ObservationWrite {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ObservationWriteWireV1::deserialize(deserializer)?;
+        Self::new(wire.observation, wire.expected_cursor, wire.next_cursor)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl ObservationWrite {

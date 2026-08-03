@@ -7,10 +7,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    BrainNodeId, CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1, DurableObservationV1,
+    BrainNodeId, CurrentRemoteAuthorityStateV1, CurrentRemoteAuthorityV1,
     EnrollmentCredentialRecordV1, EnrollmentCredentialStateV1, EntityId, ProjectId,
     RemoteAuthorityUnavailableReasonV1, RemoteCapabilityV1, RemoteRepositoryScopeV1, UtcMicros,
 };
+use tracedecay_store::AnchoredObservationWrite;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -60,17 +61,19 @@ impl RemoteWriterAuthorityV1 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RemoteOfflineCaptureCommandV1 {
     pub enrollment: EnrollmentCredentialRecordV1,
     pub writer: RemoteWriterAuthorityV1,
     pub policy_revision: u64,
     pub sequence: RemoteCaptureSequenceV1,
-    pub observation: DurableObservationV1,
+    pub anchored_write: AnchoredObservationWrite,
     pub captured_at: UtcMicros,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AdmittedRemoteCaptureV1 {
     pub enrollment_id: EntityId,
     pub enrollment_revision: u64,
@@ -78,7 +81,7 @@ pub struct AdmittedRemoteCaptureV1 {
     pub writer: RemoteWriterAuthorityV1,
     pub policy_revision: u64,
     pub sequence: RemoteCaptureSequenceV1,
-    pub observation: DurableObservationV1,
+    pub anchored_write: AnchoredObservationWrite,
     pub captured_at: UtcMicros,
 }
 
@@ -239,7 +242,7 @@ fn admit_capture(
         writer: command.writer,
         policy_revision: command.policy_revision,
         sequence: command.sequence,
-        observation: command.observation,
+        anchored_write: command.anchored_write,
         captured_at: command.captured_at,
     })
 }
