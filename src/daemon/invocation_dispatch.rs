@@ -128,7 +128,7 @@ pub(super) async fn write_tool_list_changed_notification(
 pub(super) async fn resolve_multi_root_projects(
     store_administration: &StoreAdministration,
     service: &service::invocation::DaemonInvocationService,
-    project_ids: &[tracedecay_domain::ProjectId],
+    selectors: &[tracedecay_application::RegisteredRootSelectorV1],
 ) -> std::result::Result<
     Vec<(PathBuf, tracedecay_application::ResolvedScope)>,
     service::invocation::DaemonInvocationProblem,
@@ -137,22 +137,32 @@ pub(super) async fn resolve_multi_root_projects(
         .registered_profile_database()
         .await
         .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-    let mut roots = Vec::with_capacity(project_ids.len());
-    for project_id in project_ids {
+    let mut roots = Vec::with_capacity(selectors.len());
+    for selector in selectors {
         let context = database
-            .project_registry_context_by_id(project_id.as_str())
+            .project_registry_context_by_id(selector.project_id.as_str())
             .await
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
             .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
-        if context.project.project_id != project_id.as_str() {
+        if context.project.project_id != selector.project_id.as_str() {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
-        let root = PathBuf::from(context.project.canonical_root);
-        if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
+        let registered_root = PathBuf::from(context.project.canonical_root);
+        if !registered_root.is_absolute()
+            || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
+        {
             return Err(service::invocation::DaemonInvocationProblem::Unavailable);
         }
-        let scope = project_open_owners::resolved_scope_for_project(&root, project_id)
+        let root = selector
+            .root
+            .canonicalize()
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        let scope = tracedecay_usecases::context::RegisteredScopeResolver::resolve(
+            &registered_root,
+            &root,
+            &selector.project_id,
+        )
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
         if !service.lsp_owner_matches_scope(&root, &scope).await {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }

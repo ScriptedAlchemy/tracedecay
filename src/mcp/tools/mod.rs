@@ -43,12 +43,12 @@ pub(crate) use handlers::{
     SessionRefreshCoverageView, SessionRefreshFrontierView, SessionRefreshProgressView,
     SessionRefreshReceiptView, SessionRefreshServiceOutcome, SessionRefreshServicePort,
     SessionRetrievalCommand, SessionRetrievalExplanationView, SessionRetrievalPageView,
-    SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome, SessionRetrievalServicePort,
-    SessionRetrievalStoreScope, SessionRetrievalUnavailable, SessionRetrievalUnavailableReason,
-    SessionRetrievalWorkerBlocker, SessionRetrievalWorkerRetryClass,
-    SessionRetrievalWorkerStatusView, SessionTemporalMetadataView, SessionTemporalWatermarksView,
-    handle_projectless_admin_cli, handle_projectless_hook_runtime,
-    replay_projectless_hermes_host_admission, utc_micros_value,
+    SessionRetrievalProjectSelector, SessionRetrievalServiceFuture, SessionRetrievalServiceOutcome,
+    SessionRetrievalServicePort, SessionRetrievalStoreScope, SessionRetrievalUnavailable,
+    SessionRetrievalUnavailableReason, SessionRetrievalWorkerBlocker,
+    SessionRetrievalWorkerRetryClass, SessionRetrievalWorkerStatusView,
+    SessionTemporalMetadataView, SessionTemporalWatermarksView, handle_projectless_admin_cli,
+    handle_projectless_hook_runtime, replay_projectless_hermes_host_admission, utc_micros_value,
 };
 pub use handlers::{
     SessionAuthorities, ToolCallRegistryOptions, handle_tool_call,

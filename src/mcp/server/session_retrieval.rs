@@ -383,6 +383,131 @@ pub(crate) struct DaemonSessionRetrievalService {
     refresh_status: Option<SessionTemporalRefreshWake>,
 }
 
+pub(crate) struct DaemonProjectSessionRetrievalRouter {
+    active: DaemonSessionRetrievalService,
+    registry: Arc<RegisteredGlobalDb>,
+    resolver: crate::mcp::server::RetainedProjectGraphResolver,
+    profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    calls: Arc<AtomicU64>,
+}
+
+impl DaemonProjectSessionRetrievalRouter {
+    pub(crate) fn new(
+        active: DaemonSessionRetrievalService,
+        registry: Arc<RegisteredGlobalDb>,
+        resolver: crate::mcp::server::RetainedProjectGraphResolver,
+        profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+        calls: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            active,
+            registry,
+            resolver,
+            profile_identity,
+            calls,
+        }
+    }
+
+    async fn context_for_selector(
+        &self,
+        selector: &crate::mcp::tools::SessionRetrievalProjectSelector,
+    ) -> Option<ProjectRegistryContext> {
+        if let Some(project_id) = selector.project_id.as_deref() {
+            return self
+                .registry
+                .project_registry_context_by_id(project_id)
+                .await
+                .ok()
+                .flatten();
+        }
+        let project_path = Path::new(selector.project_path.as_deref()?);
+        if let Some(store) = self
+            .registry
+            .try_resolve_project_store_record_by_alias(project_path)
+            .await
+            .ok()
+            .flatten()
+        {
+            return self
+                .registry
+                .project_registry_context_by_id(&store.project_id)
+                .await
+                .ok()
+                .flatten();
+        }
+        if let Some(context) = self
+            .registry
+            .project_registry_context_by_alias(project_path)
+            .await
+            .ok()
+            .flatten()
+        {
+            return Some(context);
+        }
+        let git_common_dir = crate::worktree::git_common_dir(project_path);
+        self.registry
+            .project_registry_context_by_identity(project_path, git_common_dir.as_deref())
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn service_for_context(
+        &self,
+        context: ProjectRegistryContext,
+    ) -> Option<DaemonSessionRetrievalService> {
+        let requested_root = PathBuf::from(&context.project.canonical_root);
+        let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+            context.clone(),
+            requested_root,
+        );
+        let graph = (self.resolver)(request).await.ok()??;
+        let root = DaemonSessionRetrievalRoot::from_project_context(
+            graph.as_ref(),
+            self.registry.as_ref(),
+            context,
+        )?
+        .with_project_runtime_shard(&self.profile_identity)?;
+        let project_id = ProjectId::new(root.project_id.as_deref()?).ok()?;
+        let enrollment_roots = root.project_paths.iter().cloned().collect::<Vec<_>>();
+        let database = graph
+            .store_runtime_registry()
+            .project_sessions(project_id, enrollment_roots)
+            .await
+            .ok()?;
+        DaemonSessionRetrievalService::new_registered(
+            Arc::clone(&database),
+            database,
+            root,
+            Arc::clone(&self.calls),
+            None,
+        )
+    }
+
+    async fn execute_command(
+        &self,
+        command: SessionRetrievalCommand,
+    ) -> SessionRetrievalServiceOutcome {
+        if self.active.root.owns(&command) {
+            return self.active.execute_command(command).await;
+        }
+        let Some(selector) = command.project_selector() else {
+            return SessionRetrievalServiceOutcome::WrongScope;
+        };
+        let Some(context) = self.context_for_selector(selector).await else {
+            return SessionRetrievalServiceOutcome::WrongScope;
+        };
+        let Some(service) = self.service_for_context(context).await else {
+            return SessionRetrievalServiceOutcome::Unavailable(
+                SessionRetrievalUnavailable::without_worker(
+                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
+                ),
+            );
+        };
+        service.execute_command(command).await
+    }
+}
+
 impl DaemonSessionRetrievalService {
     pub(crate) fn new(
         database: Arc<RegisteredGlobalDb>,
@@ -1289,6 +1414,20 @@ impl SessionRetrievalServicePort for DaemonSessionRetrievalService {
 
     fn expand_lcm(&self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'_> {
         Box::pin(async move { self.execute_lcm_expand(command).await })
+    }
+}
+
+impl SessionRetrievalServicePort for DaemonProjectSessionRetrievalRouter {
+    fn execute(&self, command: SessionRetrievalCommand) -> SessionRetrievalServiceFuture<'_> {
+        Box::pin(async move { self.execute_command(command).await })
+    }
+
+    fn describe_lcm(&self, command: LcmDescribeServiceCommand) -> LcmDescribeServiceFuture<'_> {
+        self.active.describe_lcm(command)
+    }
+
+    fn expand_lcm(&self, command: LcmExpandServiceCommand) -> LcmExpandServiceFuture<'_> {
+        self.active.expand_lcm(command)
     }
 }
 
