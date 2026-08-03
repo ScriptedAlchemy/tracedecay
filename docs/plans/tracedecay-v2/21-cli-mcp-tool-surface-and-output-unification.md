@@ -23,17 +23,15 @@ evidence rather than a spine to reconstruct. A missing callable operation or
 lost semantic is a gap; a renamed/deleted scaffold is not. PR17 adds only the
 surface needed to complete the Plan 24/32 user journey.
 
-CLI/MCP/HTTP names and shapes retain compatibility when `origin/master`, a
-published package/release, an independently deployed client, or a live host
-installation proves a predecessor. Potentially installed branch-era callable
-names remain until an authorized installed-client/host census proves absence.
-Pure source-only/internal PR12/PR17 bindings change in place. Generated
-request/response revisions that may have reached a dogfood client or host
-retain negotiated readers and writers until the installed-client/host census
-proves absence; tests and operation inventories alone are not publication
-evidence. Persisted cursors, cancellation records, idempotency keys, journals,
-checkpoints, and receipts remain backward-readable until the separately
-authorized registered-store/profile census proves absence.
+Only actually independently released public CLI/MCP/HTTP names and protocol
+shapes retain compatibility. Pure source-only/internal PR12/PR17 bindings,
+branch-era V2 callable names, and V2 generated request/response revisions
+change in place. Persisted cursors, cancellation records, idempotency keys,
+journals, checkpoints, and receipts accept only their exact final shape; any
+other database, store, spool, file, or projection returns typed
+`ResetRequired` and requires explicit reset or recreation. No storage reader,
+migration, backfill, dual write, or census path exists; tests and operation
+inventories alone are not publication evidence.
 
 **Cursor-parity correction (2026-07-27).** The cursor half of that parity
 requirement was stated as delivered while no shipped code-read surface could
@@ -347,9 +345,8 @@ fixture does not land before its operation is callable.
   manifests, shadow profiles, and declaration-only gates.
 - Compatibility aliases with release evidence delegate to the canonical
   operation or return an actionable negotiated upgrade, but own no schema or
-  behavior, until an authorized installed-client/host census proves absence.
-  Pure source-only aliases are removed in place after internal callers move;
-  branch-era callable aliases follow the same census gate.
+  behavior. Pure source-only and branch-era aliases are removed in place after
+  internal callers move.
 - Remove any client-side provider launch, hidden fallback, task status write,
   scheduler, or Git implementation.
 

@@ -3,7 +3,7 @@
 ## Status and role
 
 This is the active historical regression and observable-behavior contract for
-PR5–PR20. It preserves failures learned from V1 and dogfooding while product
+PR5–PR20. It preserves failures learned from V1 and pre-V2 development while product
 plans replace and optimize implementation. It is not a numbered failure
 ledger, exact fixture inventory, compatibility catalog, Doctor kernel, plan
 parser, generated gate, or requirement that PR descriptions reference this
@@ -11,9 +11,12 @@ file.
 
 Names of retired fixtures, matrices, packets, files, and intermediate
 milestones are historical evidence only and are not features to recreate.
-Published or persisted contracts keep their compatibility obligations;
-otherwise retention is judged by the observable behavior, platform coverage,
-migration outcome, and regression classes in this plan.
+Only actually independently released public protocols retain compatibility.
+Persisted state accepts only its exact final shape; every other shape returns
+typed `ResetRequired` for explicit reset or recreation, with no storage reader,
+migration, backfill, dual write, or census path. Otherwise retention is judged
+by the observable behavior, platform coverage, and regression classes in this
+plan.
 
 ## Outcome
 
@@ -24,13 +27,13 @@ relevant to that slice.
 
 **Regression-status correction (2026-07-27).** Direct tests now cover
 cooperative cancellation of daemon startup transcript/provider ingest and
-code-index reconcile work; terminal-versus-retryable dogfood startup-health
+code-index reconcile work; terminal-versus-retryable startup-health
 classification; active-project convergence scoping; prior-complete generation
 serving during refresh; and bundled-SQLite FTS blob self-heal without treating
 whole-database corruption as repairable. Those observable regressions are
 delivered and their old missing-test language must not be recreated.
 
-Operational acceptance remains open. `cargo dogfood` still fails on Doctor
+Operational acceptance remains open. Doctor reports
 `authority_audit_unavailable` and a Cursor Core component-ownership conflict,
 semantic search is disabled by an invalid configuration snapshot, incremental
 index cadence is suspect, and the full suite has not completed. Plan 09 owns
@@ -199,7 +202,7 @@ acceptance, effect success, or an independent outcome.
   CI localization, read-only GitHub lifecycle, proximity, host capability,
   Kimi Code manifest/global `PostToolUse`/`Stop`, OpenCode local-plugin edit/
   tool/session/LSP events, Cline-family route/unavailable evidence,
-  cross-platform official lifecycle dogfood, competing-extension/interruption/
+  cross-platform official lifecycle validation, competing-extension/interruption/
   host rollback, and the feedback rollback switch retain capture redaction, no-write,
   restart, truthful coverage, and all previously supported host features.
 - **PR14:** the direct Doctor/dashboard journey above retains canonical state,
@@ -221,9 +224,9 @@ acceptance, effect success, or an independent outcome.
   behavioral/lifecycle conformance, including paging, streams, cancellation,
   retry directives, reconnect/resume, cross-version behavior, and the
   diagnostic handoff-token journey.
-- **PR19:** migration/cutover retains one writer and canonical route,
-  resumability, rollback evidence, stale-client rejection, and deletion of
-  superseded paths.
+- **PR19:** exact-final persisted-state admission retains one writer and the
+  canonical route; every other shape returns `ResetRequired` for explicit
+  reset/recreation, and superseded storage paths are deleted.
 - **PR20:** accepted production comparisons cannot weaken semantics,
   authority, project isolation, ordering, coverage, durability, crash/restart
   correctness, or hide tail/resource regressions behind averages.

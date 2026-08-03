@@ -7,22 +7,29 @@ This policy defines how the project treats names and artifacts from the pre-rebr
 TraceDecay era. It is normative for new code, docs, tests, release automation, and
 agent/plugin integrations.
 
+It applies only to independently shipped public interfaces, installed-agent
+artifacts, and user-owned pre-rebrand data with evidence of that external
+contract. It does not authorize a V2 internal-store reader, converter,
+backfill, dual write, profile census, or staged cutover; fresh V2 profiles use
+the final product shape.
+
 ## Policy principles
 
 1. **TraceDecay is the canonical name for new behavior.** New files, commands,
    config keys, docs, release assets, plugin IDs, and examples must use
    `tracedecay`, `.tracedecay`, `TRACEDECAY_*`, or `TraceDecay` unless this policy
    explicitly assigns the surface to a legacy-retention category.
-2. **Compatibility must protect existing user data and installed agents.** Legacy
-   project/user databases, branch metadata, monitor files, plugin installs, and
-   shell/profile configuration must not be orphaned by a cosmetic rename.
+2. **Compatibility must protect externally contracted user data and installed
+   agents.** Legacy project/user data, plugin installs, and shell/profile
+   configuration must not be orphaned by a cosmetic rename.
 3. **Compatibility shims must be intentional and tested.** Any code that accepts a
-   legacy spelling must say whether it is retained indefinitely, auto-migrated,
-   warning-producing, rejected, or externally constrained. Tests should cover the
-   chosen category for runtime behavior.
-4. **No silent destructive migration.** A fallback from `.tracedecay/` to
-   `.tracedecay/` is not a license to rename, delete, or rewrite user data. Any
-   future conversion command must be explicit, backed up, atomic, and reversible.
+   legacy spelling must say whether it is retained, reconciled as an owned
+   generated artifact, warning-producing, rejected, or externally constrained.
+   Tests should cover the chosen category for runtime behavior.
+4. **No silent destructive data move.** A fallback from `.tracedecay/` to
+   `.tracedecay/` is not a license to rename, delete, or rewrite user data. A
+   separately released rebrand data-move utility would require explicit user
+   intent, backups, atomicity, and reversibility; this policy does not create one.
 5. **Historical documents are not product surface.** Changelog entries, old plans,
    benchmark outputs, and TraceDecay-era narrative may keep old names when the name
    is part of the historical record.
@@ -100,8 +107,8 @@ Zed/Cline/Kimi/OpenCode/Gemini/Kiro/Roo/Kilo/Copilot agent configs.
 Hermes integration refresh may recognize old generated state only to remove or
 replace it safely. It must not retain runtime aliases, profile-local installs,
 or project-pin routing. A historical `plugins.tracedecay.project_root` value
-may be read as provenance to prove the target of a one-time legacy-store
-migration; it is never copied into current runtime configuration.
+is cleanup provenance only; it never authorizes store conversion or current
+runtime routing.
 
 Generated state includes:
 
@@ -206,11 +213,10 @@ must not advertise legacy-only releases as current.
 
 ### D2. Silent storage renames or implicit data moves
 
-Code must reject any implicit migration that renames pre-rename data directories or
-databases, or moves user-level data roots without an explicit migration command. A
-future migration command must require clear user intent and must handle backups,
-branch metadata, session payloads, curation sidecars, monitor files, caches,
-rollback, and both project and user data roots.
+Code must reject any implicit rename or move of pre-rebrand data directories or
+databases. This policy does not promise a conversion command. Any separately
+released user-data move would require clear user intent, backups, rollback, and
+explicit ownership of every affected external artifact.
 
 ### D3. New public TraceDecay-branded product surface
 
@@ -271,7 +277,7 @@ Every audited surface maps to exactly one policy category below.
 | `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB` | C | Accept fallback with warning; keep test hermeticity for both names. |
 | Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |
 | Savings pricing env fallbacks (`TRACEDECAY_OFFLINE`, `TRACEDECAY_MODEL_PRICES_PATH`) | C | Accept fallback with warning; do not leak values in logs. |
-| Hermes historical project pins | B | Read only as one-time migration provenance, then remove generated routing state; never use as a runtime fallback. |
+| Hermes historical project pins | B | Read only as cleanup provenance, then remove generated routing state; never use for runtime routing or store conversion. |
 | Hermes plugin list, memory provider, and context-engine aliases named `tracedecay` | B | Rewrite/remove to canonical `tracedecay` behavior. |
 | `$TRACEDECAY_PLUGIN_PATH` and `.tracedecay/plugins/` docs claim | C | Warn/accept only where implemented; otherwise document as pending compatibility. |
 | Generic agent config server key `tracedecay` | B | Reconcile generated old entries to one canonical `tracedecay` entry. |
@@ -294,7 +300,6 @@ Every audited surface maps to exactly one policy category below.
 | Benchmark reports with TraceDecay tool/path names | A | Preserve measured historical names. |
 | Changelog historical TraceDecay references | A | Preserve history; summarize rename in current entries only. |
 | Legacy config field `include` unrelated to brand rename | B | Keep ordinary config compatibility/migration separate from brand policy. |
-| LCM/session schema legacy data carry-forward unrelated to brand names | B | Treat as ordinary schema migration, not TraceDecay-brand compatibility. |
 
 ## Warning and migration implementation guidance
 
@@ -305,11 +310,11 @@ Every audited surface maps to exactly one policy category below.
   tokens, or raw config contents.
 - Tests for fallback code should cover: old-only, new-only, both-set precedence, and
   warning/no-warning behavior where warning hooks exist.
-- Installer migrations must be idempotent. Running install/refresh twice should not
-  duplicate entries or re-delete preserved user files.
-- Any future explicit storage migration command must run a dry-run by default, list
-  every source/destination path, create backups, validate the migrated DBs/sidecars,
-  and leave the legacy tree untouched unless the user explicitly requests cleanup.
+- Installer reconciliation must be idempotent. Running install/refresh twice should
+  not duplicate entries or re-delete preserved user files.
+- This policy does not authorize internal V2 storage conversion. A separately
+  released external user-data move would need explicit user approval, an exact
+  source/destination inventory, backups, validation, and reversible cleanup.
 
 ## Review checklist for future rebrand-related changes
 
