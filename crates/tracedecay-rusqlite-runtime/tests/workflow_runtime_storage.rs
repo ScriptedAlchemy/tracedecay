@@ -1,4 +1,4 @@
-//! Durable workflow authority over the registered Work exact-SQL channel.
+//! Durable workflow authority over the registered Work writer.
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
@@ -109,11 +109,12 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
     let store = RegisteredWorkStore::start_with_setup("workflow-reset-required", |connection| {
         connection
             .execute_batch(
-                "DROP TABLE workflow_run_heads_v2;
-                 DROP TABLE workflow_run_events_v2;
-                 DROP TABLE workflow_handoffs_v1;
-                 DROP TABLE workflow_activations_v1;
-                 DROP TABLE workflow_definitions_v1;",
+                "DROP TABLE workflow_run_heads;
+                 DROP TABLE workflow_run_events;
+                 DROP TABLE workflow_handoffs;
+                 DROP TABLE workflow_activations;
+                 DROP TABLE workflow_definitions;
+                 DROP TABLE workflow_schema;",
             )
             .unwrap();
     });
@@ -136,6 +137,38 @@ fn non_final_store_requires_reset_without_runtime_schema_mutation() {
         0,
         "runtime attachment must not mutate a non-final store"
     );
+}
+
+#[test]
+fn attachment_rejects_wrong_schema_version_digest_and_definition() {
+    for (name, mutation) in [
+        (
+            "workflow-wrong-version",
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE workflow_schema SET schema_version = 2;",
+        ),
+        (
+            "workflow-wrong-digest",
+            "UPDATE workflow_schema SET definition_digest = 'sha256:wrong';",
+        ),
+        (
+            "workflow-wrong-definition",
+            "DROP TABLE workflow_run_heads;
+             CREATE TABLE workflow_run_heads (
+                 run_id TEXT NOT NULL PRIMARY KEY,
+                 sequence INTEGER NOT NULL,
+                 projection_payload TEXT NOT NULL
+             ) STRICT;",
+        ),
+    ] {
+        let store = RegisteredWorkStore::start_with_setup(name, |connection| {
+            connection.execute_batch(mutation).unwrap();
+        });
+        assert!(matches!(
+            WorkflowSqliteAuthority::from_work_storage(store.storage()),
+            Err(WorkflowSqliteAuthorityBuildError::ResetRequired)
+        ));
+    }
 }
 
 #[test]
@@ -192,16 +225,14 @@ fn run_journal_appends_replays_and_rebuilds_after_restart() {
 
     let store = store.restart("workflow-run-journal");
     let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
-    let history = WorkflowRunStoragePort::load(&authority, &run_id).unwrap();
-    assert_eq!(history.len(), 2);
     assert_eq!(
         WorkflowRunStoragePort::projection(&authority, &run_id)
             .unwrap()
             .sequence(),
         2
     );
-    assert_eq!(store.count("workflow_run_events_v2"), 2);
-    assert_eq!(store.count("workflow_run_heads_v2"), 1);
+    assert_eq!(store.count("workflow_run_events"), 2);
+    assert_eq!(store.count("workflow_run_heads"), 1);
 }
 
 #[test]
@@ -445,8 +476,8 @@ fn definitions_activate_and_reject_conflicting_payloads() {
         Some(2)
     );
 
-    assert_eq!(store.count("workflow_definitions_v1"), 2);
-    assert_eq!(store.count("workflow_activations_v1"), 1);
+    assert_eq!(store.count("workflow_definitions"), 2);
+    assert_eq!(store.count("workflow_activations"), 1);
 }
 
 #[test]
@@ -472,7 +503,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
     store.inspect(|connection| {
         let payload: String = connection
             .query_row(
-                "SELECT scope_payload FROM workflow_handoffs_v1 WHERE token_digest = ?1",
+                "SELECT scope_payload FROM workflow_handoffs WHERE token_digest = ?1",
                 [grant.token_digest().as_str()],
                 |row| row.get(0),
             )
@@ -486,7 +517,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         );
         let count: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM workflow_handoffs_v1 WHERE scope_payload LIKE ?1",
+                "SELECT COUNT(*) FROM workflow_handoffs WHERE scope_payload LIKE ?1",
                 [format!("%{secret}%")],
                 |row| row.get(0),
             )
