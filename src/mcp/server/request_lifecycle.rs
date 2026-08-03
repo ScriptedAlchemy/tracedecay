@@ -14,42 +14,13 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::errors::{Result, TraceDecayError};
 
 mod policy;
-pub(crate) use policy::{McpRequestStart, McpToolLifecyclePolicy};
+pub(crate) use policy::{McpRequestStart, McpToolDispatchStage, McpToolLifecyclePolicy};
 
 const MAX_PENDING_CANCELLATIONS: usize = 128;
 const PENDING_CANCELLATION_RETENTION: Duration = Duration::from_mins(10);
 const MAX_ACTIVE_REQUESTS: usize = 64;
 const MAX_PENDING_WORKER_SETTLEMENTS: usize = 32;
 const MAX_RETAINED_WORKER_SETTLEMENTS: usize = 128;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum McpToolDispatchStage {
-    QueueAdmission,
-    SchemaValidation,
-    ProjectGate,
-    ProjectSelection,
-    Readiness,
-    ApplicationRoute,
-    Handler,
-    ResultMaterialization,
-    ResponseWrite,
-}
-
-impl McpToolDispatchStage {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::QueueAdmission => "queue_admission",
-            Self::SchemaValidation => "schema_validation",
-            Self::ProjectGate => "project_gate",
-            Self::ProjectSelection => "project_selection",
-            Self::Readiness => "readiness",
-            Self::ApplicationRoute => "application_route",
-            Self::Handler => "handler",
-            Self::ResultMaterialization => "result_materialization",
-            Self::ResponseWrite => "response_write",
-        }
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct McpRequestRegistry {
@@ -101,11 +72,18 @@ impl McpRequestRegistry {
         started: McpRequestStart,
         policy: McpToolLifecyclePolicy,
     ) -> Result<McpToolDispatchControl> {
-        let deadline_at = started
+        let response_deadline_at = started
             .runtime
             .checked_add(policy.maximum_duration)
             .ok_or_else(|| TraceDecayError::Config {
                 message: "MCP request deadline cannot be represented by the runtime clock"
+                    .to_owned(),
+            })?;
+        let deadline_at = started
+            .runtime
+            .checked_add(policy.execution_duration())
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "MCP execution deadline cannot be represented by the runtime clock"
                     .to_owned(),
             })?;
         if tokio::time::Instant::now() >= deadline_at {
@@ -128,11 +106,12 @@ impl McpRequestRegistry {
                 )
             })?;
 
-        let deadline_micros = i64::try_from(policy.maximum_duration.as_micros()).map_err(|_| {
-            TraceDecayError::Config {
-                message: "MCP request deadline exceeds the domain clock".to_owned(),
-            }
-        })?;
+        let deadline_micros =
+            i64::try_from(policy.execution_duration().as_micros()).map_err(|_| {
+                TraceDecayError::Config {
+                    message: "MCP request deadline exceeds the domain clock".to_owned(),
+                }
+            })?;
         let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
             started.wall.0.saturating_add(deadline_micros),
         ))
@@ -152,11 +131,26 @@ impl McpRequestRegistry {
             message: format!("could not create MCP cancellation signal: {error}"),
         })?;
         let termination = Arc::new(AtomicU8::new(McpRequestTermination::Active as u8));
-        let registration = self.inner.next_registration.fetch_add(1, Ordering::AcqRel);
+        let registration;
         let pre_cancelled = {
             let mut requests = lock(&self.inner.requests);
             prune_pending_cancellations(&mut requests, tokio::time::Instant::now());
-            let pre_cancelled = requests.pending_cancellations.remove(request_key).is_some();
+            if requests.active.contains_key(request_key) {
+                return Err(TraceDecayError::mcp_tool_dispatch(
+                    "tool_dispatch_duplicate_request_id",
+                    McpToolDispatchStage::QueueAdmission.as_str(),
+                    false,
+                    format!(
+                        "tool '{tool_name}' reused request id '{request_key}' while its prior request is active"
+                    ),
+                ));
+            }
+            registration = self.inner.next_registration.fetch_add(1, Ordering::AcqRel);
+            let pre_cancelled = policy.externally_cancellable
+                && requests.pending_cancellations.remove(request_key).is_some();
+            if !policy.externally_cancellable {
+                requests.pending_cancellations.remove(request_key);
+            }
             requests.active.insert(
                 request_key.to_owned(),
                 ActiveMcpRequest {
@@ -183,6 +177,7 @@ impl McpRequestRegistry {
                 policy,
                 deadline,
                 deadline_at,
+                response_deadline_at,
                 cancellation,
                 termination,
                 _admission_permit: admission_permit,
@@ -301,6 +296,7 @@ struct McpToolDispatchControlInner {
     policy: McpToolLifecyclePolicy,
     deadline: tracedecay_application::Deadline,
     deadline_at: tokio::time::Instant,
+    response_deadline_at: tokio::time::Instant,
     cancellation: tracedecay_application::CancellationSignal,
     termination: Arc<AtomicU8>,
     _admission_permit: OwnedSemaphorePermit,
@@ -331,11 +327,11 @@ impl McpToolDispatchControl {
     }
 
     pub(crate) fn check(&self, stage: McpToolDispatchStage) -> Result<()> {
-        if tokio::time::Instant::now() >= self.inner.deadline_at {
+        if tokio::time::Instant::now() >= self.stage_deadline(stage) {
             self.terminate(McpRequestTermination::Deadline);
             return Err(self.deadline_error(stage));
         }
-        if self.is_cancelled() {
+        if stage != McpToolDispatchStage::ResponseWrite && self.is_cancelled() {
             return Err(self.terminal_error(stage));
         }
         Ok(())
@@ -346,10 +342,21 @@ impl McpToolDispatchControl {
         F: Future<Output = Result<T>>,
     {
         self.check(stage)?;
+        let stage_deadline = self.stage_deadline(stage);
         tokio::pin!(future);
+        if stage == McpToolDispatchStage::ResponseWrite {
+            return tokio::select! {
+                biased;
+                () = tokio::time::sleep_until(stage_deadline) => {
+                    self.terminate(McpRequestTermination::Deadline);
+                    Err(self.deadline_error(stage))
+                }
+                result = &mut future => result,
+            };
+        }
         tokio::select! {
             biased;
-            () = tokio::time::sleep_until(self.inner.deadline_at) => {
+            () = tokio::time::sleep_until(stage_deadline) => {
                 self.terminate(McpRequestTermination::Deadline);
                 Err(self.deadline_error(stage))
             }
@@ -472,6 +479,14 @@ impl McpToolDispatchControl {
             McpRequestTermination::Active | McpRequestTermination::Cancelled => {
                 self.cancelled_error(stage)
             }
+        }
+    }
+
+    fn stage_deadline(&self, stage: McpToolDispatchStage) -> tokio::time::Instant {
+        if stage == McpToolDispatchStage::ResponseWrite {
+            self.inner.response_deadline_at
+        } else {
+            self.inner.deadline_at
         }
     }
 
@@ -639,6 +654,8 @@ struct McpWorkerSettlementReaper {
 
 struct McpWorkerSettlementReaperInner {
     state: AtomicU8,
+    admission_gate: Mutex<()>,
+    shutdown_gate: tokio::sync::Mutex<()>,
     permits: Arc<Semaphore>,
     next_id: AtomicU64,
     records: Mutex<BTreeMap<u64, McpWorkerSettlementRecord>>,
@@ -654,6 +671,8 @@ impl McpWorkerSettlementReaper {
         Self {
             inner: Arc::new(McpWorkerSettlementReaperInner {
                 state: AtomicU8::new(0),
+                admission_gate: Mutex::new(()),
+                shutdown_gate: tokio::sync::Mutex::new(()),
                 permits: Arc::new(Semaphore::new(MAX_PENDING_WORKER_SETTLEMENTS)),
                 next_id: AtomicU64::new(1),
                 records: Mutex::new(BTreeMap::new()),
@@ -675,6 +694,7 @@ impl McpWorkerSettlementReaper {
         tool_name: &str,
         stage: McpToolDispatchStage,
     ) -> Result<McpToolWorkerReservation> {
+        let _admission = lock(&self.inner.admission_gate);
         if self.state() != McpWorkerReaperState::Running {
             return Err(TraceDecayError::mcp_tool_dispatch(
                 "tool_dispatch_reaper_unavailable",
@@ -719,10 +739,14 @@ impl McpWorkerSettlementReaper {
     }
 
     async fn shutdown(&self, timeout: Duration) -> McpWorkerReaperShutdown {
+        let _shutdown = self.inner.shutdown_gate.lock().await;
         if self.state() == McpWorkerReaperState::Stopped {
             return McpWorkerReaperShutdown::Complete { reconciliations: 0 };
         }
-        self.inner.state.store(1, Ordering::Release);
+        {
+            let _admission = lock(&self.inner.admission_gate);
+            self.inner.state.store(1, Ordering::Release);
+        }
         let deadline = tokio::time::Instant::now()
             .checked_add(timeout)
             .unwrap_or_else(tokio::time::Instant::now);

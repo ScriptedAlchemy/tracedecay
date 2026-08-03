@@ -79,7 +79,7 @@ impl McpServer {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.shutdown_application_surface_request(id, &connection_scope);
                         }
-                        return Ok((None, true));
+                        return Ok((handling.await, false));
                     }
                     () = peer_close_check => {
                         if let Some(id) = request.id.as_ref() {
@@ -95,7 +95,7 @@ impl McpServer {
                     if let Some(id) = request.id.as_ref() {
                         let _ = self.shutdown_application_surface_request(id, &connection_scope);
                     }
-                    return Ok((None, true));
+                    return Ok((handling.await, false));
                 }
                 incoming = transport.read_line() => {
                     let line = match incoming {
@@ -181,7 +181,7 @@ impl McpServer {
                                 &connection_scope,
                             );
                         }
-                        return Ok((None, true));
+                        return Ok((handling.await, false));
                     }
                     () = peer_close_check => {
                         if let Some(id) = request.id.as_ref() {
@@ -203,7 +203,7 @@ impl McpServer {
                             &connection_scope,
                         );
                     }
-                    return Ok((None, true));
+                    return Ok((handling.await, false));
                 }
                 incoming = transport.read_line() => {
                     let line = match incoming {
@@ -455,7 +455,7 @@ impl McpServer {
 
             let response = if let Some(error) = admission_failure.or(gate_failure) {
                 revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    requests::finish_early_tool_call_response(
+                    request_receipts::finish_early_tool_call_response(
                         tool_error_response(id.clone(), tool_name, &error),
                         started,
                     )
@@ -474,7 +474,7 @@ impl McpServer {
                             })),
                         );
                         if request.method == "tools/call" {
-                            requests::finish_early_tool_call_response(response, started)
+                            request_receipts::finish_early_tool_call_response(response, started)
                         } else {
                             response
                         }
@@ -482,7 +482,7 @@ impl McpServer {
                 })
             } else if !project_request_admitted {
                 revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    requests::finish_early_tool_call_response(
+                    request_receipts::finish_early_tool_call_response(
                         JsonRpcResponse::error_with_data(
                         id.clone(),
                         ErrorCode::InternalError,
@@ -706,20 +706,23 @@ impl McpServer {
     /// its main loop exits; callers (e.g. `main.rs`, tests) may invoke it
     /// explicitly afterwards without re-running the persistence logic.
     pub async fn shutdown(&self) {
-        match self
+        let _ = self.shutdown_with_worker_status().await;
+    }
+
+    pub(crate) async fn shutdown_with_worker_status(&self) -> McpWorkerReaperShutdown {
+        let worker_shutdown = self
             .request_registry
             .shutdown_workers(Duration::from_millis(250))
-            .await
-        {
+            .await;
+        match worker_shutdown {
             McpWorkerReaperShutdown::Complete { .. } => {}
             McpWorkerReaperShutdown::Retryable { pending } => {
                 tracing::warn!(pending, "MCP worker settlement shutdown remains retryable");
-                return;
             }
         }
         // Idempotency guard: only run the persistence path once.
         if self.shutdown_done.swap(true, Ordering::SeqCst) {
-            return;
+            return worker_shutdown;
         }
 
         self.shutdown_background_tasks().await;
@@ -775,6 +778,7 @@ impl McpServer {
             uptime_secs = uptime.as_secs(),
             "MCP server shutdown complete"
         );
+        worker_shutdown
     }
 
     pub(crate) async fn shutdown_background_tasks(&self) {

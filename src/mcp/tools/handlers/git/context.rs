@@ -6,6 +6,14 @@ use super::shell::{
 };
 use super::*;
 
+const MAX_PR_CONTEXT_FILES: usize = 256;
+const MAX_PR_CONTEXT_COMMITS: usize = 128;
+const MAX_PR_CONTEXT_SYMBOLS: usize = 1_000;
+const MAX_PR_CONTEXT_NODES_PER_FILE: usize = 256;
+const MAX_PR_CONTEXT_CALLERS_PER_SYMBOL: usize = 128;
+const MAX_PR_CONTEXT_AFFECTED_TESTS: usize = 512;
+const MAX_PR_CONTEXT_IMPACTED_MODULES: usize = 512;
+
 /// Runs one synchronous gix span on the blocking pool.
 ///
 /// Repo open, tree diff, status classification, and rev-walk are all
@@ -357,6 +365,8 @@ pub(crate) async fn handle_pr_context(
     args: Value,
     control: &crate::mcp::server::McpToolDispatchControl,
 ) -> Result<ToolResult> {
+    let stage = crate::mcp::server::McpToolDispatchStage::Handler;
+    control.check(stage)?;
     let base = args
         .get("base_ref")
         .and_then(|v| v.as_str())
@@ -387,29 +397,49 @@ pub(crate) async fn handle_pr_context(
     };
     let GitPrComparison {
         merge_base,
-        changes,
-        commits,
+        mut changes,
+        mut commits,
     } = comparison;
+    let files_changed_total = changes.len();
+    let commits_total = commits.len();
+    let files_truncated = files_changed_total > MAX_PR_CONTEXT_FILES;
+    let commits_truncated = commits_total > MAX_PR_CONTEXT_COMMITS;
+    changes.truncate(MAX_PR_CONTEXT_FILES);
+    commits.truncate(MAX_PR_CONTEXT_COMMITS);
     let changed_files: Vec<String> = changes.iter().map(|change| change.path.clone()).collect();
+    let changed_file_set: HashSet<&str> = changed_files.iter().map(String::as_str).collect();
 
     let mut symbols_added: Vec<Value> = Vec::new();
     let mut symbols_modified: Vec<Value> = Vec::new();
     let mut test_files_changed: Vec<String> = Vec::new();
     let mut impacted_modules: HashSet<String> = HashSet::new();
+    let mut symbols_truncated = false;
+    let mut callers_truncated = false;
+    let mut affected_tests_truncated = false;
+    let mut impacted_modules_truncated = false;
 
     // Pre-compute files with inline test modules.
+    control.check(stage)?;
     let files_with_inline_tests = cg.get_files_with_test_annotations().await?;
+    control.check(stage)?;
     let has_tests = |path: &str| {
         crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
     };
 
     for change in &changes {
+        control.check(stage)?;
+        if symbols_added.len() + symbols_modified.len() >= MAX_PR_CONTEXT_SYMBOLS {
+            symbols_truncated = true;
+            break;
+        }
         let file = &change.path;
         if has_tests(file) {
             test_files_changed.push(file.clone());
         }
 
         let nodes = cg.get_nodes_by_file(file).await?;
+        control.check(stage)?;
+        symbols_truncated |= nodes.len() > MAX_PR_CONTEXT_NODES_PER_FILE;
 
         // Config files explode into one node per key — Cargo.toml with 50
         // dependencies blows past the response budget. Treat them as a
@@ -424,7 +454,12 @@ pub(crate) async fn handle_pr_context(
             continue;
         }
 
-        for node in &nodes {
+        for node in nodes.iter().take(MAX_PR_CONTEXT_NODES_PER_FILE) {
+            control.check(stage)?;
+            if symbols_added.len() + symbols_modified.len() >= MAX_PR_CONTEXT_SYMBOLS {
+                symbols_truncated = true;
+                break;
+            }
             let sym = json!({
                 "name": node.name,
                 "kind": node.kind.as_str(),
@@ -436,9 +471,12 @@ pub(crate) async fn handle_pr_context(
             // modified files the graph only has the post-change symbol set, so
             // per-symbol added/modified inference would overstate additions.
             let callers = cg.get_callers(&node.id, 1).await?;
+            control.check(stage)?;
+            callers_truncated |= callers.len() > MAX_PR_CONTEXT_CALLERS_PER_SYMBOL;
             let has_external_callers = callers
                 .iter()
-                .any(|(c, _)| !changed_files.contains(&c.file_path));
+                .take(MAX_PR_CONTEXT_CALLERS_PER_SYMBOL)
+                .any(|(c, _)| !changed_file_set.contains(c.file_path.as_str()));
 
             if change.status == "added" {
                 symbols_added.push(sym);
@@ -447,8 +485,12 @@ pub(crate) async fn handle_pr_context(
             }
 
             if has_external_callers {
-                for (caller, _) in &callers {
-                    if !changed_files.contains(&caller.file_path) {
+                for (caller, _) in callers.iter().take(MAX_PR_CONTEXT_CALLERS_PER_SYMBOL) {
+                    if impacted_modules.len() >= MAX_PR_CONTEXT_IMPACTED_MODULES {
+                        impacted_modules_truncated = true;
+                        break;
+                    }
+                    if !changed_file_set.contains(caller.file_path.as_str()) {
                         let dir = caller
                             .file_path
                             .rfind('/')
@@ -463,20 +505,40 @@ pub(crate) async fn handle_pr_context(
     // Find transitively affected test files
     let mut affected_tests: HashSet<String> = HashSet::new();
     for file in &changed_files {
+        control.check(stage)?;
+        if affected_tests.len() >= MAX_PR_CONTEXT_AFFECTED_TESTS {
+            affected_tests_truncated = true;
+            break;
+        }
         if has_tests(file) {
             continue;
         }
         let nodes = cg.get_nodes_by_file(file).await?;
-        for node in &nodes {
+        control.check(stage)?;
+        affected_tests_truncated |= nodes.len() > MAX_PR_CONTEXT_NODES_PER_FILE;
+        for node in nodes.iter().take(MAX_PR_CONTEXT_NODES_PER_FILE) {
+            control.check(stage)?;
+            if affected_tests.len() >= MAX_PR_CONTEXT_AFFECTED_TESTS {
+                affected_tests_truncated = true;
+                break;
+            }
             let impact = cg.get_impact_radius(&node.id, 2).await?;
-            for impacted in &impact.nodes {
+            control.check(stage)?;
+            affected_tests_truncated |= impact.nodes.len() > MAX_PR_CONTEXT_NODES_PER_FILE;
+            for impacted in impact.nodes.iter().take(MAX_PR_CONTEXT_NODES_PER_FILE) {
                 if has_tests(&impacted.file_path) {
                     affected_tests.insert(impacted.file_path.clone());
+                    if affected_tests.len() >= MAX_PR_CONTEXT_AFFECTED_TESTS {
+                        affected_tests_truncated = true;
+                        break;
+                    }
                 }
             }
         }
     }
 
+    let impacted_modules_count = impacted_modules.len();
+    let affected_tests_count = affected_tests.len();
     let mut impacted_sorted: Vec<String> = impacted_modules.into_iter().collect();
     impacted_sorted.sort();
     let mut affected_sorted: Vec<String> = affected_tests.into_iter().collect();
@@ -487,7 +549,8 @@ pub(crate) async fn handle_pr_context(
         "head": head,
         "merge_base": merge_base,
         "commits": commits,
-        "files_changed": changed_files.len(),
+        "files_changed": files_changed_total,
+        "files_analyzed": changed_files.len(),
         "symbols_added": symbols_added.len(),
         "symbols_modified": symbols_modified.len(),
         "added": symbols_added,
@@ -495,14 +558,32 @@ pub(crate) async fn handle_pr_context(
         "test_files_changed": test_files_changed,
         "affected_tests": affected_sorted,
         "impacted_modules": impacted_sorted,
+        "truncated": {
+            "files": files_truncated,
+            "commits": commits_truncated,
+            "symbols": symbols_truncated,
+            "callers": callers_truncated,
+            "affected_tests": affected_tests_truncated
+                || affected_tests_count >= MAX_PR_CONTEXT_AFFECTED_TESTS,
+            "impacted_modules": impacted_modules_truncated
+                || impacted_modules_count >= MAX_PR_CONTEXT_IMPACTED_MODULES,
+        },
+        "limits": {
+            "files": MAX_PR_CONTEXT_FILES,
+            "commits": MAX_PR_CONTEXT_COMMITS,
+            "symbols": MAX_PR_CONTEXT_SYMBOLS,
+            "nodes_per_file": MAX_PR_CONTEXT_NODES_PER_FILE,
+            "callers_per_symbol": MAX_PR_CONTEXT_CALLERS_PER_SYMBOL,
+            "affected_tests": MAX_PR_CONTEXT_AFFECTED_TESTS,
+            "impacted_modules": MAX_PR_CONTEXT_IMPACTED_MODULES,
+        },
     });
 
-    Ok(generic_tool_result(
-        Some(cg.project_root()),
-        &args,
-        &output,
-        changed_files,
-    ))
+    let project_root = cg.project_root().to_path_buf();
+    blocking_git_span(control, move || {
+        generic_tool_result(Some(&project_root), &args, &output, changed_files)
+    })
+    .await
 }
 
 #[cfg(test)]

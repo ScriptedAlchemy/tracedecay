@@ -21,7 +21,9 @@ use tokio::sync::Mutex;
 
 use crate::mcp::transport::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 
-use super::{ConnectionRouteState, McpRequestStart, McpServer, McpToolDispatchStage};
+use super::{
+    ConnectionRouteState, McpRequestStart, McpServer, McpToolDispatchControl, McpToolDispatchStage,
+};
 
 /// Allows daemon routing to enrich the legacy `initialize` response without
 /// coupling this MCP module to daemon route types.
@@ -100,7 +102,9 @@ impl RmcpConnectionAdapter {
             Some(tool_name) => Some(
                 self.server
                     .admit_tool_request(&id, tool_name, &self.memory_request_scope, started)
-                    .map_err(|error| typed_tool_error(id.clone(), tool_name, &error))?,
+                    .map_err(|error| {
+                        typed_tool_error(id.clone(), tool_name, &error, started, None)
+                    })?,
             ),
             None => None,
         };
@@ -120,6 +124,8 @@ impl RmcpConnectionAdapter {
                                 id.clone(),
                                 tool_name.as_deref().unwrap_or("<unresolved>"),
                                 &error,
+                                started,
+                                dispatch_control.as_ref(),
                             )
                         })?,
                 ),
@@ -135,7 +141,12 @@ impl RmcpConnectionAdapter {
                 .response_revoked()
                 .is_cancelled()
         {
-            return Err(project_server_retired_error());
+            return Err(project_server_retired_error(
+                id.clone(),
+                tool_name.as_deref().unwrap_or("<unresolved>"),
+                started,
+                dispatch_control.as_ref(),
+            ));
         }
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_owned(),
@@ -152,6 +163,8 @@ impl RmcpConnectionAdapter {
                         id.clone(),
                         tool_name.as_deref().unwrap_or("<unresolved>"),
                         &error,
+                        started,
+                        dispatch_control.as_ref(),
                     )
                 })?,
             None => self.connection.lock().await,
@@ -160,7 +173,7 @@ impl RmcpConnectionAdapter {
             &request,
             self.timings_enabled,
             &mut connection,
-            dispatch_control,
+            dispatch_control.clone(),
             started,
         );
         tokio::pin!(handling);
@@ -174,7 +187,13 @@ impl RmcpConnectionAdapter {
                 handling.await
             }
         }
-        .ok_or_else(|| ErrorData::internal_error("MCP request did not produce a response", None))?;
+        .ok_or_else(|| {
+            response_error(JsonRpcResponse::error(
+                id.clone(),
+                crate::mcp::transport::ErrorCode::InternalError,
+                "MCP request did not produce a response".to_owned(),
+            ))
+        })?;
         if project_tool_call
             && self
                 .server
@@ -182,7 +201,12 @@ impl RmcpConnectionAdapter {
                 .response_revoked()
                 .is_cancelled()
         {
-            return Err(project_server_retired_error());
+            return Err(project_server_retired_error(
+                id,
+                tool_name.as_deref().unwrap_or("<unresolved>"),
+                started,
+                dispatch_control.as_ref(),
+            ));
         }
         Ok(response)
     }
@@ -326,8 +350,16 @@ fn typed_tool_error(
     id: Value,
     tool_name: &str,
     error: &crate::errors::TraceDecayError,
+    started: McpRequestStart,
+    control: Option<&McpToolDispatchControl>,
 ) -> ErrorData {
-    match super::tool_errors::tool_error_response(id, tool_name, error).error {
+    response_error(super::request_receipts::finish_tool_error_response(
+        id, tool_name, error, started, control,
+    ))
+}
+
+fn response_error(response: JsonRpcResponse) -> ErrorData {
+    match response.error {
         Some(error) => rmcp_error(error),
         None => ErrorData::internal_error(
             "TraceDecay MCP tool error response omitted its error payload",
@@ -336,15 +368,29 @@ fn typed_tool_error(
     }
 }
 
-fn project_server_retired_error() -> ErrorData {
-    ErrorData::internal_error(
-        "tool project route failed: project server was retired",
+fn project_server_retired_error(
+    id: Value,
+    tool_name: &str,
+    started: McpRequestStart,
+    control: Option<&McpToolDispatchControl>,
+) -> ErrorData {
+    let response = JsonRpcResponse::error_with_data(
+        id,
+        crate::mcp::transport::ErrorCode::InternalError,
+        "tool project route failed: project server was retired".to_owned(),
         Some(json!({
+            "tool": tool_name,
             "reason_code": "project_server_retired",
             "retryable": true,
             "detail": "the retained project server was replaced or revoked; retry against the current owner",
         })),
-    )
+    );
+    response_error(super::request_receipts::finish_tool_call_response(
+        response,
+        &super::request_receipts::McpToolCallTiming::new(started),
+        control,
+        None,
+    ))
 }
 
 #[cfg(test)]
@@ -400,5 +446,31 @@ mod tests {
         );
         assert!(initialized.capabilities.tools.is_some());
         assert!(initialized.capabilities.resources.is_some());
+    }
+
+    #[test]
+    fn typed_rmcp_admission_errors_include_the_canonical_receipt() {
+        let error = crate::errors::TraceDecayError::mcp_tool_dispatch(
+            "tool_dispatch_duplicate_request_id",
+            "queue_admission",
+            false,
+            "duplicate active request id",
+        );
+        let error = typed_tool_error(
+            json!(7),
+            "tracedecay_search",
+            &error,
+            McpRequestStart::now(),
+            None,
+        );
+        let receipt = error
+            .data
+            .and_then(|data| {
+                data.get(super::super::request_receipts::EXECUTION_RECEIPT_KEY)
+                    .cloned()
+            })
+            .expect("canonical execution receipt");
+        assert_eq!(receipt["terminal"], "denied");
+        assert_eq!(receipt["worker_settlement"], "not_started");
     }
 }

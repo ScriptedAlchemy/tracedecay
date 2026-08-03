@@ -1,6 +1,36 @@
 use std::time::Duration;
 
 const DEFAULT_WORKER_CLEANUP: Duration = Duration::from_millis(100);
+const MAX_RESPONSE_WRITE_RESERVE: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum McpToolDispatchStage {
+    QueueAdmission,
+    SchemaValidation,
+    ProjectGate,
+    ProjectSelection,
+    Readiness,
+    ApplicationRoute,
+    Handler,
+    ResultMaterialization,
+    ResponseWrite,
+}
+
+impl McpToolDispatchStage {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::QueueAdmission => "queue_admission",
+            Self::SchemaValidation => "schema_validation",
+            Self::ProjectGate => "project_gate",
+            Self::ProjectSelection => "project_selection",
+            Self::Readiness => "readiness",
+            Self::ApplicationRoute => "application_route",
+            Self::Handler => "handler",
+            Self::ResultMaterialization => "result_materialization",
+            Self::ResponseWrite => "response_write",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct McpRequestStart {
@@ -39,6 +69,15 @@ impl McpToolLifecyclePolicy {
 
     pub(crate) const fn maximum_duration(self) -> Duration {
         self.maximum_duration
+    }
+
+    pub(super) fn response_write_reserve(self) -> Duration {
+        (self.maximum_duration / 10).min(MAX_RESPONSE_WRITE_RESERVE)
+    }
+
+    pub(super) fn execution_duration(self) -> Duration {
+        self.maximum_duration
+            .saturating_sub(self.response_write_reserve())
     }
 
     pub(crate) fn bounded_by(mut self, remaining: Duration) -> Self {

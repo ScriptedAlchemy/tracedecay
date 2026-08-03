@@ -42,6 +42,8 @@ use super::tools::{
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
 mod connection;
+#[cfg(test)]
+mod connection_tests;
 mod construction;
 mod hook_dispatch;
 mod hook_writes;
@@ -51,6 +53,7 @@ mod project_registry;
 mod protocol;
 mod read_coalescing;
 mod request_lifecycle;
+mod request_receipts;
 mod requests;
 mod rmcp;
 mod routing;
