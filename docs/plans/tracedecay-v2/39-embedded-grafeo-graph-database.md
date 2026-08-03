@@ -4,14 +4,17 @@
 
 **Goal:** Replace custom adjacency structures and graph-shaped SQLite storage with one embedded Grafeo runtime boundary while retaining SQLite only for genuinely relational, transactional, and content-bearing records.
 
-**Architecture:** A new `tracedecay-graph-db` crate is the only workspace crate allowed to depend on Grafeo. Domain crates keep typed TraceDecay identities and contracts; storage adapters translate those contracts into labels, typed edges, properties, vectors, traversals, and snapshots without exposing Grafeo types. Each migrated datum has exactly one authority: durable graph-shaped state lives in Grafeo, rebuildable projections are recreated from their canonical manifests/events, and SQLite does not dual-write or shadow the same graph.
+**Architecture:** Task 1 retains PR487's temporary direct Grafeo dependency in `tracedecay-query`; Task 2 creates the opaque `tracedecay-graph-db` boundary without prematurely deleting that seed; Task 3 moves every PR487 caller behind the boundary and makes `tracedecay-graph-db` the only workspace crate allowed to depend on Grafeo. Domain crates keep typed TraceDecay identities and contracts; storage adapters translate those contracts into labels, typed edges, properties, vectors, traversals, and snapshots without exposing Grafeo types. Each migrated datum has exactly one authority: durable graph-shaped state lives in Grafeo, rebuildable projections are recreated from their canonical manifests/events, and SQLite does not dual-write or shadow the same graph.
 
 **Tech Stack:** Rust 2024, embedded in-process Grafeo `0.5.42`, TraceDecay domain/store ports, Tokio cancellation, Criterion, cargo-nextest.
 
 ## Global Constraints
 
 - Use Grafeo embedded in-process. No server, sidecar, network transport, or separately managed database process.
-- `tracedecay-graph-db` is the only crate with direct `grafeo-*` dependencies.
+- Task 3 completes the sole-dependency cutover: until then, only
+  `tracedecay-graph-db` and Task 1's unchanged `tracedecay-query` seed may have
+  direct `grafeo-*` dependencies. Do not delete or disguise the Task 1
+  dependency during Task 2.
 - Do not introduce `petgraph` or another overlapping graph/vector database.
 - V2 is a breaking fresh-profile cutover: no V1 reader, migration, backfill, compatibility table, dual-write, fallback, or cutover receipt.
 - One datum has one authority. A rebuildable Grafeo projection records its source generation/watermark and never becomes a second canonical copy.
@@ -222,7 +225,11 @@ Expected: fail because the crate and interfaces do not exist.
 
 - [ ] **Step 2: Add the workspace crate and centralize Grafeo dependencies**
 
-Use the exact PR487-compatible Grafeo `0.5.42` dependency set only inside this crate. Add `tracedecay-graph-db` to `[workspace].members` and `[workspace.dependencies]`. No other manifest may contain `grafeo`.
+Use the exact PR487-compatible Grafeo `0.5.42` dependency set in the new crate.
+Add `tracedecay-graph-db` to `[workspace].members` and centralize the exact
+versions in `[workspace.dependencies]`. Preserve Task 1's direct
+`tracedecay-query` dependencies unchanged until its production callers move in
+Task 3; Task 2 adds no other direct Grafeo consumer.
 
 - [ ] **Step 3: Implement typed open, snapshot, batch, traversal, and vector adapters**
 
@@ -256,7 +263,11 @@ cargo nextest run -p tracedecay-graph-db --no-fail-fast
 cargo clippy -p tracedecay-graph-db --all-targets --all-features -- -D warnings
 ```
 
-Expected: Grafeo appears only in `crates/tracedecay-graph-db/Cargo.toml`; all tests and Clippy pass.
+Expected: direct Grafeo consumers are limited to
+`crates/tracedecay-graph-db/Cargo.toml` and the unchanged Task 1
+`crates/tracedecay-query/Cargo.toml` seed; the graph-db API exposes no Grafeo
+types; all tests and Clippy pass. Sole-manifest ownership is Task 3 acceptance,
+not Task 2 acceptance.
 
 - [ ] **Step 5: Commit**
 
@@ -310,6 +321,17 @@ Build the replacement off to the side, validate every typed identity, then repla
 - [ ] **Step 3: Remove direct query-to-Grafeo coupling**
 
 `tracedecay-query` imports only the consumer-owned `CodeGraphEvidenceReadPort`. Move graph construction into `tracedecay-code-index`; graph-db performs storage/traversal. Remove all `grafeo-*` dependencies from `tracedecay-query`.
+
+Task 3 cutover acceptance requires:
+
+```bash
+rg -n 'grafeo' --glob 'Cargo.toml'
+```
+
+Expected: Grafeo appears only in
+`crates/tracedecay-graph-db/Cargo.toml`. Do not claim the sole dependency
+boundary before this production caller cutover and manifest deletion are both
+complete.
 
 - [ ] **Step 4: Delete the SQLite graph adapter**
 

@@ -10,6 +10,7 @@ members = [
     "crates/tracedecay-dashboard-api",
     "crates/tracedecay-domain",
     "crates/tracedecay-global-db",
+    "crates/tracedecay-graph-db",
     "crates/tracedecay-host-integration",
     "crates/tracedecay-hooks",
     "crates/tracedecay-jsonrpc",
@@ -51,6 +52,11 @@ ignored-paths = [
 # inheritance table is the sanctioned single source of truth.
 [workspace.package]
 edition = "2024"
+
+[workspace.dependencies]
+grafeo-common = { version = "=0.5.42", default-features = false }
+grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
+grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "wal", "grafeo-file", "vector-index"] }
 
 [package]
 name = "tracedecay"
