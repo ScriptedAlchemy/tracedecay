@@ -5,7 +5,8 @@ use grafeo_core::index::vector::DistanceMetric;
 use grafeo_engine::GrafeoDB;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::{ENTITY_LABEL, load_entities, vector_property_key};
+use crate::runtime::vector_property_key;
+use crate::state::{ENTITY_LABEL, StateCache};
 use crate::{
     GraphCancellation, GraphDbError, GraphEntityId, GraphNamespace, GraphProperty,
     GraphPropertyName,
@@ -35,6 +36,14 @@ impl VectorMetric {
             Self::Cosine => DistanceMetric::Cosine,
             Self::DotProduct => DistanceMetric::DotProduct,
             Self::Euclidean => DistanceMetric::Euclidean,
+        }
+    }
+
+    pub(crate) const fn storage_tag(self) -> &'static str {
+        match self {
+            Self::Cosine => "cos",
+            Self::DotProduct => "dot",
+            Self::Euclidean => "l2",
         }
     }
 }
@@ -76,12 +85,12 @@ pub struct VectorSearchResult {
 
 pub(crate) fn vector_search(
     database: &GrafeoDB,
+    state: &StateCache,
     request: VectorSearchRequest,
 ) -> Result<VectorSearchResult, GraphDbError> {
     validate_request(&request)?;
-    let entities = load_entities(database)?;
     let store = database.graph_store();
-    let key = vector_property_key(&request.property);
+    let key = vector_property_key(&request.property, request.dimension, request.metric);
     let candidates = store.vector_search(
         Some(ENTITY_LABEL),
         &key,
@@ -98,11 +107,12 @@ pub(crate) fn vector_search(
         if request.cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
-        let Some(stored) = entities.values().find_map(|(candidate, stored)| {
-            (*candidate == node_id && stored.namespace == request.namespace).then_some(stored)
-        }) else {
+        let Some(stored) = state.entity_by_node(node_id) else {
             continue;
         };
+        if stored.namespace != request.namespace {
+            continue;
+        }
         let Some(GraphProperty::Vector(vector)) = stored.entity.properties.get(&request.property)
         else {
             continue;

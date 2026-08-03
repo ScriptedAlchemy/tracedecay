@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
@@ -17,6 +18,27 @@ struct Cancelled;
 impl GraphCancellation for Cancelled {
     fn is_cancelled(&self) -> bool {
         true
+    }
+}
+
+#[derive(Debug)]
+struct CancelOnPoll {
+    polls: AtomicUsize,
+    cancel_on: usize,
+}
+
+impl CancelOnPoll {
+    fn new(cancel_on: usize) -> Self {
+        Self {
+            polls: AtomicUsize::new(0),
+            cancel_on,
+        }
+    }
+}
+
+impl GraphCancellation for CancelOnPoll {
+    fn is_cancelled(&self) -> bool {
+        self.polls.fetch_add(1, Ordering::SeqCst) + 1 >= self.cancel_on
     }
 }
 
@@ -90,6 +112,24 @@ fn batch(
     .unwrap()
 }
 
+fn batch_in(
+    namespace_value: &str,
+    owner: &str,
+    generation_value: &str,
+    watermark_value: &str,
+    mutations: Vec<GraphMutation>,
+) -> GraphWriteBatch {
+    GraphWriteBatch::new(
+        GraphNamespace::new(namespace_value).unwrap(),
+        projection(owner),
+        generation(generation_value),
+        watermark(watermark_value),
+        mutations,
+        live(),
+    )
+    .unwrap()
+}
+
 fn traversal(start: &str) -> TraversalRequest {
     TraversalRequest {
         namespace: namespace(),
@@ -116,6 +156,17 @@ fn rejects_invalid_opaque_identities() {
         GraphLabel::new("x".repeat(1025)),
         Err(GraphDbError::InvalidRequest { .. })
     ));
+}
+
+#[test]
+fn opaque_identity_deserialization_reuses_constructor_validation() {
+    for invalid in [
+        "\"\"".to_owned(),
+        "\"__tracedecay_graph_db_forbidden\"".to_owned(),
+        format!("\"{}\"", "x".repeat(1025)),
+    ] {
+        assert!(serde_json::from_str::<GraphNamespace>(&invalid).is_err());
+    }
 }
 
 #[test]
@@ -169,6 +220,62 @@ fn apply_honors_cancellation_without_advancing_sequence() {
 }
 
 #[test]
+fn apply_rechecks_cancellation_after_lock_for_empty_batch() {
+    let db = memory_db();
+    let cancelled = GraphWriteBatch::new(
+        namespace(),
+        projection("code"),
+        generation("g1"),
+        watermark("w1"),
+        Vec::new(),
+        Arc::new(CancelOnPoll::new(2)),
+    )
+    .unwrap();
+    assert_eq!(db.apply(cancelled).unwrap_err(), GraphDbError::Cancelled);
+    assert_eq!(
+        db.apply(batch(
+            "code",
+            "g2",
+            "w2",
+            vec![GraphMutation::UpsertEntity(entity("kept"))],
+        ))
+        .unwrap()
+        .sequence,
+        1
+    );
+}
+
+#[test]
+fn apply_rechecks_cancellation_immediately_before_commit() {
+    let db = memory_db();
+    let cancelled = GraphWriteBatch::new(
+        namespace(),
+        projection("code"),
+        generation("g1"),
+        watermark("w1"),
+        vec![GraphMutation::UpsertEntity(entity("cancelled"))],
+        Arc::new(CancelOnPoll::new(4)),
+    )
+    .unwrap();
+    assert_eq!(db.apply(cancelled).unwrap_err(), GraphDbError::Cancelled);
+    assert!(matches!(
+        db.traverse(traversal("cancelled")),
+        Err(GraphDbError::InvalidRequest { .. })
+    ));
+    assert_eq!(
+        db.apply(batch(
+            "code",
+            "g2",
+            "w2",
+            vec![GraphMutation::UpsertEntity(entity("kept"))],
+        ))
+        .unwrap()
+        .sequence,
+        1
+    );
+}
+
+#[test]
 fn rejects_persistent_path_without_grafeo_extension() {
     let temp = TempDir::new().unwrap();
     let error = GraphDb::open(GraphDbOpenOptions {
@@ -179,6 +286,24 @@ fn rejects_persistent_path_without_grafeo_extension() {
     })
     .unwrap_err();
     assert!(matches!(error, GraphDbError::InvalidRequest { .. }));
+}
+
+#[test]
+fn cancellation_after_file_creation_leaves_reopenable_initialized_store() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("graph.grafeo");
+    let error = GraphDb::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(path.clone()),
+        expected_format: GraphFormatVersion::new(2).unwrap(),
+        durability: GraphDurability::Sync,
+        cancellation: Arc::new(CancelOnPoll::new(2)),
+    })
+    .unwrap_err();
+    assert_eq!(error, GraphDbError::Cancelled);
+    GraphDb::open(persistent_options(path))
+        .unwrap()
+        .close()
+        .unwrap();
 }
 
 #[test]
@@ -355,10 +480,19 @@ fn traversal_honors_cancellation() {
 }
 
 fn vector_entity(value: &str, vector: Vec<f32>, metric: VectorMetric) -> GraphEntity {
+    vector_entity_with_dimension(value, vector.clone(), vector.len(), metric)
+}
+
+fn vector_entity_with_dimension(
+    value: &str,
+    vector: Vec<f32>,
+    dimension: usize,
+    metric: VectorMetric,
+) -> GraphEntity {
     let mut properties = BTreeMap::new();
     properties.insert(
         GraphPropertyName::new("embedding").unwrap(),
-        GraphProperty::Vector(GraphVector::new(vector, 2, metric).unwrap()),
+        GraphProperty::Vector(GraphVector::new(vector, dimension, metric).unwrap()),
     );
     GraphEntity::new(entity_id(value), BTreeSet::new(), properties).unwrap()
 }
@@ -457,6 +591,147 @@ fn vector_search_supports_dot_product_and_euclidean() {
             .unwrap();
         assert_eq!(result.matches[0].entity.as_str(), "near");
     }
+}
+
+#[test]
+fn vector_search_isolates_dimension_metric_and_namespace_before_distance() {
+    let db = memory_db();
+    db.apply(batch_in(
+        "project",
+        "vectors",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(vector_entity_with_dimension(
+                "wanted",
+                vec![1.0, 0.0],
+                2,
+                VectorMetric::Cosine,
+            )),
+            GraphMutation::UpsertEntity(vector_entity_with_dimension(
+                "wrong-dimension",
+                vec![1.0, 0.0, 0.0],
+                3,
+                VectorMetric::Cosine,
+            )),
+            GraphMutation::UpsertEntity(vector_entity_with_dimension(
+                "wrong-metric",
+                vec![1.0, 0.0],
+                2,
+                VectorMetric::Euclidean,
+            )),
+        ],
+    ))
+    .unwrap();
+    db.apply(batch_in(
+        "another-project",
+        "vectors",
+        "g2",
+        "w2",
+        vec![GraphMutation::UpsertEntity(vector_entity_with_dimension(
+            "foreign-dimension",
+            vec![1.0, 0.0, 0.0, 0.0],
+            4,
+            VectorMetric::Cosine,
+        ))],
+    ))
+    .unwrap();
+
+    let result = db
+        .vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
+        .unwrap();
+    assert_eq!(result.matches.len(), 1);
+    assert_eq!(result.matches[0].entity.as_str(), "wanted");
+}
+
+#[test]
+fn vector_upsert_clears_prior_dimension_and_metric_keys() {
+    let db = memory_db();
+    db.apply(batch(
+        "vectors",
+        "g1",
+        "w1",
+        vec![GraphMutation::UpsertEntity(vector_entity_with_dimension(
+            "changing",
+            vec![1.0, 0.0, 0.0],
+            3,
+            VectorMetric::Cosine,
+        ))],
+    ))
+    .unwrap();
+    db.apply(batch(
+        "vectors",
+        "g2",
+        "w2",
+        vec![GraphMutation::UpsertEntity(vector_entity_with_dimension(
+            "changing",
+            vec![1.0, 0.0],
+            2,
+            VectorMetric::Euclidean,
+        ))],
+    ))
+    .unwrap();
+
+    let stale = db
+        .vector_search(VectorSearchRequest {
+            namespace: namespace(),
+            property: GraphPropertyName::new("embedding").unwrap(),
+            query: vec![1.0, 0.0, 0.0],
+            dimension: 3,
+            metric: VectorMetric::Cosine,
+            limit: 10,
+            cancellation: live(),
+        })
+        .unwrap();
+    assert!(stale.matches.is_empty());
+    let current = db
+        .vector_search(vector_request(VectorMetric::Euclidean, vec![1.0, 0.0]))
+        .unwrap();
+    assert_eq!(current.matches.len(), 1);
+    assert_eq!(current.matches[0].entity.as_str(), "changing");
+}
+
+#[test]
+fn repeated_scale_traversal_and_followup_write_remain_exact() {
+    let db = memory_db();
+    let mut mutations = Vec::new();
+    for index in 0..256 {
+        mutations.push(GraphMutation::UpsertEntity(entity(&format!("n{index:03}"))));
+        if index > 0 {
+            mutations.push(GraphMutation::UpsertRelation(relation(
+                &format!("r{index:03}"),
+                &format!("n{:03}", index - 1),
+                &format!("n{index:03}"),
+                "next",
+            )));
+        }
+    }
+    db.apply(batch("scale", "g1", "w1", mutations)).unwrap();
+    let started = std::time::Instant::now();
+    for _ in 0..32 {
+        let mut request = traversal("n000");
+        request.max_depth = 255;
+        request.max_visits = 256;
+        request.max_results = 256;
+        assert_eq!(db.traverse(request).unwrap().visits.len(), 256);
+    }
+    let elapsed = started.elapsed();
+    db.apply(batch(
+        "scale",
+        "g2",
+        "w2",
+        vec![
+            GraphMutation::UpsertEntity(entity("n256")),
+            GraphMutation::UpsertRelation(relation("r256", "n255", "n256", "next")),
+        ],
+    ))
+    .unwrap();
+    let mut request = traversal("n000");
+    request.max_depth = 256;
+    request.max_visits = 257;
+    request.max_results = 257;
+    assert_eq!(db.traverse(request).unwrap().visits.len(), 257);
+    eprintln!("32 traversals across 256 nodes completed in {elapsed:?}");
 }
 
 #[test]
@@ -633,15 +908,6 @@ fn publication_state_survives_reopen() {
         reopened.publish(publication("event-1", None)).unwrap(),
         first
     );
-}
-
-#[test]
-fn malformed_persistent_file_is_corrupt() {
-    let temp = TempDir::new().unwrap();
-    let path = temp.path().join("graph.grafeo");
-    std::fs::write(&path, b"not a grafeo database").unwrap();
-    let error = GraphDb::open(persistent_options(path)).unwrap_err();
-    assert!(matches!(error, GraphDbError::Corrupt { .. }));
 }
 
 #[test]

@@ -3,6 +3,7 @@ mod location;
 mod projection;
 mod publication;
 mod runtime;
+mod state;
 mod traversal;
 mod vector;
 
