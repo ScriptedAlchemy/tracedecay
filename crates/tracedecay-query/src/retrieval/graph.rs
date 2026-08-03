@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_domain::{
     CodeGenerationId, CompactCandidate, CursorPayloadDigest, EdgeAuthorityV1, RelationEdgeKindV1,
     RetrievalBudget, RetrievalError, RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch,
@@ -62,6 +63,11 @@ impl GraphLaneRequest {
         if self.max_depth == 0 {
             return Err(RetrievalPortError::Contract(
                 "graph traversal depth must be positive".to_owned(),
+            ));
+        }
+        if self.max_depth > MAX_CALLABLE_CODE_DEPTH {
+            return Err(RetrievalPortError::Contract(
+                "graph traversal depth exceeds the callable code bound".to_owned(),
             ));
         }
         if self.seed_anchors.is_empty() {

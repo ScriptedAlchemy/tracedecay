@@ -15,13 +15,13 @@ import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
-  type MemoryCategoryCount,
-  MemoryFactDetailPayloadSchema,
-  type MemoryFactRow,
-  type MemoryHrrCoverage,
-  MemoryOverviewPayloadSchema,
-  MemoryStatusPayloadSchema,
-} from '../../contracts/wire.ts';
+  type MemoryCategoryCountV1,
+  MemoryFactDetailPayloadV1Schema,
+  type MemoryFactRowV1,
+  type MemoryHrrCoverageV1,
+  MemoryOverviewPayloadV1Schema,
+  MemoryStatusPayloadV1Schema,
+} from '../../contracts/generated.ts';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -44,13 +44,13 @@ export function KnowledgePage() {
   const overview = useLegacy(
     ['memory', 'overview', applied],
     `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
-    MemoryOverviewPayloadSchema,
+    MemoryOverviewPayloadV1Schema,
   );
   // The overview's own `trust_histogram` comes back all-zero against a real
   // store (see trust.ts). This route reports the same distribution in four
   // coarser bands and is correct, so it is read as the fallback source rather
   // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
-  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadSchema);
+  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadV1Schema);
   const statusBands =
     status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
   const overviewData = overview.data?.outcome === 'ok' ? overview.data.data : undefined;
@@ -67,11 +67,11 @@ export function KnowledgePage() {
     statusBands,
     overviewData?.holographic.facts,
   );
-  const [selected, setSelected] = useState<MemoryFactRow | null>(null);
+  const [selected, setSelected] = useState<MemoryFactRowV1 | null>(null);
   const detail = useLegacy(
     ['memory', 'fact', String(selected?.fact_id ?? '')],
     `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ''))}`,
-    MemoryFactDetailPayloadSchema,
+    MemoryFactDetailPayloadV1Schema,
     { enabled: selected != null },
   );
   const selectedDetail =
@@ -428,7 +428,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
  * stale or incompletely vectorized, which no coverage percentage shows. The
  * uniformity is stated; only the banks that deviate get a row.
  */
-function HrrCoveragePlate({ rows }: { rows: readonly MemoryHrrCoverage[] }) {
+function HrrCoveragePlate({ rows }: { rows: readonly MemoryHrrCoverageV1[] }) {
   const summary = summarizeHrrCoverage(rows);
   if (!summary) return null;
   return (
@@ -533,13 +533,13 @@ function FactList({
   selected,
   onSelect,
 }: {
-  facts: MemoryFactRow[];
+  facts: MemoryFactRowV1[];
   recallCeiling: number;
   loaded: LoadedTrust | null;
   distribution: TrustDistribution;
   query: string;
-  selected: MemoryFactRow | null;
-  onSelect: (fact: MemoryFactRow) => void;
+  selected: MemoryFactRowV1 | null;
+  onSelect: (fact: MemoryFactRowV1) => void;
 }) {
   const listRootRef = useRef<HTMLDivElement>(null);
   const summaryProbeRef = useRef<HTMLSpanElement>(null);
@@ -619,7 +619,7 @@ function FactListRow({
   selected,
   onSelect,
 }: {
-  fact: MemoryFactRow;
+  fact: MemoryFactRowV1;
   recallCeiling: number;
   showTrustRail: boolean;
   characterLimit: number | null;
@@ -741,7 +741,7 @@ function formatShortDate(iso: string): string {
  * category on screen for ranking. No fabricated denominator — the rail
  * measures against the largest category actually present, not an assumed
  * total. */
-function CategoryBar({ row, ceiling }: { row: MemoryCategoryCount; ceiling: number }) {
+function CategoryBar({ row, ceiling }: { row: MemoryCategoryCountV1; ceiling: number }) {
   const fraction = ceiling > 0 ? row.count / ceiling : null;
   return (
     <div className="flex flex-col gap-1">

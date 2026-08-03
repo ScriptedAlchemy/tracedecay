@@ -20,7 +20,7 @@
 import {
   StructureReadV12Schema as StrataReadSchema,
   type StrataMeasurementV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { absenceReason, useStructure } from '../../data/query/structure.ts';
 import { Meter } from '../../ui/instrument.tsx';
 

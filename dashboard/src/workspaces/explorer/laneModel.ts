@@ -24,8 +24,8 @@ import type {
   ExplorerSourceOutcomeV1,
   ExplorerSourcePhaseV1,
   ExplorerSourceProgressV1,
-  WireDomainState,
-} from '../../contracts/wire.ts';
+  DashboardDomainStateV1,
+} from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import type { LegacyResult } from '../../data/query/legacy.ts';
 import { codeHits, knowledgeHits, sessionHits, type Hit, type LaneId } from './model.ts';
@@ -111,7 +111,7 @@ export type ExplorerLaneReadModel =
   | {
       readonly state: 'indeterminate';
       readonly lane: LaneId;
-      readonly domainState: WireDomainState;
+      readonly domainState: DashboardDomainStateV1;
     };
 
 /**
@@ -242,7 +242,7 @@ export function laneFromSourceProgress(
  */
 export function laneFromTransport(
   lane: LaneId,
-  domainState: WireDomainState,
+  domainState: DashboardDomainStateV1,
   detail: string | null,
 ): ExplorerLaneReadModel {
   switch (domainState) {
