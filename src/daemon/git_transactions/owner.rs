@@ -362,6 +362,7 @@ pub(crate) type DaemonProjectGitIndexTransactionService = DaemonGitIndexTransact
 #[derive(Clone)]
 pub(crate) struct DaemonGitInvocationOwner {
     pub(crate) project_id: ProjectId,
+    pub(crate) repository_root: PathBuf,
     pub(crate) service: Arc<DaemonProjectGitIndexTransactionService>,
     authority: Arc<DaemonGitAuthoritySlot>,
 }
@@ -597,6 +598,7 @@ impl DaemonGitIndexTransactionServiceRegistry {
         }
         Ok(Some(DaemonGitInvocationOwner {
             project_id: entry.project_id.clone(),
+            repository_root: entry.repository_root.clone(),
             service: Arc::clone(&entry.service),
             authority: Arc::clone(&entry.authority),
         }))

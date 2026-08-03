@@ -9,18 +9,20 @@
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_domain::{
-    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewV1, GitIndexTransactionId,
-    GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1, RepositoryId,
+    GitIndexIdempotencyKey, GitIndexPreviewId, GitIndexPreviewInputV1, GitIndexPreviewV1,
+    GitIndexTransactionId, GitIndexTransactionJournalV1, GitIndexTransactionReceiptV1,
+    RepositoryId, UtcMicros,
 };
 use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, CodeRecoveryCandidatesQueryV1,
-    CodeRecoveryRepositoriesQueryV1, GitIndexTransactionBeginRequestV1,
-    GitIndexTransactionBeginResultV1, GitIndexTransactionRecordV1, GitIndexTransactionStore,
-    GitIndexTransactionStoreError, GitIndexTransactionStoreResult,
-    GitIndexTransactionTerminalWriteV1,
+    CodeRecoveryRepositoriesQueryV1, GitIndexPreviewInputReadV1,
+    GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
+    GitIndexTransactionRecordV1, GitIndexTransactionStore, GitIndexTransactionStoreError,
+    GitIndexTransactionStoreResult, GitIndexTransactionTerminalWriteV1,
+    MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
 };
 
 #[cfg(test)]
@@ -37,10 +39,18 @@ const GIT_INDEX_TRANSACTION_STORE_ACTOR_CAPACITY: usize = 64;
 // `RegisteredGlobalDb`; callers can reconcile durable state after an unavailable result
 // instead of pinning a daemon worker forever.
 const GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT: Duration = Duration::from_secs(5);
+const GIT_INDEX_PREVIEW_INPUT_GC_INTERVAL: Duration = Duration::from_secs(1);
 
 type Reply<T> = SyncSender<GitIndexTransactionStoreResult<T>>;
 
 enum StoreCommand {
+    SavePreviewInput(GitIndexPreviewInputV1, Reply<()>),
+    ReadPreviewInput(
+        GitIndexPreviewId,
+        UtcMicros,
+        Reply<GitIndexPreviewInputReadV1>,
+    ),
+    PurgeExpiredPreviewInputs(UtcMicros, usize, Reply<usize>),
     SavePreview(GitIndexPreviewV1, Reply<()>),
     ReadCode(CodeReadOperationV1, Reply<CodeReadResultV1>),
     BeginOrReplay(
@@ -223,6 +233,43 @@ impl Drop for DaemonGitIndexTransactionStore {
 }
 
 impl GitIndexTransactionStore for DaemonGitIndexTransactionStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::SavePreviewInput(input, reply))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::ReadPreviewInput(
+            preview_id.clone(),
+            observed_at,
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        let (reply, receiver) = sync_channel(1);
+        self.submit(StoreCommand::PurgeExpiredPreviewInputs(
+            observed_at,
+            limit,
+            reply,
+        ))?;
+        Self::await_reply(&receiver)
+    }
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::SavePreview(preview, reply))?;
@@ -337,8 +384,56 @@ fn run_store_actor(
     database: &ActorDatabase,
     receiver: &Receiver<StoreCommand>,
 ) {
-    while let Ok(command) = receiver.recv() {
+    loop {
+        let command = match receiver.recv_timeout(GIT_INDEX_PREVIEW_INPUT_GC_INTERVAL) {
+            Ok(command) => command,
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                let observed_at = match current_utc_micros() {
+                    Ok(observed_at) => observed_at,
+                    Err(error) => {
+                        tracing::warn!(%error, "git index preview input GC clock unavailable");
+                        continue;
+                    }
+                };
+                if let Err(error) = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .purge_expired_preview_inputs(
+                            observed_at,
+                            MAX_GIT_INDEX_PREVIEW_INPUT_GC_BATCH,
+                        ),
+                ) {
+                    tracing::warn!(%error, "git index preview input GC failed");
+                }
+                continue;
+            }
+        };
         match command {
+            StoreCommand::SavePreviewInput(input, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .save_preview_input(input),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::ReadPreviewInput(preview_id, observed_at, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .read_preview_input(&preview_id, observed_at),
+                );
+                let _ = reply.send(result);
+            }
+            StoreCommand::PurgeExpiredPreviewInputs(observed_at, limit, reply) => {
+                let result = runtime.block_on(
+                    database
+                        .git_index_transaction_store()
+                        .purge_expired_preview_inputs(observed_at, limit),
+                );
+                let _ = reply.send(result);
+            }
             StoreCommand::SavePreview(preview, reply) => {
                 let result =
                     runtime.block_on(database.git_index_transaction_store().save_preview(preview));
@@ -396,6 +491,15 @@ fn run_store_actor(
     }
 }
 
+fn current_utc_micros() -> GitIndexTransactionStoreResult<UtcMicros> {
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+    let micros = i64::try_from(elapsed.as_micros())
+        .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+    Ok(UtcMicros(micros))
+}
+
 /// Shared handle to the one daemon-owned store actor for a project database.
 ///
 /// This local newtype exists so the foreign `GitIndexTransactionStore` trait
@@ -413,6 +517,30 @@ impl SharedDaemonGitIndexTransactionStore {
 }
 
 impl GitIndexTransactionStore for SharedDaemonGitIndexTransactionStore {
+    fn save_preview_input(
+        &self,
+        input: GitIndexPreviewInputV1,
+    ) -> GitIndexTransactionStoreResult<()> {
+        self.inner.save_preview_input(input)
+    }
+
+    fn read_preview_input(
+        &self,
+        preview_id: &GitIndexPreviewId,
+        observed_at: UtcMicros,
+    ) -> GitIndexTransactionStoreResult<GitIndexPreviewInputReadV1> {
+        self.inner.read_preview_input(preview_id, observed_at)
+    }
+
+    fn purge_expired_preview_inputs(
+        &self,
+        observed_at: UtcMicros,
+        limit: usize,
+    ) -> GitIndexTransactionStoreResult<usize> {
+        self.inner
+            .purge_expired_preview_inputs(observed_at, limit)
+    }
+
     fn save_preview(&self, preview: GitIndexPreviewV1) -> GitIndexTransactionStoreResult<()> {
         self.inner.save_preview(preview)
     }

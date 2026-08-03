@@ -428,6 +428,8 @@ pub enum GitIndexTransactionPortError {
     DaemonUnavailable,
     #[error("git index transaction preview is stale, unknown, malformed, or expired")]
     StalePreview,
+    #[error("git index transaction preview input expired")]
+    ExpiredPreview,
     #[error("git index transaction is unsupported in the current repository state")]
     Unsupported,
     #[error("git index transaction policy proof did not admit this exact effect")]

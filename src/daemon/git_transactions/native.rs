@@ -1528,33 +1528,32 @@ fn classify_native_failure(error: &NativeGitIndexError) -> NativeGitIndexApplyOu
     }
 }
 
-#[cfg(any(test, feature = "test-transport"))]
-#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
-pub(crate) fn capture_exact_snapshot_for_test(
+pub(crate) fn capture_exact_snapshot(
     repository_root: &std::path::Path,
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
-) -> crate::errors::Result<RepositoryStateSnapshotV1> {
+) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
     // Same canonical root the daemon owner mounts; alias paths must not mint a
     // divergent snapshot that later fails exact preview CAS.
-    let repository_root = super::canonicalize_repository_root(repository_root)?;
+    let repository_root = super::canonicalize_repository_root(repository_root)
+        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
     let assembler = NativeGitIndexPreviewAssembler::new(
         &repository_root,
         project_id,
         repository_id,
         worktree_id,
     );
-    let runner = FixedGitIndexRunner::new(&repository_root).map_err(test_snapshot_error)?;
+    let runner = FixedGitIndexRunner::new(&repository_root).map_err(map_native_error)?;
     let status = assembler
         .read_authority()
         .status()
-        .map_err(test_snapshot_error)?;
-    let lock = runner.acquire_index_lock().map_err(test_snapshot_error)?;
+        .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+    let lock = runner.acquire_index_lock().map_err(map_native_error)?;
     let tree = runner
         .index_tree_under_lock(&lock)
-        .map_err(test_snapshot_error)?;
+        .map_err(map_native_error)?;
     let placeholder = RepositoryStateSnapshotV1::new(
         assembler.project_id.clone(),
         assembler.repository_id.clone(),
@@ -1563,7 +1562,8 @@ pub(crate) fn capture_exact_snapshot_for_test(
         tree.format(),
         status.head,
         RepositoryIndexSnapshotV1 {
-            checksum: canonical_sha256(&b"placeholder".as_slice()).map_err(test_snapshot_error)?,
+            checksum: canonical_sha256(&b"placeholder".as_slice())
+                .map_err(|_| GitIndexTransactionPortError::NativeFailure)?,
             tree_id: Some(tree),
             state: RepositoryIndexStateV1::Clean,
             unmerged_stage_digest: None,
@@ -1571,7 +1571,7 @@ pub(crate) fn capture_exact_snapshot_for_test(
         RepositoryWorkingTreeSnapshotV1 {
             state: RepositoryWorkingTreeStateV1::Clean,
             tracked_digest: canonical_sha256(&b"placeholder".as_slice())
-                .map_err(test_snapshot_error)?,
+                .map_err(|_| GitIndexTransactionPortError::NativeFailure)?,
             untracked_name_digest: None,
             ignored_collision_digest: None,
         },
@@ -1583,10 +1583,27 @@ pub(crate) fn capture_exact_snapshot_for_test(
         captured_at,
         tracedecay_domain::GitCoverageV1::complete(),
     )
-    .map_err(test_snapshot_error)?;
-    assembler
-        .capture_snapshot(&placeholder, &runner, &lock)
-        .map_err(test_snapshot_error)
+    .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
+    assembler.capture_snapshot(&placeholder, &runner, &lock)
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
+pub(crate) fn capture_exact_snapshot_for_test(
+    repository_root: &std::path::Path,
+    project_id: ProjectId,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
+    captured_at: UtcMicros,
+) -> crate::errors::Result<RepositoryStateSnapshotV1> {
+    capture_exact_snapshot(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+        captured_at,
+    )
+    .map_err(test_snapshot_error)
 }
 
 #[cfg(any(test, feature = "test-transport"))]
