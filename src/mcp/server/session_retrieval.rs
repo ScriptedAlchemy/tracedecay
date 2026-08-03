@@ -951,9 +951,6 @@ impl DaemonSessionRetrievalService {
         if command.store_scope() != self.root.store_scope {
             return LcmDescribeServiceOutcome::WrongScope;
         }
-        if let Some(unavailable) = self.refresh_unavailable() {
-            return LcmDescribeServiceOutcome::Unavailable(unavailable);
-        }
         self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
             Ok(executor) => executor,
@@ -1105,9 +1102,6 @@ impl DaemonSessionRetrievalService {
     ) -> LcmExpandServiceOutcome {
         if command.store_scope() != self.root.store_scope {
             return LcmExpandServiceOutcome::WrongScope;
-        }
-        if let Some(unavailable) = self.refresh_unavailable() {
-            return LcmExpandServiceOutcome::Unavailable(unavailable);
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
         let executor = match self.registered_execution() {
@@ -1680,6 +1674,9 @@ async fn registered_session(
         parent_tool_use_id: row.get(12).ok(),
     })
 }
+
+#[cfg(test)]
+mod stored_refresh_tests;
 
 #[cfg(test)]
 mod tests {
