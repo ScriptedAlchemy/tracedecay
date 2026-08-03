@@ -517,12 +517,7 @@ impl GenerationTestAttributionJoinReadPort for PublishedGenerationTestAttributio
         if generation == &self.generation_id {
             self.read.clone()
         } else {
-            GenerationProviderReadV1::new(
-                ProviderEvaluationStateV1::Stale,
-                GenerationProviderCoverageV1::Unavailable,
-                None,
-            )
-            .unwrap_or_else(|_| panic!("static stale attribution read"))
+            GenerationProviderReadV1::stale()
         }
     }
 }

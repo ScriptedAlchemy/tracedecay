@@ -15,7 +15,7 @@ use tracedecay_code_index::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
         build_batch_receipt,
     },
-    provider::GenerationTestAttributionJoinReadPort,
+    provider::{GenerationProviderCoverageV1, GenerationTestAttributionJoinReadPort},
 };
 use tracedecay_domain::{
     BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId,
@@ -284,6 +284,14 @@ fn published_generation_serves_current_conservative_test_attribution() {
         record.attribution.evidence_class
             == TestAttributionEvidenceClassV1::ConservativeDependencyCandidates
     }));
+
+    let foreign_generation =
+        CodeGenerationId::new("generation.foreign-test-attribution").expect("foreign generation");
+    let stale = authority.read_test_attribution(&foreign_generation);
+    assert_eq!(stale.provider_state, ProviderEvaluationStateV1::Stale);
+    assert_eq!(stale.coverage, GenerationProviderCoverageV1::Unavailable);
+    assert!(stale.evidence.is_none());
+    stale.validate().expect("typed stale provider read");
 }
 
 #[test]

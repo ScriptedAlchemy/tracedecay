@@ -112,6 +112,14 @@ impl<T> GenerationProviderReadV1<T> {
         }
     }
 
+    pub fn stale() -> Self {
+        Self {
+            provider_state: ProviderEvaluationStateV1::Stale,
+            coverage: GenerationProviderCoverageV1::Unavailable,
+            evidence: None,
+        }
+    }
+
     pub fn new(
         provider_state: ProviderEvaluationStateV1,
         coverage: GenerationProviderCoverageV1,
