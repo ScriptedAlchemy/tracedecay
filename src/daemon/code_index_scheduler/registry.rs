@@ -14,9 +14,14 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, ProjectId, RepositoryId, WorktreeId};
 use tracedecay_lsp::{LspRuntimeFailure, LspRuntimeFuture};
-#[cfg(test)]
-use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
+
+mod activation;
+mod authority;
+mod background_reconcile;
+mod lifecycle;
+
+use background_reconcile::BackgroundCodeIndexReconcileV1;
 
 use super::{
     CodeIndexArrivalV1, CodeIndexBytePoolStatsV1, CodeIndexCadenceOutcomeV1,
@@ -140,14 +145,6 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
     _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
-enum BackgroundCodeIndexReconcileV1 {
-    Completed {
-        outcome: Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1>,
-        latest: Option<LatestCompleteCodeIndexV1>,
-    },
-    SchedulerBusy,
-}
-
 #[derive(Clone)]
 pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
@@ -173,124 +170,6 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    #[cfg(test)]
-    pub fn new(max_worktrees: usize) -> Self {
-        Self::with_resident_memory(
-            max_worktrees,
-            Arc::new(ProcessResidentMemoryV1::new(
-                DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1,
-            )),
-        )
-    }
-
-    pub fn with_resident_memory(
-        max_worktrees: usize,
-        resident_memory: Arc<ProcessResidentMemoryV1>,
-    ) -> Self {
-        let (generation_publications, _) =
-            tokio::sync::broadcast::channel(GENERATION_PUBLICATION_CHANNEL_CAPACITY);
-        Self {
-            max_worktrees,
-            resident_memory,
-            byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
-            mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            mount_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
-            background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
-            generation_publications,
-            cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
-            activations: Arc::new(Mutex::new(BTreeMap::new())),
-            test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
-        }
-    }
-
-    #[cfg(test)]
-    pub(in crate::daemon) fn resident_memory(&self) -> &Arc<ProcessResidentMemoryV1> {
-        &self.resident_memory
-    }
-
-    pub(in crate::daemon) fn register_activation(
-        &self,
-        scope: &tracedecay_application::ResolvedScope,
-        activation: &Arc<super::CodeIndexActivationV1>,
-    ) -> bool {
-        if scope.validate().is_err() {
-            return false;
-        }
-        if activation.identity().is_none() {
-            return true;
-        }
-        if !activation.authorizes_scope(scope) {
-            return false;
-        }
-        let mut activations = self
-            .activations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        activations.retain(|_, activation| activation.strong_count() > 0);
-        let scope_digest = scope.scope_digest.clone();
-        let registered = Arc::downgrade(activation);
-        let project_root = activation.project_root().to_path_buf();
-        let registry = self.clone();
-        activations.insert(scope_digest.clone(), registered.clone());
-        drop(activations);
-        let activations = Arc::clone(&self.activations);
-        activation.install_retirement(Box::new(move || {
-            let mut activations = activations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if activations
-                .get(&scope_digest)
-                .is_some_and(|current| Weak::ptr_eq(current, &registered))
-            {
-                activations.remove(&scope_digest);
-            }
-            let should_unmount = !activations.values().any(|activation| {
-                activation
-                    .upgrade()
-                    .is_some_and(|activation| activation.project_root() == project_root)
-            });
-            drop(activations);
-            if should_unmount && let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    registry.unmount_worktree(&project_root).await;
-                });
-            }
-        }));
-        true
-    }
-
-    fn activate_for_scope(&self, scope: &tracedecay_application::ResolvedScope) -> bool {
-        let activation = {
-            let mut activations = self
-                .activations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let activation = activations.get(&scope.scope_digest).and_then(Weak::upgrade);
-            if activation
-                .as_ref()
-                .is_none_or(|activation| !activation.authorizes_scope(scope))
-            {
-                activations.remove(&scope.scope_digest);
-                None
-            } else {
-                activation
-            }
-        };
-        activation.is_some_and(|activation| activation.activate())
-    }
-
-    #[cfg(test)]
-    pub(super) fn activation_count(&self) -> usize {
-        self.activations
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
-
     /// Construct a registry with an explicit background-reconcile permit count so
     /// tests can deterministically exercise the bounded-admission behavior
     /// (parallelism across distinct stores vs. serialization at a bound of one)
@@ -810,44 +689,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     CodeIndexCadenceTriggerV1::Mount,
                 );
                 let result = tokio::task::spawn_blocking(move || {
-                    let mut scheduler = match scheduler.try_lock() {
-                        Ok(scheduler) => scheduler,
-                        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                        Err(std::sync::TryLockError::WouldBlock) => {
-                            return BackgroundCodeIndexReconcileV1::SchedulerBusy;
-                        }
-                    };
-                    let outcome = scheduler.reconcile_now();
-                    let latest = match scheduler.try_latest_complete() {
-                        Ok(latest) => latest,
-                        Err(error) => {
-                            return BackgroundCodeIndexReconcileV1::Completed {
-                                outcome: Err(error),
-                                latest: None,
-                            };
-                        }
-                    };
-                    if reconcile_shutting_down.load(Ordering::Acquire) {
-                        if let Some(latest) = latest.as_ref() {
-                            latest.warm_control.cancel();
-                        }
-                        return BackgroundCodeIndexReconcileV1::Completed {
-                            outcome: Err(super::cancelled_code_index_reconcile()),
-                            latest: None,
-                        };
-                    }
-                    // Reconcile completion is an activation point: build this
-                    // generation's serving derivations here, on the blocking
-                    // pool, so the first query against it stays O(result).
-                    if let Some(latest) = latest.as_ref() {
-                        if let Err(error) = latest.warm_serving_caches() {
-                            return BackgroundCodeIndexReconcileV1::Completed {
-                                outcome: Err(CodeIndexSchedulerErrorV1::Serving(error.to_string())),
-                                latest: None,
-                            };
-                        }
-                    }
-                    BackgroundCodeIndexReconcileV1::Completed { outcome, latest }
+                    background_reconcile::reconcile(scheduler, reconcile_shutting_down)
                 })
                 .await;
                 if let Ok(BackgroundCodeIndexReconcileV1::Completed {
@@ -1996,47 +1838,6 @@ impl CodeIndexSchedulerRegistryV1 {
         mounted
             .get(&project_root)
             .map(|worktree| Arc::clone(&worktree.scheduler))
-    }
-
-    pub async fn shutdown(&self) {
-        let mounted = std::mem::take(&mut *self.mounted.lock().await);
-        self.test_attribution_authorities
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clear();
-        for worktree in mounted.values() {
-            worktree.shutting_down.store(true, Ordering::Release);
-            *worktree
-                .serving_generation
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-            worktree.wake.notify_one();
-        }
-        for (_, worktree) in mounted {
-            let _ = worktree.task.await;
-        }
-    }
-
-    pub(in crate::daemon) async fn unmount_worktree(&self, project_root: &Path) -> bool {
-        let project_root = match project_root.canonicalize() {
-            Ok(root) => root,
-            Err(_) => project_root.to_path_buf(),
-        };
-        let Some(worktree) = self.mounted.lock().await.remove(&project_root) else {
-            return false;
-        };
-        worktree.shutting_down.store(true, Ordering::Release);
-        *worktree
-            .serving_generation
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        worktree.wake.notify_one();
-        let _ = worktree.task.await;
-        self.test_attribution_authorities
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&project_root);
-        true
     }
 }
 

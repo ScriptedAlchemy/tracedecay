@@ -150,9 +150,7 @@ fn conservative_exact_lexical_reservation(
 }
 
 impl LatestCompleteCodeIndexV1 {
-    pub(in crate::daemon) fn record_index(
-        &self,
-    ) -> Result<&GenerationRecordIndexV1, RetrievalPortError> {
+    pub(super) fn record_index(&self) -> Result<&GenerationRecordIndexV1, RetrievalPortError> {
         self.ensure_serving_ready()?;
         self.serving
             .get()
