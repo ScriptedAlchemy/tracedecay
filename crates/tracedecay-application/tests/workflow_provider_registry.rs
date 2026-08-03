@@ -1,6 +1,6 @@
 use tracedecay_application::{
-    WorkflowProviderPlacementErrorV1, WorkflowProviderPlacementServiceV1,
-    WorkflowProviderRegistrationV1, WorkflowProviderRegistryV1, WorkflowTopologyPlacementRequestV1,
+    WorkflowProviderPlacementError, WorkflowProviderPlacementService,
+    WorkflowProviderRegistration, WorkflowProviderRegistry, WorkflowTopologyPlacementRequest,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
@@ -26,8 +26,8 @@ fn registration(
     backend: WorkProviderBackendV1,
     model: &str,
     priority: u32,
-) -> WorkflowProviderRegistrationV1 {
-    WorkflowProviderRegistrationV1::new(
+) -> WorkflowProviderRegistration {
+    WorkflowProviderRegistration::new(
         WorkProviderRouteV1::new(id::<ProviderId>(provider), id::<WorkProviderRouteId>(route))
             .unwrap(),
         backend,
@@ -40,7 +40,7 @@ fn registration(
 #[test]
 fn placement_is_registry_backed_and_pins_the_topology_decision() {
     let configuration_digest = digest('a');
-    let registry = WorkflowProviderRegistryV1::new(
+    let registry = WorkflowProviderRegistry::new(
         configuration_digest.clone(),
         vec![
             registration(
@@ -62,14 +62,14 @@ fn placement_is_registry_backed_and_pins_the_topology_decision() {
     .unwrap();
     let policy = safe_work_topology_policy_v1();
     let topology_digest = policy.compute_digest().unwrap().0;
-    let request = WorkflowTopologyPlacementRequestV1 {
+    let request = WorkflowTopologyPlacementRequest {
         run_id: id::<RunId>("run.workflow.provider"),
         step_id: id::<WorkflowStepId>("prepare"),
         configuration_digest,
         topology_digest: topology_digest.clone(),
     };
 
-    let receipt = WorkflowProviderPlacementServiceV1::new(registry.clone())
+    let receipt = WorkflowProviderPlacementService::new(registry.clone())
         .place(&request, &policy)
         .unwrap();
 
@@ -87,7 +87,7 @@ fn placement_is_registry_backed_and_pins_the_topology_decision() {
 #[test]
 fn placement_rejects_stale_configuration_and_topology() {
     let configuration_digest = digest('a');
-    let registry = WorkflowProviderRegistryV1::new(
+    let registry = WorkflowProviderRegistry::new(
         configuration_digest.clone(),
         vec![registration(
             "provider.work.codex-app-server",
@@ -99,24 +99,24 @@ fn placement_rejects_stale_configuration_and_topology() {
     )
     .unwrap();
     let policy = safe_work_topology_policy_v1();
-    let service = WorkflowProviderPlacementServiceV1::new(registry);
+    let service = WorkflowProviderPlacementService::new(registry);
 
     for (configuration_digest, topology_digest, expected) in [
         (
             digest('9'),
             policy.compute_digest().unwrap().0,
-            WorkflowProviderPlacementErrorV1::ConfigurationDigestMismatch,
+            WorkflowProviderPlacementError::ConfigurationDigestMismatch,
         ),
         (
             configuration_digest,
             digest('9'),
-            WorkflowProviderPlacementErrorV1::TopologyDigestMismatch,
+            WorkflowProviderPlacementError::TopologyDigestMismatch,
         ),
     ] {
         assert_eq!(
             service
                 .place(
-                    &WorkflowTopologyPlacementRequestV1 {
+                    &WorkflowTopologyPlacementRequest {
                         run_id: id::<RunId>("run.workflow.provider.stale"),
                         step_id: id::<WorkflowStepId>("prepare"),
                         configuration_digest,

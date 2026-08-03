@@ -201,14 +201,14 @@ pub(super) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
     project_root: &Path,
     request_id: String,
-    request: WorkflowApplicationInvocationV1,
+    request: WorkflowApplicationInvocation,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
-        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1
+        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
             .find(|(operation, _, _)| *operation == operation_key)
     else {
@@ -249,7 +249,7 @@ pub(super) async fn execute_workflow_application(
     };
 
     match request {
-        WorkflowApplicationInvocationV1::RegisterDefinition(request) => complete_workflow_effect(
+        WorkflowApplicationInvocation::RegisterDefinition(request) => complete_workflow_effect(
             &registered,
             request_id,
             &context,
@@ -263,9 +263,9 @@ pub(super) async fn execute_workflow_application(
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
-            WorkflowApplicationOutcomeV1::RegisterDefinition,
+            WorkflowApplicationOutcome::RegisterDefinition,
         ),
-        WorkflowApplicationInvocationV1::ActivateDefinition(request) => complete_workflow_effect(
+        WorkflowApplicationInvocation::ActivateDefinition(request) => complete_workflow_effect(
             &registered,
             request_id,
             &context,
@@ -283,9 +283,9 @@ pub(super) async fn execute_workflow_application(
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
-            WorkflowApplicationOutcomeV1::ActivateDefinition,
+            WorkflowApplicationOutcome::ActivateDefinition,
         ),
-        WorkflowApplicationInvocationV1::ExecuteFanOut(request) => {
+        WorkflowApplicationInvocation::ExecuteFanOut(request) => {
             let request = *request;
             if request.provider.deadline > deadline.expires_at {
                 return DaemonInvocationResponse::problem(
@@ -313,10 +313,10 @@ pub(super) async fn execute_workflow_application(
                 result,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::ExecuteFanOut,
+                WorkflowApplicationOutcome::ExecuteFanOut,
             )
         }
-        WorkflowApplicationInvocationV1::HandoffIssue(request) => {
+        WorkflowApplicationInvocation::HandoffIssue(request) => {
             let result = TaskHandoffToken::new(request.secret)
                 .map_err(task_handoff_problem)
                 .and_then(|token| {
@@ -342,10 +342,10 @@ pub(super) async fn execute_workflow_application(
                 result,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::HandoffIssue,
+                WorkflowApplicationOutcome::HandoffIssue,
             )
         }
-        WorkflowApplicationInvocationV1::HandoffRedeem(request) => {
+        WorkflowApplicationInvocation::HandoffRedeem(request) => {
             let scope = request.expected_scope;
             let result = TaskHandoffToken::new(request.secret)
                 .map_err(task_handoff_problem)
@@ -355,7 +355,7 @@ pub(super) async fn execute_workflow_application(
                         .redeem(&token, &scope, &request.redeemer, request.consumed_at)
                         .map_err(task_handoff_problem)
                 })
-                .map(|()| TaskHandoffRedeemedV1 { scope });
+                .map(|()| TaskHandoffRedeemed { scope });
             complete_workflow_effect(
                 &registered,
                 request_id,
@@ -367,7 +367,7 @@ pub(super) async fn execute_workflow_application(
                 result,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::HandoffRedeem,
+                WorkflowApplicationOutcome::HandoffRedeem,
             )
         }
     }
@@ -385,7 +385,7 @@ fn complete_workflow_effect<T>(
     result: Result<T, DaemonInvocationProblem>,
     observed_at: UtcMicros,
     deadline: Deadline,
-    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcomeV1,
+    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcome,
 ) -> DaemonInvocationResponse
 where
     T: Serialize,
