@@ -7,10 +7,9 @@
 //! ingest accepted, and adds the formatting and relative-filter parsing that
 //! only the executable needs.
 
-use tracedecay_capture::parse_yyyy_mm_dd_utc_start;
-
 pub use tracedecay_capture::{
-    civil_from_days, parse_cursor_human_timestamp, parse_rfc3339_timestamp,
+    format_yyyy_mm_dd, humanize_unix_secs, now_iso_utc, parse_cursor_human_timestamp,
+    parse_rfc3339_timestamp, parse_yyyy_mm_dd_utc_start,
 };
 
 /// Returns the nearest-rank percentile from an ascending sample.
@@ -91,39 +90,9 @@ fn bound_day_timestamp(day_start: i64, bound: SearchTimeBound) -> i64 {
     }
 }
 
-/// Formats "days since 1970-01-01 UTC" as `YYYY-MM-DD`.
-pub fn format_yyyy_mm_dd(days: i64) -> String {
-    let (y, m, d) = civil_from_days(days);
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-/// Formats a Unix-seconds instant as a human-readable UTC
-/// `YYYY-MM-DD HH:MM:SSZ` string. Used to render session activity windows
-/// and commit times as calendar timestamps instead of raw epoch seconds.
-pub fn humanize_unix_secs(secs: i64) -> String {
-    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-    let rem = secs.rem_euclid(86_400);
-    let (hour, min, sec) = (rem / 3_600, (rem / 60) % 60, rem % 60);
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}Z")
-}
-
-/// The current UTC time as an ISO 8601 `yyyy-mm-ddThh:mm:ssZ` string.
-pub fn now_iso_utc() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
-    let rem = secs.rem_euclid(86_400);
-    let (hour, min, sec) = (rem / 3_600, (rem / 60) % 60, rem % 60);
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}Z")
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
-    use tracedecay_capture::days_from_civil;
-
     use super::*;
 
     /// The start-of-day bound every assertion below defaults to; production
@@ -165,6 +134,12 @@ mod tests {
     }
 
     #[test]
+    fn formats_epoch_boundaries_as_exact_utc_bytes() {
+        assert_eq!(format_yyyy_mm_dd(-1), "1969-12-31");
+        assert_eq!(humanize_unix_secs(-1), "1969-12-31 23:59:59Z");
+    }
+
+    #[test]
     fn applies_timezone_offsets() {
         assert_eq!(
             parse_rfc3339_timestamp("1970-01-01T02:00:00+02:00"),
@@ -172,6 +147,14 @@ mod tests {
         );
         assert_eq!(
             parse_rfc3339_timestamp("1969-12-31T22:30:00-01:30"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_rfc3339_timestamp("1970-01-01T23:59:00+23:59"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_rfc3339_timestamp("1969-12-31T00:01:00-23:59"),
             Some(0)
         );
     }
@@ -195,6 +178,7 @@ mod tests {
         assert!(parse_rfc3339_timestamp("2026-01-00T00:00:00Z").is_none());
         assert!(parse_rfc3339_timestamp("2026-01-01T24:00:00Z").is_none());
         assert!(parse_rfc3339_timestamp("2026-01-01T00:60:00Z").is_none());
+        assert!(parse_rfc3339_timestamp("2026-01-01T00:00:60Z").is_none());
     }
 
     #[test]
@@ -287,17 +271,9 @@ mod tests {
     }
 
     #[test]
-    fn civil_from_days_round_trips_days_from_civil() {
-        for days in [0, 1, 59, 60, 20_588, 365 * 100, -1, -365] {
-            let (y, m, d) = civil_from_days(days);
-            assert_eq!(
-                days_from_civil(y as i32, m, d),
-                days,
-                "round trip failed for {days} ({y:04}-{m:02}-{d:02})"
-            );
-        }
-        assert_eq!(civil_from_days(0), (1970, 1, 1));
+    fn formats_days_with_proleptic_gregorian_calendar() {
         assert_eq!(format_yyyy_mm_dd(20_588), "2026-05-15");
+        assert_eq!(format_yyyy_mm_dd(-1), "1969-12-31");
     }
 
     #[test]
