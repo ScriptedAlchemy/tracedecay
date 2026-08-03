@@ -2,6 +2,19 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+#[path = "inventory/artifacts.rs"]
+mod artifacts;
+#[path = "inventory/hermes.rs"]
+mod hermes;
+#[path = "inventory/project.rs"]
+mod project;
+#[path = "inventory/scan.rs"]
+mod scan;
+#[path = "inventory/sqlite.rs"]
+mod sqlite;
+
+pub use scan::build_inventory_with_global_db;
+
 #[derive(Debug, Clone, Default)]
 pub struct MigrationInventoryOptions {
     pub roots: Vec<PathBuf>,

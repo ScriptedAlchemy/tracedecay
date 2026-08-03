@@ -1,4 +1,7 @@
 use super::*;
+use crate::registry_adapter::{
+    GraphScopeUpsert, RegistryDatabase, RegistryRuntime, StoreArtifactUpsert, StoreInstanceUpsert,
+};
 
 pub(super) async fn verify_destination(
     resolved: &ResolvedPlan,
@@ -88,7 +91,10 @@ pub(super) async fn verify_destination(
     Ok(())
 }
 
-pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> {
+pub(super) async fn register_destination<R: RegistryRuntime>(
+    resolved: &ResolvedPlan,
+    registry: &R,
+) -> Result<()> {
     let global_path = resolved
         .report
         .destination_data_root
@@ -96,7 +102,8 @@ pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> 
         .and_then(Path::parent)
         .ok_or_else(|| config_error("destination shard has no profile root"))?
         .join("global.db");
-    let db = GlobalDb::open_at(&global_path)
+    let db = registry
+        .open_at(&global_path)
         .await
         .ok_or_else(|| config_error("could not open global registry for consolidation"))?;
     let project = db
@@ -109,46 +116,57 @@ pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> 
         )
         .await
         .ok_or_else(|| config_error("could not register consolidated project"))?;
-    db.upsert_project_alias(&resolved.report.project_root, &project.project_id)
+    if !db
+        .upsert_project_alias(&resolved.report.project_root, &project.project_id)
         .await
-        .ok_or_else(|| config_error("could not register consolidated project alias"))?;
+    {
+        return Err(config_error(
+            "could not register consolidated project alias",
+        ));
+    }
     let store_id = format!("store:{}:profile_sharded", project.project_id);
     let store_relpath = format!("projects/{}", project.project_id);
     let now = crate::tracedecay::current_timestamp();
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: store_id.clone(),
-        project_id: project.project_id.clone(),
-        store_kind: "code_project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: store_relpath.clone(),
-        manifest_relpath: Some(format!(
-            "{store_relpath}/{}",
-            storage::STORE_MANIFEST_FILENAME
-        )),
-        last_verified_at: Some(now),
-        last_write_at: Some(now),
-    })
-    .await
-    .ok_or_else(|| config_error("could not register consolidated store"))?;
+    if !db
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: store_id.clone(),
+            project_id: project.project_id.clone(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: store_relpath.clone(),
+            manifest_relpath: Some(format!(
+                "{store_relpath}/{}",
+                storage::STORE_MANIFEST_FILENAME
+            )),
+            last_verified_at: Some(now),
+            last_write_at: Some(now),
+        })
+        .await
+    {
+        return Err(config_error("could not register consolidated store"));
+    }
 
     let meta = branch_meta::load_branch_meta(&resolved.report.destination_data_root)
         .ok_or_else(|| config_error("consolidated branch metadata disappeared"))?;
     for (branch_name, entry) in &meta.branches {
-        db.upsert_graph_scope(GraphScopeUpsert {
-            graph_scope_id: format!("{store_id}:branch:{branch_name}"),
-            project_id: project.project_id.clone(),
-            store_id: store_id.clone(),
-            branch_name: branch_name.clone(),
-            db_relpath: format!("{store_relpath}/{}", entry.db_file),
-            parent_scope_id: entry
-                .parent
-                .as_deref()
-                .map(|parent| format!("{store_id}:branch:{parent}")),
-            last_synced_at: entry.last_synced_at.parse().ok(),
-            writable: true,
-        })
-        .await
-        .ok_or_else(|| config_error("could not register consolidated graph scope"))?;
+        if !db
+            .upsert_graph_scope(GraphScopeUpsert {
+                graph_scope_id: format!("{store_id}:branch:{branch_name}"),
+                project_id: project.project_id.clone(),
+                store_id: store_id.clone(),
+                branch_name: branch_name.clone(),
+                db_relpath: format!("{store_relpath}/{}", entry.db_file),
+                parent_scope_id: entry
+                    .parent
+                    .as_deref()
+                    .map(|parent| format!("{store_id}:branch:{parent}")),
+                last_synced_at: entry.last_synced_at.parse().ok(),
+                writable: true,
+            })
+            .await
+        {
+            return Err(config_error("could not register consolidated graph scope"));
+        }
     }
     for (kind, relative) in [
         ("graph_db", crate::config::DB_FILENAME),
@@ -157,22 +175,24 @@ pub(super) async fn register_destination(resolved: &ResolvedPlan) -> Result<()> 
         ("store_manifest", storage::STORE_MANIFEST_FILENAME),
     ] {
         let path = resolved.report.destination_data_root.join(relative);
-        db.upsert_store_artifact(StoreArtifactUpsert {
-            store_id: store_id.clone(),
-            artifact_kind: kind.to_string(),
-            relpath: format!("{store_relpath}/{relative}"),
-            size_bytes: fs::metadata(path)
-                .ok()
-                .and_then(|meta| i64::try_from(meta.len()).ok()),
-            schema_version: (kind == "store_manifest")
-                .then(|| storage::STORE_MANIFEST_SCHEMA_VERSION.to_string()),
-            updated_at: Some(now),
-        })
-        .await
-        .ok_or_else(|| config_error("could not register consolidated artifact"))?;
+        if !db
+            .upsert_store_artifact(StoreArtifactUpsert {
+                store_id: store_id.clone(),
+                artifact_kind: kind.to_string(),
+                relpath: format!("{store_relpath}/{relative}"),
+                size_bytes: fs::metadata(path)
+                    .ok()
+                    .and_then(|meta| i64::try_from(meta.len()).ok()),
+                schema_version: (kind == "store_manifest")
+                    .then(|| storage::STORE_MANIFEST_SCHEMA_VERSION.to_string()),
+                updated_at: Some(now),
+            })
+            .await
+        {
+            return Err(config_error("could not register consolidated artifact"));
+        }
     }
     db.checkpoint().await;
-    db.close();
     Ok(())
 }
 

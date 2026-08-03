@@ -7,10 +7,8 @@ use libsql::{Connection, Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::migrate::inventory::{MigrationInventory, StoreStatus};
-use crate::migrate::registry::{
-    RegistryReconstructionReport, reconstruct_registry_from_store_manifest,
-};
+use crate::inventory::{MigrationInventory, StoreStatus};
+use crate::registry::{RegistryReconstructionReport, reconstruct_registry_from_store_manifest};
 use crate::storage::{
     EnrollmentMarker, PrivateStoreIo, STORE_MANIFEST_FILENAME, StorageMode, StoreKind,
     has_sqlite_database_header, profile_sharded_data_root, profile_sharded_layout,

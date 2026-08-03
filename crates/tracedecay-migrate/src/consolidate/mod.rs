@@ -37,7 +37,7 @@ use prepare::prepare_destination;
 
 use crate::branch_meta::{self, BranchEntry, BranchMeta};
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use crate::registry_adapter::{RegistryDatabase, RegistryRuntime, canonical_project_key};
 use crate::storage::{
     self, EnrollmentMarker, PrivateStoreIo, StorageMode, StoreKind, StoreLayout, StoreManifest,
 };
@@ -202,19 +202,21 @@ pub async fn plan(options: &ConsolidationOptions) -> Result<ConsolidationReport>
     Ok(resolve_plan(options).await?.report)
 }
 
-pub async fn apply(
+pub async fn apply_with_registry<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
+    registry: &R,
 ) -> Result<ConsolidationReport> {
-    apply_with_stop(options, confirmation_token, None).await
+    apply_with_stop(options, confirmation_token, None, registry).await
 }
 
-async fn apply_with_stop(
+async fn apply_with_stop<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
     stop_after: Option<ConsolidationState>,
+    registry: &R,
 ) -> Result<ConsolidationReport> {
-    apply_with_faults(options, confirmation_token, stop_after, None).await
+    apply_with_faults(options, confirmation_token, stop_after, None, registry).await
 }
 
 #[cfg(test)]
@@ -226,11 +228,12 @@ async fn apply_with_prepare_stop(
     apply_with_faults(options, confirmation_token, None, Some(prepare_stop)).await
 }
 
-async fn apply_with_faults(
+async fn apply_with_faults<R: RegistryRuntime>(
     options: &ConsolidationOptions,
     confirmation_token: &str,
     stop_after: Option<ConsolidationState>,
     prepare_stop: Option<prepare::PrepareStop>,
+    registry: &R,
 ) -> Result<ConsolidationReport> {
     ensure_profile_offline(options)?;
     let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
@@ -278,7 +281,7 @@ async fn apply_with_faults(
     let mut ledger = load_or_create_ledger(&resolved, &ledger_path)?;
     validate_ledger(&ledger, &resolved)?;
     if ledger.state == ConsolidationState::Applied {
-        finalize_applied_consolidation(&options.profile_root, &ledger).await?;
+        finalize_applied_consolidation(&options.profile_root, &ledger, registry).await?;
         let mut report = resolved.report;
         report.state = ConsolidationState::Applied;
         report.dry_run = false;
@@ -326,7 +329,7 @@ async fn apply_with_faults(
 
     if ledger.state == ConsolidationState::ArtifactsMerged {
         remove_verification_inputs(&resolved)?;
-        register_destination(&resolved).await?;
+        register_destination(&resolved, registry).await?;
         ledger.state = ConsolidationState::Registered;
         save_ledger(&ledger_path, &ledger)?;
         maybe_stop(&ledger.state, stop_after.as_ref())?;
@@ -339,7 +342,7 @@ async fn apply_with_faults(
     }
 
     if ledger.state == ConsolidationState::Applied {
-        finalize_applied_consolidation(&options.profile_root, &ledger).await?;
+        finalize_applied_consolidation(&options.profile_root, &ledger, registry).await?;
     }
 
     let mut report = resolved.report;
@@ -1066,8 +1069,9 @@ fn save_ledger(path: &Path, ledger: &ConsolidationLedger) -> Result<()> {
     PrivateStoreIo::write_file_atomically(path, &temp, &bytes).map_err(io_error)
 }
 
-pub(crate) async fn retire_applied_input_manifests(
+pub(crate) async fn retire_applied_input_manifests<R: RegistryRuntime>(
     profile_root: &Path,
+    registry: &R,
 ) -> ManifestRetirementReport {
     let mut report = ManifestRetirementReport::default();
     let ledger_root = profile_root.join(LEDGER_DIR);
@@ -1117,7 +1121,7 @@ pub(crate) async fn retire_applied_input_manifests(
             ));
             continue;
         }
-        match finalize_applied_consolidation(profile_root, &ledger).await {
+        match finalize_applied_consolidation(profile_root, &ledger, registry).await {
             Ok((retired, registry_projects)) => {
                 report.retired.extend(retired);
                 report.retired_registry_projects = report
@@ -1130,9 +1134,10 @@ pub(crate) async fn retire_applied_input_manifests(
     report
 }
 
-async fn finalize_applied_consolidation(
+async fn finalize_applied_consolidation<R: RegistryRuntime>(
     profile_root: &Path,
     ledger: &ConsolidationLedger,
+    registry: &R,
 ) -> Result<(Vec<PathBuf>, usize)> {
     validate_applied_retirement_authority(profile_root, ledger)?;
     let source_layout = layout_for_id(
@@ -1177,7 +1182,8 @@ async fn finalize_applied_consolidation(
             ManifestRetirementAction::AlreadyRetired => {}
         }
     }
-    let retired_registry_projects = retire_legacy_registry_owners(profile_root, ledger).await?;
+    let retired_registry_projects =
+        retire_legacy_registry_owners(profile_root, ledger, registry).await?;
     Ok((retired, retired_registry_projects))
 }
 
@@ -1239,9 +1245,10 @@ fn validate_applied_retirement_authority(
     Ok(())
 }
 
-async fn retire_legacy_registry_owners(
+async fn retire_legacy_registry_owners<R: RegistryRuntime>(
     profile_root: &Path,
     ledger: &ConsolidationLedger,
+    registry: &R,
 ) -> Result<usize> {
     let global_path = profile_root.join("global.db");
     if !global_path.is_file() {
@@ -1250,7 +1257,8 @@ async fn retire_legacy_registry_owners(
             global_path.display()
         )));
     }
-    let db = GlobalDb::open_at(&global_path)
+    let db = registry
+        .open_at(&global_path)
         .await
         .ok_or_else(|| config_error("could not open global registry for consolidation cleanup"))?;
     let conn = db.conn();
@@ -1273,7 +1281,7 @@ async fn retire_legacy_registry_owners(
     }
 
     let result = async {
-        let canonical_root = GlobalDb::canonical_project_key(&ledger.project_root);
+        let canonical_root = canonical_project_key(&ledger.project_root);
         let mut rows = conn
             .query(
                 "SELECT canonical_root, COALESCE(git_common_dir, '')
@@ -1364,7 +1372,7 @@ async fn retire_legacy_registry_owners(
             ));
         }
 
-        let canonical_common = GlobalDb::canonical_project_key(&ledger.git_common_dir);
+        let canonical_common = canonical_project_key(&ledger.git_common_dir);
         let mut rows = conn
             .query(
                 "SELECT project_id FROM code_projects WHERE canonical_root=?1 ORDER BY project_id",

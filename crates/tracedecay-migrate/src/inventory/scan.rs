@@ -1,21 +1,16 @@
-mod artifacts;
-mod hermes;
-mod model {
-    pub use tracedecay_migrate::inventory::*;
-}
-mod project;
-mod sqlite;
-
 use std::collections::HashSet;
 use std::path::Path;
 
-pub use model::*;
+use super::*;
 
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
-use crate::global_db;
 
-pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<MigrationInventory> {
+pub async fn build_inventory_with_global_db(
+    options: MigrationInventoryOptions,
+    discovered_global_db_path: Option<std::path::PathBuf>,
+    global_db_path_is_overridden: bool,
+) -> Result<MigrationInventory> {
     let profile_root = options
         .global_db_path
         .as_deref()
@@ -41,7 +36,7 @@ async fn build_inventory_in_scope(
     let mut skipped = Vec::new();
     let mut seen_data_dirs = HashSet::new();
     let explicit_global_db_path = options.global_db_path.is_some();
-    let global_db_path = options.global_db_path.or_else(global_db::global_db_path);
+    let global_db_path = options.global_db_path.or(discovered_global_db_path);
 
     for root in &options.roots {
         project::scan_root(
@@ -67,7 +62,7 @@ async fn build_inventory_in_scope(
         Some(path) => Some(
             sqlite::inspect_global_db(
                 &path,
-                explicit_global_db_path || global_db::global_db_path_is_overridden(),
+                explicit_global_db_path || global_db_path_is_overridden,
             )
             .await,
         ),
@@ -113,7 +108,7 @@ async fn build_inventory_in_scope(
 
 #[cfg(test)]
 mod prune_dir_tests {
-    use super::project::should_prune_dir;
+    use crate::inventory::project::should_prune_dir;
 
     #[test]
     fn prunes_shared_generated_segments_and_the_local_git_addition() {

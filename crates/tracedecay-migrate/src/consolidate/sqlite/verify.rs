@@ -15,7 +15,7 @@ struct TableVerification {
     expected: String,
 }
 
-pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
+pub(in crate::consolidate) async fn verify_session_union_sql(
     input_snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
     source: &Path,
     target: &Path,

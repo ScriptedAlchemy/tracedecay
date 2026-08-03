@@ -6,8 +6,9 @@ use libsql::{Connection, params, params::IntoParams};
 use serde::Serialize;
 
 use crate::branch_meta;
-use crate::global_db::{
-    CodeProjectRecord, GlobalDb, GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert,
+use crate::registry_adapter::{
+    CodeProjectRecord, GraphScopeUpsert, RegistryDatabase, StoreArtifactUpsert,
+    StoreInstanceUpsert, canonical_project_key,
 };
 use crate::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind,
@@ -75,8 +76,8 @@ pub struct RegistryReconstructionDiffReport {
     pub issues: Vec<String>,
 }
 
-pub async fn diff_registry_reconstruction_report(
-    db: &GlobalDb,
+pub async fn diff_registry_reconstruction_report<D: RegistryDatabase>(
+    db: &D,
     report: &RegistryReconstructionReport,
 ) -> RegistryReconstructionDiffReport {
     let mut diff = RegistryReconstructionDiffReport {
@@ -141,7 +142,7 @@ async fn registry_plan_has_missing_rows(
     plan: &RegistryReconstructionPlan,
 ) -> std::result::Result<bool, String> {
     let project = &plan.project;
-    let root = GlobalDb::canonical_project_key(&project.project_root);
+    let root = canonical_project_key(&project.project_root);
     if query_optional_text(
         conn,
         "SELECT canonical_root FROM code_projects WHERE project_id=?1",
@@ -157,7 +158,7 @@ async fn registry_plan_has_missing_rows(
         if query_optional_text(
             conn,
             "SELECT project_id FROM project_aliases WHERE alias_path=?1",
-            params![GlobalDb::canonical_project_key(alias)],
+            params![canonical_project_key(alias)],
         )
         .await?
         .as_deref()
@@ -230,8 +231,8 @@ async fn registry_plan_has_missing_rows(
     Ok(false)
 }
 
-pub async fn apply_registry_reconstruction_report(
-    db: &GlobalDb,
+pub async fn apply_registry_reconstruction_report<D: RegistryDatabase>(
+    db: &D,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
     let conn = db.conn();
@@ -262,8 +263,8 @@ pub async fn apply_registry_reconstruction_report(
     }
 }
 
-pub async fn apply_single_registry_reconstruction_report(
-    db: &GlobalDb,
+pub async fn apply_single_registry_reconstruction_report<D: RegistryDatabase>(
+    db: &D,
     report: &RegistryReconstructionReport,
 ) -> std::result::Result<RegistryReconstructionApplyReport, Vec<String>> {
     let [plan] = report.plans.as_slice() else {
@@ -312,7 +313,7 @@ async fn preflight_registry_reconstruction(
             }
         }
         let project = &plan.project;
-        let root = GlobalDb::canonical_project_key(&project.project_root);
+        let root = canonical_project_key(&project.project_root);
         record_batch_owner(
             &mut project_roots,
             &root,
@@ -353,7 +354,7 @@ async fn preflight_registry_reconstruction(
             Err(error) => issues.push(error),
         }
         for alias in &project.aliases {
-            let alias = GlobalDb::canonical_project_key(alias);
+            let alias = canonical_project_key(alias);
             record_batch_owner(
                 &mut aliases,
                 &alias,
@@ -569,7 +570,7 @@ async fn insert_missing_registry_rows(
             continue;
         }
         let project = &plan.project;
-        let canonical_root = GlobalDb::canonical_project_key(&project.project_root);
+        let canonical_root = canonical_project_key(&project.project_root);
         applied.projects += usize::try_from(
             conn.execute(
                 "INSERT OR IGNORE INTO code_projects(
@@ -594,7 +595,7 @@ async fn insert_missing_registry_rows(
                     "INSERT OR IGNORE INTO project_aliases(alias_path, project_id, last_seen_at)
                      VALUES(?1, ?2, ?3)",
                     params![
-                        GlobalDb::canonical_project_key(alias),
+                        canonical_project_key(alias),
                         project.project_id.as_str(),
                         now,
                     ],

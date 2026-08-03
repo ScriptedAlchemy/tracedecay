@@ -14,12 +14,28 @@ use libsql::{Connection, Value, params};
 use sha2::{Digest, Sha256};
 
 use crate::db::Database;
-use crate::global_db::GlobalDb;
 use crate::memory::store::MemoryStore;
+use crate::registry_adapter::{RegistryDatabase, RegistryRuntime, canonical_project_key};
 
 mod session_merge;
 
 use session_merge::merge_snapshot;
+
+pub struct LegacyHermesStateImport {
+    pub sessions_upserted: u64,
+    pub messages_upserted: u64,
+}
+
+pub trait HermesStateImporter {
+    fn user_sessions_db_path(&self, profile_root: &Path) -> PathBuf;
+
+    async fn ingest_legacy_pinned_profile(
+        &self,
+        target_sessions_db_path: &Path,
+        profile_dir: &Path,
+        project_root: &Path,
+    ) -> Result<LegacyHermesStateImport, String>;
+}
 
 const LEDGER_DIR: &str = "migration-ledger/hermes-legacy";
 const COPIED_TABLES: &[&str] = &[
@@ -63,7 +79,17 @@ pub struct LegacyHermesMigrationReport {
 /// Migrates historical stores below the standard user Hermes integration into
 /// the normal `TraceDecay` user profile. No environment or working-directory
 /// override can redirect discovery.
-pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigrationReport {
+pub async fn migrate_legacy_hermes_stores_with_runtime<R, F, H>(
+    user_home: &Path,
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> LegacyHermesMigrationReport
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
     let Ok(profile_root) = crate::storage::default_profile_root() else {
         return LegacyHermesMigrationReport {
             failed: vec![LegacyHermesMigrationIssue {
@@ -74,31 +100,59 @@ pub async fn migrate_legacy_hermes_stores(user_home: &Path) -> LegacyHermesMigra
         };
     };
     let hermes_homes = [user_home.join(".hermes")];
-    migrate_legacy_hermes_stores_inner(user_home, &profile_root, &hermes_homes, None).await
+    migrate_legacy_hermes_stores_inner(
+        user_home,
+        &profile_root,
+        &hermes_homes,
+        None,
+        registry,
+        read_pinned_project_root,
+        state_importer,
+    )
+    .await
 }
 
 /// Explicit `TraceDecay` profile-root seam used by migration tests. The source
 /// root remains the user's standard home; the second argument controls only
 /// the destination `TraceDecay` profile.
-pub async fn migrate_legacy_hermes_stores_to(
+pub async fn migrate_legacy_hermes_stores_to_with_runtime<R, F, H>(
     user_home: &Path,
     tracedecay_profile_root: &Path,
-) -> LegacyHermesMigrationReport {
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> LegacyHermesMigrationReport
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
     migrate_legacy_hermes_stores_inner(
         user_home,
         tracedecay_profile_root,
         &[user_home.join(".hermes")],
         None,
+        registry,
+        read_pinned_project_root,
+        state_importer,
     )
     .await
 }
 
-async fn migrate_legacy_hermes_stores_inner(
+async fn migrate_legacy_hermes_stores_inner<R, F, H>(
     user_home: &Path,
     tracedecay_profile_root: &Path,
     hermes_homes: &[PathBuf],
     fail_after_table: Option<&str>,
-) -> LegacyHermesMigrationReport {
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> LegacyHermesMigrationReport
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
     let lifecycle = match crate::lifecycle_lease::acquire_exclusive_for_profile(
         tracedecay_profile_root,
         "legacy Hermes store migration",
@@ -128,6 +182,9 @@ async fn migrate_legacy_hermes_stores_inner(
             &candidate,
             tracedecay_profile_root,
             fail_after_table,
+            registry,
+            read_pinned_project_root,
+            state_importer,
         )
         .await
         {
@@ -136,6 +193,7 @@ async fn migrate_legacy_hermes_stores_inner(
                     tracedecay_profile_root,
                     candidate.legacy_registry_project_id.as_deref(),
                     &candidate.profile_dir,
+                    registry,
                 )
                 .await
                 {
@@ -152,6 +210,7 @@ async fn migrate_legacy_hermes_stores_inner(
                     tracedecay_profile_root,
                     candidate.legacy_registry_project_id.as_deref(),
                     &candidate.profile_dir,
+                    registry,
                 )
                 .await
                 {
@@ -178,10 +237,7 @@ async fn migrate_legacy_hermes_stores_inner(
     for profile_dir in profile_dirs {
         let state_db = profile_dir.join("state.db");
         if !state_db.is_file()
-            || crate::agents::hermes::read_config_pinned_project_root(
-                &profile_dir.join("config.yaml"),
-            )
-            .is_none()
+            || read_pinned_project_root(&profile_dir.join("config.yaml")).is_none()
         {
             continue;
         }
@@ -190,6 +246,9 @@ async fn migrate_legacy_hermes_stores_inner(
             hermes_homes,
             &profile_dir,
             tracedecay_profile_root,
+            registry,
+            read_pinned_project_root,
+            state_importer,
         )
         .await
         {
@@ -229,21 +288,25 @@ fn migration_authority_failure(
     }
 }
 
-async fn remove_legacy_registry_metadata(
+async fn remove_legacy_registry_metadata<R: RegistryRuntime>(
     tracedecay_profile_root: &Path,
     project_id: Option<&str>,
     expected_legacy_root: &Path,
+    registry_runtime: &R,
 ) -> Result<(), String> {
     let Some(project_id) = project_id else {
         return Ok(());
     };
     let registry_path = tracedecay_profile_root.join("global.db");
-    let registry = GlobalDb::open_at(&registry_path).await.ok_or_else(|| {
-        format!(
-            "could not open project registry '{}'",
-            registry_path.display()
-        )
-    })?;
+    let registry = registry_runtime
+        .open_at(&registry_path)
+        .await
+        .ok_or_else(|| {
+            format!(
+                "could not open project registry '{}'",
+                registry_path.display()
+            )
+        })?;
     let Some(project) = registry.get_code_project(project_id).await else {
         return Ok(());
     };
@@ -411,15 +474,23 @@ struct ResolvedTargetLayout {
     project_id: String,
 }
 
-async fn migrate_candidate(
+async fn migrate_candidate<R, F, H>(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     candidate: &LegacyStoreCandidate,
     tracedecay_profile_root: &Path,
     fail_after_table: Option<&str>,
-) -> Result<CandidateOutcome, CandidateError> {
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> Result<CandidateOutcome, CandidateError>
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
     let source_db = match candidate.source_sessions_db.as_deref() {
-        Some(path) => Some(GlobalDb::open_read_only_at(path).await.ok_or_else(|| {
+        Some(path) => Some(registry.open_read_only_at(path).await.ok_or_else(|| {
             CandidateError::Failed("could not open source read-only".to_string())
         })?),
         None => None,
@@ -434,9 +505,12 @@ async fn migrate_candidate(
         user_home,
         hermes_homes,
         candidate,
-        source_db.as_ref().map(GlobalDb::conn),
+        source_db.as_ref().map(|db| db.conn()),
         tracedecay_profile_root,
         fail_after_table,
+        registry,
+        read_pinned_project_root,
+        state_importer,
     )
     .await;
     let finish = match source_db.as_ref() {
@@ -452,12 +526,20 @@ async fn migrate_candidate(
     }
 }
 
-async fn migrate_legacy_state_store(
+async fn migrate_legacy_state_store<R, F, H>(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     profile_dir: &Path,
     tracedecay_profile_root: &Path,
-) -> Result<CandidateOutcome, CandidateError> {
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> Result<CandidateOutcome, CandidateError>
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
     let state_db = profile_dir.join("state.db");
     let target_project = resolve_target_project(
         None,
@@ -465,24 +547,25 @@ async fn migrate_legacy_state_store(
         user_home,
         hermes_homes,
         tracedecay_profile_root,
+        registry,
+        read_pinned_project_root,
     )
     .await
     .map_err(CandidateError::Unresolved)?;
-    let target_layout = resolve_target_layout(&target_project, tracedecay_profile_root)
+    let target_layout =
+        resolve_target_layout(&target_project, tracedecay_profile_root, state_importer)
+            .await
+            .map_err(|error| {
+                CandidateError::Failed(format!("could not resolve target profile shard: {error}"))
+            })?;
+    let stats = state_importer
+        .ingest_legacy_pinned_profile(
+            &target_layout.sessions_db_path,
+            profile_dir,
+            &target_project.root,
+        )
         .await
-        .map_err(|error| {
-            CandidateError::Failed(format!("could not resolve target profile shard: {error}"))
-        })?;
-    let target = GlobalDb::open_at(&target_layout.sessions_db_path)
-        .await
-        .ok_or_else(|| CandidateError::Failed("could not open target session store".to_string()))?;
-    let stats = crate::sessions::hermes::ingest_legacy_pinned_profile(
-        &target,
-        profile_dir,
-        &target_project.root,
-    )
-    .await
-    .map_err(CandidateError::Failed)?;
+        .map_err(CandidateError::Failed)?;
     let rows_copied = stats
         .sessions_upserted
         .saturating_add(stats.messages_upserted);
@@ -498,14 +581,22 @@ async fn migrate_legacy_state_store(
     })
 }
 
-async fn migrate_candidate_snapshot(
+async fn migrate_candidate_snapshot<R, F, H>(
     user_home: &Path,
     hermes_homes: &[PathBuf],
     candidate: &LegacyStoreCandidate,
     source: Option<&Connection>,
     tracedecay_profile_root: &Path,
     fail_after_table: Option<&str>,
-) -> Result<CandidateOutcome, CandidateError> {
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> Result<CandidateOutcome, CandidateError>
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
     if let Some(source) = source {
         verify_source(source)
             .await
@@ -517,10 +608,10 @@ async fn migrate_candidate_snapshot(
             .map_err(CandidateError::Failed)?,
         None => 0,
     };
-    if source_schema_version > crate::sessions::lcm::LCM_SCHEMA_VERSION {
+    if source_schema_version > tracedecay_sessions::lcm::LCM_SCHEMA_VERSION {
         return Err(CandidateError::Failed(format!(
             "source LCM schema {source_schema_version} is newer than supported schema {}",
-            crate::sessions::lcm::LCM_SCHEMA_VERSION
+            tracedecay_sessions::lcm::LCM_SCHEMA_VERSION
         )));
     }
 
@@ -530,6 +621,8 @@ async fn migrate_candidate_snapshot(
         user_home,
         hermes_homes,
         tracedecay_profile_root,
+        registry,
+        read_pinned_project_root,
     )
     .await
     .map_err(CandidateError::Unresolved)?;
@@ -545,11 +638,12 @@ async fn migrate_candidate_snapshot(
     } else {
         None
     };
-    let target_layout = resolve_target_layout(&target_project, tracedecay_profile_root)
-        .await
-        .map_err(|error| {
-            CandidateError::Failed(format!("could not resolve target profile shard: {error}"))
-        })?;
+    let target_layout =
+        resolve_target_layout(&target_project, tracedecay_profile_root, state_importer)
+            .await
+            .map_err(|error| {
+                CandidateError::Failed(format!("could not resolve target profile shard: {error}"))
+            })?;
     if candidate
         .source_sessions_db
         .as_deref()
@@ -609,7 +703,8 @@ async fn migrate_candidate_snapshot(
     )
     .await
     .map_err(CandidateError::Failed)?;
-    let target_db = GlobalDb::open_at(&target_layout.sessions_db_path)
+    let target_db = registry
+        .open_at(&target_layout.sessions_db_path)
         .await
         .ok_or_else(|| CandidateError::Failed("could not open target session store".to_string()))?;
     if let Some(source) = source {
@@ -672,13 +767,14 @@ async fn migrate_candidate_snapshot(
     })
 }
 
-async fn resolve_target_layout(
+async fn resolve_target_layout<H: HermesStateImporter>(
     target_project: &ResolvedTargetProject,
     tracedecay_profile_root: &Path,
+    state_importer: &H,
 ) -> crate::errors::Result<ResolvedTargetLayout> {
     if target_project.user_scope {
         return Ok(ResolvedTargetLayout {
-            sessions_db_path: crate::sessions::user_sessions_db_path(tracedecay_profile_root),
+            sessions_db_path: state_importer.user_sessions_db_path(tracedecay_profile_root),
             graph_db_path: None,
             project_id: "user".to_string(),
         });
@@ -843,17 +939,24 @@ async fn ensure_message_identity_matches(
     Ok(())
 }
 
-async fn resolve_target_project(
+async fn resolve_target_project<R, F>(
     source: Option<&Connection>,
     config_path: &Path,
     user_home: &Path,
     hermes_homes: &[PathBuf],
     tracedecay_profile_root: &Path,
-) -> Result<ResolvedTargetProject, String> {
+    registry_runtime: &R,
+    read_pinned_project_root: &F,
+) -> Result<ResolvedTargetProject, String>
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+{
     let registry_path = tracedecay_profile_root.join("global.db");
     let registry = if registry_path.is_file() {
         Some(
-            GlobalDb::open_read_only_at(&registry_path)
+            registry_runtime
+                .open_read_only_at(&registry_path)
                 .await
                 .ok_or_else(|| {
                     format!(
@@ -866,7 +969,7 @@ async fn resolve_target_project(
         None
     };
 
-    if let Some(pin) = crate::agents::hermes::read_config_pinned_project_root(config_path) {
+    if let Some(pin) = read_pinned_project_root(config_path) {
         return resolve_project_candidate(
             Path::new(&pin),
             user_home,
@@ -997,7 +1100,7 @@ fn target_key(target: &ResolvedTargetProject) -> String {
     target
         .registry_project_id
         .clone()
-        .unwrap_or_else(|| format!("path:{}", GlobalDb::canonical_project_key(&target.root)))
+        .unwrap_or_else(|| format!("path:{}", canonical_project_key(&target.root)))
 }
 
 fn project_identity_collision(
@@ -1045,11 +1148,11 @@ fn collect_metadata_project_candidates(
     Ok(())
 }
 
-async fn resolve_project_candidate(
+async fn resolve_project_candidate<D: RegistryDatabase>(
     candidate: &Path,
     user_home: &Path,
     hermes_homes: &[PathBuf],
-    registry: Option<&GlobalDb>,
+    registry: Option<&D>,
 ) -> Result<Option<ResolvedTargetProject>, String> {
     if !candidate.is_absolute() {
         return Ok(None);

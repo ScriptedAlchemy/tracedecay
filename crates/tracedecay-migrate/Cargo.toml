@@ -8,7 +8,18 @@ license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
 [dependencies]
+dirs = "6"
+fs2 = "0.4"
+hex = "0.4"
+libsql = "0.9.30"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+tokio = { version = "1", features = ["rt"] }
+tracedecay-runtime-core = { path = "../tracedecay-runtime-core" }
+tracedecay-sessions = { path = "../tracedecay-sessions" }
 
 [dev-dependencies]
 serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

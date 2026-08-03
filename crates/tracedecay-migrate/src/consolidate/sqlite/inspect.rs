@@ -10,7 +10,7 @@ use super::{
 use crate::errors::Result;
 
 #[derive(Debug, Clone, Copy)]
-pub(in crate::migrate::consolidate) struct DatabaseCollisionCounts {
+pub(in crate::consolidate) struct DatabaseCollisionCounts {
     pub sessions: u64,
     pub messages: u64,
     pub lcm_messages: u64,
@@ -31,31 +31,31 @@ struct LcmMessageCollisionCounts {
     payload_refs: u64,
 }
 
-pub(in crate::migrate::consolidate) struct OfflineDatabaseGuards {
+pub(in crate::consolidate) struct OfflineDatabaseGuards {
     _holds: Vec<(Connection, LibsqlDatabase)>,
     _authorities: Vec<crate::db::DatabaseAuthority>,
 }
 
 #[derive(Default)]
-pub(in crate::migrate::consolidate) struct GraphLogicalIdentities {
+pub(in crate::consolidate) struct GraphLogicalIdentities {
     facts: HashSet<Vec<u8>>,
     feedback: HashSet<Vec<u8>>,
 }
 
 impl GraphLogicalIdentities {
-    pub(in crate::migrate::consolidate) fn fact_count(&self) -> u64 {
+    pub(in crate::consolidate) fn fact_count(&self) -> u64 {
         self.facts.len() as u64
     }
 
-    pub(in crate::migrate::consolidate) fn feedback_count(&self) -> u64 {
+    pub(in crate::consolidate) fn feedback_count(&self) -> u64 {
         self.feedback.len() as u64
     }
 
-    pub(in crate::migrate::consolidate) fn fact_overlap(&self, other: &Self) -> u64 {
+    pub(in crate::consolidate) fn fact_overlap(&self, other: &Self) -> u64 {
         self.facts.intersection(&other.facts).count() as u64
     }
 
-    pub(in crate::migrate::consolidate) fn facts_union_matches(
+    pub(in crate::consolidate) fn facts_union_matches(
         &self,
         other: &Self,
         destination: &Self,
@@ -67,7 +67,7 @@ impl GraphLogicalIdentities {
                 .all(|key| self.facts.contains(key) || other.facts.contains(key))
     }
 
-    pub(in crate::migrate::consolidate) fn feedback_union_matches(
+    pub(in crate::consolidate) fn feedback_union_matches(
         &self,
         other: &Self,
         destination: &Self,
@@ -80,7 +80,7 @@ impl GraphLogicalIdentities {
     }
 }
 
-pub(in crate::migrate::consolidate) async fn extend_graph_identities(
+pub(in crate::consolidate) async fn extend_graph_identities(
     conn: &Connection,
     identities: &mut GraphLogicalIdentities,
 ) -> Result<()> {
@@ -94,7 +94,7 @@ pub(in crate::migrate::consolidate) async fn extend_graph_identities(
 }
 
 #[cfg(all(test, windows))]
-pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
+pub(in crate::consolidate) async fn acquire_offline_guards(
     paths: &[PathBuf],
 ) -> Result<OfflineDatabaseGuards> {
     // Windows byte-range locks prevent the same process from copying a file
@@ -109,7 +109,7 @@ pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
 }
 
 #[cfg(not(all(test, windows)))]
-pub(in crate::migrate::consolidate) async fn acquire_offline_guards(
+pub(in crate::consolidate) async fn acquire_offline_guards(
     paths: &[PathBuf],
 ) -> Result<OfflineDatabaseGuards> {
     let mut ordered = paths.to_vec();
@@ -237,14 +237,14 @@ fn push_f64(target: &mut Vec<u8>, value: f64) {
 }
 
 #[cfg(test)]
-pub(in crate::migrate::consolidate) async fn count_rows(path: &Path, table: &str) -> Result<u64> {
+pub(in crate::consolidate) async fn count_rows(path: &Path, table: &str) -> Result<u64> {
     let snapshots = crate::sqlite_read_snapshot::SnapshotSet::capture(&[path.to_path_buf()])
         .await
         .map_err(|error| db_error("read_snapshot", error))?;
     count_rows_in(&snapshots, path, table).await
 }
 
-pub(in crate::migrate::consolidate) async fn count_rows_in(
+pub(in crate::consolidate) async fn count_rows_in(
     snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
     path: &Path,
     table: &str,
@@ -265,7 +265,7 @@ pub(in crate::migrate::consolidate) async fn count_rows_in(
     u64::try_from(count).map_err(|error| db_error("count_rows", error))
 }
 
-pub(in crate::migrate::consolidate) async fn quick_check_in(
+pub(in crate::consolidate) async fn quick_check_in(
     snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
     path: &Path,
 ) -> Result<()> {
@@ -273,7 +273,7 @@ pub(in crate::migrate::consolidate) async fn quick_check_in(
     quick_check_connection(db.connection(), path).await
 }
 
-pub(in crate::migrate::consolidate) async fn quick_check_connection(
+pub(in crate::consolidate) async fn quick_check_connection(
     conn: &Connection,
     path: &Path,
 ) -> Result<()> {
@@ -301,7 +301,7 @@ pub(in crate::migrate::consolidate) async fn quick_check_connection(
     Ok(())
 }
 
-pub(in crate::migrate::consolidate) async fn inspect_collisions(
+pub(in crate::consolidate) async fn inspect_collisions(
     snapshots: &crate::sqlite_read_snapshot::SnapshotSet,
     source_sessions: &Path,
     target_sessions: &Path,

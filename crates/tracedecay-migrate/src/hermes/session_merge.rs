@@ -110,7 +110,7 @@ async fn merge_snapshot_in_transaction(
         });
     };
     copy_external_payload_files(source, source_path, target_path, created_payloads).await?;
-    let project = GlobalDb::canonical_project_key(target_project);
+    let project = canonical_project_key(target_project);
     rows_copied += copy_table(source, target, "sessions", &[], |columns, values| {
         for (column, value) in columns.iter().zip(values.iter_mut()) {
             if column == "project_path" || column == "project_key" {
