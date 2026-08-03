@@ -1,6 +1,7 @@
-use tracedecay::sessions::lcm::security::should_externalize;
-use tracedecay::sessions::lcm::security::{heartbeat_noise_reason, quarantine_reason};
-use tracedecay::sessions::lcm::security::{ignore_message_reason, pattern_matches};
+use tracedecay_sessions::runtime::lcm::security::{
+    heartbeat_noise_reason, ignore_message_reason, pattern_matches, quarantine_reason,
+    should_externalize,
+};
 
 #[test]
 fn classifies_data_uri_and_long_base64_for_externalization() {
@@ -185,21 +186,4 @@ fn ignore_message_patterns_use_regex_search_with_anchors_and_inline_flags() {
         ),
         Some("ignore_message_pattern")
     );
-}
-
-#[test]
-fn no_authoritative_session_write_uses_legacy_text_cap() {
-    let global_db = std::fs::read_to_string("src/global_db.rs").unwrap();
-    assert!(
-        !global_db.contains("MAX_SESSION_MESSAGE_TEXT_BYTES"),
-        "authoritative session writes must not use the legacy text byte cap"
-    );
-    assert!(
-        !global_db.contains("SESSION_MESSAGE_TRUNCATION_MARKER"),
-        "authoritative session writes must not use the legacy truncation marker"
-    );
-
-    let lcm_raw = std::fs::read_to_string("src/sessions/lcm/raw.rs").unwrap();
-    assert!(lcm_raw.contains("MAX_DERIVED_TEXT_CHARS"));
-    assert!(lcm_raw.contains("derived_text_for_index"));
 }

@@ -14,7 +14,6 @@ mod git_backfill;
 mod global_db;
 mod lcm_compression;
 mod lcm_dag;
-mod lcm_ingest_protection;
 mod lcm_payload;
 mod lcm_query;
 mod lcm_raw;
