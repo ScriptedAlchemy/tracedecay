@@ -1,0 +1,11 @@
+[package]
+name = "tracedecay-sessions"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "TraceDecay session parsing and retrieval primitives"
+
+[dependencies]
+regex = "1.12.3"
+serde = { version = "1", features = ["derive"] }

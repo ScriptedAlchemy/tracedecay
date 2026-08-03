@@ -10,6 +10,7 @@ members = [
     "crates/tracedecay-lsp",
     "crates/tracedecay-migrate",
     "crates/tracedecay-runtime-core",
+    "crates/tracedecay-sessions",
     "crates/tracedecay-usecases",
 ]
 resolver = "3"
@@ -136,6 +137,7 @@ tracedecay-migrate = { path = "crates/tracedecay-migrate" }
 tracedecay-capture = { path = "crates/tracedecay-capture" }
 tracedecay-automation = { path = "crates/tracedecay-automation" }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core" }
+tracedecay-sessions = { path = "crates/tracedecay-sessions" }
 tracedecay-usecases = { path = "crates/tracedecay-usecases" }
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

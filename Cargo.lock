@@ -4907,6 +4907,7 @@ dependencies = [
  "tracedecay-lsp",
  "tracedecay-migrate",
  "tracedecay-runtime-core",
+ "tracedecay-sessions",
  "tracedecay-usecases",
  "tracing",
  "tree-sitter",
@@ -5008,6 +5009,14 @@ dependencies = [
  "bincode",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "tracedecay-sessions"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
 ]
 
 [[package]]
