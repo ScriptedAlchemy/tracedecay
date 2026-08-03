@@ -4901,6 +4901,7 @@ dependencies = [
  "tracedecay-capture",
  "tracedecay-code-extraction",
  "tracedecay-code-index",
+ "tracedecay-dashboard-api",
  "tracedecay-domain",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
@@ -4950,6 +4951,17 @@ dependencies = [
  "ignore",
  "tempfile",
  "tracedecay-code-extraction",
+]
+
+[[package]]
+name = "tracedecay-dashboard-api"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "libsql",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -5,6 +5,7 @@ members = [
     "crates/tracedecay-domain",
     "crates/tracedecay-code-extraction",
     "crates/tracedecay-code-index",
+    "crates/tracedecay-dashboard-api",
     "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
     "crates/tracedecay-migrate",
@@ -128,6 +129,7 @@ tree-sitter-language = "0.1"
 tracedecay-domain = { path = "crates/tracedecay-domain" }
 tracedecay-code-extraction = { path = "crates/tracedecay-code-extraction", default-features = false }
 tracedecay-code-index = { path = "crates/tracedecay-code-index", default-features = false }
+tracedecay-dashboard-api = { path = "crates/tracedecay-dashboard-api" }
 tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp" }
 tracedecay-migrate = { path = "crates/tracedecay-migrate" }
