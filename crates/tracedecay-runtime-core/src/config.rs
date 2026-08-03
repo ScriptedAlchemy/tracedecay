@@ -336,7 +336,7 @@ fn parse_env_bool(raw: &str) -> Option<bool> {
 }
 
 /// Reads a `TRACEDECAY_<suffix>` env var and parses it as a bool.
-pub(crate) fn env_bool(suffix: &str) -> Option<bool> {
+pub fn env_bool(suffix: &str) -> Option<bool> {
     brand_env(suffix).as_deref().and_then(parse_env_bool)
 }
 

@@ -9,8 +9,8 @@ use crate::branch_meta::BranchMeta;
 /// spin lets a contender through instead of failing immediately. Shared by the
 /// async [`prepare_branch_tracking_in_layout`] and the synchronous
 /// administrative path; only the sleep primitive differs.
-const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
-const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+pub const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
+pub const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Resolves the current branch name using `gix`. Falls back to
 /// `git symbolic-ref HEAD` for worktrees when gix cannot resolve HEAD
@@ -462,12 +462,32 @@ pub async fn prepare_branch_tracking_in_layout(
     branch_name: &str,
     tracedecay_dir: &Path,
 ) -> crate::errors::Result<BranchTrackingPreparation> {
+    prepare_branch_tracking_in_layout_with_lock(
+        project_root,
+        branch_name,
+        tracedecay_dir,
+        try_acquire_branch_add_lock_raw,
+    )
+    .await
+}
+
+/// Runs branch tracking with an injected lock acquisition policy.
+///
+/// The root compatibility façade supplies its pending branch-admin recovery
+/// gate; standalone kernel callers use the raw lock above.
+#[doc(hidden)]
+pub async fn prepare_branch_tracking_in_layout_with_lock(
+    project_root: &Path,
+    branch_name: &str,
+    tracedecay_dir: &Path,
+    acquire_branch_lock: fn(&Path) -> crate::errors::Result<std::fs::File>,
+) -> crate::errors::Result<BranchTrackingPreparation> {
     use crate::branch_meta;
 
     let branch_lock = {
         let mut attempts = 0;
         loop {
-            match try_acquire_branch_add_lock(tracedecay_dir) {
+            match acquire_branch_lock(tracedecay_dir) {
                 Ok(lock) => break lock,
                 Err(crate::errors::TraceDecayError::SyncLock { .. })
                     if attempts < BRANCH_LOCK_RETRY_ATTEMPTS =>
@@ -756,15 +776,11 @@ pub fn try_acquire_branch_add_lock_raw(
     Ok(file)
 }
 
-pub(crate) fn try_acquire_branch_add_lock(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
+pub fn try_acquire_branch_add_lock(tracedecay_dir: &Path) -> crate::errors::Result<std::fs::File> {
     try_acquire_branch_add_lock_raw(tracedecay_dir)
 }
 
-pub(crate) fn acquire_branch_lock_blocking(
-    tracedecay_dir: &Path,
-) -> crate::errors::Result<std::fs::File> {
+pub fn acquire_branch_lock_blocking(tracedecay_dir: &Path) -> crate::errors::Result<std::fs::File> {
     try_acquire_branch_add_lock_raw(tracedecay_dir)
 }
 
@@ -858,11 +874,11 @@ pub struct GcReport {
 /// Parses a `last_synced_at` / `created_at` unix-seconds string defensively.
 /// Returns 0 (epoch, i.e. maximally stale) when unparseable so a corrupt
 /// timestamp never protects a dead store from collection.
-fn parse_unix_secs(ts: &str) -> u64 {
+pub fn parse_unix_secs(ts: &str) -> u64 {
     ts.trim().parse::<u64>().unwrap_or(0)
 }
 
-fn now_unix_secs() -> u64 {
+pub fn now_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

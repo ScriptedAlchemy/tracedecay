@@ -277,7 +277,7 @@ pub fn load_branch_meta(data_dir: &Path) -> Option<BranchMeta> {
 }
 
 /// Serializes validated branch metadata in the canonical persisted form.
-pub(crate) fn serialize_branch_meta(meta: &BranchMeta) -> std::io::Result<String> {
+pub fn serialize_branch_meta(meta: &BranchMeta) -> std::io::Result<String> {
     meta.validate()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     serde_json::to_string_pretty(meta).map_err(std::io::Error::other)
@@ -286,10 +286,7 @@ pub(crate) fn serialize_branch_meta(meta: &BranchMeta) -> std::io::Result<String
 /// Publishes already-serialized branch metadata after validating that it is the
 /// same canonical schema accepted by runtime readers. This is crate-private so
 /// the deletion journal can persist and later compare the exact commit bytes.
-pub(crate) fn save_branch_meta_serialized(
-    data_dir: &Path,
-    serialized: &str,
-) -> std::io::Result<()> {
+pub fn save_branch_meta_serialized(data_dir: &Path, serialized: &str) -> std::io::Result<()> {
     parse(serialized)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let path = data_dir.join(BRANCH_META_FILENAME);

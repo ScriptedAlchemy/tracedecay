@@ -20,14 +20,14 @@ mod unresolved;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
 #[cfg(windows)]
-pub(crate) use access::windows_hard_link_count;
+pub use access::windows_hard_link_count;
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
-pub(crate) use access::{
+pub use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
     enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
 pub use connection::{Database, SQLITE_UNSAFE_FAST_ENV};
-pub(crate) use connection::{platform_safe_journal_mode, platform_safe_synchronous_mode};
+pub use connection::{platform_safe_journal_mode, platform_safe_synchronous_mode};
 pub use fingerprints::StoredFingerprint;
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub use search::DependencyImportUse;

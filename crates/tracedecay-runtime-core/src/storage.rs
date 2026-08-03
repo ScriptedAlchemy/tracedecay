@@ -29,7 +29,7 @@ pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 /// This is deliberately file-only: libsql may create or rewrite WAL/SHM
 /// sidecars before reporting that the main file is not a database. Recovery
 /// paths use this preflight to preserve the complete on-disk recovery set.
-pub(crate) fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
+pub fn has_sqlite_database_header(path: &Path) -> io::Result<bool> {
     let mut file = fs::File::open(path)?;
     let mut header = [0_u8; 16];
     match file.read_exact(&mut header) {
@@ -408,7 +408,7 @@ pub fn resolve_layout(project_root: &Path, profile_root: &Path) -> Result<StoreL
     default_profile_sharded_layout(project_root, profile_root)
 }
 
-pub(crate) fn resolve_persisted_layout(
+pub fn resolve_persisted_layout(
     project_root: &Path,
     profile_root: &Path,
 ) -> Result<Option<StoreLayout>> {
@@ -443,7 +443,7 @@ pub(crate) fn resolve_persisted_layout(
 /// path-derived project id but still name this exact local checkout, or one of
 /// its linked worktrees, in their manifest. Remote URLs are deliberately not
 /// considered: two clones of one remote are different local identities.
-pub(crate) fn matching_legacy_profile_layouts(
+pub fn matching_legacy_profile_layouts(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
@@ -581,7 +581,7 @@ where
     Ok((layouts, selected_is_sole_exact_root))
 }
 
-pub(crate) fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {
+pub fn retire_identity_cutover_manifest(layout: &StoreLayout) -> Result<PathBuf> {
     let source = layout
         .manifest_path
         .as_ref()
@@ -1055,7 +1055,7 @@ fn open_lock_file(lock_path: &Path, private: bool) -> io::Result<fs::File> {
 /// success, or `None` when another process/thread already holds it (the caller
 /// then skips its critical section). See the sidecar-lock module note above for
 /// the read+write-handle rationale.
-pub(crate) fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
+pub fn try_acquire_sidecar_lock(lock_path: &Path) -> io::Result<Option<fs::File>> {
     let file = open_lock_file(lock_path, false)?;
     match file.try_lock_exclusive() {
         Ok(()) => Ok(Some(file)),
@@ -1081,7 +1081,7 @@ fn acquire_lock_file_blocking(lock_path: &Path, private: bool) -> io::Result<fs:
 /// append lock. When `private`, the data file is created owner-only and both
 /// the data and lock paths are symlink-checked (the private-store contract);
 /// otherwise a plain create+append handle is used (the automation run ledger).
-pub(crate) fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
+pub fn append_line_locked(path: &Path, line: &str, private: bool) -> io::Result<()> {
     let lock_path = append_lock_path(path);
     if private {
         reject_symlink_components(&lock_path, "private store lock file")?;
@@ -1209,7 +1209,7 @@ fn validate_enrollment_marker(marker: &EnrollmentMarker, path: &Path) -> Result<
     })
 }
 
-pub(crate) fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
+pub fn validate_project_id(project_id: &str) -> std::result::Result<(), &'static str> {
     if project_id.is_empty() {
         return Err("project_id must not be empty");
     }

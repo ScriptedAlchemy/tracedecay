@@ -54,7 +54,7 @@ fn fallback_scoped_runtime_role(
     }
 }
 
-pub(crate) fn enter_daemon_database_scope(
+pub fn enter_daemon_database_scope(
     profile_root: &Path,
     election_epoch: u64,
     election_token: &str,
@@ -379,28 +379,28 @@ impl DatabaseDeletionStates {
         }
     }
 
-    pub(crate) fn missing(self) -> usize {
+    pub fn missing(self) -> usize {
         self.missing
     }
 
-    pub(crate) fn deleting(self) -> usize {
+    pub fn deleting(self) -> usize {
         self.deleting
     }
 
-    pub(crate) fn deleted(self) -> usize {
+    pub fn deleted(self) -> usize {
         self.deleted
     }
 
-    pub(crate) fn has_missing(self) -> bool {
+    pub fn has_missing(self) -> bool {
         self.missing != 0
     }
 
     #[cfg(test)]
-    pub(crate) fn has_deleting(self) -> bool {
+    pub fn has_deleting(self) -> bool {
         self.deleting != 0
     }
 
-    pub(crate) fn has_deleted(self) -> bool {
+    pub fn has_deleted(self) -> bool {
         self.deleted != 0
     }
 }
@@ -412,7 +412,7 @@ struct DeletionTombstone {
 }
 
 impl DatabaseDeletionFence {
-    pub(crate) fn acquire(database_paths: &[PathBuf], intent: &str) -> Result<Self> {
+    pub fn acquire(database_paths: &[PathBuf], intent: &str) -> Result<Self> {
         let identities = canonical_deletion_identities(database_paths, intent)?;
         let identity_hash = deletion_identity_set_hash(&identities);
         let transaction_id = format!("{identity_hash:016x}:{}", authority_token());
@@ -429,7 +429,7 @@ impl DatabaseDeletionFence {
         })
     }
 
-    pub(crate) fn reacquire(
+    pub fn reacquire(
         database_paths: &[PathBuf],
         transaction_id: &str,
         intent: &str,
@@ -456,18 +456,18 @@ impl DatabaseDeletionFence {
         ))
     }
 
-    pub(crate) fn transaction_id(&self) -> &str {
+    pub fn transaction_id(&self) -> &str {
         &self.transaction_id
     }
 
-    pub(crate) fn database_paths(&self) -> impl ExactSizeIterator<Item = &Path> {
+    pub fn database_paths(&self) -> impl ExactSizeIterator<Item = &Path> {
         self.entries
             .iter()
             .map(|entry| entry.identity.database_path.as_path())
     }
 
     #[cfg(test)]
-    pub(crate) fn tombstone_states(&self) -> Result<DatabaseDeletionStates> {
+    pub fn tombstone_states(&self) -> Result<DatabaseDeletionStates> {
         classify_tombstone_states(
             &self.entries,
             &self.transaction_id,
@@ -476,13 +476,13 @@ impl DatabaseDeletionFence {
     }
 
     #[cfg(test)]
-    pub(crate) fn tombstone_paths(&self) -> impl ExactSizeIterator<Item = &Path> {
+    pub fn tombstone_paths(&self) -> impl ExactSizeIterator<Item = &Path> {
         self.entries
             .iter()
             .map(|entry| entry.identity.deletion_tombstone_path.as_path())
     }
 
-    pub(crate) fn publish_deleting(&self) -> Result<()> {
+    pub fn publish_deleting(&self) -> Result<()> {
         let mut missing = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             match read_deletion_tombstone(&entry.identity)? {
@@ -516,7 +516,7 @@ impl DatabaseDeletionFence {
         Ok(())
     }
 
-    pub(crate) fn promote_deleted(&self) -> Result<()> {
+    pub fn promote_deleted(&self) -> Result<()> {
         let mut needs_promotion = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             match read_deletion_tombstone(&entry.identity)? {
@@ -553,7 +553,7 @@ impl DatabaseDeletionFence {
         Ok(())
     }
 
-    pub(crate) fn rollback_deleting(&self) -> Result<()> {
+    pub fn rollback_deleting(&self) -> Result<()> {
         let mut present = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             match read_deletion_tombstone(&entry.identity)? {
@@ -1029,12 +1029,12 @@ fn tombstone_transition_error(
     access_error(operation, &identity.database_path, &message)
 }
 
-pub(crate) fn database_path_is_tombstoned(db_path: &Path) -> Result<bool> {
+pub fn database_path_is_tombstoned(db_path: &Path) -> Result<bool> {
     let identity = DatabaseIdentity::for_path(db_path)?;
     read_deletion_tombstone(&identity).map(|tombstone| tombstone.is_some())
 }
 
-pub(crate) fn probe_writer_owner(db_path: &Path) -> Result<WriterOwnership> {
+pub fn probe_writer_owner(db_path: &Path) -> Result<WriterOwnership> {
     let identity = DatabaseIdentity::for_path(db_path)?;
     {
         let leases = PROCESS_LEASES

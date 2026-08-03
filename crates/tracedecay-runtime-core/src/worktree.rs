@@ -98,7 +98,7 @@ pub fn is_detached_linked_worktree(dir: &Path) -> bool {
 /// somewhere in its ancestor chain or the caller overrides discovery via
 /// `GIT_DIR`. Spawning `git` costs ~100-300ms on Windows, so callers skip
 /// the spawn when it is guaranteed to fail anyway.
-pub(crate) fn git_may_resolve_repo(dir: &Path) -> bool {
+pub fn git_may_resolve_repo(dir: &Path) -> bool {
     if std::env::var_os("GIT_DIR").is_some() {
         return true;
     }

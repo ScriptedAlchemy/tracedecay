@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 const SQLITE_OPEN_URI: i32 = 0x0000_0040;
 
-pub(crate) struct SnapshotDatabase {
+pub struct SnapshotDatabase {
     connection: Connection,
     _database: libsql::Database,
     source: PathBuf,
@@ -28,15 +28,15 @@ pub(crate) struct SnapshotDatabase {
 }
 
 impl SnapshotDatabase {
-    pub(crate) fn connection(&self) -> &Connection {
+    pub fn connection(&self) -> &Connection {
         &self.connection
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
-    pub(crate) fn validate_source(&self) -> io::Result<()> {
+    pub fn validate_source(&self) -> io::Result<()> {
         if family_state(&self.source)? == self.source_state {
             return Ok(());
         }
@@ -46,7 +46,7 @@ impl SnapshotDatabase {
         )))
     }
 
-    pub(crate) fn source_generation(&self) -> SourceGeneration {
+    pub fn source_generation(&self) -> SourceGeneration {
         SourceGeneration {
             source: self.source.clone(),
             states: self.source_state.clone(),
@@ -54,19 +54,19 @@ impl SnapshotDatabase {
     }
 
     #[cfg(test)]
-    pub(crate) fn copied_bytes(&self) -> u64 {
+    pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SourceGeneration {
+pub struct SourceGeneration {
     source: PathBuf,
     states: Vec<FileState>,
 }
 
 impl SourceGeneration {
-    pub(crate) fn validate(&self) -> io::Result<()> {
+    pub fn validate(&self) -> io::Result<()> {
         if family_state(&self.source)? == self.states {
             return Ok(());
         }
@@ -77,7 +77,7 @@ impl SourceGeneration {
     }
 }
 
-pub(crate) struct SnapshotSet {
+pub struct SnapshotSet {
     databases: BTreeMap<PathBuf, SnapshotDatabase>,
     copied_bytes: u64,
     #[allow(dead_code)]
@@ -85,12 +85,12 @@ pub(crate) struct SnapshotSet {
 }
 
 impl SnapshotSet {
-    pub(crate) async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
+    pub async fn capture(paths: &[PathBuf]) -> io::Result<Self> {
         let root = default_scratch_root(paths)?;
         Self::capture_in(paths, &root).await
     }
 
-    pub(crate) async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
+    pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
         let scratch = Arc::new(create_scratch_directory(root, expected_owner(paths)?)?);
         let mut unique = paths.to_vec();
         unique.sort();
@@ -122,7 +122,7 @@ impl SnapshotSet {
         })
     }
 
-    pub(crate) fn get(&self, path: &Path) -> io::Result<&SnapshotDatabase> {
+    pub fn get(&self, path: &Path) -> io::Result<&SnapshotDatabase> {
         self.databases.get(path).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
@@ -131,19 +131,19 @@ impl SnapshotSet {
         })
     }
 
-    pub(crate) fn validate_sources_unchanged(&self) -> io::Result<()> {
+    pub fn validate_sources_unchanged(&self) -> io::Result<()> {
         for database in self.databases.values() {
             database.validate_source()?;
         }
         Ok(())
     }
 
-    pub(crate) fn copied_bytes(&self) -> u64 {
+    pub fn copied_bytes(&self) -> u64 {
         self.copied_bytes
     }
 
     #[cfg(test)]
-    pub(crate) fn database_count(&self) -> usize {
+    pub fn database_count(&self) -> usize {
         self.databases.len()
     }
 }
@@ -196,7 +196,7 @@ struct FileState {
 /// Opens one source family without mutating it. Checkpointed DBs are read
 /// directly through `SQLite` immutable mode. WAL-backed DBs are reflinked when
 /// supported, then fall back to one full copy with WAL/SHM copied alongside.
-pub(crate) async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
+pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture(&[path.to_path_buf()]).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
@@ -206,7 +206,7 @@ pub(crate) async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
     })
 }
 
-pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
+pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture_in(&[path.to_path_buf()], root).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
@@ -216,7 +216,7 @@ pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotData
     })
 }
 
-pub(crate) fn family_fingerprint(path: &Path) -> io::Result<String> {
+pub fn family_fingerprint(path: &Path) -> io::Result<String> {
     use std::io::Read;
 
     let _authority = crate::db::DatabaseAuthority::for_runtime(

@@ -259,7 +259,7 @@ pub(super) fn read_owner(path: &Path) -> Option<WriterOwner> {
     })
 }
 
-pub(crate) fn is_lock_contended(error: &std::io::Error) -> bool {
+pub fn is_lock_contended(error: &std::io::Error) -> bool {
     if error.kind() == std::io::ErrorKind::WouldBlock {
         return true;
     }

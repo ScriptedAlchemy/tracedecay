@@ -8,6 +8,6 @@
 /// takes `&T`; the `trivially_copy_pass_by_ref` lint is expected for `Copy`
 /// scalars and allowed here once for every caller.
 #[allow(clippy::trivially_copy_pass_by_ref)]
-pub(crate) fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+pub fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }

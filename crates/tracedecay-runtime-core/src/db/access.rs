@@ -16,10 +16,8 @@ pub(crate) use bootstrap::windows_hard_link_count;
 use bootstrap::{BootstrapAuthority, acquire_bootstrap_authority, reject_hard_linked_database};
 pub use lease::enter_maintenance_database_scope;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
-pub(crate) use lease::{
-    database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner,
-};
-pub(crate) use owner_io::is_lock_contended;
+pub use lease::{database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner};
+pub use owner_io::is_lock_contended;
 use owner_io::{
     authority_token, epoch_ms, open_lock_file, publish_record_atomically, read_owner,
     read_record_strict, remove_record_durably, write_owner, write_record_atomically, writer_owner,
@@ -52,7 +50,7 @@ pub struct DatabaseAuthority {
 }
 
 #[derive(Debug)]
-pub(crate) struct DatabaseDeletionFence {
+pub struct DatabaseDeletionFence {
     transaction_id: String,
     entries: Vec<DeletionFenceEntry>,
 }
@@ -65,14 +63,14 @@ enum DatabaseDeletionState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DatabaseDeletionStates {
+pub struct DatabaseDeletionStates {
     missing: usize,
     deleting: usize,
     deleted: usize,
 }
 
 #[derive(Debug)]
-pub(crate) struct DaemonDatabaseScope {
+pub struct DaemonDatabaseScope {
     profile_root: PathBuf,
     token: String,
 }
@@ -154,16 +152,16 @@ enum HeldLocks {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WriterOwner {
-    pub(crate) token: String,
-    pub(crate) pid: u32,
-    pub(crate) started_epoch_ms: u128,
-    pub(crate) version: String,
-    pub(crate) intent: String,
+pub struct WriterOwner {
+    pub token: String,
+    pub pid: u32,
+    pub started_epoch_ms: u128,
+    pub version: String,
+    pub intent: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum WriterOwnership {
+pub enum WriterOwnership {
     Idle,
     Active(WriterOwner),
     ActiveUnknown,
@@ -270,7 +268,7 @@ impl DatabaseAuthority {
         &self.inner.token
     }
 
-    pub(crate) fn publish_record_atomically(
+    pub fn publish_record_atomically(
         temporary: &Path,
         destination: &Path,
         payload: &[u8],
@@ -279,7 +277,7 @@ impl DatabaseAuthority {
         publish_record_atomically(temporary, destination, payload, record_name)
     }
 
-    pub(crate) fn replace_file_atomically(
+    pub fn replace_file_atomically(
         temporary: &Path,
         destination: &Path,
         record_name: &str,
@@ -312,7 +310,7 @@ impl DatabaseAuthority {
         })
     }
 
-    pub(crate) fn hold_for(&self, db_path: &Path, operation: &str) -> Result<Self> {
+    pub fn hold_for(&self, db_path: &Path, operation: &str) -> Result<Self> {
         let identity = DatabaseIdentity::for_path(db_path)?;
         if identity.database_key != self.inner.identity.database_key {
             return Err(access_error(
@@ -324,7 +322,7 @@ impl DatabaseAuthority {
         Ok(self.clone())
     }
 
-    pub(crate) fn canonical_database_path(&self) -> &Path {
+    pub fn canonical_database_path(&self) -> &Path {
         &self.inner.identity.database_path
     }
 }

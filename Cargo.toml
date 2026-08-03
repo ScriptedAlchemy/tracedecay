@@ -43,7 +43,6 @@ include = [
     "/src/**",
     "/benches/**",
     "/examples/**",
-    "/tests/fixtures/redundancy_eval_labeled.json",
     "/benchmarks/queries/default.toml",
     "/plugin/**",
     "/vendor/**",

@@ -15,7 +15,7 @@ mod registry;
 pub use pragmas::SQLITE_UNSAFE_FAST_ENV;
 #[cfg(test)]
 pub(crate) use pragmas::{adaptive_cache_sizes, platform_safe_mmap_size};
-pub(crate) use pragmas::{platform_safe_journal_mode, platform_safe_synchronous_mode};
+pub use pragmas::{platform_safe_journal_mode, platform_safe_synchronous_mode};
 use registry::{DatabaseInner, database_slot};
 
 /// `SQLite` database backing the code graph, powered by libsql.
