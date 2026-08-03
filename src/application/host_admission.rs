@@ -434,6 +434,24 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    pub async fn session_messages_page_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        provider: &str,
+        session_id: &str,
+        after_ordinal: Option<i64>,
+        after_message_id: &str,
+    ) -> Result<Vec<tracedecay_sessions::runtime::SessionMessageRecord>> {
+        self.session_database_for_test(scope)?
+            .session_messages_page(provider, session_id, after_ordinal, after_message_id)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                operation: "read projected session message page".to_owned(),
+                message,
+            })
+    }
+
+    #[doc(hidden)]
     pub async fn upsert_transcript_batch_for_test(
         &self,
         scope: HostAdmissionScope,
