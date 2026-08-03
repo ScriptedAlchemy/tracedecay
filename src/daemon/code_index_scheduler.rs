@@ -1035,6 +1035,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
 }
 
 impl CodeIndexWorktreeSchedulerV1 {
+    #[cfg(test)]
     pub fn open(
         project_id: ProjectId,
         project_root: &Path,
@@ -1067,6 +1068,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
     }
 
+    #[cfg(test)]
     pub fn open_with_policy(
         project_id: ProjectId,
         project_root: &Path,
