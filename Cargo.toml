@@ -9,6 +9,10 @@ homepage = "https://github.com/ScriptedAlchemy/tracedecay"
 readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
+
+[workspace]
+exclude = [".worktrees", ".codex-worktrees"]
+
 # Explicit whitelist so `cargo package`/`cargo publish` ship everything the
 # build needs — including the PREBUILT dashboard dist bundles, which are
 # gitignored (an `exclude`-style package can never pick them up). Run
