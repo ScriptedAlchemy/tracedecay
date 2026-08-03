@@ -4,8 +4,11 @@
 //! file-backed [`crate::sessions::source`] drivers and the Hermes `SQLite` sweep
 //! both depend on them so they do not need to import from each other.
 
+use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -134,53 +137,274 @@ pub(crate) fn path_belongs_to_project(path: &Path, project_root: &Path) -> bool 
     ProjectRootMatcher::new(project_root).contains(path)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectMembership {
+    Match,
+    NoMatch,
+    Unknown,
+}
+
+impl ProjectMembership {
+    fn from_bool(value: bool) -> Self {
+        if value { Self::Match } else { Self::NoMatch }
+    }
+
+    pub(crate) fn definitive(self) -> Option<bool> {
+        match self {
+            Self::Match => Some(true),
+            Self::NoMatch => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
+pub(crate) type GitIdentityResolver = fn(&Path) -> crate::worktree::GitRepoIdentityOutcome;
+const LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default)]
+struct LocationWorktreeCacheEntry {
+    outcome: OnceLock<crate::worktree::GitRepoIdentityOutcome>,
+    unknown_retry_after: Mutex<Option<Instant>>,
+}
+
 /// A project root with its git worktree/common-dir resolutions computed once,
 /// so repeated membership tests (e.g. one per discovered workflow run) do not
 /// re-run `git_worktree_root`/`git_common_dir` on the fixed project side. A
 /// single [`ProjectRootMatcher::contains`] call is exactly equivalent to
 /// [`path_belongs_to_project`], which is a thin wrapper over it.
+#[derive(Debug)]
 pub(crate) struct ProjectRootMatcher {
     root: PathBuf,
-    worktree: Option<PathBuf>,
-    common_dir: Option<PathBuf>,
+    identity: crate::worktree::GitRepoIdentityOutcome,
+    identity_resolver: GitIdentityResolver,
+    path_membership: Mutex<HashMap<PathBuf, bool>>,
 }
 
 impl ProjectRootMatcher {
     /// Resolve the fixed project-side git identity once.
     pub(crate) fn new(project_root: &Path) -> Self {
+        Self::new_with_identity_resolver(project_root, crate::worktree::git_repo_identity_outcome)
+    }
+
+    pub(crate) fn new_with_identity_resolver(
+        project_root: &Path,
+        identity_resolver: GitIdentityResolver,
+    ) -> Self {
         Self {
             root: project_root.to_path_buf(),
-            worktree: crate::worktree::git_worktree_root(project_root),
-            common_dir: crate::worktree::git_common_dir(project_root),
+            identity: identity_resolver(project_root),
+            identity_resolver,
+            path_membership: Mutex::new(HashMap::new()),
         }
     }
 
     /// True when `path` belongs to this project: it is the root, shares the
     /// project's git worktree or common dir, or discovers back to the root.
-    /// Only the varying `path` side is git-resolved here.
+    /// Each distinct path is resolved once for this matcher, so repeated
+    /// transcript rows with the same cwd do not repeatedly discover/open git.
     pub(crate) fn contains(&self, path: &Path) -> bool {
+        self.contains_status(path) == ProjectMembership::Match
+    }
+
+    pub(crate) fn contains_status(&self, path: &Path) -> ProjectMembership {
+        if let Some(belongs) = self
+            .path_membership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path)
+            .copied()
+        {
+            return ProjectMembership::from_bool(belongs);
+        }
+
+        let belongs = self.contains_uncached(path);
+        if let Some(definitive) = belongs.definitive() {
+            self.path_membership
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.to_path_buf(), definitive);
+        }
+        belongs
+    }
+
+    fn contains_uncached(&self, path: &Path) -> ProjectMembership {
+        self.contains_uncached_with(
+            path,
+            self.identity_resolver,
+            crate::config::discover_project_root,
+        )
+    }
+
+    fn contains_uncached_with(
+        &self,
+        path: &Path,
+        identity_resolver: impl FnOnce(&Path) -> crate::worktree::GitRepoIdentityOutcome,
+        discover_project_root: impl FnOnce(&Path) -> Option<PathBuf>,
+    ) -> ProjectMembership {
         if paths_equal(path, &self.root) {
-            return true;
+            return ProjectMembership::Match;
+        }
+        if self.identity == crate::worktree::GitRepoIdentityOutcome::Unknown {
+            return ProjectMembership::Unknown;
         }
 
-        if let (Some(path_worktree), Some(project_worktree)) = (
-            crate::worktree::git_worktree_root(path).as_ref(),
-            self.worktree.as_ref(),
-        ) {
-            if paths_equal(path_worktree, project_worktree) {
-                return true;
+        let path_identity = identity_resolver(path);
+        match (&self.identity, path_identity) {
+            (
+                crate::worktree::GitRepoIdentityOutcome::Resolved(project_identity),
+                crate::worktree::GitRepoIdentityOutcome::Resolved(path_identity),
+            ) => {
+                if paths_equal(
+                    &path_identity.worktree_root,
+                    &project_identity.worktree_root,
+                ) {
+                    return ProjectMembership::Match;
+                }
+                return ProjectMembership::from_bool(paths_equal(
+                    &path_identity.common_dir,
+                    &project_identity.common_dir,
+                ));
             }
-            return crate::worktree::git_common_dir(path)
-                .as_ref()
-                .zip(self.common_dir.as_ref())
-                .is_some_and(|(path_common, project_common)| {
-                    paths_equal(path_common, project_common)
-                });
+            (crate::worktree::GitRepoIdentityOutcome::Unknown, _)
+            | (_, crate::worktree::GitRepoIdentityOutcome::Unknown) => {
+                return ProjectMembership::Unknown;
+            }
+            _ => {}
         }
 
-        crate::config::discover_project_root(path)
-            .as_ref()
-            .is_some_and(|discovered| paths_equal(discovered, &self.root))
+        ProjectMembership::from_bool(
+            discover_project_root(path)
+                .as_ref()
+                .is_some_and(|discovered| paths_equal(discovered, &self.root)),
+        )
+    }
+}
+
+/// Source-lifetime cache of project matchers keyed by canonical project root.
+///
+/// A source parses many transcript files for the same project. Keeping the
+/// matcher here avoids reopening the same git repository once per file while
+/// retaining per-path membership caching inside [`ProjectRootMatcher`].
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectRootMatcherCache {
+    matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcher>>>>,
+    location_worktrees: Arc<Mutex<HashMap<PathBuf, Arc<LocationWorktreeCacheEntry>>>>,
+    identity_resolver: GitIdentityResolver,
+}
+
+impl Default for ProjectRootMatcherCache {
+    fn default() -> Self {
+        Self {
+            matchers: Arc::default(),
+            location_worktrees: Arc::default(),
+            identity_resolver: crate::worktree::git_repo_identity_outcome,
+        }
+    }
+}
+
+impl ProjectRootMatcherCache {
+    #[cfg(test)]
+    pub(crate) fn with_identity_resolver(identity_resolver: GitIdentityResolver) -> Self {
+        Self {
+            identity_resolver,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn get(&self, project_root: &Path) -> Arc<ProjectRootMatcher> {
+        let key = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        if let Some(matcher) = self
+            .matchers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned()
+        {
+            return matcher;
+        }
+
+        let matcher = Arc::new(ProjectRootMatcher::new_with_identity_resolver(
+            project_root,
+            self.identity_resolver,
+        ));
+        if matcher.identity == crate::worktree::GitRepoIdentityOutcome::Unknown {
+            return matcher;
+        }
+
+        self.matchers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key)
+            .or_insert_with(|| matcher.clone())
+            .clone()
+    }
+
+    /// Resolve a transcript cwd's worktree once for this ingest source.
+    ///
+    /// Location metadata is added per message, so one transcript can otherwise
+    /// repeat git discovery thousands of times for the same cwd. Keep this
+    /// source-lifetime like the project matchers and use the bounded CLI-first
+    /// identity path instead of opening the repository object database.
+    pub(crate) fn git_worktree_root(&self, cwd: &Path) -> Option<PathBuf> {
+        self.git_worktree_root_at(
+            cwd,
+            Instant::now(),
+            &crate::worktree::git_repo_identity_outcome,
+        )
+    }
+
+    fn git_worktree_root_at(
+        &self,
+        cwd: &Path,
+        now: Instant,
+        identity_resolver: &impl Fn(&Path) -> crate::worktree::GitRepoIdentityOutcome,
+    ) -> Option<PathBuf> {
+        loop {
+            let resolution = self
+                .location_worktrees
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(cwd.to_path_buf())
+                .or_insert_with(|| Arc::new(LocationWorktreeCacheEntry::default()))
+                .clone();
+            match resolution
+                .outcome
+                .get_or_init(|| identity_resolver(cwd))
+                .clone()
+            {
+                crate::worktree::GitRepoIdentityOutcome::Resolved(identity) => {
+                    return Some(identity.worktree_root);
+                }
+                crate::worktree::GitRepoIdentityOutcome::NotFound => return None,
+                crate::worktree::GitRepoIdentityOutcome::Unknown => {
+                    let should_retry = {
+                        let mut retry_after = resolution
+                            .unknown_retry_after
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let retry_after = retry_after
+                            .get_or_insert(now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN);
+                        now >= *retry_after
+                    };
+                    if !should_retry {
+                        return None;
+                    }
+
+                    let mut worktrees = self
+                        .location_worktrees
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if worktrees
+                        .get(cwd)
+                        .is_some_and(|cached| Arc::ptr_eq(cached, &resolution))
+                    {
+                        worktrees.remove(cwd);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -393,6 +617,34 @@ pub(crate) fn append_location_metadata(
     keys: TranscriptLocationMetadataKeys,
     location: TranscriptLocation<'_>,
 ) {
+    append_location_metadata_with_worktree(
+        map,
+        keys,
+        location,
+        location.cwd.and_then(crate::worktree::git_worktree_root),
+    );
+}
+
+pub(crate) fn append_location_metadata_cached(
+    map: &mut serde_json::Map<String, Value>,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
+    cache: &ProjectRootMatcherCache,
+) {
+    append_location_metadata_with_worktree(
+        map,
+        keys,
+        location,
+        location.cwd.and_then(|cwd| cache.git_worktree_root(cwd)),
+    );
+}
+
+fn append_location_metadata_with_worktree(
+    map: &mut serde_json::Map<String, Value>,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
+    worktree: Option<PathBuf>,
+) {
     let Some(cwd) = location.cwd else {
         return;
     };
@@ -400,7 +652,7 @@ pub(crate) fn append_location_metadata(
         keys.cwd.to_string(),
         Value::String(cwd.to_string_lossy().to_string()),
     );
-    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
+    if let Some(worktree) = worktree {
         map.insert(
             keys.worktree.to_string(),
             Value::String(worktree.to_string_lossy().to_string()),
@@ -550,10 +802,159 @@ pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<S
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
+    use serde_json::{Value, json};
+    use tempfile::TempDir;
+
+    use super::LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN;
+    use super::ProjectMembership;
+    use super::ProjectRootMatcher;
+    use super::ProjectRootMatcherCache;
+    use super::TranscriptLocation;
+    use super::TranscriptLocationMetadataKeys;
+    use super::append_location_metadata_cached;
     use super::one_line_truncated;
     use super::usage_counters_from;
+
+    fn resolved_test_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
+            worktree_root: root.to_path_buf(),
+            common_dir: root.join(".git"),
+        })
+    }
+
+    #[test]
+    fn matcher_timeout_is_unknown_without_downstream_discovery() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let matcher =
+            ProjectRootMatcher::new_with_identity_resolver(&project_root, resolved_test_identity);
+
+        let membership = matcher.contains_uncached_with(
+            &nested_cwd,
+            |_| crate::worktree::GitRepoIdentityOutcome::Unknown,
+            |_| panic!("timeout must not fall through to project discovery/gix"),
+        );
+
+        assert_eq!(membership, ProjectMembership::Unknown);
+    }
+
+    #[test]
+    fn location_metadata_unknown_uses_cooldown_then_retries() {
+        let temp = TempDir::new().expect("temp dir");
+        let cwd = temp.path().join("repo");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        let cache = ProjectRootMatcherCache::default();
+        let calls = AtomicUsize::new(0);
+        let now = Instant::now();
+        let resolver = |path: &Path| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                crate::worktree::GitRepoIdentityOutcome::Unknown
+            } else {
+                crate::worktree::GitRepoIdentityOutcome::Resolved(
+                    crate::worktree::GitRepoIdentity {
+                        worktree_root: path.to_path_buf(),
+                        common_dir: path.join(".git"),
+                    },
+                )
+            }
+        };
+
+        assert!(cache.git_worktree_root_at(&cwd, now, &resolver).is_none());
+        assert!(
+            cache
+                .git_worktree_root_at(
+                    &cwd,
+                    now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN / 2,
+                    &resolver,
+                )
+                .is_none()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            cache.git_worktree_root_at(
+                &cwd,
+                now + LOCATION_WORKTREE_UNKNOWN_RETRY_COOLDOWN,
+                &resolver,
+            ),
+            Some(cwd)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn location_metadata_cache_reuses_worktree_root_for_repeated_cwd() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let cache = ProjectRootMatcherCache::default();
+        let keys = TranscriptLocationMetadataKeys::new("cwd", "worktree", "provenance");
+        let location = TranscriptLocation::new(Some(&nested_cwd), "test");
+        let mut first = serde_json::Map::new();
+        append_location_metadata_cached(&mut first, keys, location, &cache);
+        assert_eq!(
+            first.get("worktree").and_then(Value::as_str),
+            Some(
+                project_root
+                    .canonicalize()
+                    .expect("canonical project root")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+
+        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
+            .expect("hide git metadata after first lookup");
+
+        let mut second = serde_json::Map::new();
+        append_location_metadata_cached(&mut second, keys, location, &cache);
+        assert_eq!(
+            second.get("worktree").and_then(Value::as_str),
+            first.get("worktree").and_then(Value::as_str),
+            "repeated cwd should reuse the source-lifetime worktree resolution"
+        );
+    }
+
+    #[test]
+    fn project_root_matcher_caches_repeated_path_membership() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let matcher = ProjectRootMatcher::new(&project_root);
+        assert!(matcher.contains(&nested_cwd));
+
+        // A repeated lookup should use the result already resolved for this
+        // cwd, rather than discovering/opening the same repository again.
+        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
+            .expect("hide git metadata after first lookup");
+        assert!(matcher.contains(&nested_cwd));
+    }
 
     #[test]
     fn one_line_truncated_collapses_and_clips() {
