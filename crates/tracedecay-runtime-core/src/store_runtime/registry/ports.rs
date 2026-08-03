@@ -298,29 +298,29 @@ struct InitializingMigrationAuthority {
     opened_file_identity: u64,
 }
 
-impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
+impl tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteAuthority
     for InitializingMigrationAuthority
 {
     fn verify(
         &self,
-        _intent: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent,
-    ) -> Result<(), tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError> {
+        _intent: tracedecay_rusqlite_runtime::exact_sql::ExactSqlWriteIntent,
+    ) -> Result<(), tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> {
         self.authority
             .require_active_write_scope("migrate initialized SQLite runtime")
             .map_err(|error| {
-                tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
                     error.to_string(),
                 )
             })?;
         let identity =
             crate::db::sqlite_generation_identity(&self.canonical_path).map_err(|_| {
-                tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
                     "could not verify initialized SQLite file identity".to_owned(),
                 )
             })?;
         if identity != self.opened_file_identity {
             return Err(
-                tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied(
+                tracedecay_rusqlite_runtime::exact_sql::ExactSqlError::AuthorityDenied(
                     "initialized SQLite file identity changed".to_owned(),
                 ),
             );
@@ -357,7 +357,7 @@ async fn migrate_before_publication(
             message,
         }
     })?;
-    let handle = attachment.migration_sql_handle().map_err(|message| {
+    let handle = attachment.exact_sql_handle().map_err(|message| {
         StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
             operation: "migrate initialized SQLite runtime",
             message,
@@ -435,16 +435,15 @@ impl PhysicalRuntimeAttachment for GraphRuntimePhysicalAttachment {
         GraphRuntimePhysicalAttachment::close_and_join(self)
     }
 
-    fn migration_sql_handle(
+    fn exact_sql_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
-        GraphRuntimePhysicalAttachment::migration_sql_handle(self)
-            .map_err(|error| error.to_string())
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, String> {
+        GraphRuntimePhysicalAttachment::exact_sql_handle(self).map_err(|error| error.to_string())
     }
 
     fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
         retained_storage_page_counts(
-            GraphRuntimePhysicalAttachment::migration_sql_handle(self)
+            GraphRuntimePhysicalAttachment::exact_sql_handle(self)
                 .map_err(|error| error.to_string())?,
             reader_wait,
         )
@@ -452,7 +451,7 @@ impl PhysicalRuntimeAttachment for GraphRuntimePhysicalAttachment {
 
     fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
         retained_storage_table_bytes(
-            GraphRuntimePhysicalAttachment::migration_sql_handle(self)
+            GraphRuntimePhysicalAttachment::exact_sql_handle(self)
                 .map_err(|error| error.to_string())?,
             reader_wait,
         )
@@ -570,16 +569,16 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         RepositoryRuntimePhysicalAttachment::close_and_join(self)
     }
 
-    fn migration_sql_handle(
+    fn exact_sql_handle(
         &self,
-    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, String> {
-        RepositoryRuntimePhysicalAttachment::migration_sql_handle(self)
+    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, String> {
+        RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
             .map_err(|error| error.to_string())
     }
 
     fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
         retained_storage_page_counts(
-            RepositoryRuntimePhysicalAttachment::migration_sql_handle(self)
+            RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
                 .map_err(|error| error.to_string())?,
             reader_wait,
         )
@@ -587,7 +586,7 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
 
     fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
         retained_storage_table_bytes(
-            RepositoryRuntimePhysicalAttachment::migration_sql_handle(self)
+            RepositoryRuntimePhysicalAttachment::exact_sql_handle(self)
                 .map_err(|error| error.to_string())?,
             reader_wait,
         )
@@ -678,7 +677,7 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
 }
 
 fn retained_storage_page_counts(
-    handle: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+    handle: tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
     reader_wait: Duration,
 ) -> Result<(u64, u64, u64), String> {
     let sample = handle
@@ -693,7 +692,7 @@ fn retained_storage_page_counts(
 }
 
 fn retained_storage_table_bytes(
-    handle: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+    handle: tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
     reader_wait: Duration,
 ) -> Result<Vec<(String, u64)>, String> {
     let samples = handle

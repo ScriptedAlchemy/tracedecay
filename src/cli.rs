@@ -1064,15 +1064,6 @@ pub enum MigrateAction {
         #[arg(long)]
         restore: String,
     },
-    /// Remove old source artifacts after a verified manifest-backed migration.
-    CleanupSources {
-        /// Manifest path to clean up.
-        #[arg(long)]
-        manifest: String,
-        /// Confirmation token recorded in the manifest being cleaned up.
-        #[arg(long = "confirm-token")]
-        confirm_token: String,
-    },
 }
 
 #[derive(Subcommand)]

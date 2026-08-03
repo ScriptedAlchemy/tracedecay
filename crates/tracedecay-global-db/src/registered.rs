@@ -1,8 +1,8 @@
 use std::future::Future;
 use std::path::Path;
 #[cfg(test)]
-use tracedecay_rusqlite_runtime::migration_sql::{
-    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+use tracedecay_rusqlite_runtime::exact_sql::{
+    ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
 };
 
 use tracedecay_runtime_core::{
@@ -50,7 +50,7 @@ impl RegisteredWorkApplicationServicesV1 {
 }
 
 /// PR17 workflow definition/activation and task-handoff-token services over
-/// the same registered Work migration-SQL channel as [`RegisteredWorkApplicationServicesV1`].
+/// the same registered Work exact-SQL channel as [`RegisteredWorkApplicationServicesV1`].
 /// This is not a second Work authority: [`WorkflowSqliteAuthority`] installs its
 /// tables through the exact handle `WorkSqliteStorage` owns.
 ///
@@ -291,7 +291,7 @@ impl RegisteredGlobalDb {
     {
         let handle = self
             .runtime
-            .authorized_migration_sql_handle(self.authority.clone())
+            .authorized_exact_sql_handle(self.authority.clone())
             .map_err(|error| {
                 registered_error("attach registered Work storage", format!("{error:?}"))
             })?;
@@ -311,7 +311,7 @@ impl RegisteredGlobalDb {
     > {
         let handle = self
             .runtime
-            .authorized_migration_sql_handle(self.authority.clone())
+            .authorized_exact_sql_handle(self.authority.clone())
             .map_err(|error| {
                 registered_error(
                     "attach registered authorized scope-set storage",
@@ -342,7 +342,7 @@ impl RegisteredGlobalDb {
     }
 
     /// Attaches the PR17 workflow-definition/task-handoff authority over the
-    /// registered Work migration-SQL handle. Installs `workflow_*` tables
+    /// registered Work exact-SQL handle. Installs `workflow_*` tables
     /// idempotently through the same handle `work_storage` validates.
     pub fn workflow_storage(
         &self,
@@ -374,7 +374,7 @@ impl RegisteredGlobalDb {
     pub fn storage_telemetry_handle(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<
-        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+        tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle,
     > {
         self.runtime.telemetry_read_handle().map_err(|error| {
             registered_error(
@@ -490,7 +490,7 @@ impl RegisteredGlobalDb {
     }
 }
 
-// `impl MigrationSqlWriteAuthority for DatabaseAuthority` moved into
+// `impl ExactSqlWriteAuthority for DatabaseAuthority` moved into
 // `tracedecay_runtime_core::db::access`: both the trait and the type are
 // now foreign to this crate, so the orphan rule forbids it here.
 
@@ -771,7 +771,7 @@ fn registered_connection(
 ) -> tracedecay_runtime_core::errors::Result<Connection> {
     validate_registered_locator(runtime, expected_binding, expected_locator, authority)?;
     let handle = runtime
-        .authorized_migration_sql_handle(authority.clone())
+        .authorized_exact_sql_handle(authority.clone())
         .map_err(|error| {
             registered_error(
                 "attach registered global database runtime",
@@ -946,8 +946,8 @@ mod tests {
         gate: Arc<AuthorityGate>,
     }
 
-    impl MigrationSqlWriteAuthority for GatedAuthority {
-        fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+    impl ExactSqlWriteAuthority for GatedAuthority {
+        fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
             {
                 let mut state = self.gate.state.lock().unwrap();
                 if state.armed {
@@ -959,7 +959,7 @@ mod tests {
                         .wait_timeout_while(state, Duration::from_secs(5), |state| !state.released)
                         .unwrap();
                     if timeout.timed_out() && !state_after_wait.released {
-                        return Err(MigrationSqlError::AuthorityDenied(
+                        return Err(ExactSqlError::AuthorityDenied(
                             "test authority gate timed out".to_owned(),
                         ));
                     }

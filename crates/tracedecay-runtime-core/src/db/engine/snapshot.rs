@@ -1,15 +1,15 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlReadSnapshot;
+use tracedecay_rusqlite_runtime::exact_sql::ExactSqlReadSnapshot;
 
 use super::{IntoParams, Result, Rows, Value, connection::statement};
 
 pub struct ReadSnapshot {
-    runtime: Arc<Mutex<MigrationSqlReadSnapshot>>,
+    runtime: Arc<Mutex<ExactSqlReadSnapshot>>,
 }
 
 impl ReadSnapshot {
-    pub(super) fn from_runtime(runtime: MigrationSqlReadSnapshot) -> Self {
+    pub(super) fn from_runtime(runtime: ExactSqlReadSnapshot) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
         }
@@ -43,11 +43,11 @@ impl ReadSnapshot {
 fn lock_runtime<T>(runtime: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
     runtime
         .lock()
-        .map_err(|_| super::Error::Runtime("migration SQL read snapshot lock poisoned".to_owned()))
+        .map_err(|_| super::Error::Runtime("exact SQL read snapshot lock poisoned".to_owned()))
 }
 
 fn join_error(error: tokio::task::JoinError) -> super::Error {
-    super::Error::Runtime(format!("migration SQL read snapshot task failed: {error}"))
+    super::Error::Runtime(format!("exact SQL read snapshot task failed: {error}"))
 }
 
 #[cfg(test)]
@@ -68,6 +68,6 @@ mod tests {
         let Err(Error::Runtime(message)) = result else {
             panic!("poisoned snapshot lock must return a runtime error");
         };
-        assert_eq!(message, "migration SQL read snapshot lock poisoned");
+        assert_eq!(message, "exact SQL read snapshot lock poisoned");
     }
 }

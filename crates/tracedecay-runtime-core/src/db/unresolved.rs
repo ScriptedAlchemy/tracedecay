@@ -268,7 +268,7 @@ mod tests {
     /// A first index of a real repository leaves far more unresolved references
     /// than the `SQLite` runtime will materialize for one query, and the
     /// runtime refuses an oversized query outright instead of truncating it —
-    /// which failed branch sync with "migration SQL query materialization
+    /// which failed branch sync with "exact SQL query materialization
     /// exceeded its limit (operation: `get_unresolved_refs`)".
     ///
     /// Both directions matter: the whole-table statement the read used to

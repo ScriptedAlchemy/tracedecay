@@ -2,10 +2,9 @@ use std::{sync::Arc, time::Duration};
 
 use tracedecay_store::OperationPriorityV1;
 
-use tracedecay_rusqlite_runtime::migration_sql::{
-    MigrationSqlBatchResult, MigrationSqlExecuteResult, MigrationSqlHandle,
-    MigrationSqlReadSnapshot, MigrationSqlRows, MigrationSqlStatement,
-    MigrationSqlTransaction as RuntimeTransaction,
+use tracedecay_rusqlite_runtime::exact_sql::{
+    ExactSqlBatchResult, ExactSqlExecuteResult, ExactSqlHandle, ExactSqlReadSnapshot, ExactSqlRows,
+    ExactSqlStatement, ExactSqlTransaction as RuntimeTransaction,
 };
 pub use tracedecay_rusqlite_runtime::reader::{ReaderPoolSnapshot, ReaderPoolState};
 
@@ -16,24 +15,21 @@ use super::{IntoParams, ReadSnapshot, Result, Rows, Transaction, TransactionBeha
 const READER_WAIT: Duration = Duration::from_secs(5);
 
 pub(super) trait Runtime: Send + Sync {
-    fn execute(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlExecuteResult>;
+    fn execute(&self, statement: ExactSqlStatement) -> Result<ExactSqlExecuteResult>;
     fn query(
         &self,
-        statement: MigrationSqlStatement,
+        statement: ExactSqlStatement,
         priority: OperationPriorityV1,
-    ) -> Result<MigrationSqlRows>;
-    fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows>;
-    fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult>;
+    ) -> Result<ExactSqlRows>;
+    fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows>;
+    fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult>;
     fn repair_incremental_auto_vacuum(&self) -> Result<()>;
     #[cfg(any(test, feature = "test-helpers"))]
-    fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
+    fn validate(&self, statement: ExactSqlStatement) -> Result<()>;
     #[cfg(any(test, feature = "test-helpers"))]
     fn last_insert_rowid(&self) -> i64;
-    fn begin_read_snapshot(
-        &self,
-        priority: OperationPriorityV1,
-    ) -> Result<MigrationSqlReadSnapshot>;
-    fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
+    fn begin_read_snapshot(&self, priority: OperationPriorityV1) -> Result<ExactSqlReadSnapshot>;
+    fn begin_health_read_snapshot(&self) -> Result<ExactSqlReadSnapshot>;
     fn reader_pool_occupancy(&self) -> Option<ReaderPoolSnapshot>;
     #[cfg(any(test, feature = "test-helpers"))]
     fn begin_deferred(&self) -> Result<RuntimeTransaction>;
@@ -41,25 +37,25 @@ pub(super) trait Runtime: Send + Sync {
     fn begin_authorized_long_lease_immediate(&self) -> Result<RuntimeTransaction>;
 }
 
-impl Runtime for MigrationSqlHandle {
-    fn execute(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlExecuteResult> {
+impl Runtime for ExactSqlHandle {
+    fn execute(&self, statement: ExactSqlStatement) -> Result<ExactSqlExecuteResult> {
         self.execute(statement).map_err(Into::into)
     }
 
     fn query(
         &self,
-        statement: MigrationSqlStatement,
+        statement: ExactSqlStatement,
         priority: OperationPriorityV1,
-    ) -> Result<MigrationSqlRows> {
+    ) -> Result<ExactSqlRows> {
         self.query_with_priority(statement, priority, READER_WAIT)
             .map_err(Into::into)
     }
 
-    fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows> {
+    fn checkpoint_wal_truncate(&self) -> Result<ExactSqlRows> {
         self.checkpoint_wal_truncate().map_err(Into::into)
     }
 
-    fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult> {
+    fn execute_batch(&self, sql: String) -> Result<ExactSqlBatchResult> {
         self.execute_batch(sql).map_err(Into::into)
     }
 
@@ -68,7 +64,7 @@ impl Runtime for MigrationSqlHandle {
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
-    fn validate(&self, statement: MigrationSqlStatement) -> Result<()> {
+    fn validate(&self, statement: ExactSqlStatement) -> Result<()> {
         self.validate(statement).map_err(Into::into)
     }
 
@@ -77,15 +73,12 @@ impl Runtime for MigrationSqlHandle {
         self.last_insert_rowid()
     }
 
-    fn begin_read_snapshot(
-        &self,
-        priority: OperationPriorityV1,
-    ) -> Result<MigrationSqlReadSnapshot> {
+    fn begin_read_snapshot(&self, priority: OperationPriorityV1) -> Result<ExactSqlReadSnapshot> {
         self.begin_read_snapshot_with_priority(priority, READER_WAIT)
             .map_err(Into::into)
     }
 
-    fn begin_health_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot> {
+    fn begin_health_read_snapshot(&self) -> Result<ExactSqlReadSnapshot> {
         self.begin_health_read_snapshot(READER_WAIT)
             .map_err(Into::into)
     }
@@ -152,7 +145,7 @@ impl ReadConnection {
 }
 
 impl Connection {
-    pub fn attach(runtime: MigrationSqlHandle) -> Self {
+    pub fn attach(runtime: ExactSqlHandle) -> Self {
         Self {
             runtime: Arc::new(runtime),
             read_priority: OperationPriorityV1::Foreground,
@@ -331,9 +324,10 @@ impl Connection {
     /// Reserved for schema installation on a fresh or index-less store and for
     /// full-index bulk replacement — writes that legitimately outlive one fixed
     /// lease while continuously making progress. It steps no store forward from
-    /// an older shape. Only its explicit schema-step methods may bypass the
-    /// ordinary per-statement deadline; all other operations retain ordinary
-    /// bounds, and idleness, shutdown, and authority revocation still cancel.
+    /// an older shape. Only its explicit authority-revalidated batch may bypass
+    /// the ordinary per-statement deadline; all other operations retain
+    /// ordinary bounds, and idleness, shutdown, and authority revocation still
+    /// cancel.
     pub async fn authorized_long_lease_transaction(&self) -> Result<Transaction> {
         let runtime = Arc::clone(&self.runtime);
         tokio::task::spawn_blocking(move || runtime.begin_authorized_long_lease_immediate())
@@ -344,14 +338,14 @@ impl Connection {
 }
 
 fn join_error(error: tokio::task::JoinError) -> super::Error {
-    super::Error::Runtime(format!("migration SQL worker task failed: {error}"))
+    super::Error::Runtime(format!("exact SQL worker task failed: {error}"))
 }
 
-pub(super) fn statement<P>(sql: &str, params: P) -> Result<MigrationSqlStatement>
+pub(super) fn statement<P>(sql: &str, params: P) -> Result<ExactSqlStatement>
 where
     P: IntoParams,
 {
-    MigrationSqlStatement::new(
+    ExactSqlStatement::new(
         sql.to_owned(),
         params.into_params()?.into_iter().map(Into::into).collect(),
     )
@@ -362,16 +356,16 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use tracedecay_rusqlite_runtime::migration_sql::{
-        MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    use tracedecay_rusqlite_runtime::exact_sql::{
+        ExactSqlError, ExactSqlWriteAuthority, ExactSqlWriteIntent,
     };
 
     use super::super::{Error, TestConnection};
 
     struct AllowWrites;
 
-    impl MigrationSqlWriteAuthority for AllowWrites {
-        fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+    impl ExactSqlWriteAuthority for AllowWrites {
+        fn verify(&self, _intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError> {
             Ok(())
         }
     }

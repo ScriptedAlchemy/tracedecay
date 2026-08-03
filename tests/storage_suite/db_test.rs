@@ -331,7 +331,7 @@ async fn test_unresolved_refs() {
 /// than the `SQLite` runtime will materialize for a single query, and the
 /// runtime rejects an oversized query outright instead of truncating it.
 /// Reading them back must page, or branch sync fails with
-/// "migration SQL query materialization exceeded its limit".
+/// "exact SQL query materialization exceeded its limit".
 #[tokio::test]
 async fn unresolved_refs_read_back_beyond_the_runtime_query_limit() {
     /// The `SQLite` runtime refuses a single query over this many rows.

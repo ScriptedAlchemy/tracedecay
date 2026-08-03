@@ -741,7 +741,7 @@ async fn open_registered_test_database(
     )
     .await?;
     // `Database::conn()` is the retained *reader*; schema DDL has to run on the
-    // serialized writer lane or the migration SQL channel reports
+    // serialized writer lane or the exact SQL channel reports
     // `WriterUnavailable`. Converging here (rather than relying solely on the
     // kernel's initialise-time port call) keeps the fixture correct for an
     // already-materialised store too.

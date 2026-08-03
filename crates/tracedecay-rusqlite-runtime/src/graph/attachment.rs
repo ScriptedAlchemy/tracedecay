@@ -18,7 +18,7 @@ use crate::{
     CheckpointOutcome, CheckpointRequest, ExistingWriterLocator, OnlineBackupReceipt,
     PersistentWriter, RuntimeWriteAuthority, WriterStartError, WriterState,
     connection::{OpenedDatabaseFile, OpenedDatabaseFileError},
-    migration_sql::{MigrationSqlError, MigrationSqlHandle},
+    exact_sql::{ExactSqlError, ExactSqlHandle},
     reader::{ExistingReaderLocator, ReaderAcquireError, ReaderPool, ReaderStartError},
     writer::WriterPersistence,
 };
@@ -434,19 +434,19 @@ impl GraphRuntimePhysicalAttachment {
             .map_err(|error| error.to_string())
     }
 
-    pub fn migration_sql_handle(&self) -> Result<MigrationSqlHandle, MigrationSqlError> {
+    pub fn exact_sql_handle(&self) -> Result<ExactSqlHandle, ExactSqlError> {
         let state = self.lock_state();
         if !state.admission_open || state.closed {
-            return Err(MigrationSqlError::ReaderUnavailable(
+            return Err(ExactSqlError::ReaderUnavailable(
                 "graph physical attachment is closed".to_owned(),
             ));
         }
         let readers = state.readers.as_ref().ok_or_else(|| {
-            MigrationSqlError::ReaderUnavailable("graph readers are unavailable".to_owned())
+            ExactSqlError::ReaderUnavailable("graph readers are unavailable".to_owned())
         })?;
         match state.writer.as_deref() {
-            Some(writer) => MigrationSqlHandle::attach(writer, readers),
-            None => Ok(MigrationSqlHandle::attach_read_only(readers)),
+            Some(writer) => ExactSqlHandle::attach(writer, readers),
+            None => Ok(ExactSqlHandle::attach_read_only(readers)),
         }
     }
 
