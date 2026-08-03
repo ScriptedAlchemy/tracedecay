@@ -536,6 +536,8 @@ struct CargoDependency {
     name: String,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    rename: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -722,21 +724,19 @@ fn parse_architecture_contract(
         for dependency in &package.dependencies {
             let dependency_name = dependency.name.as_str();
             let dependency_kind = dependency.kind.as_deref().unwrap_or("normal");
-            let is_production = !matches!(dependency.kind.as_deref(), Some("dev" | "build"));
+            let is_production = !matches!(dependency.kind.as_deref(), Some("dev"));
 
             if dependency_name.eq_ignore_ascii_case(root_name) && !is_root {
                 violations.insert(format!(
                     "non-root package `{source_name}` depends directly on workspace root `{root_name}`"
                 ));
             }
-            if dependency_name.to_ascii_lowercase().contains("rusqlite") {
+            let dependency_alias = dependency.rename.as_deref().unwrap_or_default();
+            if dependency_name.to_ascii_lowercase().contains("rusqlite")
+                || dependency_alias.to_ascii_lowercase().contains("rusqlite")
+            {
                 violations.insert(format!(
                     "package `{source_name}` has forbidden direct dependency `{dependency_name}` ({dependency_kind})"
-                ));
-            }
-            if ARCHITECTURE_OMITTED_MEMBERS.contains(&dependency_name) {
-                violations.insert(format!(
-                    "package `{source_name}` depends on omitted workspace crate `{dependency_name}`"
                 ));
             }
 
@@ -963,6 +963,99 @@ fn metadata_layout_includes_workspace_targets_and_scopes_tracked_sources() {
         ]
         .into_iter()
         .collect()
+    );
+}
+
+#[test]
+fn architecture_metadata_enforces_dependency_kinds_and_aliases() {
+    let repository = tempfile::tempdir().expect("create architecture metadata fixture");
+    let root_manifest = repository.path().join("Cargo.toml");
+    let mut packages = vec![serde_json::json!({
+        "id": "root",
+        "name": "tracedecay",
+        "manifest_path": root_manifest,
+        "dependencies": [],
+        "targets": []
+    })];
+    let mut workspace_members = vec!["root".to_string()];
+
+    for (index, name) in ARCHITECTURE_NON_ROOT_MEMBERS.iter().enumerate() {
+        let id = format!("member-{index}");
+        let dependencies = match *name {
+            "tracedecay-automation" => serde_json::json!([
+                { "name": "tracedecay-api", "kind": "dev" },
+                { "name": "rusqlite", "rename": "sqlite_alias", "kind": "dev" }
+            ]),
+            "tracedecay-capture" => serde_json::json!([
+                { "name": "sqlite-driver", "rename": "rusqlite_alias", "kind": "dev" }
+            ]),
+            "tracedecay-code-extraction" => serde_json::json!([
+                { "name": "tracedecay-runtime-core", "kind": "dev" }
+            ]),
+            "tracedecay-code-index" => serde_json::json!([
+                { "name": "tracedecay-runtime-core", "kind": "build" }
+            ]),
+            "tracedecay-domain" => serde_json::json!([
+                { "name": "tracedecay", "kind": null }
+            ]),
+            _ => serde_json::json!([]),
+        };
+        let manifest_path = repository
+            .path()
+            .join("crates")
+            .join(name)
+            .join("Cargo.toml");
+        packages.push(serde_json::json!({
+            "id": id,
+            "name": name,
+            "manifest_path": manifest_path,
+            "dependencies": dependencies,
+            "targets": []
+        }));
+        workspace_members.push(format!("member-{index}"));
+    }
+
+    packages.push(serde_json::json!({
+        "id": "omitted",
+        "name": "tracedecay-api",
+        "manifest_path": repository.path().join("crates/tracedecay-api/Cargo.toml"),
+        "dependencies": [],
+        "targets": []
+    }));
+    workspace_members.push("omitted".to_string());
+
+    let metadata = serde_json::json!({
+        "packages": packages,
+        "workspace_members": workspace_members
+    });
+    let violations = parse_architecture_contract(
+        repository.path(),
+        &serde_json::to_vec(&metadata).expect("serialize architecture metadata fixture"),
+    )
+    .expect("parse architecture metadata fixture");
+
+    assert!(violations.contains(
+        "upward production edge: `tracedecay-code-index` (L1) -> `tracedecay-runtime-core` (L2)"
+    ));
+    assert!(!violations.iter().any(|violation| {
+        violation.contains("tracedecay-code-extraction") && violation.contains("upward")
+    }));
+    assert!(violations.contains(
+        "non-root package `tracedecay-domain` depends directly on workspace root `tracedecay`"
+    ));
+    assert!(violations.iter().any(|violation| {
+        violation.contains("tracedecay-automation")
+            && violation.contains("forbidden direct dependency `rusqlite` (dev)")
+    }));
+    assert!(violations.iter().any(|violation| {
+        violation.contains("tracedecay-capture")
+            && violation.contains("forbidden direct dependency `sqlite-driver` (dev)")
+    }));
+    assert!(violations.contains("omitted workspace member is present: tracedecay-api"));
+    assert!(
+        !violations
+            .iter()
+            .any(|violation| violation.contains("depends on omitted workspace crate"))
     );
 }
 
