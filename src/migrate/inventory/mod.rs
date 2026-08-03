@@ -1,6 +1,8 @@
 mod artifacts;
 mod hermes;
-mod model;
+mod model {
+    pub use tracedecay_migrate::inventory::*;
+}
 mod project;
 mod sqlite;
 

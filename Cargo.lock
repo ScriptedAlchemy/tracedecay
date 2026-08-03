@@ -4904,6 +4904,7 @@ dependencies = [
  "tracedecay-domain",
  "tracedecay-jsonrpc",
  "tracedecay-lsp",
+ "tracedecay-migrate",
  "tracedecay-runtime-core",
  "tracing",
  "tree-sitter",
@@ -4976,6 +4977,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "tracedecay-migrate"
+version = "0.0.67"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
