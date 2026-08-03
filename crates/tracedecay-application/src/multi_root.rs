@@ -1,14 +1,15 @@
 //! Central authorization and immutable identity for multi-root scope sets.
 
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RootGenerationV1, RootScopeOutcomeV1, ScopeOutcome,
-    ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UtcMicros,
-    canonical_sha256,
+    ScopePartialReasonV1, ScopeSetId, ScopeSetRevision, ScopeUnavailableReasonV1, UserProfileId,
+    UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -34,15 +35,113 @@ impl MultiRootScopeSetReadRequestV1 {
     }
 }
 
+/// Shared physical profile-store locator supplied by the profile authority.
+///
+/// The typed profile and store IDs select this locator. It never derives an
+/// identity from a path, CWD, active graph, or mutable project alias.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct SharedProfileStoreLocatorV1 {
+    pub profile_id: UserProfileId,
+    pub store_id: String,
+}
+
+impl SharedProfileStoreLocatorV1 {
+    pub fn new(
+        profile_id: UserProfileId,
+        store_id: impl Into<String>,
+    ) -> Result<Self, MultiRootQueryError> {
+        let locator = Self {
+            profile_id,
+            store_id: store_id.into(),
+        };
+        locator.validate()?;
+        Ok(locator)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiRootQueryError> {
+        self.profile_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        validate_locator_text(&self.store_id, "profile store id")
+    }
+}
+
+/// Exact registered root locator retained with an authorized scope.
+///
+/// `canonical_root` is routing evidence for the already-resolved
+/// [`ResolvedScope`]. It cannot replace or manufacture that scope identity.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredRootLocatorV1 {
+    pub project_id: ProjectId,
+    pub profile: SharedProfileStoreLocatorV1,
+    pub canonical_root: PathBuf,
+}
+
+impl RegisteredRootLocatorV1 {
+    pub fn new(
+        project_id: ProjectId,
+        profile_id: UserProfileId,
+        store_id: impl Into<String>,
+        canonical_root: impl Into<PathBuf>,
+    ) -> Result<Self, MultiRootQueryError> {
+        let locator = Self {
+            project_id,
+            profile: SharedProfileStoreLocatorV1::new(profile_id, store_id)?,
+            canonical_root: canonical_root.into(),
+        };
+        locator.validate()?;
+        Ok(locator)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiRootQueryError> {
+        self.project_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        self.profile.validate()?;
+        validate_absolute_root(&self.canonical_root)
+    }
+}
+
+/// Exact registered-root selector accepted by scope-set CAS.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RegisteredRootSelectorV1 {
+    pub project_id: ProjectId,
+    pub root: PathBuf,
+}
+
+impl RegisteredRootSelectorV1 {
+    pub fn new(
+        project_id: ProjectId,
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, MultiRootQueryError> {
+        let selector = Self {
+            project_id,
+            root: root.into(),
+        };
+        selector.validate()?;
+        Ok(selector)
+    }
+
+    pub fn validate(&self) -> Result<(), MultiRootQueryError> {
+        self.project_id
+            .validate()
+            .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
+        validate_absolute_root(&self.root)
+    }
+}
+
 /// Canonical external selector for creating or updating an authorized scope
-/// set. Callers select registered projects only; filesystem roots, CWD hints,
-/// actor ids, and grants are resolved and minted by the daemon.
+/// set. Every member names one exact registered root; project-only selection
+/// cannot silently widen to an active or first-mounted graph.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MultiRootScopeSetCasRequestV1 {
     pub scope_set_id: ScopeSetId,
     pub expected_revision: Option<ScopeSetRevision>,
-    pub project_ids: Vec<ProjectId>,
+    pub roots: Vec<RegisteredRootSelectorV1>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -63,7 +162,7 @@ impl MultiRootScopeSetCasRequestV1 {
     pub fn new(
         scope_set_id: ScopeSetId,
         expected_revision: Option<ScopeSetRevision>,
-        mut project_ids: Vec<ProjectId>,
+        mut roots: Vec<RegisteredRootSelectorV1>,
     ) -> Result<Self, MultiRootQueryError> {
         scope_set_id
             .validate()
@@ -73,14 +172,19 @@ impl MultiRootScopeSetCasRequestV1 {
                 .validate()
                 .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
         }
-        project_ids.sort();
-        if project_ids.is_empty() || project_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        for root in &roots {
+            root.validate()?;
+        }
+        roots.sort_by(|left, right| {
+            (&left.project_id, &left.root).cmp(&(&right.project_id, &right.root))
+        });
+        if roots.is_empty() || roots.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(MultiRootQueryError::RootSetMismatch);
         }
         Ok(Self {
             scope_set_id,
             expected_revision,
-            project_ids,
+            roots,
         })
     }
 
@@ -88,13 +192,39 @@ impl MultiRootScopeSetCasRequestV1 {
         if Self::new(
             self.scope_set_id.clone(),
             self.expected_revision,
-            self.project_ids.clone(),
+            self.roots.clone(),
         )? != *self
         {
             return Err(MultiRootQueryError::RootSetMismatch);
         }
         Ok(())
     }
+}
+
+fn validate_locator_text(value: &str, field: &'static str) -> Result<(), MultiRootQueryError> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > 512
+        || value.chars().any(char::is_control)
+    {
+        return Err(MultiRootQueryError::Invalid(format!(
+            "{field} is not canonical"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_absolute_root(root: &Path) -> Result<(), MultiRootQueryError> {
+    if !root.is_absolute()
+        || root
+            .components()
+            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+    {
+        return Err(MultiRootQueryError::Invalid(
+            "registered root must be absolute and lexically normalized".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// Closed federated read families. The family is typed while its existing
@@ -187,15 +317,89 @@ pub enum AuthorizedScopeSetError {
     Invalid(String),
 }
 
+/// One exact application scope paired with its registered physical locator.
+///
+/// The scope remains the identity authority. The locator is retained only so
+/// a later read or restart can reopen the exact registered root without an
+/// active-graph or CWD fallback.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizedRoot {
+    scope: ResolvedScope,
+    locator: Option<RegisteredRootLocatorV1>,
+}
+
+impl AuthorizedRoot {
+    fn resolved(scope: ResolvedScope) -> Result<Self, AuthorizedScopeSetError> {
+        scope
+            .validate()
+            .map_err(|error| AuthorizedScopeSetError::Invalid(error.to_string()))?;
+        Ok(Self {
+            scope,
+            locator: None,
+        })
+    }
+
+    fn registered(
+        scope: ResolvedScope,
+        locator: RegisteredRootLocatorV1,
+    ) -> Result<Self, AuthorizedScopeSetError> {
+        scope
+            .validate()
+            .map_err(|error| AuthorizedScopeSetError::Invalid(error.to_string()))?;
+        locator
+            .validate()
+            .map_err(|error| AuthorizedScopeSetError::Invalid(error.to_string()))?;
+        if scope.project_id != locator.project_id {
+            return Err(AuthorizedScopeSetError::Invalid(
+                "registered locator project does not match its resolved scope".to_owned(),
+            ));
+        }
+        Ok(Self {
+            scope,
+            locator: Some(locator),
+        })
+    }
+
+    pub fn scope(&self) -> &ResolvedScope {
+        &self.scope
+    }
+
+    pub fn locator(&self) -> Option<&RegisteredRootLocatorV1> {
+        self.locator.as_ref()
+    }
+}
+
+/// Ephemeral authorization input narrowed into one [`AuthorizedRoot`].
+///
+/// There is no parallel request-context model: admission consumes the
+/// canonical application [`RequestContext`] and retains only its exact scope.
+#[derive(Clone, Debug)]
+pub struct AuthorizedRootAdmission {
+    context: RequestContext,
+    locator: RegisteredRootLocatorV1,
+}
+
+impl AuthorizedRootAdmission {
+    pub fn new(
+        context: RequestContext,
+        locator: RegisteredRootLocatorV1,
+    ) -> Result<Self, AuthorizedScopeSetError> {
+        AuthorizedRoot::registered(context.scope().clone(), locator.clone())?;
+        Ok(Self { context, locator })
+    }
+}
+
 /// Immutable canonical set of exact roots admitted by their existing request
-/// contexts. Paths and mutable aliases never participate in this authority.
+/// contexts. A registered locator participates only as frozen reopening
+/// evidence; its paired [`ResolvedScope`] remains the root identity authority.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AuthorizedScopeSet {
     scope_set_id: ScopeSetId,
     revision: ScopeSetRevision,
     actor_id: ActorId,
-    roots: Vec<ResolvedScope>,
+    roots: Vec<AuthorizedRoot>,
     digest: ManifestDigest,
 }
 
@@ -205,7 +409,7 @@ struct AuthorizedScopeSetWire {
     scope_set_id: ScopeSetId,
     revision: ScopeSetRevision,
     actor_id: ActorId,
-    roots: Vec<ResolvedScope>,
+    roots: Vec<AuthorizedRoot>,
     digest: ManifestDigest,
 }
 
@@ -215,9 +419,13 @@ impl<'de> Deserialize<'de> for AuthorizedScopeSet {
         D: Deserializer<'de>,
     {
         let wire = AuthorizedScopeSetWire::deserialize(deserializer)?;
-        let set =
-            Self::from_resolved_roots(wire.scope_set_id, wire.revision, wire.actor_id, wire.roots)
-                .map_err(serde::de::Error::custom)?;
+        let set = Self::from_authorized_roots(
+            wire.scope_set_id,
+            wire.revision,
+            wire.actor_id,
+            wire.roots,
+        )
+        .map_err(serde::de::Error::custom)?;
         if set.digest != wire.digest {
             return Err(serde::de::Error::custom(
                 "authorized scope-set digest does not match its exact roots",
@@ -228,11 +436,11 @@ impl<'de> Deserialize<'de> for AuthorizedScopeSet {
 }
 
 impl AuthorizedScopeSet {
-    fn from_resolved_roots(
+    fn from_authorized_roots(
         scope_set_id: ScopeSetId,
         revision: ScopeSetRevision,
         actor_id: ActorId,
-        mut roots: Vec<ResolvedScope>,
+        mut roots: Vec<AuthorizedRoot>,
     ) -> Result<Self, AuthorizedScopeSetError> {
         scope_set_id
             .validate()
@@ -247,28 +455,56 @@ impl AuthorizedScopeSet {
             return Err(AuthorizedScopeSetError::Empty);
         }
         for root in &roots {
-            root.validate()
-                .map_err(|error| AuthorizedScopeSetError::Invalid(error.to_string()))?;
+            match &root.locator {
+                Some(locator) => {
+                    AuthorizedRoot::registered(root.scope.clone(), locator.clone())?;
+                }
+                None => {
+                    AuthorizedRoot::resolved(root.scope.clone())?;
+                }
+            }
         }
         roots.sort_by(|left, right| {
             (
-                left.project_id.as_str(),
-                left.repository_id.as_str(),
-                left.worktree_id.as_str(),
-                left.reference.as_ref().map(|reference| reference.as_str()),
+                left.scope.project_id.as_str(),
+                left.scope.repository_id.as_str(),
+                left.scope.worktree_id.as_str(),
+                left.scope
+                    .reference
+                    .as_ref()
+                    .map(|reference| reference.as_str()),
+                left.locator.as_ref().map(|locator| &locator.canonical_root),
             )
                 .cmp(&(
-                    right.project_id.as_str(),
-                    right.repository_id.as_str(),
-                    right.worktree_id.as_str(),
-                    right.reference.as_ref().map(|reference| reference.as_str()),
+                    right.scope.project_id.as_str(),
+                    right.scope.repository_id.as_str(),
+                    right.scope.worktree_id.as_str(),
+                    right
+                        .scope
+                        .reference
+                        .as_ref()
+                        .map(|reference| reference.as_str()),
+                    right
+                        .locator
+                        .as_ref()
+                        .map(|locator| &locator.canonical_root),
                 ))
         });
         if roots
             .windows(2)
-            .any(|pair| pair[0].scope_digest == pair[1].scope_digest)
+            .any(|pair| pair[0].scope.scope_digest == pair[1].scope.scope_digest)
         {
             return Err(AuthorizedScopeSetError::DuplicateRoot);
+        }
+        let profile = roots[0].locator.as_ref().map(|locator| &locator.profile);
+        if roots
+            .iter()
+            .any(|root| root.locator.as_ref().map(|locator| &locator.profile) != profile)
+        {
+            return Err(AuthorizedScopeSetError::Invalid(
+                "authorized roots must either all be registered under one profile store locator or all be pre-resolved"
+                    .to_owned(),
+            ));
         }
         let digest = canonical_sha256(&(
             AUTHORIZED_SCOPE_SET_DIGEST_DOMAIN_V1,
@@ -299,7 +535,7 @@ impl AuthorizedScopeSet {
         &self.actor_id
     }
 
-    pub fn roots(&self) -> &[ResolvedScope] {
+    pub fn roots(&self) -> &[AuthorizedRoot] {
         &self.roots
     }
 
@@ -319,7 +555,7 @@ impl AuthorizedScopeSet {
     }
 
     pub fn validate(&self) -> Result<(), AuthorizedScopeSetError> {
-        let canonical = Self::from_resolved_roots(
+        let canonical = Self::from_authorized_roots(
             self.scope_set_id.clone(),
             self.revision,
             self.actor_id.clone(),
@@ -369,8 +605,47 @@ impl AuthorizedScopeSetAuthority {
             actor,
             contexts
                 .into_iter()
-                .map(|context| context.scope().clone())
-                .collect(),
+                .map(|context| AuthorizedRoot::resolved(context.scope().clone()))
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_registered(
+        scope_set_id: ScopeSetId,
+        revision: ScopeSetRevision,
+        admissions: Vec<AuthorizedRootAdmission>,
+        capability_id: &CapabilityId,
+        use_case_id: &UseCaseId,
+        observed_at: UtcMicros,
+    ) -> Result<AuthorizedScopeSet, AuthorizedScopeSetError> {
+        let actor = admissions
+            .first()
+            .map(|admission| admission.context.actor())
+            .cloned()
+            .ok_or(AuthorizedScopeSetError::Empty)?;
+        if admissions
+            .iter()
+            .any(|admission| admission.context.actor() != &actor)
+        {
+            return Err(AuthorizedScopeSetError::MixedActor);
+        }
+        if admissions.iter().any(|admission| {
+            admission.context.admission_at(observed_at) != RequestAdmission::Admitted
+                || !admission.context.allows(capability_id, use_case_id)
+        }) {
+            return Err(AuthorizedScopeSetError::Denied);
+        }
+        Self::authorize_resolved(
+            scope_set_id,
+            revision,
+            actor,
+            admissions
+                .into_iter()
+                .map(|admission| {
+                    AuthorizedRoot::registered(admission.context.scope().clone(), admission.locator)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
         )
     }
 
@@ -378,12 +653,12 @@ impl AuthorizedScopeSetAuthority {
         scope_set_id: ScopeSetId,
         revision: ScopeSetRevision,
         actor: ActorId,
-        roots: Vec<ResolvedScope>,
+        roots: Vec<AuthorizedRoot>,
     ) -> Result<AuthorizedScopeSet, AuthorizedScopeSetError> {
         actor
             .validate()
             .map_err(|error| AuthorizedScopeSetError::Invalid(error.to_string()))?;
-        AuthorizedScopeSet::from_resolved_roots(scope_set_id, revision, actor, roots)
+        AuthorizedScopeSet::from_authorized_roots(scope_set_id, revision, actor, roots)
     }
 }
 
@@ -601,7 +876,8 @@ impl<P> AuthorizedMultiRootQueryService<P> {
         validate_continuation(&request)?;
 
         let mut roots = Vec::with_capacity(request.scope_set.roots().len());
-        for scope in request.scope_set.roots() {
+        for root in request.scope_set.roots() {
+            let scope = root.scope();
             let snapshot = generations
                 .get(&scope.scope_digest)
                 .copied()
@@ -699,7 +975,8 @@ fn validate_contexts<Q>(
             return Err(MultiRootQueryError::Denied);
         }
     }
-    if request.scope_set.roots().iter().any(|scope| {
+    if request.scope_set.roots().iter().any(|root| {
+        let scope = root.scope();
         request
             .root_generations
             .iter()
@@ -740,7 +1017,7 @@ fn validate_generations<Q>(
         .scope_set
         .roots()
         .iter()
-        .any(|scope| !generations.contains_key(&scope.scope_digest))
+        .any(|root| !generations.contains_key(&root.scope().scope_digest))
     {
         return Err(MultiRootQueryError::RootSetMismatch);
     }
