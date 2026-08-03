@@ -107,45 +107,60 @@ fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal
     }
 }
 
-fn attach_execution_receipt(response: &mut JsonRpcResponse, receipt: Value) {
-    if let Some(result) = response.result.as_mut() {
-        let Some(result) = result.as_object_mut() else {
-            tracing::error!("MCP tool result is not an object; execution receipt omitted");
-            return;
-        };
+fn normalize_tool_response(response: JsonRpcResponse) -> JsonRpcResponse {
+    let valid_success =
+        response.result.as_ref().is_some_and(Value::is_object) && response.error.is_none();
+    let valid_error = response.result.is_none() && response.error.is_some();
+    if valid_success || valid_error {
+        return response;
+    }
+    JsonRpcResponse::error_with_data(
+        response.id,
+        ErrorCode::InternalError,
+        "MCP tool response did not contain exactly one object result or error".to_owned(),
+        Some(json!({
+            "reason_code": "tool_response_materialization_invalid",
+            "retryable": false,
+        })),
+    )
+}
+
+fn attach_execution_receipt(mut response: JsonRpcResponse, receipt: Value) -> JsonRpcResponse {
+    if let Some(result) = response.result.as_mut()
+        && let Some(result) = result.as_object_mut()
+    {
         let meta = result.entry("_meta").or_insert_with(|| json!({}));
         if let Some(meta) = meta.as_object_mut() {
             meta.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
         } else {
             *meta = json!({ EXECUTION_RECEIPT_KEY: receipt });
         }
-        return;
+        return response;
     }
-    let Some(error) = response.error.as_mut() else {
-        tracing::error!("MCP tool response has no result or error; execution receipt omitted");
-        return;
-    };
-    let data = error.data.get_or_insert_with(|| json!({}));
-    if let Some(data) = data.as_object_mut() {
-        data.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
-    } else {
-        let original_data = std::mem::take(data);
-        *data = json!({
-            "original_data": original_data,
-            EXECUTION_RECEIPT_KEY: receipt,
-        });
+    if let Some(error) = response.error.as_mut() {
+        let data = error.data.get_or_insert_with(|| json!({}));
+        if let Some(data) = data.as_object_mut() {
+            data.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
+        } else {
+            let original_data = std::mem::take(data);
+            *data = json!({
+                "original_data": original_data,
+                EXECUTION_RECEIPT_KEY: receipt,
+            });
+        }
     }
+    response
 }
 
 pub(super) fn finish_tool_call_response(
-    mut response: JsonRpcResponse,
+    response: JsonRpcResponse,
     timing: &McpToolCallTiming,
     control: Option<&McpToolDispatchControl>,
     terminal: Option<McpToolCallTerminal>,
 ) -> JsonRpcResponse {
+    let response = normalize_tool_response(response);
     let terminal = terminal.unwrap_or_else(|| terminal_for_tool_response(&response));
-    attach_execution_receipt(&mut response, timing.receipt(terminal, control));
-    response
+    attach_execution_receipt(response, timing.receipt(terminal, control))
 }
 
 pub(super) fn finish_early_tool_call_response(
@@ -189,5 +204,15 @@ mod tests {
             .expect("execution receipt");
         assert_eq!(receipt["worker_settlement"], "not_started");
         assert_eq!(receipt["terminal"], "denied");
+    }
+
+    #[test]
+    fn malformed_success_becomes_typed_terminal_error_with_receipt() {
+        let response = JsonRpcResponse::success(json!(1), json!("not an object"));
+        let response = finish_early_tool_call_response(response, McpRequestStart::now());
+        let error = response.error.expect("typed terminal error");
+        let data = error.data.expect("typed terminal data");
+        assert_eq!(data["reason_code"], "tool_response_materialization_invalid");
+        assert_eq!(data[EXECUTION_RECEIPT_KEY]["terminal"], "failed");
     }
 }

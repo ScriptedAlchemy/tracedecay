@@ -641,6 +641,53 @@ mod blocking_git_span_tests {
         );
         ticker.await.expect("ticker joins");
     }
+
+    #[tokio::test]
+    async fn a_blocking_span_is_preemptible_and_reconciled() {
+        let registry = crate::mcp::server::McpRequestRegistry::new();
+        let control = registry
+            .admit(
+                "git-span-cancellation-test",
+                "tracedecay_pr_context",
+                crate::mcp::server::McpRequestStart::now(),
+                crate::mcp::server::McpToolLifecyclePolicy::new(Duration::from_secs(5), true),
+            )
+            .expect("test lifecycle admission");
+        let task_control = control.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let task = tokio::spawn(async move {
+            blocking_git_span(&task_control, move || {
+                let _ = started_tx.send(());
+                release_rx.recv().expect("release blocking git span");
+            })
+            .await
+        });
+        started_rx.await.expect("blocking git span started");
+        assert!(registry.cancel_or_retain("git-span-cancellation-test"));
+
+        let error = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("blocking span cancellation stayed bounded")
+            .expect("blocking span task")
+            .expect_err("blocking span must observe cancellation");
+        assert_eq!(
+            error.mcp_tool_dispatch_context().map(|context| context.0),
+            Some("tool_dispatch_cancelled")
+        );
+
+        release_tx.send(()).expect("release blocking git span");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if control.worker_receipt_snapshot().0.as_str() == "joined" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("blocking span reconciliation");
+    }
 }
 
 // ── Cross-branch tools ─────────────────────────────────────────────────

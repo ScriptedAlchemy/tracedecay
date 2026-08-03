@@ -188,11 +188,21 @@ impl RmcpConnectionAdapter {
             }
         }
         .ok_or_else(|| {
-            response_error(JsonRpcResponse::error(
+            let response = JsonRpcResponse::error(
                 id.clone(),
                 crate::mcp::transport::ErrorCode::InternalError,
                 "MCP request did not produce a response".to_owned(),
-            ))
+            );
+            let response = match tool_name.as_deref() {
+                Some(_) => super::request_receipts::finish_tool_call_response(
+                    response,
+                    &super::request_receipts::McpToolCallTiming::new(started),
+                    dispatch_control.as_ref(),
+                    None,
+                ),
+                None => response,
+            };
+            response_error(response)
         })?;
         if project_tool_call
             && self
