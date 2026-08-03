@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn queued_write_rechecks_authority_on_actor_dequeue() {
     let fixture = fixture('a', 'a');
-    let holder = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let holder = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     let allowed = Arc::new(AtomicBool::new(true));
     let transaction = holder.begin_immediate().unwrap();
     let (reply, receive) = std::sync::mpsc::sync_channel(1);
@@ -13,7 +13,7 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
             .as_ref()
             .unwrap()
             .try_send(WriterCommand::Dispatch {
-                request: MigrationSqlRequest::ExecuteBatch(
+                request: SqlRequest::ExecuteBatch(
                     "CREATE TABLE denied_after_queue (value INTEGER)".to_owned(),
                 ),
                 reply,
@@ -30,7 +30,7 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
         .unwrap()
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::AuthorityDenied(_)));
+    assert!(matches!(error, ExactSqlError::AuthorityDenied(_)));
     let rows = holder
         .query(
             statement(
@@ -41,17 +41,17 @@ fn queued_write_rechecks_authority_on_actor_dequeue() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(0)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }
 
 #[test]
 fn revoked_commit_rolls_back_pinned_transaction() {
     let fixture = fixture('a', 'a');
-    let base = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     base.execute_batch("CREATE TABLE denied_commit (value INTEGER)".to_owned())
         .unwrap();
     let allowed = Arc::new(AtomicBool::new(true));
-    let guarded = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers)
+    let guarded = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
         .unwrap()
         .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::clone(&allowed))))
         .unwrap();
@@ -63,24 +63,24 @@ fn revoked_commit_rolls_back_pinned_transaction() {
     allowed.store(false, Ordering::Release);
     let error = transaction.commit().unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::AuthorityDenied(_)));
+    assert!(matches!(error, ExactSqlError::AuthorityDenied(_)));
     let rows = base
         .query(
             statement("SELECT count(*) FROM denied_commit", vec![]),
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(0)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }
 
 #[test]
 fn revoked_pinned_dispatch_rolls_back_and_releases_writer() {
     let fixture = fixture('a', 'a');
-    let base = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let base = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     base.execute_batch("CREATE TABLE denied_dispatch (value INTEGER)".to_owned())
         .unwrap();
     let allowed = Arc::new(AtomicBool::new(true));
-    let guarded = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers)
+    let guarded = ExactSqlHandle::attach(&fixture.writer, &fixture.readers)
         .unwrap()
         .with_write_authority(Arc::new(AtomicWriteAuthority(Arc::clone(&allowed))))
         .unwrap();
@@ -94,20 +94,20 @@ fn revoked_pinned_dispatch_rolls_back_and_releases_writer() {
         .execute(statement("INSERT INTO denied_dispatch VALUES (2)", vec![]))
         .unwrap_err();
 
-    assert!(matches!(error, MigrationSqlError::AuthorityDenied(_)));
+    assert!(matches!(error, ExactSqlError::AuthorityDenied(_)));
     let rows = base
         .query(
             statement("SELECT count(*) FROM denied_dispatch", vec![]),
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(0)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }
 
 #[test]
 fn pinned_batch_allows_named_savepoint_rollback_and_release() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE savepoint_value (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -130,13 +130,13 @@ fn pinned_batch_allows_named_savepoint_rollback_and_release() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(0)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(0)]);
 }
 
 #[test]
 fn pinned_batch_allows_schema_install_ddl() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE old_name (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -161,13 +161,13 @@ fn pinned_batch_allows_schema_install_ddl() {
             Duration::from_secs(1),
         )
         .unwrap();
-    assert_eq!(rows.rows[0].values, vec![MigrationSqlValue::Integer(1)]);
+    assert_eq!(rows.rows[0].values, vec![ExactSqlValue::Integer(1)]);
 }
 
 #[test]
 fn unpinned_batch_allows_schema_install_ddl() {
     let fixture = fixture('a', 'a');
-    let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+    let channel = ExactSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
     channel
         .execute_batch("CREATE TABLE protected (value INTEGER NOT NULL)".to_owned())
         .unwrap();
@@ -183,7 +183,7 @@ fn unpinned_batch_allows_schema_install_ddl() {
 }
 
 #[test]
-fn migration_guard_restores_authorizer_after_success() {
+fn exact_sql_guard_restores_authorizer_after_success() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
         .authorizer(Some(crate::connection::authorize_writer))
@@ -192,7 +192,7 @@ fn migration_guard_restores_authorizer_after_success() {
         .execute_batch("CREATE TABLE protected (value INTEGER)")
         .unwrap();
 
-    with_migration_guard(
+    with_exact_sql_guard(
         &connection,
         false,
         false,
@@ -207,7 +207,7 @@ fn migration_guard_restores_authorizer_after_success() {
         || {
             connection
                 .execute_batch("DROP TABLE protected")
-                .map_err(|error| sqlite_error("test migration DDL", error))
+                .map_err(|error| sqlite_error("test exact SQL DDL", error))
         },
     )
     .unwrap();
@@ -219,14 +219,14 @@ fn migration_guard_restores_authorizer_after_success() {
 }
 
 #[test]
-fn migration_guard_restores_authorizer_after_panic() {
+fn exact_sql_guard_restores_authorizer_after_panic() {
     let connection = rusqlite::Connection::open_in_memory().unwrap();
     connection
         .authorizer(Some(crate::connection::authorize_writer))
         .unwrap();
 
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _: Result<(), MigrationSqlError> = with_migration_guard(
+        let _: Result<(), ExactSqlError> = with_exact_sql_guard(
             &connection,
             false,
             false,
@@ -238,12 +238,12 @@ fn migration_guard_restores_authorizer_after_panic() {
             true,
             None,
             None,
-            || panic!("migration operation panic"),
+            || panic!("exact SQL operation panic"),
         );
     }));
 
     assert!(panic.is_err());
-    std::thread::sleep(MIGRATION_SQL_EXECUTION_LIMIT + Duration::from_millis(50));
+    std::thread::sleep(EXACT_SQL_EXECUTION_LIMIT + Duration::from_millis(50));
     let sum: i64 = connection
         .query_row(
             "WITH RECURSIVE n(value) AS (

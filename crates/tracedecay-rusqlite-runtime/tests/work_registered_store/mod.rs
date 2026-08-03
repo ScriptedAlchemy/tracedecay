@@ -1,7 +1,7 @@
 //! Synchronous registered Work store for the storage suites.
 //!
 //! Work storage has exactly one transaction implementation: the registered
-//! migration-SQL channel the daemon uses. These tests run against that same
+//! exact-SQL channel the daemon uses. These tests run against that same
 //! channel rather than a private connection, so a test can never observe a
 //! transaction shape production does not have.
 
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use rusqlite::{Connection, Savepoint};
 use tempfile::TempDir;
 use tracedecay_domain::LocatorDigest;
-use tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle;
+use tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle;
 use tracedecay_rusqlite_runtime::reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor};
 use tracedecay_rusqlite_runtime::work::{WorkSqliteStorage, install_work_schema};
 use tracedecay_rusqlite_runtime::{
@@ -29,7 +29,7 @@ impl StorageOperationExecutor for NoTypedWrites {
         _savepoint: &Savepoint<'_>,
         _payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
-        unreachable!("Work storage writes only through the registered migration-SQL channel")
+        unreachable!("Work storage writes only through the registered exact-SQL channel")
     }
 }
 
@@ -42,7 +42,7 @@ impl ReaderQueryExecutor for NoTypedReads {
         _snapshot: &rusqlite::Transaction<'_>,
         _request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
-        unreachable!("Work storage reads only through the registered migration-SQL channel")
+        unreachable!("Work storage reads only through the registered exact-SQL channel")
     }
 }
 
@@ -109,7 +109,7 @@ impl RegisteredWorkStore {
             NoTypedReads,
         )
         .expect("start work store readers");
-        let handle = MigrationSqlHandle::attach(&writer, &readers).expect("attach work store");
+        let handle = ExactSqlHandle::attach(&writer, &readers).expect("attach work store");
         Self {
             storage: WorkSqliteStorage::from_registered(handle),
             path,

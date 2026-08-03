@@ -1,4 +1,4 @@
-//! The owned vocabulary the migration transport speaks in.
+//! The owned vocabulary the exact SQL transport speaks in.
 //!
 //! Every type here is a value: no SQLite connection, statement, or filesystem
 //! path crosses this boundary, which is what lets the transport hand results to
@@ -12,7 +12,7 @@ use rusqlite::types::{Value, ValueRef};
 use super::{CELL_ALLOCATION_OVERHEAD, MAX_REQUEST_BYTES, MAX_SQL_BYTES, MAX_SQL_PARAMETERS};
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MigrationSqlValue {
+pub enum ExactSqlValue {
     Null,
     Integer(i64),
     Real(f64),
@@ -20,7 +20,7 @@ pub enum MigrationSqlValue {
     Blob(Vec<u8>),
 }
 
-impl MigrationSqlValue {
+impl ExactSqlValue {
     pub(super) fn into_rusqlite(self) -> Value {
         match self {
             Self::Null => Value::Null,
@@ -31,14 +31,14 @@ impl MigrationSqlValue {
         }
     }
 
-    pub(super) fn from_rusqlite(value: ValueRef<'_>) -> Result<Self, MigrationSqlError> {
+    pub(super) fn from_rusqlite(value: ValueRef<'_>) -> Result<Self, ExactSqlError> {
         Ok(match value {
             ValueRef::Null => Self::Null,
             ValueRef::Integer(value) => Self::Integer(value),
             ValueRef::Real(value) => Self::Real(value),
             ValueRef::Text(value) => Self::Text(
                 std::str::from_utf8(value)
-                    .map_err(|error| MigrationSqlError::Sqlite {
+                    .map_err(|error| ExactSqlError::Sqlite {
                         operation: "decode query text",
                         code: None,
                         extended_code: None,
@@ -61,24 +61,24 @@ impl MigrationSqlValue {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct MigrationSqlStatement {
+pub struct ExactSqlStatement {
     pub sql: String,
-    pub params: Vec<MigrationSqlValue>,
+    pub params: Vec<ExactSqlValue>,
 }
 
-impl MigrationSqlStatement {
-    pub fn new(sql: String, params: Vec<MigrationSqlValue>) -> Result<Self, MigrationSqlError> {
+impl ExactSqlStatement {
+    pub fn new(sql: String, params: Vec<ExactSqlValue>) -> Result<Self, ExactSqlError> {
         let statement = Self { sql, params };
         statement.validate()?;
         Ok(statement)
     }
 
-    pub(super) fn validate(&self) -> Result<(), MigrationSqlError> {
+    pub(super) fn validate(&self) -> Result<(), ExactSqlError> {
         if self.sql.trim().is_empty() {
-            return Err(MigrationSqlError::InvalidStatement);
+            return Err(ExactSqlError::InvalidStatement);
         }
         if self.sql.capacity() > MAX_SQL_BYTES || self.params.capacity() > MAX_SQL_PARAMETERS {
-            return Err(MigrationSqlError::RequestLimitExceeded);
+            return Err(ExactSqlError::RequestLimitExceeded);
         }
         let bytes = CELL_ALLOCATION_OVERHEAD
             .checked_mul(self.params.capacity())
@@ -86,38 +86,38 @@ impl MigrationSqlStatement {
             .and_then(|initial| {
                 self.params.iter().try_fold(initial, |total, value| {
                     let retained = match value {
-                        MigrationSqlValue::Text(value) => value.capacity(),
-                        MigrationSqlValue::Blob(value) => value.capacity(),
+                        ExactSqlValue::Text(value) => value.capacity(),
+                        ExactSqlValue::Blob(value) => value.capacity(),
                         _ => value.materialized_bytes(),
                     };
                     total.checked_add(retained)
                 })
             });
         if bytes.is_none_or(|bytes| bytes > MAX_REQUEST_BYTES) {
-            return Err(MigrationSqlError::RequestLimitExceeded);
+            return Err(ExactSqlError::RequestLimitExceeded);
         }
         Ok(())
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MigrationSqlAttachment {
+pub struct ExactSqlAttachment {
     filename: String,
     database_name: String,
 }
 
-impl MigrationSqlAttachment {
+impl ExactSqlAttachment {
     pub fn new(
         filename: impl Into<String>,
         database_name: impl Into<String>,
-    ) -> Result<Self, MigrationSqlError> {
+    ) -> Result<Self, ExactSqlError> {
         let filename = filename.into();
         let database_name = database_name.into();
         if filename.is_empty()
             || filename.len() > MAX_SQL_BYTES
             || !valid_database_name(&database_name)
         {
-            return Err(MigrationSqlError::InvalidAttachment);
+            return Err(ExactSqlError::InvalidAttachment);
         }
         Ok(Self {
             filename,
@@ -145,67 +145,67 @@ pub(super) fn valid_database_name(value: &str) -> bool {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct MigrationSqlRow {
-    pub values: Vec<MigrationSqlValue>,
+pub struct ExactSqlRow {
+    pub values: Vec<ExactSqlValue>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct MigrationSqlRows {
+pub struct ExactSqlRows {
     pub columns: Vec<String>,
-    pub rows: Vec<MigrationSqlRow>,
+    pub rows: Vec<ExactSqlRow>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MigrationSqlExecuteResult {
+pub struct ExactSqlExecuteResult {
     pub changed_rows: usize,
     pub last_insert_rowid: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MigrationSqlBatchResult {
+pub struct ExactSqlBatchResult {
     pub changed_rows: u64,
     pub last_insert_rowid: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MigrationSqlCommitReceipt {
+pub struct ExactSqlCommitReceipt {
     pub changed_rows: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MigrationSqlRollbackReceipt {
+pub struct ExactSqlRollbackReceipt {
     pub discarded_changed_rows: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MigrationSqlRequest {
-    Validate(MigrationSqlStatement),
-    Execute(MigrationSqlStatement),
-    Query(MigrationSqlStatement),
+pub enum SqlRequest {
+    Validate(ExactSqlStatement),
+    Execute(ExactSqlStatement),
+    Query(ExactSqlStatement),
     ExecuteBatch(String),
 }
 
-impl MigrationSqlRequest {
-    pub(super) fn intent(&self) -> MigrationSqlWriteIntent {
+impl SqlRequest {
+    pub(super) fn intent(&self) -> ExactSqlWriteIntent {
         match self {
-            Self::Validate(_) => MigrationSqlWriteIntent::Validate,
-            Self::Execute(_) => MigrationSqlWriteIntent::Execute,
-            Self::Query(_) => MigrationSqlWriteIntent::Query,
-            Self::ExecuteBatch(_) => MigrationSqlWriteIntent::ExecuteBatch,
+            Self::Validate(_) => ExactSqlWriteIntent::Validate,
+            Self::Execute(_) => ExactSqlWriteIntent::Execute,
+            Self::Query(_) => ExactSqlWriteIntent::Query,
+            Self::ExecuteBatch(_) => ExactSqlWriteIntent::ExecuteBatch,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum MigrationSqlResult {
+pub enum SqlResult {
     Validated,
-    Executed(MigrationSqlExecuteResult),
-    Queried(MigrationSqlRows),
-    BatchExecuted(MigrationSqlBatchResult),
+    Executed(ExactSqlExecuteResult),
+    Queried(ExactSqlRows),
+    BatchExecuted(ExactSqlBatchResult),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MigrationSqlWriteIntent {
+pub enum ExactSqlWriteIntent {
     Validate,
     Execute,
     Query,
@@ -224,7 +224,7 @@ pub enum MigrationSqlWriteIntent {
 /// replacement. None of them steps an existing store forward from an older
 /// shape; there is no version ladder behind this policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MigrationSqlTransactionPolicy {
+pub(crate) enum TransactionPolicy {
     Ordinary,
     AuthorizedLongLease,
 }
@@ -232,23 +232,22 @@ pub(crate) enum MigrationSqlTransactionPolicy {
 /// Whether one statement inside a transaction carries the ordinary
 /// per-statement deadline.
 ///
-/// `AuthorizedLongSchema` is accepted only inside an
-/// [`MigrationSqlTransactionPolicy::AuthorizedLongLease`] transaction, and only
-/// for durable schema DDL: a single `CREATE INDEX` over a real-scale table can
-/// exceed the ordinary statement deadline while still being one bounded,
-/// cancellable unit of work.
+/// `AuthorityRevalidated` is accepted only inside an
+/// [`TransactionPolicy::AuthorizedLongLease`] transaction. It removes the
+/// ordinary per-statement deadline while preserving shutdown cancellation and
+/// repeated authority checks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MigrationSqlStepPolicy {
+pub(crate) enum ExecutionPolicy {
     Bounded,
-    AuthorizedLongSchema,
+    AuthorityRevalidated,
 }
 
-pub trait MigrationSqlWriteAuthority: Send + Sync {
-    fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError>;
+pub trait ExactSqlWriteAuthority: Send + Sync {
+    fn verify(&self, intent: ExactSqlWriteIntent) -> Result<(), ExactSqlError>;
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum MigrationSqlError {
+pub enum ExactSqlError {
     AuthorityMismatch,
     AuthorityDenied(String),
     InvalidAttachment,
@@ -269,44 +268,42 @@ pub enum MigrationSqlError {
     },
 }
 
-impl fmt::Display for MigrationSqlError {
+impl fmt::Display for ExactSqlError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AuthorityMismatch => {
-                formatter.write_str("migration SQL authority does not match attached runtime")
+                formatter.write_str("exact SQL authority does not match attached runtime")
             }
             Self::AuthorityDenied(reason) => {
-                write!(formatter, "migration SQL write authority denied: {reason}")
+                write!(formatter, "exact SQL write authority denied: {reason}")
             }
-            Self::InvalidAttachment => formatter.write_str("migration SQL attachment is invalid"),
-            Self::InvalidStatement => formatter.write_str("migration SQL statement is empty"),
+            Self::InvalidAttachment => formatter.write_str("exact SQL attachment is invalid"),
+            Self::InvalidStatement => formatter.write_str("exact SQL statement is empty"),
             Self::RequestLimitExceeded => {
-                formatter.write_str("migration SQL request exceeded its admission limit")
+                formatter.write_str("exact SQL request exceeded its admission limit")
             }
             Self::TransactionControlDenied => {
-                formatter.write_str("transaction control SQL is denied on the migration channel")
+                formatter.write_str("transaction control SQL is denied on the exact SQL channel")
             }
             Self::QueryLimitExceeded => {
-                formatter.write_str("migration SQL query materialization exceeded its limit")
+                formatter.write_str("exact SQL query materialization exceeded its limit")
             }
-            Self::Busy => formatter.write_str("migration SQL channel is busy"),
-            Self::WriterUnavailable => formatter.write_str("migration SQL writer is unavailable"),
+            Self::Busy => formatter.write_str("exact SQL channel is busy"),
+            Self::WriterUnavailable => formatter.write_str("exact SQL writer is unavailable"),
             Self::ReaderUnavailable(message) => {
-                write!(formatter, "migration SQL reader is unavailable: {message}")
+                write!(formatter, "exact SQL reader is unavailable: {message}")
             }
             Self::TransactionClosed => {
-                formatter.write_str("migration SQL transaction is already closed")
+                formatter.write_str("exact SQL transaction is already closed")
             }
-            Self::TransactionExpired => {
-                formatter.write_str("migration SQL transaction lease expired")
-            }
+            Self::TransactionExpired => formatter.write_str("exact SQL transaction lease expired"),
             Self::Sqlite {
                 operation, message, ..
             } => {
-                write!(formatter, "migration SQL {operation} failed: {message}")
+                write!(formatter, "exact SQL {operation} failed: {message}")
             }
         }
     }
 }
 
-impl Error for MigrationSqlError {}
+impl Error for ExactSqlError {}
