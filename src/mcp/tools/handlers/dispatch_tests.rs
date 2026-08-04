@@ -943,7 +943,8 @@ async fn pr_context_succeeds_within_deadline_on_a_diverged_branch() {
     assert!(
         missing_key_error
             .to_string()
-            .contains("pre-provisioned PR context cursor key is unavailable")
+            .contains("pre-provisioned PR context cursor key is unavailable"),
+        "unexpected pre-provisioned cursor-key failure: {missing_key_error}",
     );
     let key_snapshot = cursor_db.read_snapshot().await.unwrap();
     let mut key_rows = key_snapshot
