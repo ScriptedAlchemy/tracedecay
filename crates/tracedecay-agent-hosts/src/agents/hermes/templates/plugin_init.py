@@ -266,17 +266,12 @@ LCM_NATIVE_SCHEMAS = [
                     "description": "Optional session id override (for example, expand a cross-session grep hit in its owning session).",
                 },
                 "max_tokens": {"type": "integer", "description": "Token budget for returned content.", "default": 4000},
-                "source_offset": {
-                    "type": "integer",
-                    "description": "Source pagination offset for node_id mode.",
-                    "default": 0,
-                },
                 "source_limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 100,
                     "default": 50,
-                    "description": "Maximum immediate sources to return from source_offset. If a returned source marks content_truncated=true, continue from its own store_id + content_offset.",
+                    "description": "Maximum immediate sources to return. Continue summary pages only with the authenticated cursor. If a returned source marks content_truncated=true, continue from its own store_id + content_offset.",
                 },
                 "content_offset": {
                     "type": "integer",
@@ -2619,8 +2614,8 @@ def _translate_lcm_args(native_name: str, args: dict) -> dict:
                 translated["target"] = target
         for public_key in ("node_id", "store_id", "externalized_ref"):
             translated.pop(public_key, None)
+        translated.pop("source_offset", None)
         if translated["target"]["kind"] != "summary_node":
-            translated.pop("source_offset", None)
             translated.pop("source_limit", None)
             translated.pop("cursor", None)
         content_limit = _tokens_from_native_max(translated.pop("max_tokens", None))

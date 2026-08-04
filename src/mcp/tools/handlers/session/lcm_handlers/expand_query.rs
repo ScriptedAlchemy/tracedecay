@@ -289,7 +289,6 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_expand_query(
                         offset: 0,
                         limit: request.context_max_tokens.min(MAX_LCM_CONTENT_LIMIT),
                     },
-                    0,
                     Some(request.max_results),
                     cursor.clone(),
                     context.retrieval_store_scope,

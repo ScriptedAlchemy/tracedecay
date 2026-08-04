@@ -195,18 +195,16 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_expand(
     let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
     let target = parse_lcm_expand_target(&args)?;
-    if !matches!(target, LcmExpandTarget::SummaryNode { .. })
-        && (args.get("source_offset").is_some()
-            || args.get("source_limit").is_some()
-            || args.get("cursor").is_some())
-    {
+    if args.get("source_offset").is_some() {
         return Err(argument_error(
-            "source_offset, source_limit, and cursor are valid only when target.kind is summary_node",
+            "source_offset was replaced by the authenticated cursor",
         ));
     }
-    if args.get("cursor").is_some() && args.get("source_offset").is_some() {
+    if !matches!(target, LcmExpandTarget::SummaryNode { .. })
+        && (args.get("source_limit").is_some() || args.get("cursor").is_some())
+    {
         return Err(argument_error(
-            "cursor cannot be combined with source_offset; use one continuation mechanism",
+            "source_limit and cursor are valid only when target.kind is summary_node",
         ));
     }
     let grain = match &target {
@@ -231,7 +229,6 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_expand(
                     target,
                     grain,
                     lcm_content_slice(&args)?,
-                    bounded_usize_arg(&args, "source_offset", 0, usize::MAX)?.unwrap_or(0),
                     source_limit,
                     lcm_cursor_arg(&args)?,
                     context.retrieval_store_scope,

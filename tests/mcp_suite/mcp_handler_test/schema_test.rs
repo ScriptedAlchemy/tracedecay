@@ -279,13 +279,19 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         raw_message_target["properties"]["store_id"]["type"],
         json!("integer")
     );
-    assert_eq!(
-        expand.input_schema["properties"]["source_offset"]["type"],
-        json!("integer")
+    assert!(
+        expand.input_schema["properties"]
+            .get("source_offset")
+            .is_none(),
+        "numeric continuation must not remain in the public schema"
     );
     assert_eq!(
         expand.input_schema["properties"]["source_limit"]["type"],
         json!("integer")
+    );
+    assert_eq!(
+        expand.input_schema["properties"]["cursor"]["type"],
+        json!("string")
     );
 
     let doctor = tools

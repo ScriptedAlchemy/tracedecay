@@ -414,17 +414,12 @@ pub(super) fn def_lcm_expand() -> ToolDefinition {
                     "maximum": 8192,
                     "description": "Maximum characters returned."
                 },
-                "source_offset": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Zero-based pagination offset into a summary node's immediate source list (summary_node targets only)."
-                },
                 "source_limit": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 100,
                     "default": 50,
-                    "description": "Maximum immediate sources returned from source_offset (summary_node targets only); resume with the response's next_source_offset. If a returned source has content_truncated=true, continue via target.kind=raw_message for that source's store_id and content_offset."
+                    "description": "Maximum immediate sources returned for a summary_node target; resume only with the response's authenticated next_cursor. If a returned source has content_truncated=true, continue via target.kind=raw_message for that source's store_id and content_offset."
                 },
                 "cursor": {
                     "type": "string",

@@ -162,29 +162,31 @@ pub struct LcmExpandRequest {
     pub session_id: String,
     pub target: LcmExpandTarget,
     pub content_slice: Option<LcmContentSlice>,
-    /// Zero-based offset into a summary node's immediate source list
-    /// (summary-node targets only). Mirrors hermes-lcm `lcm_expand`
-    /// `source_offset`.
-    #[serde(default)]
+    /// Internal zero-based boundary decoded from an authenticated cursor.
+    /// Never serialized as a caller-controlled continuation.
+    #[serde(skip)]
     pub source_offset: usize,
-    /// Maximum number of immediate sources returned from `source_offset`
-    /// (summary-node targets only). `None` returns all remaining sources,
-    /// mirroring hermes-lcm `lcm_expand` `source_limit`.
+    /// Maximum number of immediate sources returned from the authenticated
+    /// boundary. `None` returns all remaining sources.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_limit: Option<usize>,
 }
 
-/// Pagination metadata for a summary node's immediate source list, mirroring
-/// the hermes-lcm `lcm_expand` pagination payload (`_pagination_payload` in
-/// `tools.py`). `TraceDecay` slices each returned source by characters via
-/// `content_slice` instead of sharing a token budget across sources, so the
-/// resume cursor is `next_source_offset` alone.
+/// Public pagination metadata for a summary node's immediate source list.
+/// Numeric page boundaries are serialization-private; external callers resume
+/// only with the authenticated `next_cursor` emitted by the temporal service.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmExpandSourcePagination {
+    /// Internal page boundary used while rendering a cursor-authenticated
+    /// request. Never serialized: callers continue only with `next_cursor`.
+    #[serde(skip)]
     pub source_offset: usize,
     pub source_limit: usize,
     pub returned_sources: usize,
     pub total_sources: usize,
+    /// Internal next boundary consumed by the cursor encoder. Never serialized
+    /// because an unauthenticated numeric continuation is not a public API.
+    #[serde(skip)]
     pub next_source_offset: Option<usize>,
     pub has_more: bool,
     pub remaining_sources: usize,
@@ -208,7 +210,7 @@ pub struct LcmExpandResponse {
     /// `raw_message.session_id` and remain note-free.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub externalized_note: Option<String>,
-    /// Source-list pagination metadata (summary-node targets only).
+    /// Source-list coverage metadata (summary-node targets only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_pagination: Option<LcmExpandSourcePagination>,
 }
