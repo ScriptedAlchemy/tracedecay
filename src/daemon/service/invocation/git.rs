@@ -188,6 +188,7 @@ pub(super) async fn execute_git_read(
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
+    request_cancellation: tracedecay_runtime_core::cancellation::CancellationToken,
 ) -> DaemonInvocationResponse {
     let Some(owner) = owner else {
         return concealed_application_problem(wire_request_id);
@@ -243,7 +244,7 @@ pub(super) async fn execute_git_read(
         max_entries: request.max_entries,
         max_bytes: request.max_bytes,
         deadline: Some(std::time::Instant::now() + Duration::from_micros(remaining_micros)),
-        cancel: Some(Arc::new(AtomicBool::new(false))),
+        cancel: Some(request_cancellation),
     };
     let selected_scope = initial.scope.clone();
     let read_request = request.request.clone();
@@ -318,10 +319,24 @@ pub(super) async fn execute_git_read(
             wire_request_id,
             ApplicationProblem::timed_out_before_admission(),
         ),
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::OutputLimitExceeded,
+        } => application_problem(wire_request_id, git_read_output_limit_problem()),
         crate::application::git_reads::GitReadOutcomeV1::Complete { .. }
         | crate::application::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
             DaemonInvocationResponse::problem(wire_request_id, DaemonInvocationProblem::Unavailable)
         }
+    }
+}
+
+fn git_read_output_limit_problem() -> ApplicationProblem {
+    ApplicationProblem::Saturated {
+        diagnostic: SafeDiagnostic {
+            code: "git_read.output_limit_exceeded".to_owned(),
+            message: "The Git read exceeded its output byte limit".to_owned(),
+        },
+        retry: RetryDirective::Never,
+        legal_actions: vec![tracedecay_application::LegalAction::CorrectRequest],
     }
 }
 

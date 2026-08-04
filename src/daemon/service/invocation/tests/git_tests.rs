@@ -4,6 +4,19 @@
 use super::*;
 
 #[test]
+fn git_read_output_limit_maps_to_a_stable_saturated_problem() {
+    let problem = git_read_output_limit_problem();
+    assert!(matches!(
+        problem,
+        ApplicationProblem::Saturated {
+            diagnostic: SafeDiagnostic { ref code, .. },
+            retry: RetryDirective::Never,
+            ..
+        } if code == "git_read.output_limit_exceeded"
+    ));
+}
+
+#[test]
 fn git_read_packet_binds_catalog_authority_and_native_coverage() {
     let scope = ResolvedScope::new(
         ProjectId::new("project.git-read-packet").expect("project"),

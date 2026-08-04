@@ -221,6 +221,7 @@ use invocation_executor::{
 mod invocation_state;
 use invocation_state::DaemonInvocationState;
 mod lsp_sessions;
+mod request_cancellation;
 use lsp_sessions::{
     admitted_lsp_root_for_project_path, admitted_lsp_workspace_for_request,
     cleanup_connection_lsp_sessions, invocation_lsp_session_transition,

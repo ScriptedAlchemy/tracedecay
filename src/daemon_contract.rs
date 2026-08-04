@@ -112,11 +112,55 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 pub(crate) const DAEMON_INVOCATION_PROTOCOL: &str = "tracedecay.daemon.invocation";
 /// Initial revision of the daemon-owned invocation wire shape.
 pub(crate) const DAEMON_INVOCATION_REVISION: u16 = 1;
+const DAEMON_INVOCATION_CANCEL_OPERATION: &str = "invocation_cancel";
 
 const MAX_INVOCATION_REQUEST_ID_BYTES: usize = 128;
 const MAX_CLIENT_REVISION_BYTES: usize = 128;
 const MAX_ROOT_HINT_BYTES: usize = 4_096;
 const MAX_OPAQUE_HANDLE_BYTES: usize = 256;
+
+/// A separate authenticated control frame that can interrupt an in-flight
+/// read without contending on that invocation's response connection.
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct DaemonInvocationCancellationRequest {
+    protocol: String,
+    revision: u16,
+    request_id: String,
+    operation: String,
+    target_request_id: String,
+}
+
+impl DaemonInvocationCancellationRequest {
+    pub(crate) fn new(target_request_id: impl Into<String>) -> Self {
+        let target_request_id = target_request_id.into();
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: target_request_id.clone(),
+            operation: DAEMON_INVOCATION_CANCEL_OPERATION.to_owned(),
+            target_request_id,
+        }
+    }
+
+    pub(crate) fn target_request_id(&self) -> &str {
+        &self.target_request_id
+    }
+
+    fn validate(&self) -> bool {
+        self.protocol == DAEMON_INVOCATION_PROTOCOL
+            && self.revision == DAEMON_INVOCATION_REVISION
+            && self.operation == DAEMON_INVOCATION_CANCEL_OPERATION
+            && valid_token(&self.request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+            && valid_token(&self.target_request_id, MAX_INVOCATION_REQUEST_ID_BYTES)
+    }
+}
+
+pub(crate) fn parse_daemon_invocation_cancellation_request(
+    line: &str,
+) -> Option<DaemonInvocationCancellationRequest> {
+    let request = serde_json::from_str::<DaemonInvocationCancellationRequest>(line.trim()).ok()?;
+    request.validate().then_some(request)
+}
 
 /// Closed operations accepted by the daemon invocation connection.
 ///
@@ -147,6 +191,11 @@ pub(crate) enum DaemonInvocationOperation {
     PrimitiveRead,
     CodeExactOccurrence,
     CodePhraseSearch,
+    CodeSymbolSearch,
+    CodeSignatureSearch,
+    CodeImplementations,
+    CodeTypeHierarchy,
+    CodeCallers,
     CodeCallees,
     CodeFacets,
     CodeTimeline,
@@ -195,6 +244,11 @@ impl DaemonInvocationOperation {
             Self::PrimitiveRead => "primitive_read",
             Self::CodeExactOccurrence => "code_exact_occurrence",
             Self::CodePhraseSearch => "code_phrase_search",
+            Self::CodeSymbolSearch => "code_symbol_search",
+            Self::CodeSignatureSearch => "code_signature_search",
+            Self::CodeImplementations => "code_implementations",
+            Self::CodeTypeHierarchy => "code_type_hierarchy",
+            Self::CodeCallers => "code_callers",
             Self::CodeCallees => "code_callees",
             Self::CodeFacets => "code_facets",
             Self::CodeTimeline => "code_timeline",
@@ -1073,6 +1127,21 @@ impl DaemonInvocationRequest {
                 crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
                 crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
             ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::SymbolSearch(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::SignatureSearch(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeSignatureSearch,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Implementations(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeImplementations,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::TypeHierarchy(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeTypeHierarchy,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Callers(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeCallers,
+            ) | (
                 crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
                 crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
             ) | (
@@ -1313,6 +1382,26 @@ impl DaemonInvocationRequest {
                 request: crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
                 ..
             } => DaemonInvocationOperation::CodePhraseSearch,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::SymbolSearch(_),
+                ..
+            } => DaemonInvocationOperation::CodeSymbolSearch,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::SignatureSearch(_),
+                ..
+            } => DaemonInvocationOperation::CodeSignatureSearch,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Implementations(_),
+                ..
+            } => DaemonInvocationOperation::CodeImplementations,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::TypeHierarchy(_),
+                ..
+            } => DaemonInvocationOperation::CodeTypeHierarchy,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Callers(_),
+                ..
+            } => DaemonInvocationOperation::CodeCallers,
             DaemonInvocationPayload::CallableCode {
                 request: crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
                 ..
@@ -1607,6 +1696,21 @@ impl DaemonInvocationRequest {
                     ) | (
                         crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch,
                         crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch,
+                        crate::application_surface::CallableCodeSurfaceRequest::SymbolSearch(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeSignatureSearch,
+                        crate::application_surface::CallableCodeSurfaceRequest::SignatureSearch(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeImplementations,
+                        crate::application_surface::CallableCodeSurfaceRequest::Implementations(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeTypeHierarchy,
+                        crate::application_surface::CallableCodeSurfaceRequest::TypeHierarchy(_),
+                    ) | (
+                        crate::application_surface::ApplicationSurfaceOperation::CodeCallers,
+                        crate::application_surface::CallableCodeSurfaceRequest::Callers(_),
                     ) | (
                         crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
                         crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
