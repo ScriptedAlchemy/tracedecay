@@ -2253,6 +2253,28 @@ impl DaemonEngine {
                 .await);
         }
 
+        let gate = project_open_gate(&self.project_open_gates, &route).await;
+        let _singleflight = gate.lock().await;
+        self.project_server_after_open_gate(handshake).await
+    }
+
+    async fn project_server_after_open_gate(
+        &self,
+        handshake: &DaemonHandshake,
+    ) -> Result<Arc<crate::mcp::McpServer>> {
+        let (project_path, route) = Self::project_route(handshake)?;
+        let cached = {
+            let servers = self.store_administration.project_servers().lock().await;
+            servers
+                .get_route(&route)
+                .map(|(key, server)| (key.clone(), Arc::clone(server)))
+        };
+        if let Some((key, server)) = cached {
+            return Ok(self
+                .activate_project_server(key, project_path, handshake, server)
+                .await);
+        }
+
         let (key, project_path, server) = self
             .store_administration
             .with_writer(|| self.open_project_server(handshake))
@@ -2262,37 +2284,78 @@ impl DaemonEngine {
             .await)
     }
 
-    fn spawn_project_server_warmup(
+    async fn spawn_project_server_warmup(
         &self,
         handshake: DaemonHandshake,
         initialize_request: JsonRpcRequest,
     ) {
+        let (_, route) = match Self::project_route(&handshake) {
+            Ok(route) => route,
+            Err(error) => {
+                spawn_lifecycle_project_server_warmup(
+                    self.lifecycle.clone(),
+                    initialize_request,
+                    async move { Err(error) },
+                );
+                return;
+            }
+        };
+        let gate = project_open_gate(&self.project_open_gates, &route).await;
         let engine = self.clone();
-        spawn_lifecycle_project_server_warmup(
-            self.lifecycle.clone(),
-            initialize_request,
-            async move { Box::pin(engine.project_server(&handshake)).await },
-        );
+        match Arc::clone(&gate).try_lock_owned() {
+            Ok(singleflight) => {
+                spawn_lifecycle_project_server_warmup(
+                    self.lifecycle.clone(),
+                    initialize_request,
+                    async move {
+                        let _singleflight = singleflight;
+                        Box::pin(engine.project_server_after_open_gate(&handshake)).await
+                    },
+                );
+            }
+            Err(_) => {
+                spawn_lifecycle_project_server_warmup(
+                    self.lifecycle.clone(),
+                    initialize_request,
+                    async move { Box::pin(engine.project_server(&handshake)).await },
+                );
+            }
+        }
     }
 
-    fn spawn_direct_project_server_open(
+    async fn spawn_direct_project_server_open(
         &self,
         handshake: DaemonHandshake,
-    ) -> JoinHandle<Result<Arc<crate::mcp::McpServer>>> {
+    ) -> Result<(JoinHandle<Result<Arc<crate::mcp::McpServer>>>, bool)> {
+        let (_, route) = Self::project_route(&handshake)?;
+        let gate = project_open_gate(&self.project_open_gates, &route).await;
         let engine = self.clone();
-        tokio::spawn(async move {
+        let (singleflight, joins_existing_open) = match Arc::clone(&gate).try_lock_owned() {
+            Ok(singleflight) => (Some(singleflight), false),
+            Err(_) => (None, true),
+        };
+        let task = tokio::spawn(async move {
             let Some(activity) = engine.lifecycle.try_enter() else {
                 return Err(TraceDecayError::Config {
                     message: "daemon is draining before project warm-up".to_string(),
                 });
             };
             let _activity = activity;
+            let open = async {
+                match singleflight {
+                    Some(singleflight) => {
+                        let _singleflight = singleflight;
+                        engine.project_server_after_open_gate(&handshake).await
+                    }
+                    None => engine.project_server(&handshake).await,
+                }
+            };
             let result = tokio::select! {
                 biased;
                 () = engine.lifecycle.wait_for_draining() => Err(TraceDecayError::Config {
                     message: "daemon began draining during project warm-up".to_string(),
                 }),
-                result = Box::pin(engine.project_server(&handshake)) => result,
+                result = Box::pin(open) => result,
             };
             if let Err(error) = &result {
                 log_daemon_event(
@@ -2304,7 +2367,8 @@ impl DaemonEngine {
                 );
             }
             result
-        })
+        });
+        Ok((task, joins_existing_open))
     }
 
     /// Opens or resolves a project server while writer administration is held.
@@ -2315,18 +2379,6 @@ impl DaemonEngine {
         handshake: &DaemonHandshake,
     ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>)> {
         let (canonical_project_path, route) = Self::project_route(handshake)?;
-        let cached = {
-            let servers = self.store_administration.project_servers().lock().await;
-            servers
-                .get_route(&route)
-                .map(|(key, server)| (key.clone(), Arc::clone(server)))
-        };
-        if let Some((key, server)) = cached {
-            return Ok((key, canonical_project_path, server));
-        }
-
-        let gate = project_open_gate(&self.project_open_gates, &route).await;
-        let _singleflight = gate.lock().await;
         let cached = {
             let servers = self.store_administration.project_servers().lock().await;
             servers
@@ -2882,7 +2934,9 @@ async fn serve_broker_socket_client(
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
             {
-                engine.spawn_project_server_warmup(handshake.clone(), request);
+                engine
+                    .spawn_project_server_warmup(handshake.clone(), request)
+                    .await;
             }
             drop(setup_activity);
             if let DaemonBootstrap::Respond(response) = bootstrap {
@@ -2896,8 +2950,11 @@ async fn serve_broker_socket_client(
         // operation, so answer with a retry hint rather than holding the
         // client. An uncontended open is this client's own work and must run
         // to completion, otherwise one-shot callers never get a result.
-        let contended = engine.store_administration.writer_is_busy();
-        let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
+        let writer_contended = engine.store_administration.writer_is_busy();
+        let (mut project_open, joins_existing_open) = engine
+            .spawn_direct_project_server_open(handshake.clone())
+            .await?;
+        let contended = writer_contended && !joins_existing_open;
         let opened = if contended {
             tokio::time::timeout(CONTENDED_PROJECT_OPEN_GRACE, &mut project_open).await
         } else {
