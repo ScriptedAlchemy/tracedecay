@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -609,9 +610,13 @@ pub(crate) fn render_temporal_message_search_md(payload: &Value) -> Result<Strin
         let hidden = markdown_u64(coverage, "hidden", "temporal.coverage.hidden")?;
         let unknown = markdown_u64(coverage, "unknown", "temporal.coverage.unknown")?;
         let redacted = markdown_u64(coverage, "redacted", "temporal.coverage.redacted")?;
-        markdown.push_str(&format!(
+        write!(
+            &mut markdown,
             "\n- Coverage: visible {visible}, hidden {hidden}, unknown {unknown}, redacted {redacted}\n"
-        ));
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to render message search markdown: {error}"),
+        })?;
     }
     let refresh_required = payload
         .get("refresh_required")
@@ -629,12 +634,20 @@ pub(crate) fn render_temporal_message_search_md(payload: &Value) -> Result<Strin
         let error = markdown_object(error, "error")?;
         let code = markdown_string(error, "code", "error.code")?;
         let message = markdown_string(error, "message", "error.message")?;
-        markdown.push_str(&format!("- Problem: `{code}` — {message}\n"));
+        writeln!(&mut markdown, "- Problem: `{code}` — {message}").map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("failed to render message search markdown: {error}"),
+            }
+        })?;
         if let Some(reason) = error.get("reason") {
             let reason = reason.as_str().ok_or_else(|| TraceDecayError::Config {
                 message: "message search markdown requires error.reason to be a string".to_string(),
             })?;
-            markdown.push_str(&format!("- Unavailable reason: `{reason}`\n"));
+            writeln!(&mut markdown, "- Unavailable reason: `{reason}`").map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("failed to render message search markdown: {error}"),
+                }
+            })?;
         }
     }
     if let Some(status) = payload.get("service_status") {
@@ -656,9 +669,13 @@ pub(crate) fn render_temporal_message_search_md(payload: &Value) -> Result<Strin
         let blocker = markdown_optional_string(status, "blocker", "service_status.blocker")?;
         let retry_class =
             markdown_optional_string(status, "retry_class", "service_status.retry_class")?;
-        markdown.push_str(&format!(
-            "- Refresh worker: last progress {last_progress}, backlog {backlog}, blocker `{blocker}`, retry class `{retry_class}`\n"
-        ));
+        writeln!(
+            &mut markdown,
+            "- Refresh worker: last progress {last_progress}, backlog {backlog}, blocker `{blocker}`, retry class `{retry_class}`"
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to render message search markdown: {error}"),
+        })?;
     }
     Ok(markdown)
 }
