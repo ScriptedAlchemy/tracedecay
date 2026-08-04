@@ -184,6 +184,7 @@ impl LocalStoreRuntimeResolverV1 {
     /// A project can carry many aliases in its one
     /// [`LocalProjectEnrollmentAuthorityV1`], but two separately configured
     /// authorities for the same typed project are refused rather than merged.
+    #[cfg(test)]
     pub(crate) fn with_project_authority(
         self,
         authority: LocalProjectEnrollmentAuthorityV1,

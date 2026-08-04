@@ -163,6 +163,7 @@ impl StoreRuntimeRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn release_lease(
         &self,
         binding: &StoreRuntimeBindingV1,

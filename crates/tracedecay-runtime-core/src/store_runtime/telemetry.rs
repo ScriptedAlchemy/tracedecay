@@ -24,7 +24,7 @@ use super::shard::{
 ///
 /// The aggregate still covers every supplied inventory entry and reports the
 /// number of omitted detail rows.
-pub(crate) const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
+pub const MAX_PROJECTED_RUNTIME_SHARDS: usize = 64;
 
 /// One registry inventory item captured before telemetry projection.
 ///
@@ -63,7 +63,7 @@ pub struct RuntimeRegistryInventory {
 
 /// Counted leases held by a shard at one health-snapshot instant.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ShardRuntimeLeaseCounts {
+pub struct ShardRuntimeLeaseCounts {
     pub general_readers: u32,
     pub health_readers: u32,
     pub snapshots: u32,
@@ -87,7 +87,7 @@ impl ShardRuntimeLeaseCounts {
 
 /// Driver-neutral telemetry detail for one daemon-owned runtime publication.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ShardRuntimeTelemetry {
+pub struct ShardRuntimeTelemetry {
     /// The source binding carries the canonical shard, incarnation, and epoch.
     pub binding: StoreRuntimeBindingV1,
     pub state: RuntimeMaintenanceStateV1,
@@ -110,7 +110,7 @@ pub(crate) struct ShardRuntimeTelemetry {
 
 /// Fixed-shape, saturating counts of runtime states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeStateCounts {
+pub struct RuntimeStateCounts {
     pub closed: u32,
     pub opening: u32,
     pub ready: u32,
@@ -137,7 +137,7 @@ impl RuntimeStateCounts {
 
 /// Fixed-shape, saturating counts of observed health states.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeHealthCounts {
+pub struct RuntimeHealthCounts {
     pub unknown: u32,
     pub healthy: u32,
     pub degraded: u32,
@@ -158,7 +158,7 @@ impl RuntimeHealthCounts {
 
 /// Bounded aggregate facts for every entry in a registry inventory.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RuntimeTelemetryAggregate {
+pub struct RuntimeTelemetryAggregate {
     pub inventory_shards: u32,
     pub returned_shards: u32,
     pub omitted_shards: u32,
@@ -237,7 +237,7 @@ impl RuntimeTelemetryAggregate {
 
 /// Deterministically ordered bounded telemetry details plus full aggregates.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RuntimeTelemetryProjection {
+pub struct RuntimeTelemetryProjection {
     pub per_shard_queue_budget: QueueBudgetV1,
     pub global_queue_budget_bytes: u64,
     pub wal_budget: WalBudgetV1,
@@ -246,7 +246,7 @@ pub(crate) struct RuntimeTelemetryProjection {
 }
 
 /// Projects a registry inventory with the standard per-shard detail bound.
-pub(crate) fn project_runtime_telemetry(
+pub fn project_runtime_telemetry(
     inventory: &RuntimeRegistryInventory,
 ) -> RuntimeTelemetryProjection {
     project_runtime_telemetry_with_limit(inventory, MAX_PROJECTED_RUNTIME_SHARDS)

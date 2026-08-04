@@ -10,7 +10,7 @@ use tracedecay_agent_hosts::ports::project_runtime::{
     MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
 };
 use tracedecay_domain::RefId;
-use tracedecay_store::{ProjectId, StoreIncarnationV1, StoreShardIdV1};
+use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use super::register_registered_schema_installer;
 use super::registry::{
@@ -51,6 +51,16 @@ pub(crate) fn release_process_allocator_memory() {
         }
     }
 }
+
+impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) fn runtime_telemetry(
+        &self,
+    ) -> crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection {
+        let inventory = self.registry.inventory(AdmissionConfigV1::default(), 0);
+        crate::daemon::store_runtime::telemetry::project_runtime_telemetry(&inventory)
+    }
+}
+
 /// One canonical registry and profile pin shared by every daemon session shard.
 pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     identity: LocalProfileIdentityAuthorityV1,
