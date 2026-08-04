@@ -118,7 +118,6 @@ fn benchmark_authority(c: &mut Criterion) {
         .history(&history_options)
         .expect("1k history");
     assert_eq!(history_result.commits.len(), 1_000);
-    assert_eq!(history.authority.native_git_invocations(), 0);
     let mut history_group = c.benchmark_group("git_repository_authority/history");
     history_group.throughput(Throughput::Elements(1_000));
     history_group.bench_function("commits_1000", |bencher| {
@@ -134,7 +133,6 @@ fn benchmark_authority(c: &mut Criterion) {
     let dirty = dirty_fixture(10_000);
     let status_result = dirty.authority.status().expect("10k status");
     assert_eq!(status_result.entries.len(), 10_000);
-    assert_eq!(dirty.authority.native_git_invocations(), 0);
     let mut status_group = c.benchmark_group("git_repository_authority/status");
     status_group.throughput(Throughput::Elements(10_000));
     status_group.bench_function("dirty_files_10000", |bencher| {

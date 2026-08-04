@@ -172,6 +172,18 @@ fn map_repository_error(
 
     match error {
         GitRepositoryError::NotARepository { path } => GitIntelligenceError::NotARepository(path),
+        GitRepositoryError::UnreadableRepository { detail, .. } => {
+            GitIntelligenceError::GitFailed {
+                operation: "repository",
+                status: "gix".to_owned(),
+                stderr: detail,
+            }
+        }
+        GitRepositoryError::UnreadableHead { detail } => GitIntelligenceError::GitFailed {
+            operation: "HEAD",
+            status: "gix".to_owned(),
+            stderr: detail,
+        },
         GitRepositoryError::Operation { operation, detail } => GitIntelligenceError::GitFailed {
             operation,
             status: "gix".to_owned(),
