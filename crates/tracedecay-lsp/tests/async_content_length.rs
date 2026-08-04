@@ -1,10 +1,12 @@
 use std::time::Duration;
 
+use futures_util::SinkExt;
 use tokio::io::{AsyncWriteExt, duplex};
 use tokio::time::Instant;
+use tokio_util::codec::{FramedRead, FramedWrite};
 use tracedecay_lsp::{
-    AsyncContentLengthError, AsyncContentLengthReader, ContentLengthCodec, ContentLengthCodecError,
-    FramePoll, MAX_LSP_FRAME_BYTES, write_content_length_frame_until,
+    AsyncContentLengthError, ContentLengthCodec, ContentLengthCodecError, FramePoll,
+    MAX_LSP_FRAME_BYTES, read_content_length_frame_until,
 };
 
 #[tokio::test]
@@ -23,11 +25,10 @@ async fn async_reader_preserves_opaque_partial_crlf_frame() {
             .await
             .expect("write second fragment");
     });
-    let mut reader = AsyncContentLengthReader::new(reader);
+    let mut reader = FramedRead::new(reader, ContentLengthCodec::new());
 
     assert_eq!(
-        reader
-            .read_frame_until(Instant::now() + Duration::from_secs(1))
+        read_content_length_frame_until(&mut reader, Instant::now() + Duration::from_secs(1),)
             .await
             .expect("read opaque frame"),
         FramePoll::Frame(payload.to_vec())
@@ -38,11 +39,10 @@ async fn async_reader_preserves_opaque_partial_crlf_frame() {
 #[tokio::test(start_paused = true)]
 async fn async_reader_distinguishes_idle_and_partial_deadlines() {
     let (mut writer, reader) = duplex(64);
-    let mut reader = AsyncContentLengthReader::new(reader);
+    let mut reader = FramedRead::new(reader, ContentLengthCodec::new());
 
     assert_eq!(
-        reader
-            .read_frame_until(Instant::now() + Duration::from_millis(10))
+        read_content_length_frame_until(&mut reader, Instant::now() + Duration::from_millis(10),)
             .await
             .expect("idle deadline"),
         FramePoll::Pending
@@ -53,8 +53,7 @@ async fn async_reader_distinguishes_idle_and_partial_deadlines() {
         .await
         .expect("write partial frame");
     assert!(matches!(
-        reader
-            .read_frame_until(Instant::now() + Duration::from_millis(10))
+        read_content_length_frame_until(&mut reader, Instant::now() + Duration::from_millis(10),)
             .await,
         Err(AsyncContentLengthError::DeadlineElapsed)
     ));
@@ -80,9 +79,8 @@ async fn async_reader_rejects_malformed_and_oversize_frames() {
             .write_all(&wire)
             .await
             .expect("write malformed frame");
-        let mut reader = AsyncContentLengthReader::new(reader);
-        match reader
-            .read_frame_until(Instant::now() + Duration::from_secs(1))
+        let mut reader = FramedRead::new(reader, ContentLengthCodec::new());
+        match read_content_length_frame_until(&mut reader, Instant::now() + Duration::from_secs(1))
             .await
         {
             Err(AsyncContentLengthError::Codec(actual)) => assert_eq!(actual, expected),
@@ -94,18 +92,18 @@ async fn async_reader_rejects_malformed_and_oversize_frames() {
 #[tokio::test]
 async fn async_writer_uses_strict_codec_and_deadline() {
     let payload = br#"{"jsonrpc":"2.0","method":"initialized"}"#;
-    let (mut writer, mut reader) = duplex(256);
-    write_content_length_frame_until(
-        &mut writer,
-        payload,
+    let (writer, reader) = duplex(256);
+    let mut writer = FramedWrite::new(writer, ContentLengthCodec::new());
+    tokio::time::timeout_at(
         Instant::now() + Duration::from_secs(1),
+        writer.send(payload.as_slice()),
     )
     .await
+    .expect("write deadline")
     .expect("write framed payload");
-    let mut decoder = AsyncContentLengthReader::new(&mut reader);
+    let mut decoder = FramedRead::new(reader, ContentLengthCodec::new());
     assert_eq!(
-        decoder
-            .read_frame_until(Instant::now() + Duration::from_secs(1))
+        read_content_length_frame_until(&mut decoder, Instant::now() + Duration::from_secs(1),)
             .await
             .expect("decode written frame"),
         FramePoll::Frame(payload.to_vec())
