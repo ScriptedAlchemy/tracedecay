@@ -278,25 +278,6 @@ impl StoreRuntimeHandle {
         Ok(counts)
     }
 
-    pub(crate) fn storage_table_bytes(
-        &self,
-        reader_wait: Duration,
-    ) -> Result<Vec<(String, u64)>, StoreRuntimeRegistryFailure> {
-        self.validate_opened_file_identity("authorize registered table-size telemetry")?;
-        let tables = self
-            .inner
-            .attachment
-            .storage_table_bytes(reader_wait)
-            .map_err(
-                |message| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "read registered table-size telemetry",
-                    message,
-                },
-            )?;
-        self.validate_opened_file_identity("complete registered table-size telemetry")?;
-        Ok(tables)
-    }
-
     pub async fn run_bounded_incremental_compaction(
         &self,
         max_pages: u64,
