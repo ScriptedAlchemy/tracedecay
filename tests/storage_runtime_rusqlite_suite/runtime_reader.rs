@@ -12,14 +12,14 @@ use tracedecay_store::{
     StoreCommitReceiptV1, UnavailableReasonV1,
 };
 
-use crate::cutover_support::{
-    CountExecutor, Probe, TestDatabase, fixture, read_request, reader_locator,
+use crate::runtime_test_support::{
+    CountExecutor, Probe, TestDatabase, read_request, reader_locator, reader_runtime_fixture,
 };
 
 #[test]
 fn reader_drain_preserves_inflight_and_reserved_health_capacity() {
-    let fixture = fixture().s5;
-    let database = TestDatabase::new("s5-reader.sqlite3");
+    let fixture = reader_runtime_fixture();
+    let database = TestDatabase::new("runtime-reader.sqlite3");
     let connection = database.connect();
     connection
         .execute_batch(
@@ -27,7 +27,7 @@ fn reader_drain_preserves_inflight_and_reserved_health_capacity() {
              CREATE TABLE acceptance_rows(value INTEGER NOT NULL);
              INSERT INTO acceptance_rows(value) VALUES (1);",
         )
-        .expect("seed S5 reader authority");
+        .expect("seed reader authority");
 
     let mut budget = AdmissionConfigV1::default().readers;
     budget.min_per_hot_shard = fixture.reader_budget.min_per_hot_shard;
@@ -38,7 +38,7 @@ fn reader_drain_preserves_inflight_and_reserved_health_capacity() {
         budget,
         CountExecutor,
     )
-    .expect("start S5 reader pool");
+    .expect("start reader pool");
 
     let regular = read_request(&fixture.binding, "foreground");
     let regular_probe = Probe::for_read(&regular);
@@ -75,8 +75,8 @@ fn reader_drain_preserves_inflight_and_reserved_health_capacity() {
 
 #[test]
 fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
-    let fixture = fixture().s5;
-    let database = TestDatabase::new("s5-health.sqlite3");
+    let fixture = reader_runtime_fixture();
+    let database = TestDatabase::new("runtime-health.sqlite3");
     let connection = database.connect();
     connection
         .execute_batch(
@@ -84,7 +84,7 @@ fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
              CREATE TABLE acceptance_rows(value INTEGER NOT NULL);
              INSERT INTO acceptance_rows(value) VALUES (1);",
         )
-        .expect("seed S5 health authority");
+        .expect("seed health authority");
 
     let mut budget = AdmissionConfigV1::default().readers;
     budget.min_per_hot_shard = fixture.reader_budget.min_per_hot_shard;
@@ -95,11 +95,11 @@ fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
         budget,
         CountExecutor,
     )
-    .expect("start S5 reader pool");
+    .expect("start reader pool");
     let health =
         SqliteDoctorHealthLane::from_health_connection(fixture.binding.clone(), database.connect())
             .inspect(WriterState::Ready, pool.snapshot(), true)
-            .expect("inspect S5 health lane");
+            .expect("inspect health lane");
     assert_eq!(health.binding, fixture.binding);
     assert_eq!(health.quick_check, IntegrityResult::Healthy);
     assert_eq!(health.integrity_check, Some(IntegrityResult::Healthy));
@@ -109,11 +109,11 @@ fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
         &fixture.binding,
         fixture.initial_commit_sequence,
     )])
-    .expect("seed S5 committed watermark");
+    .expect("seed committed watermark");
     let receipt: StoreCommitReceiptV1 = serde_json::from_value(serde_json::json!({
-        "operation_id": "operation.cutover.watermark",
+        "operation_id": "operation.runtime.watermark",
         "idempotency": {
-            "key": "key.cutover.watermark",
+            "key": "key.runtime.watermark",
             "command_digest": format!("sha256:{}", "a".repeat(64))
         },
         "shard_id": fixture.binding.shard_id,
@@ -122,10 +122,10 @@ fn doctor_health_and_commit_watermark_report_the_same_runtime_binding() {
         "commit_sequence": fixture.published_commit_sequence,
         "committed_at": 1
     }))
-    .expect("construct committed S5 receipt");
+    .expect("construct committed receipt");
     publisher
         .publish_committed(&receipt)
-        .expect("publish monotonic S5 watermark");
+        .expect("publish monotonic watermark");
     assert_eq!(
         publisher.subscribe().current(&fixture.binding.shard_id),
         WatermarkSourceState::Available(watermark(

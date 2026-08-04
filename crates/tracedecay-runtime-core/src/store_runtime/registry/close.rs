@@ -316,7 +316,6 @@ mod tests {
     use tracedecay_domain::{
         BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, UtcMicros, WorktreeId,
     };
-    use tracedecay_rusqlite_runtime::graph::fixtures::create_graph_fixture_database_v1;
     use tracedecay_store::{
         CodeShardScopeV1, RuntimeLeaseIdV1, RuntimeLeaseV1, RuntimeMaintenanceStateV1,
         StoreClientIdV1, StoreIncarnationV1, StoreShardIdV1, StoreShardScopeV1,
@@ -382,7 +381,7 @@ mod tests {
         }
     }
 
-    async fn mount_graph(
+    async fn mount_code_runtime(
         path: PathBuf,
     ) -> (
         StoreRuntimeRegistry,
@@ -390,7 +389,8 @@ mod tests {
         StoreRuntimeHandle,
         DatabaseAuthority,
     ) {
-        let authority = DatabaseAuthority::for_runtime(&path, "mount exact-close graph").unwrap();
+        let authority =
+            DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
         let registry = StoreRuntimeRegistry::new(
             Arc::new(FixtureResolver { path }),
             Arc::new(LifecycleShardRuntimePublisher),
@@ -444,10 +444,10 @@ mod tests {
     #[tokio::test]
     async fn exact_close_refuses_facades_runtime_references_and_leases_before_closing() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        let (registry, profile, code, authority) = mount_graph(path.clone()).await;
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         let binding = code.binding().clone();
 
         assert!(matches!(
@@ -573,8 +573,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelling_exact_close_still_finishes_reserved_runtime() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&path).unwrap();
         let attachment = Arc::new(BlockingCloseAttachment {
@@ -723,8 +723,8 @@ mod tests {
     #[tokio::test]
     async fn failed_exact_close_retains_a_faulted_evicting_runtime() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
         let registry = StoreRuntimeRegistry::with_config(
