@@ -5985,12 +5985,14 @@ name = "tracedecay-lsp"
 version = "0.1.0"
 dependencies = [
  "constant_time_eq",
+ "futures-util",
  "lsp-types",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracedecay-domain",
  "url",
 ]
@@ -6079,6 +6081,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tracedecay-automation",
  "tracedecay-capture",
  "tracedecay-code-extraction",
