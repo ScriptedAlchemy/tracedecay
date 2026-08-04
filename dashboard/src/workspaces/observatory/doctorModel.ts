@@ -1,14 +1,14 @@
 import type {
   DashboardDoctorRemediationDescriptorV1,
-  DoctorEvidenceState,
-  DoctorFindingFamily,
-  DoctorOwningSurface,
-  DoctorRemediationOperation,
-  DoctorReportEntry,
-  WireScope,
-  WireLegalActionRef,
-} from '../../contracts/wire.ts';
-import { ScopeSchema } from '../../contracts/wire.ts';
+  DoctorEvidenceStateV1,
+  DoctorFindingFamilyV1,
+  DoctorOwningSurfaceV1,
+  DoctorRemediationOperationV1,
+  DoctorReportEntryV1,
+  DashboardScopeV1,
+  DashboardLegalActionRefV1,
+} from '../../contracts/generated.ts';
+import { DashboardScopeV1Schema } from '../../contracts/generated.ts';
 import { z } from 'zod';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
@@ -16,12 +16,12 @@ const ACTIVE_OPERATION_KEY = 'tracedecay.doctor.active-operation.v3';
 const ActiveDoctorOperationSchema = z.object({
   schema_revision: z.literal(3),
   operation_id: z.string(),
-  transport_scope: ScopeSchema,
+  transport_scope: DashboardScopeV1Schema,
 });
 
 export type ActiveDoctorOperation = z.infer<typeof ActiveDoctorOperationSchema>;
 
-const FAMILY_LABELS: Record<DoctorFindingFamily, string> = {
+const FAMILY_LABELS: Record<DoctorFindingFamilyV1, string> = {
   advisory: 'Advisory',
   configuration: 'Configuration',
   storage_runtime: 'Storage runtime',
@@ -52,7 +52,7 @@ export interface DoctorEvidencePresentation {
 }
 
 const EVIDENCE_TOKENS: Record<
-  DoctorEvidenceState,
+  DoctorEvidenceStateV1,
   { label: string; tokenClass: string; domainState: DomainStateKind }
 > = {
   unsupported: {
@@ -73,19 +73,19 @@ const EVIDENCE_TOKENS: Record<
   },
 };
 
-export function doctorFamilyLabel(family: DoctorFindingFamily): string {
+export function doctorFamilyLabel(family: DoctorFindingFamilyV1): string {
   return FAMILY_LABELS[family];
 }
 
 export function doctorEvidencePresentation(
-  state: DoctorEvidenceState,
+  state: DoctorEvidenceStateV1,
 ): DoctorEvidencePresentation {
   const tokens = EVIDENCE_TOKENS[state];
   return { ...tokens, dotClass: tokens.tokenClass.replace('text-', 'bg-') };
 }
 
 export function remediationForEntry(
-  entry: DoctorReportEntry,
+  entry: DoctorReportEntryV1,
   descriptors: DashboardDoctorRemediationDescriptorV1[],
 ): DashboardDoctorRemediationDescriptorV1 | undefined {
   const operation = entry.finding.remediation?.owning_operation;
@@ -94,7 +94,7 @@ export function remediationForEntry(
     : undefined;
 }
 
-const SURFACE_LABELS: Record<DoctorOwningSurface, string> = {
+const SURFACE_LABELS: Record<DoctorOwningSurfaceV1, string> = {
   configuration_control_plane: 'the configuration control plane',
   storage_runtime: 'the storage runtime',
   daemon_runtime: 'the daemon runtime',
@@ -102,7 +102,7 @@ const SURFACE_LABELS: Record<DoctorOwningSurface, string> = {
   semantic_index_runtime: 'the semantic index runtime',
 };
 
-export function doctorOwningSurfaceLabel(surface: DoctorOwningSurface): string {
+export function doctorOwningSurfaceLabel(surface: DoctorOwningSurfaceV1): string {
   return SURFACE_LABELS[surface];
 }
 
@@ -127,7 +127,7 @@ export interface RemediationActionAvailability {
 
 export function availableRemediationActions(
   descriptor: DashboardDoctorRemediationDescriptorV1,
-  legalActions: WireLegalActionRef[],
+  legalActions: DashboardLegalActionRefV1[],
 ): RemediationActionAvailability {
   const exactKinds = new Set(
     legalActions
@@ -141,7 +141,7 @@ export function availableRemediationActions(
   };
 }
 
-export function isTerminalDoctorOperation(operation: DoctorRemediationOperation): boolean {
+export function isTerminalDoctorOperation(operation: DoctorRemediationOperationV1): boolean {
   return operation.phase !== 'running';
 }
 
@@ -172,7 +172,7 @@ export function saveActiveDoctorOperation(
   }
 }
 
-export function sameDoctorScope(left: WireScope, right: WireScope): boolean {
+export function sameDoctorScope(left: DashboardScopeV1, right: DashboardScopeV1): boolean {
   return (
     left.project_id === right.project_id &&
     left.storage_mode === right.storage_mode &&

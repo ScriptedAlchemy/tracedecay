@@ -14,7 +14,7 @@
  * counted were never priced. That is a real accounting state, and the plate
  * renders it as one instead of as `$0.00`.
  */
-import { CostsReadModelSchema, type CostsReadModel } from '../../contracts/wire.ts';
+import { CostsReadModelV1Schema, type CostsReadModelV1 } from '../../contracts/generated.ts';
 import { CanonicalReadModelSection } from '../../ui/CanonicalReadModelSection.tsx';
 import { Field } from '../../ui/instrument.tsx';
 import { formatMicrosUtc } from '../../ui/format.ts';
@@ -22,7 +22,7 @@ import { StateChip } from '../../ui/StateChip';
 
 export function CanonicalCosts() {
   return (
-    <CanonicalReadModelSection<CostsReadModel>
+    <CanonicalReadModelSection<CostsReadModelV1>
       title="Canonical cost observations"
       blurb={
         'usage and estimated cost with their eligible populations, coverage, and pricing' +
@@ -30,7 +30,7 @@ export function CanonicalCosts() {
       }
       queryKey={['costs', 'canonical']}
       url="/api/costs"
-      schema={CostsReadModelSchema}
+      schema={CostsReadModelV1Schema}
       refetchInterval={60_000}
       loadingDetail="requesting canonical cost observations"
       className="border-t border-edge-subtle"
@@ -45,7 +45,7 @@ export function CanonicalCosts() {
 
 /** The costs projector is asked for an all-time window, which reaches the wire
  * as `since_micros: 0`. That is an unbounded horizon, not January 1970. */
-function HorizonFields({ model }: { model: CostsReadModel }) {
+function HorizonFields({ model }: { model: CostsReadModelV1 }) {
   const stamp = (micros: number) => formatMicrosUtc(micros, { zeroAs: 'unbounded' });
   return (
     <>

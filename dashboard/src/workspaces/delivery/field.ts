@@ -46,7 +46,7 @@ import {
 } from '../brain/field.ts';
 import {
   type ProjectRepoGroup,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 
 export interface DeliveryBody {
   id: string;

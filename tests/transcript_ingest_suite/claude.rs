@@ -119,19 +119,28 @@ async fn claude_non_utf8_cursor_key_survives_atomic_persistence() {
         .expect("lossless cursor key persisted");
     assert_eq!(offset.byte_offset, std::fs::metadata(&path).unwrap().len());
     assert_eq!(
-        db.get_parse_offset(&path.to_string_lossy())
-            .await
-            .unwrap()
-            .byte_offset,
-        offset.byte_offset,
-        "legacy health cursor stays synchronized"
+        db.get_parse_offset(&path.to_string_lossy()).await,
+        None,
+        "lossy path aliases are not persisted"
+    );
+
+    drop(db);
+    let reopened = open_project_session_db(&project).await.unwrap();
+    let replay = try_ingest_source(&reopened, &source, &project, None)
+        .await
+        .unwrap();
+    assert_eq!(replay, Default::default());
+    assert_eq!(
+        reopened.get_parse_offset(&cursor_key).await,
+        Some(offset),
+        "canonical cursor survives restart"
     );
 }
 
 // macOS filesystems reject invalid UTF-8 path components with EILSEQ.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[tokio::test]
-async fn claude_non_utf8_cursor_key_replays_unbound_legacy_offset() {
+async fn claude_non_utf8_cursor_key_ignores_lossy_path_alias() {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -188,8 +197,8 @@ async fn claude_non_utf8_cursor_key_replays_unbound_legacy_offset() {
     );
     assert_eq!(
         db.get_parse_offset(&legacy_key).await.unwrap().byte_offset,
-        final_offset,
-        "health alias advances with the migrated durable cursor"
+        prefix.len() as u64,
+        "lossy path aliases are neither read nor advanced"
     );
 }
 

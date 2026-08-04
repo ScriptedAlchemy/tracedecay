@@ -203,8 +203,7 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
             "generated_evals",
             "validation_gate",
             "optimizer_diagnosis",
-            "codex_handoff",
-            "manifest"
+            "codex_handoff"
         ]
     );
     let validation_artifact = run
@@ -579,18 +578,8 @@ async fn memory_curator_runner_validates_backend_ops_and_records_ledger() {
     assert_eq!(records[0].run_id, run.run_id);
     assert_eq!(records[0].accepted_count, 1);
     assert_eq!(records[0].rejected_count, 1);
-    assert_eq!(records[0].artifacts.len(), 7);
-    let manifest = records[0]
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.kind == "manifest")
-        .unwrap();
-    let manifest_payload =
-        read_run_artifact_payload(&cg.store_layout().dashboard_root, &run.run_id, manifest)
-            .await
-            .unwrap();
-    assert_eq!(manifest_payload["run_id"], json!(run.run_id));
-    assert_eq!(manifest_payload["artifacts"].as_array().unwrap().len(), 6);
+    assert_eq!(records[0].artifacts.len(), 6);
+    assert_eq!(records[0].artifacts, run.ledger_record.artifacts);
     assert!(
         !fact_exists(&cg, facts.loser_id).await,
         "default memory curation must apply accepted validated ops"

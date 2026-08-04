@@ -94,9 +94,53 @@ describe("contracts generator", () => {
     expect(generated).toContain("export interface DashboardEnvelopeV1<TPayload>");
     expect(generated).toContain("export function DashboardEnvelopeV1Schema<TPayload>(");
     expect(generated).toContain("payload: payloadSchema,");
+    expect(generated).not.toMatch(/DashboardEnvelopeV1\d+Schema/);
     // The exact scope + authorization shapes from read_model.rs are carried.
     expect(generated).toContain("store_root");
     expect(generated).toContain("outcome");
+  });
+
+  it("recognizes monomorphized envelopes by structure rather than generated name", () => {
+    const bundle = structuredClone(bundles[0]!);
+    const defs = bundle.$defs!;
+    defs.FeedbackEnvelopeInstantiation = defs.DashboardEnvelopeV12!;
+    delete defs.DashboardEnvelopeV12;
+
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated).not.toContain("FeedbackEnvelopeInstantiationSchema");
+  });
+
+  it("does not hide a distinct Rust contract that shares the envelope name prefix", () => {
+    const bundle = structuredClone(bundles[0]!);
+    bundle.$defs!.DashboardEnvelopeV1Metadata = {
+      type: "object",
+      properties: { description: { type: "string" } },
+      required: ["description"],
+    };
+
+    const generated = generateContracts([bundle]).files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated).toContain("export const DashboardEnvelopeV1MetadataSchema");
+  });
+
+  it("rejects an emitted contract that still references an omitted envelope instance", () => {
+    const bundle = structuredClone(bundles[0]!);
+    bundle.$defs!.EnvelopeConsumer = {
+      $ref: "#/$defs/DashboardEnvelopeV12",
+    };
+
+    expect(() => generateContracts([bundle])).toThrow(
+      "EnvelopeConsumer references omitted generated definition DashboardEnvelopeV12",
+    );
+  });
+
+  it("emits only Rust-owned contract names", () => {
+    const { files } = generateContracts(bundles);
+    const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
+    expect(generated).not.toContain("export const DashboardEnvelopeV1Schema =");
+    expect(generated).not.toContain("export type DashboardEnvelopeV1");
+    expect(generated).not.toContain("export const AnalyticsOverviewPayloadSchema =");
+    expect(generated).not.toContain("export type AnalyticsOverviewPayload =");
+    expect(generated).not.toContain("export const DoctorEffectReceiptSchema =");
   });
 
   it("emits the live index that re-exports the generated contract", () => {
