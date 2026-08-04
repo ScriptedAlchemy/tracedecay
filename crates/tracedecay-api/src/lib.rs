@@ -18,7 +18,6 @@ mod http;
 pub mod multi_root;
 pub mod read_model;
 pub mod remediation;
-pub mod remote;
 mod sse;
 pub mod work;
 pub mod workflow;

@@ -33,11 +33,9 @@ accessibility function remain mandatory.
 
 TraceDecay V2 converges capture, sessions, memory, code intelligence, search,
 policy, automation, tools, APIs, integrations, observability, and the dashboard
-into one local-first Brain. Before remote delivery, one local daemon is the
-physical database authority; PR16 generalizes this to exactly one fenced daemon
-authority per mutable shard. Clients, hooks, MCP servers, dashboard handlers,
-workers, and remote nodes use typed daemon/application operations; none opens a
-fallback writable database.
+into one local-first Brain. One local daemon is the physical database authority.
+Clients, hooks, MCP servers, dashboard handlers, and workers use typed
+daemon/application operations; none opens a fallback writable database.
 
 ## Completed foundation
 
@@ -186,8 +184,7 @@ acceptance gates:
 - Every read, write, continuation, and expansion uses the exact authorized
   `ProjectId` or `UserProfileId`; paths, labels, CWD, and collection membership
   never substitute for identity or widen scope.
-- Actual remote or network boundaries authenticate the caller and authority.
-  PR16 additionally fences every mutable shard to one current daemon writer.
+- Actual network boundaries authenticate the caller and authority.
 - Destructive Git, host-registration, and protected-configuration operations
   require an explicit preview/confirmation, stale-state compare-and-swap, a
   durable result, and rollback or forward recovery appropriate to the real
@@ -207,7 +204,7 @@ records the rejected mechanism, the reason, and the retained replacement:
 1. **libSQL as the local runtime is superseded.** Its compatibility driver and
    local runtime were removed after the rusqlite cutover. The
    `tracedecay-rusqlite-runtime` path and daemon-owned SQLite authority replace
-   it; future remote work composes over that authority rather than reviving a
+   it; future extensions compose over that authority rather than reviving a
    libSQL runtime.
 2. **Octocrab, `backon`, and `graphql-parser` are rejected for PR13.** They add
    provider-client, retry, and parser abstractions that the one narrow
@@ -226,7 +223,7 @@ records the rejected mechanism, the reason, and the retained replacement:
    generations, and real content/source digests remain required.
 4. **Local first-party signing, trust-root, and attestation systems are
    rejected.** No concrete local boundary requires a second origin or release
-   authority. Actual remote/network boundaries still authenticate, native Git
+   authority. Actual network boundaries still authenticate, native Git
    signing policy remains native Git's concern, and content digests may detect
    corruption without becoming signatures or attestations.
 5. **The PR14/PR17 Work allocation is plan authority, not a user rejection.**
@@ -497,7 +494,7 @@ host-by-host rollback, and the direct feedback rollback switch. Normal
 Linux/macOS/Windows CI covers supported-host default-feature compatibility.
 
 **Not in this PR.** Dashboard investigation belongs to PR14; multi-root scope to
-PR15; remote delivery to PR16; workflow composition to PR17.
+PR15; workflow composition to PR17.
 
 ## PR14 — an operable flagship product
 
@@ -623,56 +620,7 @@ Verify unauthorized roots, conflicts, partial shards, unavailable private
 preview, restart, and receipt recovery through direct multi-root and Git-safety
 tests plus normal repository CI, without a separate acceptance gate.
 
-**Not in this PR.** Remote authority belongs to PR16; task execution topology
-belongs to PR17.
-
-## PR16 — a remote shared Brain
-
-**User outcome.** Enrolled machines can capture while offline, reconnect and
-sync, query shared state, back up and restore it, and fail over without creating
-multiple mutable authorities.
-
-**End-to-end production path.** An enrolled node records sanitized offline
-capture, authenticates to the current fenced authority on reconnect, and sends
-duplicate-tolerant batches to the fenced shard authority. The sink admits each
-effect once, publishes receipts and verified cache/replica state, serves remote
-queries and node-local LSP overlays, and supports staged backup, restore, and
-failover under a higher fence.
-
-**Implementation and deletion.**
-
-- Preserve deletion replay, Git correlation, analyzer policy, gap
-  evidence, and recovery state across backup, restore, and authority transfer.
-- Enforce the current fence at every durable mutation and publication sink;
-  replicas and caches never turn admission into authority.
-- Immutable capture or replicas may improve integrity and reads, but CRDT,
-  wall-clock, multi-primary, or replicated-SQLite convergence never owns
-  canonical mutation.
-- Delete provisional remote writers, unfenced publication, and caches that
-  cannot identify their generation and current authority.
-
-**Library-first implementation defaults.** Build on the existing HTTP/SSE,
-rustls, and daemon-owned rusqlite runtime paths. At a concrete delivery
-integration, consider
-`reqwest` plus `eventsource-stream`, `tokio-util`, `zstd`/`tar`,
-`object_store`, or Hickory only when the dependency deletes identified stream,
-cancellation, compression/archive, object-backend, or discovery mechanics and
-passes compile-time and resource admission. TraceDecay's authentication,
-revocation, fencing, single-writer admission, replay identity, coverage,
-backup/restore verification, and failover semantics remain above those
-libraries. If admission fails or the integration is not yet concrete, retain
-the existing path or report the capability unavailable; do not add
-HMAC/attestation layers or speculative transport abstractions.
-
-**Direct acceptance.** Capture offline, reconnect with duplicates and gaps,
-observe exactly-once admitted effects, query from another enrolled node, then
-back up, restore, and fail over while stale epochs are rejected. Verify
-partition/restart recovery, revoked enrollment, authenticated manifests,
-deletion replay, and unavailable authority through direct remote durability
-journeys and normal repository checks.
-
-**Not in this PR.** Multi-primary mutation and automatic conflict convergence
-are not product paths. Executable work orchestration belongs to PR17.
+**Not in this PR.** Task execution topology belongs to PR17.
 
 ## PR17 — residual advanced workflows
 
@@ -711,7 +659,7 @@ retry, review, outcome, and calibration, and returns a non-auto-applied replan.
 - Claude-designated work uses native Claude Code CLI, never Hermes Anthropic.
   Codex app-server is preferred; an explicit policy/configuration-bounded Codex
   CLI fallback is reported rather than hidden.
-- Workflow steps may consume PR13–PR16 advisory and Git operations, but do not
+- Workflow steps may consume PR13–PR15 advisory and Git operations, but do not
   reacquire first availability, native Git authority, or GitHub review-content
   writes. Runtime effect/audit receipts orchestrate admitted Git effects without
   replacing Plan 36 preflight/apply/receipt semantics.
@@ -788,15 +736,15 @@ keep or repair the typed façade and reject the generator/Aide path rather than
 weakening conformance.
 
 **Direct acceptance.** Run behavioral/lifecycle conformance for every
-supported public operation through both published SDKs against local and
-PR16-enrolled remote authority, including representative complete journeys for
+supported public operation through both published SDKs against the local daemon,
+including representative complete journeys for
 each capability family, the create/evidence/admit/monitor/cancel/resume loop,
 version negotiation, paging, streaming interruption, typed failure and retry
 directive, unavailable capability, receipts, and cross-version compatibility.
 Produce and consume both the investigation and task handoff token through
 Rust and TypeScript; prove exact destination, scope, authorization,
 single-use expiry, policy-safe non-enumeration, wrong-scope/expired/
-unauthorized behavior, and local/remote semantic parity. LSP only opens the
+unauthorized behavior, and local semantic parity. LSP only opens the
 owning surface; it retrieves no task body and mutates no work. Compilation,
 generated declaration coverage, or schema equality alone is not acceptance.
 
@@ -848,7 +796,7 @@ recovery behavior.
 **End-to-end production path.** Production instrumentation identifies a
 bottleneck in database access, synchronization, projection, indexing,
 cache/generation handling, host feedback, dashboard investigation, multi-root
-query/Git, remote sync/recovery, task-intelligence evidence/calibration/
+query/Git, synchronization/recovery, task-intelligence evidence/calibration/
 proposal, workflow execution, SDK lifecycle, migration, or repository-controlled
 developer builds. A focused implementation changes that path, recomputes the
 same observable result, and is retained only when repeated comparisons show a
@@ -918,9 +866,6 @@ benchmarks do not ship.
 - PR15: [Plans 05](05-query-crate.md), [16](16-cross-project-repository-worktree-scope.md),
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   [36](36-git-aware-change-context-and-index-transactions.md), and
-  [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
-- PR16: [Plans 28](28-remote-multi-machine-shared-brain.md),
-  [35](35-daemon-lsp-gateway-and-universal-diagnostics.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
 - PR17 residual capability: [Plans 01](01-domain-crate.md), [02](02-store-crate.md),
   [03](03-capture-crate.md), [04](04-projectors-crate.md),

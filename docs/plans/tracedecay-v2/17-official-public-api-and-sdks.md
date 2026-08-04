@@ -28,9 +28,9 @@ package protocol compatibility starts only at an actual independent release.
 
 ## User outcome
 
-An external developer can install any supported SDK, connect to a local daemon
-or a PR16-enrolled remote authority, call every supported public operation with
-behavioral/lifecycle parity, and complete the same accepted PR17 journeys:
+An external developer can install any supported SDK, connect to the local
+daemon, call every supported public operation with behavioral/lifecycle parity,
+and complete the same accepted PR17 journeys:
 
 - use project, source, symbol, graph, retrieval, session/LCM, memory,
   configuration, health/Doctor, feedback, test, diagnostics, edit, Git,
@@ -80,9 +80,7 @@ scheduling, completion, or calibration independently.
 2. The public daemon boundary maps the request to the same canonical
    application operation used by CLI, MCP, and HTTP. The daemon remains the
    only process that authorizes, reads or writes product storage, schedules
-   work, and records receipts. A remote session routes only through PR16's
-   enrolled, fenced authority; PR18 binds accepted operations but owns no
-   remote authority, replication, failover, or offline semantics.
+   work, and records receipts.
 3. The SDK exposes the operation through an idiomatic façade and returns the
    canonical value, page, stream event, legal action, structured error, or
    unavailable/partial outcome without adding business decisions.
@@ -152,7 +150,7 @@ exposes each through Rust and TypeScript:
 After explicit capability negotiation, Plan 35 may project an LSP action for
 either kind. Each opaque token is 60-second, single-use, kind- and
 destination-bound, and bound to the exact session, project/root, cue/finding
-or task version, authorization/policy epoch, and local or PR16 remote authority
+or task version, authorization/policy epoch, and local daemon authority
 identity. Consumption reauthenticates, reauthorizes exact scope, checks kind,
 destination, expiry, use state, and current owner version, then returns only
 the owning operation's open-surface result.
@@ -252,19 +250,11 @@ matrices, and compilation-only conformance are not retained as release gates.
   against the same production daemon boundary; no operation family is
   omitted because it predates PR17, and no SDK operation bypasses daemon
   authorization or opens product storage.
-- Each Rust and TypeScript SDK runs representative read, paged,
-  streamed, cancellable, and effect/receipt operations against both a local
-  daemon and a PR16-enrolled remote authority. The two routes preserve
-  identical application semantics, stable problem/error taxonomy, exact retry
-  directive, authorization decisions, redaction, coverage, legal actions,
-  effects, and terminal receipts; only explicitly declared transport or
-  authority availability differs.
-- Local and remote variants exercise authentication, disconnect,
-  reconnect/resume, paging, streaming/backpressure, cancellation before and
-  after an effect commit point, and partial/unavailable authority as applicable.
-  Remote authority loss or failover uncertainty remains PR16's typed
-  partial/unavailable/reconciliation state and never triggers a local writer,
-  SDK fallback, semantic substitution, or PR18-owned recovery policy.
+- Each Rust and TypeScript SDK runs representative read, paged, streamed,
+  cancellable, and effect/receipt operations against the local daemon.
+- Local calls exercise authentication, disconnect, reconnect/resume, paging,
+  streaming/backpressure, cancellation before and after an effect commit point,
+  and partial/unavailable authority as applicable.
 - In each language, an executable journey creates and pages work, observes
   legal proposal/review outcomes, admits a provider-backed attempt, consumes
   progress, exercises cancellation, reconnects or resumes where supported, and
@@ -292,18 +282,15 @@ matrices, and compilation-only conformance are not retained as release gates.
   bindings and idiomatic façades share those fixtures.
 - The Plan 35 session journey covers negotiation, ordered bidirectional
   delivery, cancellation, backpressure, reconnect, stale revisions, and
-  authentication without exposing a raw LSP tunnel. For each Rust and
-  TypeScript SDK, local-daemon and PR16-enrolled-remote variants
-  produce and consume both token kinds: a feedback/diagnostic cue opens the
-  owning investigation surface, and a ready-commit/cross-worktree/task cue
-  opens the owning task surface. Both variants assert identical application
-  semantics and problem taxonomy.
+  authentication without exposing a raw LSP tunnel. Each Rust and TypeScript
+  SDK produces and consumes both token kinds through the local daemon: a
+  feedback/diagnostic cue opens the owning investigation surface, and a
+  ready-commit/cross-worktree/task cue opens the owning task surface.
 - Handoff failures cover wrong kind/destination/session/project/root/cue/task
   version/authority, expiry, replay, authorization or policy revocation,
-  partial/unavailable remote authority, and unsupported clients. They preserve
+  partial/unavailable authority, and unsupported clients. They preserve
   policy-safe non-enumeration and never return task bodies through LSP, mutate
-  work, apply edits, invoke arbitrary methods, or create local fallback
-  authority.
+  work, apply edits, invoke arbitrary methods, or create a fallback authority.
 - Linux and Windows package-install and documentation examples pass for both
   languages, followed by the ordinary aggregate repository checks rather
   than a separate acceptance gate.
