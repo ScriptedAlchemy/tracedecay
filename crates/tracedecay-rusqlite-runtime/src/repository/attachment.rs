@@ -35,6 +35,55 @@ const ATTACHMENT_DRAIN_POLL: Duration = Duration::from_millis(5);
 pub struct RepositoryPhysicalAttachmentFactory;
 
 impl RepositoryPhysicalAttachmentFactory {
+    pub fn attach_read_only(
+        &self,
+        binding: StoreRuntimeBindingV1,
+        locator: VerifiedStoreLocatorV1,
+        path: PathBuf,
+        admission: AdmissionConfigV1,
+    ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
+        let opened_database =
+            OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
+        let reader_locator = ExistingReaderLocator::new(binding.clone(), locator, path.clone())
+            .map_err(RepositoryAttachmentStartError::Reader)?;
+        let reader_locator = reader_locator.with_opened_database(
+            opened_database
+                .try_clone()
+                .map_err(RepositoryAttachmentStartError::Identity)?,
+        );
+        let readers = ReaderPool::start_with_checkpoint_pressure(
+            reader_locator,
+            admission.readers,
+            RepositoryRuntimeReadExecutor::default(),
+            None,
+        )
+        .map_err(|error| RepositoryAttachmentStartError::Reader(error))?;
+        let expected_identity = opened_database.identity();
+        if readers.opened_file_identity() != Some(expected_identity) {
+            drop(readers);
+            return Err(RepositoryAttachmentStartError::Identity(
+                OpenedDatabaseFileError::Replaced,
+            ));
+        }
+        opened_database
+            .verify_current_path(&path)
+            .map_err(RepositoryAttachmentStartError::Identity)?;
+        Ok(RepositoryRuntimePhysicalAttachment {
+            state: Mutex::new(RepositoryRuntimePhysicalState {
+                binding,
+                database_path: path,
+                opened_file_identity: expected_identity,
+                initialization_file: None,
+                writer: None,
+                readers: Some(readers),
+                admission_open: true,
+                drained: false,
+                closed: false,
+                close_failure: None,
+            }),
+        })
+    }
+
     pub fn attach(
         &self,
         binding: StoreRuntimeBindingV1,
@@ -349,14 +398,13 @@ impl RepositoryRuntimePhysicalAttachment {
         if !state.admission_open || state.closed {
             return Err(ExactSqlError::WriterUnavailable);
         }
-        let writer = state
-            .writer
-            .as_deref()
-            .ok_or(ExactSqlError::WriterUnavailable)?;
         let readers = state.readers.as_ref().ok_or_else(|| {
             ExactSqlError::ReaderUnavailable("repository readers are unavailable".to_owned())
         })?;
-        ExactSqlHandle::attach(writer, readers)
+        match state.writer.as_deref() {
+            Some(writer) => ExactSqlHandle::attach(writer, readers),
+            None => Ok(ExactSqlHandle::attach_read_only(readers)),
+        }
     }
 
     pub fn snapshot(&self) -> RepositoryRuntimePhysicalSnapshot {
@@ -892,5 +940,49 @@ mod tests {
                 .unwrap();
             assert_eq!(count, cycle + 1);
         }
+    }
+
+    #[test]
+    fn read_only_attachment_never_starts_or_exposes_a_writer() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("reader-only.sqlite3");
+        create_identity_database(&path, "reader-only");
+        let path = path.canonicalize().unwrap();
+        let binding = binding();
+        let attachment = RepositoryPhysicalAttachmentFactory
+            .attach_read_only(
+                binding.clone(),
+                locator(&binding),
+                path,
+                AdmissionConfigV1::default(),
+            )
+            .unwrap();
+
+        let snapshot = attachment.snapshot();
+        assert!(!snapshot.writer_present);
+        assert!(snapshot.reader_handles > 0);
+        let handle = attachment.exact_sql_handle().unwrap();
+        let rows = handle
+            .query(
+                statement("SELECT value FROM identity_probe", vec![]),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(
+            rows.rows[0].values,
+            vec![ExactSqlValue::Text("reader-only".to_owned())]
+        );
+        assert_eq!(
+            handle
+                .execute(statement(
+                    "UPDATE identity_probe SET value = ?",
+                    vec![ExactSqlValue::Text("write".to_owned())],
+                ))
+                .unwrap_err(),
+            ExactSqlError::WriterUnavailable
+        );
+
+        attachment.drain().unwrap();
+        attachment.close_and_join().unwrap();
     }
 }

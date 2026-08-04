@@ -1,16 +1,113 @@
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
-use tokio::sync::{Mutex, OwnedMutexGuard};
-use tracedecay_store::{CodeShardScopeV1, ProjectId, StoreShardIdV1};
+use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
-    DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, DatabaseAuthority,
-    LocalCodeStoreAuthorityRegistrationOutcomeV1, LocalCodeStoreAuthorityV1, RefId, Result,
-    StoreRuntimeHandle, StoreRuntimeKey, open_runtime, session_registry_error,
+    DaemonSessionRuntimeRegistryV1, Database, DatabaseAccessMode, DatabaseAuthority, Result,
+    open_runtime, session_registry_error,
 };
 
 impl DaemonSessionRuntimeRegistryV1 {
+    async fn project_graph_database(
+        &self,
+        project_id: ProjectId,
+        database_path: PathBuf,
+        database_authority: Option<DatabaseAuthority>,
+        access: DatabaseAccessMode,
+    ) -> Result<Database> {
+        // The graph database is project-wide. Worktree/ref/snapshot identity is
+        // retained in graph generations and query scope, never in the mutable
+        // SQLite owner. Holding this map lock through first publication makes
+        // linked-worktree opens one singleflight even though their route-local
+        // servers and code-index schedulers remain distinct.
+        let mut mounted = self.project_memory.lock().await;
+        if let Some(database) = mounted.get(&project_id) {
+            if database.canonical_database_path() != database_path {
+                return Err(session_registry_error(
+                    "reuse project graph runtime",
+                    format!(
+                        "project graph locator {} differs from retained canonical locator {}",
+                        database_path.display(),
+                        database.canonical_database_path().display()
+                    ),
+                ));
+            }
+            return match access {
+                DatabaseAccessMode::ReadWrite => Ok(database.as_ref().clone()),
+                DatabaseAccessMode::ReadOnly => {
+                    Database::publish_runtime(
+                        database.retained_runtime().clone(),
+                        DatabaseAccessMode::ReadOnly,
+                    )
+                    .await
+                }
+            };
+        }
+
+        let shard_id = StoreShardIdV1::project(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let runtime = match database_authority {
+            Some(authority) => {
+                open_runtime(
+                    &self.registry,
+                    self.resolver.as_ref(),
+                    shard_id,
+                    self.incarnation,
+                    Some(self.profile_pin.clone()),
+                    Some(authority),
+                    matches!(&access, DatabaseAccessMode::ReadWrite),
+                    "mount project graph store",
+                )
+                .await?
+            }
+            None if matches!(&access, DatabaseAccessMode::ReadOnly) => {
+                match self
+                    .registry
+                    .open(super::StoreRuntimeOpenRequest::new_read_only(
+                        shard_id,
+                        self.incarnation,
+                        Some(self.profile_pin.clone()),
+                    ))
+                    .await
+                {
+                    super::StoreRuntimeOpenResult::Published(runtime) => runtime,
+                    super::StoreRuntimeOpenResult::Failed(failure) => {
+                        return Err(session_registry_error(
+                            "mount project graph store read-only",
+                            format!("{failure:?}"),
+                        ));
+                    }
+                }
+            }
+            None => {
+                return Err(session_registry_error(
+                    "mount project graph store",
+                    "writable graph routing requires daemon write authority".to_owned(),
+                ));
+            }
+        };
+        if runtime.canonical_path() != database_path {
+            return Err(session_registry_error(
+                "mount project graph runtime",
+                format!(
+                    "project graph locator {} differs from registered locator {}",
+                    database_path.display(),
+                    runtime.canonical_path().display()
+                ),
+            ));
+        }
+        let writable = matches!(&access, DatabaseAccessMode::ReadWrite);
+        let database = Database::publish_runtime(runtime, access).await?;
+        if writable {
+            mounted.insert(project_id, Arc::new(database.clone()));
+        }
+        Ok(database)
+    }
+
     pub(crate) async fn begin_destructive_code_maintenance(
         &self,
         root: &Path,
@@ -75,141 +172,19 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(())
     }
 
-    pub(super) async fn code_graph_with_authority(
-        &self,
-        shard_id: StoreShardIdV1,
-        database_path: PathBuf,
-        mut database_authority: Option<DatabaseAuthority>,
-        initialize_if_missing: bool,
-    ) -> Result<StoreRuntimeHandle> {
-        // Registration and rollback are one per-shard transaction. Without
-        // this gate, an identical caller can observe the new authority between
-        // a failed open and its rollback, then lose that authority underneath
-        // its own open.
-        let _open_guard = self.code_graph_open_guard(&shard_id).await;
-        let registration =
-            self.resolver
-                .register_code_authority(
-                    LocalCodeStoreAuthorityV1::new(shard_id.clone(), database_path.clone())
-                        .map_err(|error| {
-                            session_registry_error(
-                                "construct code-shard authority",
-                                format!("{error:?}"),
-                            )
-                        })?,
-                )
-                .map_err(|error| {
-                    session_registry_error("register code-shard authority", format!("{error:?}"))
-                })?;
-        let runtime = async {
-            if database_authority.is_none() && !initialize_if_missing {
-                let key = StoreRuntimeKey::new(shard_id.clone(), self.incarnation);
-                if let Some(runtime) = self.registry.retained_runtime_for_read(&key) {
-                    if runtime.locator().path() != database_path {
-                        return Err(session_registry_error(
-                            "reuse read-only code-shard runtime",
-                            "retained runtime locator differs from the registered database path"
-                                .to_owned(),
-                        ));
-                    }
-                    return Ok(runtime);
-                }
-                database_authority = Some(DatabaseAuthority::for_owned_runtime(
-                    &database_path,
-                    "publish registered read-only code-shard runtime",
-                )?);
-            }
-            open_runtime(
-                &self.registry,
-                self.resolver.as_ref(),
-                shard_id.clone(),
-                self.incarnation,
-                Some(self.profile_pin.clone()),
-                database_authority,
-                initialize_if_missing,
-                "mount code-shard store",
-            )
-            .await
-        }
-        .await;
-
-        if runtime.is_err()
-            && registration == LocalCodeStoreAuthorityRegistrationOutcomeV1::Registered
-        {
-            let key = StoreRuntimeKey::new(shard_id.clone(), self.incarnation);
-            if self.registry.retained_runtime_for_read(&key).is_none() {
-                self.resolver
-                    .retire_code_authority(&shard_id, &database_path)
-                    .map_err(|error| {
-                        session_registry_error(
-                            "roll back failed code-shard authority registration",
-                            format!("{error:?}"),
-                        )
-                    })?;
-            }
-        }
-        runtime
-    }
-
-    pub(super) async fn code_graph_open_guard(
-        &self,
-        shard_id: &StoreShardIdV1,
-    ) -> OwnedMutexGuard<()> {
-        let gate = {
-            let mut gates = self.code_graph_open_gates.lock().await;
-            gates.retain(|_, gate| gate.strong_count() > 0);
-            match gates.get(shard_id).and_then(Weak::upgrade) {
-                Some(gate) => gate,
-                None => {
-                    let gate = Arc::new(Mutex::new(()));
-                    gates.insert(shard_id.clone(), Arc::downgrade(&gate));
-                    gate
-                }
-            }
-        };
-        gate.lock_owned().await
-    }
-
     /// Mounts the mutable graph for this exact project/repository/worktree
     /// identity. The checkout path is used only by the Git identity authority;
     /// it is never itself the shard identity.
     pub(crate) async fn code_graph_worktree(
         &self,
-        project_root: &Path,
+        _project_root: &Path,
         project_id: ProjectId,
         database_path: PathBuf,
         database_authority: DatabaseAuthority,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        // Mutable graph storage exists for non-Git projects too. Its structural
-        // shard identity needs only the stable repository/worktree components;
-        // resolving HEAD here would incorrectly make ordinary project open
-        // depend on a Git repository being present.
-        let repository_id =
-            crate::daemon::code_index_scheduler::identity::repository_id_for(project_root)
-                .map_err(|error| {
-                    session_registry_error("resolve code-shard repository", error.to_string())
-                })?;
-        let worktree_id =
-            crate::daemon::code_index_scheduler::identity::worktree_id_for(project_root).map_err(
-                |error| session_registry_error("resolve code-shard worktree", error.to_string()),
-            )?;
-        let shard_id = StoreShardIdV1::code(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id,
-            repository_id,
-            CodeShardScopeV1::Worktree { worktree_id },
-        );
-        let runtime = self
-            .code_graph_with_authority(
-                shard_id,
-                database_path,
-                Some(database_authority),
-                matches!(access, DatabaseAccessMode::ReadWrite),
-            )
-            .await?;
-        Database::publish_runtime(runtime, access).await
+        self.project_graph_database(project_id, database_path, Some(database_authority), access)
+            .await
     }
 
     /// Mounts the mutable graph for an exact named Git ref in this worktree.
@@ -256,50 +231,14 @@ impl DaemonSessionRuntimeRegistryV1 {
 
     async fn code_graph_branch_with_authority(
         &self,
-        project_root: &Path,
+        _project_root: &Path,
         project_id: ProjectId,
-        branch_name: &str,
+        _branch_name: &str,
         database_path: PathBuf,
         database_authority: Option<DatabaseAuthority>,
         access: DatabaseAccessMode,
     ) -> Result<Database> {
-        let identity = crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(
-            project_root,
-        )
-        .map_err(|error| {
-            session_registry_error("resolve code-branch identity", error.to_string())
-        })?;
-        let ref_name = if branch_name.starts_with("refs/heads/") {
-            branch_name.to_owned()
-        } else if branch_name.starts_with("refs/") {
-            return Err(session_registry_error(
-                "construct code-branch ref identity",
-                "branch ref must be under refs/heads/".to_owned(),
-            ));
-        } else {
-            format!("refs/heads/{branch_name}")
-        };
-        let ref_id = RefId::new(ref_name).map_err(|error| {
-            session_registry_error("construct code-branch ref identity", error.to_string())
-        })?;
-        let shard_id = StoreShardIdV1::code(
-            self.identity.brain_id().clone(),
-            self.identity.profile_id().clone(),
-            project_id,
-            identity.repository_id().clone(),
-            CodeShardScopeV1::Branch {
-                worktree_id: identity.worktree_id().clone(),
-                ref_id,
-            },
-        );
-        let runtime = self
-            .code_graph_with_authority(
-                shard_id,
-                database_path,
-                database_authority,
-                matches!(access, DatabaseAccessMode::ReadWrite),
-            )
-            .await?;
-        Database::publish_runtime(runtime, access).await
+        self.project_graph_database(project_id, database_path, database_authority, access)
+            .await
     }
 }

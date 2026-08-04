@@ -24,16 +24,19 @@ pub(super) enum DriverFailure {
 impl DriverFailure {
     pub(super) fn result(&self, request: &RuntimeSubmitRequestV1) -> RequestResult {
         match self {
-            Self::Busy => Ok(saturation(request, SaturationScopeV1::ShardOperations)),
+            Self::Busy => Err(infrastructure(format!(
+                "canonical SQLite writer for {:?} encountered a competing write authority",
+                request.binding().shard_id
+            ))),
             Self::Error(error) => Err(error.clone()),
         }
     }
 
     pub(super) fn storage_error(self) -> StorageRuntimeErrorV1 {
         match self {
-            Self::Busy => {
-                infrastructure("SQLite writer remained busy after its zero-duration busy timeout")
-            }
+            Self::Busy => infrastructure(
+                "canonical SQLite writer encountered a competing write authority during rollback",
+            ),
             Self::Error(error) => error,
         }
     }

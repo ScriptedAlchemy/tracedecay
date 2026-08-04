@@ -504,6 +504,50 @@ fn actor_commits_before_reply_and_releases_admission() {
     writer.shutdown_and_join().unwrap();
 }
 
+#[test]
+fn competing_write_authority_fails_instead_of_reporting_retryable_saturation() {
+    let database = TestDatabase::new();
+    let blocked = request(metadata(
+        "operation.writer.competing",
+        "key.writer.competing",
+        'b',
+    ));
+    let applied = Arc::new(AtomicU64::new(0));
+    let writer = start(&database, &blocked, Arc::clone(&applied));
+    let mut competing = Connection::open(&database.0).unwrap();
+    let transaction = competing
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let failure = runtime
+        .block_on(writer.submit(blocked.clone(), Arc::new(Probe::new(&blocked, None))))
+        .unwrap_err();
+    assert!(matches!(
+        failure,
+        WriterActorError::StorageFailure(StorageRuntimeErrorV1::Infrastructure { operation })
+            if operation.contains("competing write authority")
+    ));
+    assert_eq!(applied.load(Ordering::SeqCst), 0);
+
+    drop(transaction);
+    let recovered = request(metadata(
+        "operation.writer.recovered",
+        "key.writer.recovered",
+        'c',
+    ));
+    assert!(matches!(
+        runtime
+            .block_on(writer.submit(recovered.clone(), Arc::new(Probe::new(&recovered, None)),))
+            .unwrap(),
+        RuntimeSubmitOutcomeV1::Committed { .. }
+    ));
+    assert_eq!(applied.load(Ordering::SeqCst), 1);
+    writer.shutdown_and_join().unwrap();
+}
+
 mod authority;
 mod backup;
 mod checkpoint;
