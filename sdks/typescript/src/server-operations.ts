@@ -9,11 +9,6 @@ export interface ServerOperationDescriptor<Name extends string = string> {
 }
 
 export const SERVER_OPERATIONS = [
-  { operation: "git_status", route: "/application/git/status", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
-  { operation: "git_diff", route: "/application/git/diff", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
-  { operation: "git_history", route: "/application/git/history", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
-  { operation: "git_blame", route: "/application/git/blame", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
-  { operation: "git_hunks", route: "/application/git/hunks", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
   { operation: "feedback_diagnostics", route: "/application/feedback/diagnostics", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
   { operation: "feedback_get", route: "/application/feedback/get", sdkAvailability: "unavailable", disposition: "schema_unavailable" },
   { operation: "feedback_expand", route: "/application/feedback/expand", sdkAvailability: "unavailable", disposition: "schema_unavailable" },

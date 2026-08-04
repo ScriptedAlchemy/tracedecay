@@ -1,4 +1,6 @@
-use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish};
+use tracedecay_sdk::operations::{
+    GitStatus, OperationTransport, TypedOperation, WorkAttemptFinish,
+};
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
     application, domain, operation, operations, remote, work,
@@ -99,17 +101,19 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
         binding.operation_id().as_str(),
         WorkAttemptFinish::OPERATION_ID
     );
+    assert_eq!(WorkAttemptFinish::EFFECT, binding.effect());
+    assert_eq!(WorkAttemptFinish::IDEMPOTENCY, binding.idempotency());
 
-    match binding.exposure() {
-        operation::RouteExposureV1::Public {
-            binding_id,
-            route_path,
-        } => {
-            assert_eq!(binding_id.as_str(), WorkAttemptFinish::BINDING_ID);
-            assert_eq!(route_path, WorkAttemptFinish::ROUTE);
+    assert_eq!(
+        WorkAttemptFinish::TRANSPORT,
+        OperationTransport::Http {
+            route: "/application/work/attempt/finish"
         }
-        operation::RouteExposureV1::Internal => panic!("attempt_finish must be publicly exposed"),
-    }
+    );
+    assert!(matches!(
+        binding.exposure(),
+        operation::RouteExposureV1::Public { .. }
+    ));
 
     assert_eq!(
         binding.request_schema().schema_ref().schema_id().as_str(),
@@ -123,6 +127,26 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
     assert_eq!(
         binding.result_schema().schema_ref().revision(),
         WorkAttemptFinish::RESULT_SCHEMA_REVISION
+    );
+}
+
+#[test]
+fn git_status_descriptor_matches_the_canonical_mcp_sdk_binding() {
+    let registry = application::sdk_executable_binding_registry().expect("SDK registry");
+    let binding = registry
+        .get(&operation::OperationId::new(GitStatus::OPERATION_ID).unwrap())
+        .and_then(|availability| availability.binding())
+        .expect("Git status SDK binding");
+
+    assert_eq!(binding.sdk_method().as_str(), "git_status");
+    assert_eq!(binding.binding_id().as_str(), GitStatus::BINDING_ID);
+    assert_eq!(GitStatus::EFFECT, binding.effect());
+    assert_eq!(GitStatus::IDEMPOTENCY, binding.idempotency());
+    assert_eq!(
+        GitStatus::TRANSPORT,
+        OperationTransport::McpTool {
+            tool_name: "tracedecay_git_status"
+        }
     );
 }
 

@@ -2,20 +2,30 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracedecay_api::HttpApplicationOperation;
-use tracedecay_tool_catalog::ExecutableUnavailableDispositionV1;
+use tracedecay_tool_catalog::{
+    EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
+};
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationTransport {
+    Http { route: &'static str },
+    McpTool { tool_name: &'static str },
+}
 pub trait TypedOperation {
     type Request: Serialize;
     type Result: DeserializeOwned;
     const OPERATION_ID: &'static str;
-    const ROUTE: &'static str;
+    const TRANSPORT: OperationTransport;
     const BINDING_ID: &'static str;
+    const EFFECT: EffectClass;
+    const IDEMPOTENCY: IdempotencyContract;
     const RESULT_SCHEMA_ID: &'static str;
     const RESULT_SCHEMA_REVISION: u32;
 }
 macro_rules! typed_operation {
     (
-        $name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal,
-        $schema:literal, $revision:literal
+        $name:ident, $module:ident, $operation:literal, $transport:expr,
+        $binding:literal, $effect:expr, $idempotency:expr, $schema:literal,
+        $revision:literal
     ) => {
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub struct $name;
@@ -23,13 +33,18591 @@ macro_rules! typed_operation {
             type Request = $module::Request;
             type Result = $module::Result;
             const OPERATION_ID: &'static str = $operation;
-            const ROUTE: &'static str = $route;
+            const TRANSPORT: OperationTransport = $transport;
             const BINDING_ID: &'static str = $binding;
+            const EFFECT: EffectClass = $effect;
+            const IDEMPOTENCY: IdempotencyContract = $idempotency;
             const RESULT_SCHEMA_ID: &'static str = $schema;
             const RESULT_SCHEMA_REVISION: u32 = $revision;
         }
     };
 }
+#[allow(clippy::all)]
+pub mod git_apply {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Public MCP/CLI request to apply one immutable Git index preview.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitApplySurfaceRequest",
+        ///  "description": "Public MCP/CLI request to apply one immutable Git index preview.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "idempotency_key",
+        ///    "preview"
+        ///  ],
+        ///  "properties": {
+        ///    "idempotency_key": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview": {
+        ///      "$ref": "#/definitions/GitIndexPreviewV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitApplySurfaceRequest {
+            pub idempotency_key: ::std::string::String,
+            pub preview: GitIndexPreviewV1,
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        ///Whether a captured preview may reach the daemon's native apply path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Whether a captured preview may reach the daemon's native apply path.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "applicable"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "reason",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "reason": {
+        ///          "$ref": "#/definitions/GitIndexUnsupportedStateV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unsupported"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "reason")]
+        pub enum GitIndexPreviewDispositionV1 {
+            #[serde(rename = "applicable")]
+            Applicable,
+            #[serde(rename = "unsupported")]
+            Unsupported(GitIndexUnsupportedStateV1),
+        }
+        impl ::std::convert::From<GitIndexUnsupportedStateV1> for GitIndexPreviewDispositionV1 {
+            fn from(value: GitIndexUnsupportedStateV1) -> Self {
+                Self::Unsupported(value)
+            }
+        }
+        ///Strongly typed canonical identity: `GitIndexPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `GitIndexPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitIndexPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for GitIndexPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitIndexPreviewId> for ::std::string::String {
+            fn from(value: GitIndexPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitIndexPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitIndexPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitIndexPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Immutable, content-bound preview for one daemon-serialized index
+        transaction. Applicability is only a precondition: the daemon must capture
+        and compare the entire snapshot and every contained `HunkRefV1` again
+        immediately before a native mutation.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable, content-bound preview for one daemon-serialized index\ntransaction. Applicability is only a precondition: the daemon must capture\nand compare the entire snapshot and every contained `HunkRefV1` again\nimmediately before a native mutation.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "created_at",
+        ///    "disposition",
+        ///    "expires_at",
+        ///    "operation",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_snapshot",
+        ///    "repository_snapshot_digest",
+        ///    "selected_hunks"
+        ///  ],
+        ///  "properties": {
+        ///    "candidate_index_tree": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "commit_intent_digest": {
+        ///      "description": "Canonical commitment to the full commit input. It is present exactly\nfor `commit_index`; plaintext message, identity, timestamp, key, and\nsigning policy remain process-local ephemeral material.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "disposition": {
+        ///      "$ref": "#/definitions/GitIndexPreviewDispositionV1"
+        ///    },
+        ///    "expires_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitIndexTransactionOperationV1"
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/GitIndexPreviewId"
+        ///    },
+        ///    "repository_snapshot": {
+        ///      "$ref": "#/definitions/RepositoryStateSnapshotV1"
+        ///    },
+        ///    "repository_snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "selected_hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexPreviewV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub candidate_index_tree: ::std::option::Option<GitOidV1>,
+            /**Canonical commitment to the full commit input. It is present exactly
+            for `commit_index`; plaintext message, identity, timestamp, key, and
+            signing policy remain process-local ephemeral material.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub commit_intent_digest: ::std::option::Option<ManifestDigest>,
+            pub created_at: UtcMicros,
+            pub disposition: GitIndexPreviewDispositionV1,
+            pub expires_at: UtcMicros,
+            pub operation: GitIndexTransactionOperationV1,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: GitIndexPreviewId,
+            pub repository_snapshot: RepositoryStateSnapshotV1,
+            pub repository_snapshot_digest: ManifestDigest,
+            pub selected_hunks: ::std::vec::Vec<HunkRefV1>,
+        }
+        /**The only native Git mutations represented by PR11. Generic Git execution,
+        ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
+        deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only native Git mutations represented by PR11. Generic Git execution,\nref rewrites, merge/rebase/cherry-pick, push, and worktree writes are\ndeliberately absent.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "stage_hunks",
+        ///    "unstage_hunks",
+        ///    "commit_index"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexTransactionOperationV1 {
+            #[serde(rename = "stage_hunks")]
+            StageHunks,
+            #[serde(rename = "unstage_hunks")]
+            UnstageHunks,
+            #[serde(rename = "commit_index")]
+            CommitIndex,
+        }
+        impl ::std::fmt::Display for GitIndexTransactionOperationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::StageHunks => f.write_str("stage_hunks"),
+                    Self::UnstageHunks => f.write_str("unstage_hunks"),
+                    Self::CommitIndex => f.write_str("commit_index"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexTransactionOperationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "stage_hunks" => Ok(Self::StageHunks),
+                    "unstage_hunks" => Ok(Self::UnstageHunks),
+                    "commit_index" => Ok(Self::CommitIndex),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Why a preview is intentionally read-only. A caller must re-preview after
+        resolving the condition; no variant grants a relaxed or partial apply.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preview is intentionally read-only. A caller must re-preview after\nresolving the condition; no variant grants a relaxed or partial apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "bare_repository",
+        ///    "detached_head",
+        ///    "unborn_branch",
+        ///    "index_lock_present",
+        ///    "applicable_commit_hooks",
+        ///    "signing_key_unavailable",
+        ///    "unmerged_index",
+        ///    "intent_to_add",
+        ///    "split_index",
+        ///    "sparse_index",
+        ///    "unreadable_index",
+        ///    "conflicted_working_tree",
+        ///    "unreadable_working_tree",
+        ///    "in_progress_operation",
+        ///    "unsupported_object_format",
+        ///    "binary_hunk",
+        ///    "submodule",
+        ///    "symlink",
+        ///    "file_mode_only",
+        ///    "rename_or_copy",
+        ///    "filters_or_end_of_line",
+        ///    "partial_hunk_selection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexUnsupportedStateV1 {
+            #[serde(rename = "bare_repository")]
+            BareRepository,
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "index_lock_present")]
+            IndexLockPresent,
+            #[serde(rename = "applicable_commit_hooks")]
+            ApplicableCommitHooks,
+            #[serde(rename = "signing_key_unavailable")]
+            SigningKeyUnavailable,
+            #[serde(rename = "unmerged_index")]
+            UnmergedIndex,
+            #[serde(rename = "intent_to_add")]
+            IntentToAdd,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "sparse_index")]
+            SparseIndex,
+            #[serde(rename = "unreadable_index")]
+            UnreadableIndex,
+            #[serde(rename = "conflicted_working_tree")]
+            ConflictedWorkingTree,
+            #[serde(rename = "unreadable_working_tree")]
+            UnreadableWorkingTree,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "binary_hunk")]
+            BinaryHunk,
+            #[serde(rename = "submodule")]
+            Submodule,
+            #[serde(rename = "symlink")]
+            Symlink,
+            #[serde(rename = "file_mode_only")]
+            FileModeOnly,
+            #[serde(rename = "rename_or_copy")]
+            RenameOrCopy,
+            #[serde(rename = "filters_or_end_of_line")]
+            FiltersOrEndOfLine,
+            #[serde(rename = "partial_hunk_selection")]
+            PartialHunkSelection,
+        }
+        impl ::std::fmt::Display for GitIndexUnsupportedStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::BareRepository => f.write_str("bare_repository"),
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::IndexLockPresent => f.write_str("index_lock_present"),
+                    Self::ApplicableCommitHooks => f.write_str("applicable_commit_hooks"),
+                    Self::SigningKeyUnavailable => f.write_str("signing_key_unavailable"),
+                    Self::UnmergedIndex => f.write_str("unmerged_index"),
+                    Self::IntentToAdd => f.write_str("intent_to_add"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::SparseIndex => f.write_str("sparse_index"),
+                    Self::UnreadableIndex => f.write_str("unreadable_index"),
+                    Self::ConflictedWorkingTree => f.write_str("conflicted_working_tree"),
+                    Self::UnreadableWorkingTree => f.write_str("unreadable_working_tree"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::BinaryHunk => f.write_str("binary_hunk"),
+                    Self::Submodule => f.write_str("submodule"),
+                    Self::Symlink => f.write_str("symlink"),
+                    Self::FileModeOnly => f.write_str("file_mode_only"),
+                    Self::RenameOrCopy => f.write_str("rename_or_copy"),
+                    Self::FiltersOrEndOfLine => f.write_str("filters_or_end_of_line"),
+                    Self::PartialHunkSelection => f.write_str("partial_hunk_selection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexUnsupportedStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "bare_repository" => Ok(Self::BareRepository),
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "index_lock_present" => Ok(Self::IndexLockPresent),
+                    "applicable_commit_hooks" => Ok(Self::ApplicableCommitHooks),
+                    "signing_key_unavailable" => Ok(Self::SigningKeyUnavailable),
+                    "unmerged_index" => Ok(Self::UnmergedIndex),
+                    "intent_to_add" => Ok(Self::IntentToAdd),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "sparse_index" => Ok(Self::SparseIndex),
+                    "unreadable_index" => Ok(Self::UnreadableIndex),
+                    "conflicted_working_tree" => Ok(Self::ConflictedWorkingTree),
+                    "unreadable_working_tree" => Ok(Self::UnreadableWorkingTree),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "binary_hunk" => Ok(Self::BinaryHunk),
+                    "submodule" => Ok(Self::Submodule),
+                    "symlink" => Ok(Self::Symlink),
+                    "file_mode_only" => Ok(Self::FileModeOnly),
+                    "rename_or_copy" => Ok(Self::RenameOrCopy),
+                    "filters_or_end_of_line" => Ok(Self::FiltersOrEndOfLine),
+                    "partial_hunk_selection" => Ok(Self::PartialHunkSelection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexUnsupportedStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexUnsupportedStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexUnsupportedStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Repository object format, derived from object-id length.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Repository object format, derived from object-id length.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "sha1",
+        ///    "sha256"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitObjectFormatV1 {
+            #[serde(rename = "sha1")]
+            Sha1,
+            #[serde(rename = "sha256")]
+            Sha256,
+        }
+        impl ::std::fmt::Display for GitObjectFormatV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Sha1 => f.write_str("sha1"),
+                    Self::Sha256 => f.write_str("sha256"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitObjectFormatV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "sha1" => Ok(Self::Sha1),
+                    "sha256" => Ok(Self::Sha256),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RepositoryIndexSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "checksum",
+        ///    "state"
+        ///  ],
+        ///  "properties": {
+        ///    "checksum": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/RepositoryIndexStateV1"
+        ///    },
+        ///    "tree_id": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryIndexSnapshotV1 {
+            pub checksum: ManifestDigest,
+            pub state: RepositoryIndexStateV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub tree_id: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage_digest: ::std::option::Option<ManifestDigest>,
+        }
+        ///`RepositoryIndexStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "clean",
+        ///    "staged",
+        ///    "unmerged",
+        ///    "intent_to_add",
+        ///    "split",
+        ///    "sparse",
+        ///    "unreadable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum RepositoryIndexStateV1 {
+            #[serde(rename = "clean")]
+            Clean,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+            #[serde(rename = "intent_to_add")]
+            IntentToAdd,
+            #[serde(rename = "split")]
+            Split,
+            #[serde(rename = "sparse")]
+            Sparse,
+            #[serde(rename = "unreadable")]
+            Unreadable,
+        }
+        impl ::std::fmt::Display for RepositoryIndexStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Clean => f.write_str("clean"),
+                    Self::Staged => f.write_str("staged"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                    Self::IntentToAdd => f.write_str("intent_to_add"),
+                    Self::Split => f.write_str("split"),
+                    Self::Sparse => f.write_str("sparse"),
+                    Self::Unreadable => f.write_str("unreadable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for RepositoryIndexStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "clean" => Ok(Self::Clean),
+                    "staged" => Ok(Self::Staged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    "intent_to_add" => Ok(Self::IntentToAdd),
+                    "split" => Ok(Self::Split),
+                    "sparse" => Ok(Self::Sparse),
+                    "unreadable" => Ok(Self::Unreadable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable content-addressed native repository state. Missing/partial
+        evidence remains typed by fields and coverage instead of being upgraded to
+        a guessed clean snapshot.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable content-addressed native repository state. Missing/partial\nevidence remains typed by fields and coverage instead of being upgraded to\na guessed clean snapshot.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "captured_at",
+        ///    "coverage",
+        ///    "head",
+        ///    "index",
+        ///    "object_format",
+        ///    "observation_epoch",
+        ///    "operation_state",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "snapshot_id",
+        ///    "working_tree"
+        ///  ],
+        ///  "properties": {
+        ///    "adapter_revision": {
+        ///      "description": "Revision of the fixed native adapter that interpreted this state.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "attributes_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "captured_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "filesystem_capabilities_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "git_version": {
+        ///      "description": "Exact native Git implementation observed by the fixed adapter. A\nread-only partial snapshot may omit this, but omitted native evidence\nis never mutation eligible.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "index": {
+        ///      "$ref": "#/definitions/RepositoryIndexSnapshotV1"
+        ///    },
+        ///    "object_format": {
+        ///      "$ref": "#/definitions/GitObjectFormatV1"
+        ///    },
+        ///    "observation_epoch": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation_state": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "refs_digest": {
+        ///      "description": "Digest of the complete native ref namespace at capture time.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "snapshot_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "sparse_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "submodule_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "working_tree": {
+        ///      "$ref": "#/definitions/RepositoryWorkingTreeSnapshotV1"
+        ///    },
+        ///    "worktree_id": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorktreeId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryStateSnapshotV1 {
+            ///Revision of the fixed native adapter that interpreted this state.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub adapter_revision: ::std::option::Option<::std::string::String>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub captured_at: UtcMicros,
+            pub coverage: GitCoverageV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub filesystem_capabilities_digest: ::std::option::Option<ManifestDigest>,
+            /**Exact native Git implementation observed by the fixed adapter. A
+            read-only partial snapshot may omit this, but omitted native evidence
+            is never mutation eligible.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub git_version: ::std::option::Option<::std::string::String>,
+            pub head: GitHeadStateV1,
+            pub index: RepositoryIndexSnapshotV1,
+            pub object_format: GitObjectFormatV1,
+            pub observation_epoch: u64,
+            pub operation_state: GitOperationStateV1,
+            pub project_id: ProjectId,
+            ///Digest of the complete native ref namespace at capture time.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub refs_digest: ::std::option::Option<ManifestDigest>,
+            pub repository_id: RepositoryId,
+            pub snapshot_id: ::std::string::String,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub sparse_digest: ::std::option::Option<ManifestDigest>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub submodule_digest: ::std::option::Option<ManifestDigest>,
+            pub working_tree: RepositoryWorkingTreeSnapshotV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub worktree_id: ::std::option::Option<WorktreeId>,
+        }
+        ///`RepositoryWorkingTreeSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "state",
+        ///    "tracked_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "ignored_collision_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/RepositoryWorkingTreeStateV1"
+        ///    },
+        ///    "tracked_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "untracked_name_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryWorkingTreeSnapshotV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub ignored_collision_digest: ::std::option::Option<ManifestDigest>,
+            pub state: RepositoryWorkingTreeStateV1,
+            pub tracked_digest: ManifestDigest,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub untracked_name_digest: ::std::option::Option<ManifestDigest>,
+        }
+        ///`RepositoryWorkingTreeStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "clean",
+        ///    "tracked_dirty",
+        ///    "untracked_only",
+        ///    "mixed",
+        ///    "conflicted",
+        ///    "unreadable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum RepositoryWorkingTreeStateV1 {
+            #[serde(rename = "clean")]
+            Clean,
+            #[serde(rename = "tracked_dirty")]
+            TrackedDirty,
+            #[serde(rename = "untracked_only")]
+            UntrackedOnly,
+            #[serde(rename = "mixed")]
+            Mixed,
+            #[serde(rename = "conflicted")]
+            Conflicted,
+            #[serde(rename = "unreadable")]
+            Unreadable,
+        }
+        impl ::std::fmt::Display for RepositoryWorkingTreeStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Clean => f.write_str("clean"),
+                    Self::TrackedDirty => f.write_str("tracked_dirty"),
+                    Self::UntrackedOnly => f.write_str("untracked_only"),
+                    Self::Mixed => f.write_str("mixed"),
+                    Self::Conflicted => f.write_str("conflicted"),
+                    Self::Unreadable => f.write_str("unreadable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for RepositoryWorkingTreeStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "clean" => Ok(Self::Clean),
+                    "tracked_dirty" => Ok(Self::TrackedDirty),
+                    "untracked_only" => Ok(Self::UntrackedOnly),
+                    "mixed" => Ok(Self::Mixed),
+                    "conflicted" => Ok(Self::Conflicted),
+                    "unreadable" => Ok(Self::Unreadable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Strongly typed canonical identity: `GitIndexPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `GitIndexPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitIndexPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for GitIndexPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitIndexPreviewId> for ::std::string::String {
+            fn from(value: GitIndexPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitIndexPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitIndexPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitIndexPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `GitIndexReceiptId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `GitIndexReceiptId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitIndexReceiptId(pub ::std::string::String);
+        impl ::std::ops::Deref for GitIndexReceiptId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitIndexReceiptId> for ::std::string::String {
+            fn from(value: GitIndexReceiptId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitIndexReceiptId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitIndexReceiptId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitIndexReceiptId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Terminal outcome a recovery record can prove without re-running a native
+        mutation.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Terminal outcome a recovery record can prove without re-running a native\nmutation.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "committed",
+        ///    "aborted_no_change",
+        ///    "needs_inspection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexReceiptOutcomeV1 {
+            #[serde(rename = "committed")]
+            Committed,
+            #[serde(rename = "aborted_no_change")]
+            AbortedNoChange,
+            #[serde(rename = "needs_inspection")]
+            NeedsInspection,
+        }
+        impl ::std::fmt::Display for GitIndexReceiptOutcomeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Committed => f.write_str("committed"),
+                    Self::AbortedNoChange => f.write_str("aborted_no_change"),
+                    Self::NeedsInspection => f.write_str("needs_inspection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexReceiptOutcomeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "committed" => Ok(Self::Committed),
+                    "aborted_no_change" => Ok(Self::AbortedNoChange),
+                    "needs_inspection" => Ok(Self::NeedsInspection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexReceiptOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexReceiptOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexReceiptOutcomeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed canonical identity: `GitIndexTransactionId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `GitIndexTransactionId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitIndexTransactionId(pub ::std::string::String);
+        impl ::std::ops::Deref for GitIndexTransactionId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitIndexTransactionId> for ::std::string::String {
+            fn from(value: GitIndexTransactionId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitIndexTransactionId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitIndexTransactionId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitIndexTransactionId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**The only native Git mutations represented by PR11. Generic Git execution,
+        ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
+        deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only native Git mutations represented by PR11. Generic Git execution,\nref rewrites, merge/rebase/cherry-pick, push, and worktree writes are\ndeliberately absent.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "stage_hunks",
+        ///    "unstage_hunks",
+        ///    "commit_index"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexTransactionOperationV1 {
+            #[serde(rename = "stage_hunks")]
+            StageHunks,
+            #[serde(rename = "unstage_hunks")]
+            UnstageHunks,
+            #[serde(rename = "commit_index")]
+            CommitIndex,
+        }
+        impl ::std::fmt::Display for GitIndexTransactionOperationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::StageHunks => f.write_str("stage_hunks"),
+                    Self::UnstageHunks => f.write_str("unstage_hunks"),
+                    Self::CommitIndex => f.write_str("commit_index"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexTransactionOperationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "stage_hunks" => Ok(Self::StageHunks),
+                    "unstage_hunks" => Ok(Self::UnstageHunks),
+                    "commit_index" => Ok(Self::CommitIndex),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Durable, integrity-protected receipt for one PR11 index transaction.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitIndexTransactionReceiptV1",
+        ///  "description": "Durable, integrity-protected receipt for one PR11 index transaction.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "committed_at",
+        ///    "final_snapshot_captured",
+        ///    "final_snapshot_digest",
+        ///    "old_snapshot_digest",
+        ///    "operation",
+        ///    "outcome",
+        ///    "preview_id",
+        ///    "receipt_digest",
+        ///    "receipt_id",
+        ///    "selected_hunk_digests",
+        ///    "transaction_id"
+        ///  ],
+        ///  "properties": {
+        ///    "committed_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "created_commit": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "final_snapshot_captured": {
+        ///      "description": "Whether `final_snapshot_digest`, `new_index_tree`, and `new_head` came\nfrom a post-outcome native observation. An unavailable observation is\nvalid only for a terminal outcome that does not claim a commit.",
+        ///      "type": "boolean"
+        ///    },
+        ///    "final_snapshot_digest": {
+        ///      "description": "Digest of a snapshot that was actually captured after the terminal\nobservation. When `final_snapshot_captured` is false this retains the\nexpected snapshot digest only as a stable schema placeholder; callers\nmust not treat it as an observation.",
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "new_head": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "new_index_tree": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_head": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_index_tree": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitIndexTransactionOperationV1"
+        ///    },
+        ///    "outcome": {
+        ///      "$ref": "#/definitions/GitIndexReceiptOutcomeV1"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/GitIndexPreviewId"
+        ///    },
+        ///    "receipt_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "receipt_id": {
+        ///      "$ref": "#/definitions/GitIndexReceiptId"
+        ///    },
+        ///    "selected_hunk_digests": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/ManifestDigest"
+        ///      }
+        ///    },
+        ///    "transaction_id": {
+        ///      "$ref": "#/definitions/GitIndexTransactionId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexTransactionReceiptV1 {
+            pub committed_at: UtcMicros,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub created_commit: ::std::option::Option<GitOidV1>,
+            /**Whether `final_snapshot_digest`, `new_index_tree`, and `new_head` came
+            from a post-outcome native observation. An unavailable observation is
+            valid only for a terminal outcome that does not claim a commit.*/
+            pub final_snapshot_captured: bool,
+            /**Digest of a snapshot that was actually captured after the terminal
+            observation. When `final_snapshot_captured` is false this retains the
+            expected snapshot digest only as a stable schema placeholder; callers
+            must not treat it as an observation.*/
+            pub final_snapshot_digest: ManifestDigest,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_head: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_index_tree: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_head: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_index_tree: ::std::option::Option<GitOidV1>,
+            pub old_snapshot_digest: ManifestDigest,
+            pub operation: GitIndexTransactionOperationV1,
+            pub outcome: GitIndexReceiptOutcomeV1,
+            pub preview_id: GitIndexPreviewId,
+            pub receipt_digest: ManifestDigest,
+            pub receipt_id: GitIndexReceiptId,
+            pub selected_hunk_digests: ::std::vec::Vec<ManifestDigest>,
+            pub transaction_id: GitIndexTransactionId,
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitApplySurfaceRequest;
+    pub type Result = result::GitIndexTransactionReceiptV1;
+}
+typed_operation!(
+    GitApply,
+    git_apply,
+    "operation.application.git.apply",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_apply"
+    },
+    "binding.mcp.git_apply.v1",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
+    "schema.application.git.apply.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod git_blame {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Request shape for the public `git_blame` surface.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitBlameSurfaceRequest",
+        ///  "description": "Request shape for the public `git_blame` surface.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "path"
+        ///  ],
+        ///  "properties": {
+        ///    "follow_renames": {
+        ///      "default": false,
+        ///      "type": "boolean"
+        ///    },
+        ///    "max_bytes": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "max_entries": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameSurfaceRequest {
+            #[serde(default)]
+            pub follow_renames: bool,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_bytes: ::std::option::Option<u64>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_entries: ::std::option::Option<u32>,
+            pub path: ::std::string::String,
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Why blame/line provenance is unavailable for a path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why blame/line provenance is unavailable for a path.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "available",
+        ///    "path_not_tracked",
+        ///    "unborn_branch",
+        ///    "binary_file"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitBlameAvailabilityV1 {
+            #[serde(rename = "available")]
+            Available,
+            #[serde(rename = "path_not_tracked")]
+            PathNotTracked,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "binary_file")]
+            BinaryFile,
+        }
+        impl ::std::fmt::Display for GitBlameAvailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Available => f.write_str("available"),
+                    Self::PathNotTracked => f.write_str("path_not_tracked"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::BinaryFile => f.write_str("binary_file"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitBlameAvailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "available" => Ok(Self::Available),
+                    "path_not_tracked" => Ok(Self::PathNotTracked),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "binary_file" => Ok(Self::BinaryFile),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Line provenance for one final (current) line.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Line provenance for one final (current) line.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "boundary",
+        ///    "commit",
+        ///    "final_line",
+        ///    "origin_line"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "boundary": {
+        ///      "description": "True when the origin commit is a history boundary (e.g. shallow root).",
+        ///      "type": "boolean"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "final_line": {
+        ///      "description": "1-based line number in the blamed revision.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "origin_line": {
+        ///      "description": "1-based line number in the origin commit.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "previous": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlamePreviousV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameLineV1 {
+            pub author: GitCommitIdentityV1,
+            ///True when the origin commit is a history boundary (e.g. shallow root).
+            pub boundary: bool,
+            pub commit: GitOidV1,
+            ///1-based line number in the blamed revision.
+            pub final_line: u32,
+            ///1-based line number in the origin commit.
+            pub origin_line: u32,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub previous: ::std::option::Option<GitBlamePreviousV1>,
+        }
+        ///Rename-following evidence for one blamed line (`previous` record).
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Rename-following evidence for one blamed line (`previous` record).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commit",
+        ///    "path"
+        ///  ],
+        ///  "properties": {
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlamePreviousV1 {
+            pub commit: GitOidV1,
+            pub path: ::std::string::String,
+        }
+        /**Typed blame result: per-line provenance plus boundary, rename-following,
+        and unavailable states.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed blame result: per-line provenance plus boundary, rename-following,\nand unavailable states.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "availability",
+        ///    "coverage",
+        ///    "lines",
+        ///    "path",
+        ///    "repository"
+        ///  ],
+        ///  "properties": {
+        ///    "availability": {
+        ///      "$ref": "#/definitions/GitBlameAvailabilityV1"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "lines": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitBlameLineV1"
+        ///      }
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameV1 {
+            pub availability: GitBlameAvailabilityV1,
+            pub coverage: GitCoverageV1,
+            pub lines: ::std::vec::Vec<GitBlameLineV1>,
+            pub path: ::std::string::String,
+            pub repository: RepositoryId,
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Native change kind for one side (index or worktree) of a status entry,
+        or for a whole-file diff record.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native change kind for one side (index or worktree) of a status entry,\nor for a whole-file diff record.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "unmodified",
+        ///    "modified",
+        ///    "added",
+        ///    "deleted",
+        ///    "renamed",
+        ///    "copied",
+        ///    "type_changed",
+        ///    "unmerged"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitChangeKindV1 {
+            #[serde(rename = "unmodified")]
+            Unmodified,
+            #[serde(rename = "modified")]
+            Modified,
+            #[serde(rename = "added")]
+            Added,
+            #[serde(rename = "deleted")]
+            Deleted,
+            #[serde(rename = "renamed")]
+            Renamed,
+            #[serde(rename = "copied")]
+            Copied,
+            #[serde(rename = "type_changed")]
+            TypeChanged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+        }
+        impl ::std::fmt::Display for GitChangeKindV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Unmodified => f.write_str("unmodified"),
+                    Self::Modified => f.write_str("modified"),
+                    Self::Added => f.write_str("added"),
+                    Self::Deleted => f.write_str("deleted"),
+                    Self::Renamed => f.write_str("renamed"),
+                    Self::Copied => f.write_str("copied"),
+                    Self::TypeChanged => f.write_str("type_changed"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitChangeKindV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "unmodified" => Ok(Self::Unmodified),
+                    "modified" => Ok(Self::Modified),
+                    "added" => Ok(Self::Added),
+                    "deleted" => Ok(Self::Deleted),
+                    "renamed" => Ok(Self::Renamed),
+                    "copied" => Ok(Self::Copied),
+                    "type_changed" => Ok(Self::TypeChanged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Author/committer identity and timestamp evidence for one commit.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Author/committer identity and timestamp evidence for one commit.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "at",
+        ///    "email",
+        ///    "name"
+        ///  ],
+        ///  "properties": {
+        ///    "at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "email": {
+        ///      "type": "string"
+        ///    },
+        ///    "name": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitIdentityV1 {
+            pub at: UtcMicros,
+            pub email: ::std::string::String,
+            pub name: ::std::string::String,
+        }
+        /**Bounded commit metadata. The full message is not retained;
+        `message_digest` is its canonical digest evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit metadata. The full message is not retained;\n`message_digest` is its canonical digest evidence.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "commit",
+        ///    "committer",
+        ///    "message_digest",
+        ///    "parents",
+        ///    "subject",
+        ///    "tree"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "committer": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "message_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "parents": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitOidV1"
+        ///      }
+        ///    },
+        ///    "subject": {
+        ///      "description": "First line of the commit message, bounded at capture.",
+        ///      "type": "string"
+        ///    },
+        ///    "tree": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitMetadataV1 {
+            pub author: GitCommitIdentityV1,
+            pub commit: GitOidV1,
+            pub committer: GitCommitIdentityV1,
+            pub message_digest: ManifestDigest,
+            pub parents: ::std::vec::Vec<GitOidV1>,
+            ///First line of the commit message, bounded at capture.
+            pub subject: ::std::string::String,
+            pub tree: GitOidV1,
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Diff scope: unstaged worktree changes, staged index changes, or an exact
+        commit range. Range diffs are read-only evidence and carry no index
+        relationship, so they cannot mint an applicable `HunkRefV1`.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Diff scope: unstaged worktree changes, staged index changes, or an exact\ncommit range. Range diffs are read-only evidence and carry no index\nrelationship, so they cannot mint an applicable `HunkRefV1`.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "working_tree"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "staged"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "base",
+        ///        "head",
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "base": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "head": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "commit_range"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "scope")]
+        pub enum GitDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange { base: GitOidV1, head: GitOidV1 },
+        }
+        ///Typed diff result for one scope with explicit coverage.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed diff result for one scope with explicit coverage.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "files",
+        ///    "repository",
+        ///    "scope"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "files": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitFileDiffV1"
+        ///      }
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope": {
+        ///      "$ref": "#/definitions/GitDiffScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitDiffV1 {
+            pub coverage: GitCoverageV1,
+            pub files: ::std::vec::Vec<GitFileDiffV1>,
+            pub repository: RepositoryId,
+            pub scope: GitDiffScopeV1,
+        }
+        /**One file's structured diff record: change kind, modes, blob identities,
+        binary/submodule classification, bounded line totals, and hunks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One file's structured diff record: change kind, modes, blob identities,\nbinary/submodule classification, bounded line totals, and hunks.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "binary",
+        ///    "change",
+        ///    "hunks",
+        ///    "path",
+        ///    "submodule"
+        ///  ],
+        ///  "properties": {
+        ///    "binary": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "change": {
+        ///      "$ref": "#/definitions/GitChangeKindV1"
+        ///    },
+        ///    "deletions": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitHunkV1"
+        ///      }
+        ///    },
+        ///    "insertions": {
+        ///      "description": "Inserted/deleted line totals; absent for binary and submodule records.",
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "new_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Source path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "submodule": {
+        ///      "description": "True when the entry is a gitlink (submodule) change.",
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitFileDiffV1 {
+            pub binary: bool,
+            pub change: GitChangeKindV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deletions: ::std::option::Option<u32>,
+            pub hunks: ::std::vec::Vec<GitHunkV1>,
+            ///Inserted/deleted line totals; absent for binary and submodule records.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub insertions: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_mode: ::std::option::Option<GitFileModeV1>,
+            ///Source path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub path: ::std::string::String,
+            ///True when the entry is a gitlink (submodule) change.
+            pub submodule: bool,
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Bounded commit history in native traversal order. `truncated` is true
+        when the capture bound cut the walk; shallow/partial-clone boundaries are
+        coverage degradations, never silently clean.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit history in native traversal order. `truncated` is true\nwhen the capture bound cut the walk; shallow/partial-clone boundaries are\ncoverage degradations, never silently clean.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commits",
+        ///    "coverage",
+        ///    "repository",
+        ///    "truncated"
+        ///  ],
+        ///  "properties": {
+        ///    "commits": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitCommitMetadataV1"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "truncated": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHistoryV1 {
+            pub commits: ::std::vec::Vec<GitCommitMetadataV1>,
+            pub coverage: GitCoverageV1,
+            pub repository: RepositoryId,
+            pub truncated: bool,
+        }
+        /**One structured diff hunk. The hunk body is not retained; `patch_digest`
+        is the canonical digest of the normalized header plus body lines, which
+        is the stable hunk identity evidence (Plan 36 bounded-result rule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One structured diff hunk. The hunk body is not retained; `patch_digest`\nis the canonical digest of the normalized header plus body lines, which\nis the stable hunk identity evidence (Plan 36 bounded-result rule).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "new_lines",
+        ///    "new_start",
+        ///    "old_lines",
+        ///    "old_start",
+        ///    "patch_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "new_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "section": {
+        ///      "description": "Function/section heading from the hunk header when Git emitted one.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHunkV1 {
+            pub new_lines: u32,
+            pub new_start: u32,
+            pub old_lines: u32,
+            pub old_start: u32,
+            pub patch_digest: ManifestDigest,
+            ///Function/section heading from the hunk header when Git emitted one.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub section: ::std::option::Option<::std::string::String>,
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitStatusSummaryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV1 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitStatusSummaryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitDiffV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV12 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitDiffV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitHistoryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV13 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitHistoryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitBlameV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV14 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitBlameV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV15 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: ::std::vec::Vec<HunkRefV1>,
+        }
+        ///Actual payload emitted by each public Git read operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitReadResultV1",
+        ///  "description": "Actual payload emitted by each public Git read operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "diff"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV12"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "history"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV13"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "blame"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV14"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "hunks"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV15"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "query", content = "result")]
+        pub enum GitReadResultV1 {
+            #[serde(rename = "status")]
+            Status(GitQueryEnvelopeV1),
+            #[serde(rename = "diff")]
+            Diff(GitQueryEnvelopeV12),
+            #[serde(rename = "history")]
+            History(GitQueryEnvelopeV13),
+            #[serde(rename = "blame")]
+            Blame(GitQueryEnvelopeV14),
+            #[serde(rename = "hunks")]
+            Hunks(GitQueryEnvelopeV15),
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV1> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV1) -> Self {
+                Self::Status(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV12> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV12) -> Self {
+                Self::Diff(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV13> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV13) -> Self {
+                Self::History(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV14> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV14) -> Self {
+                Self::Blame(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV15> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV15) -> Self {
+                Self::Hunks(value)
+            }
+        }
+        ///Bounded status summary returned by `git_status`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded status summary returned by `git_status`.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "changed_paths",
+        ///    "conflicted",
+        ///    "head",
+        ///    "ignored",
+        ///    "operation",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "staged",
+        ///    "unstaged",
+        ///    "untracked"
+        ///  ],
+        ///  "properties": {
+        ///    "changed_paths": {
+        ///      "description": "Sorted, de-duplicated paths, capped by the query entry bound.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "conflicted": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "ignored": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "staged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "unstaged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "untracked": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitStatusSummaryV1 {
+            ///Sorted, de-duplicated paths, capped by the query entry bound.
+            pub changed_paths: ::std::vec::Vec<::std::string::String>,
+            pub conflicted: u32,
+            pub head: GitHeadStateV1,
+            pub ignored: u32,
+            pub operation: GitOperationStateV1,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            pub staged: u32,
+            pub unstaged: u32,
+            pub untracked: u32,
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitBlameSurfaceRequest;
+    pub type Result = result::GitReadResultV1;
+}
+typed_operation!(
+    GitBlame,
+    git_blame,
+    "operation.application.git.blame",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_blame"
+    },
+    "binding.mcp.git_blame.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    "schema.application.git.blame.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod git_diff {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Request shape for the public `git_diff` surface.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitDiffSurfaceRequest",
+        ///  "description": "Request shape for the public `git_diff` surface.",
+        ///  "type": "object",
+        ///  "properties": {
+        ///    "base": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "head": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "max_bytes": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "max_entries": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "scope": {
+        ///      "default": "working_tree",
+        ///      "$ref": "#/definitions/GitSurfaceDiffScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitDiffSurfaceRequest {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub base: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub head: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_bytes: ::std::option::Option<u64>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_entries: ::std::option::Option<u32>,
+            #[serde(default = "defaults::git_diff_surface_request_scope")]
+            pub scope: GitSurfaceDiffScopeV1,
+        }
+        impl ::std::default::Default for GitDiffSurfaceRequest {
+            fn default() -> Self {
+                Self {
+                    base: Default::default(),
+                    head: Default::default(),
+                    max_bytes: Default::default(),
+                    max_entries: Default::default(),
+                    scope: defaults::git_diff_surface_request_scope(),
+                }
+            }
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Flat public selector for an admitted Git diff scope.
+
+        This intentionally differs from [`GitDiffScopeV1`]: MCP and CLI accept
+        `scope`, `base`, and `head` as sibling fields, then transport parsing builds
+        the canonical domain scope after checking their legal combinations.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Flat public selector for an admitted Git diff scope.\n\nThis intentionally differs from [`GitDiffScopeV1`]: MCP and CLI accept\n`scope`, `base`, and `head` as sibling fields, then transport parsing builds\nthe canonical domain scope after checking their legal combinations.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree",
+        ///    "staged",
+        ///    "commit_range"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitSurfaceDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange,
+        }
+        impl ::std::fmt::Display for GitSurfaceDiffScopeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTree => f.write_str("working_tree"),
+                    Self::Staged => f.write_str("staged"),
+                    Self::CommitRange => f.write_str("commit_range"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitSurfaceDiffScopeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree" => Ok(Self::WorkingTree),
+                    "staged" => Ok(Self::Staged),
+                    "commit_range" => Ok(Self::CommitRange),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitSurfaceDiffScopeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitSurfaceDiffScopeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitSurfaceDiffScopeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /// Generation of default values for serde.
+        pub mod defaults {
+            pub(super) fn git_diff_surface_request_scope() -> super::GitSurfaceDiffScopeV1 {
+                super::GitSurfaceDiffScopeV1::WorkingTree
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Why blame/line provenance is unavailable for a path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why blame/line provenance is unavailable for a path.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "available",
+        ///    "path_not_tracked",
+        ///    "unborn_branch",
+        ///    "binary_file"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitBlameAvailabilityV1 {
+            #[serde(rename = "available")]
+            Available,
+            #[serde(rename = "path_not_tracked")]
+            PathNotTracked,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "binary_file")]
+            BinaryFile,
+        }
+        impl ::std::fmt::Display for GitBlameAvailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Available => f.write_str("available"),
+                    Self::PathNotTracked => f.write_str("path_not_tracked"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::BinaryFile => f.write_str("binary_file"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitBlameAvailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "available" => Ok(Self::Available),
+                    "path_not_tracked" => Ok(Self::PathNotTracked),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "binary_file" => Ok(Self::BinaryFile),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Line provenance for one final (current) line.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Line provenance for one final (current) line.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "boundary",
+        ///    "commit",
+        ///    "final_line",
+        ///    "origin_line"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "boundary": {
+        ///      "description": "True when the origin commit is a history boundary (e.g. shallow root).",
+        ///      "type": "boolean"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "final_line": {
+        ///      "description": "1-based line number in the blamed revision.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "origin_line": {
+        ///      "description": "1-based line number in the origin commit.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "previous": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlamePreviousV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameLineV1 {
+            pub author: GitCommitIdentityV1,
+            ///True when the origin commit is a history boundary (e.g. shallow root).
+            pub boundary: bool,
+            pub commit: GitOidV1,
+            ///1-based line number in the blamed revision.
+            pub final_line: u32,
+            ///1-based line number in the origin commit.
+            pub origin_line: u32,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub previous: ::std::option::Option<GitBlamePreviousV1>,
+        }
+        ///Rename-following evidence for one blamed line (`previous` record).
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Rename-following evidence for one blamed line (`previous` record).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commit",
+        ///    "path"
+        ///  ],
+        ///  "properties": {
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlamePreviousV1 {
+            pub commit: GitOidV1,
+            pub path: ::std::string::String,
+        }
+        /**Typed blame result: per-line provenance plus boundary, rename-following,
+        and unavailable states.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed blame result: per-line provenance plus boundary, rename-following,\nand unavailable states.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "availability",
+        ///    "coverage",
+        ///    "lines",
+        ///    "path",
+        ///    "repository"
+        ///  ],
+        ///  "properties": {
+        ///    "availability": {
+        ///      "$ref": "#/definitions/GitBlameAvailabilityV1"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "lines": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitBlameLineV1"
+        ///      }
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameV1 {
+            pub availability: GitBlameAvailabilityV1,
+            pub coverage: GitCoverageV1,
+            pub lines: ::std::vec::Vec<GitBlameLineV1>,
+            pub path: ::std::string::String,
+            pub repository: RepositoryId,
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Native change kind for one side (index or worktree) of a status entry,
+        or for a whole-file diff record.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native change kind for one side (index or worktree) of a status entry,\nor for a whole-file diff record.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "unmodified",
+        ///    "modified",
+        ///    "added",
+        ///    "deleted",
+        ///    "renamed",
+        ///    "copied",
+        ///    "type_changed",
+        ///    "unmerged"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitChangeKindV1 {
+            #[serde(rename = "unmodified")]
+            Unmodified,
+            #[serde(rename = "modified")]
+            Modified,
+            #[serde(rename = "added")]
+            Added,
+            #[serde(rename = "deleted")]
+            Deleted,
+            #[serde(rename = "renamed")]
+            Renamed,
+            #[serde(rename = "copied")]
+            Copied,
+            #[serde(rename = "type_changed")]
+            TypeChanged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+        }
+        impl ::std::fmt::Display for GitChangeKindV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Unmodified => f.write_str("unmodified"),
+                    Self::Modified => f.write_str("modified"),
+                    Self::Added => f.write_str("added"),
+                    Self::Deleted => f.write_str("deleted"),
+                    Self::Renamed => f.write_str("renamed"),
+                    Self::Copied => f.write_str("copied"),
+                    Self::TypeChanged => f.write_str("type_changed"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitChangeKindV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "unmodified" => Ok(Self::Unmodified),
+                    "modified" => Ok(Self::Modified),
+                    "added" => Ok(Self::Added),
+                    "deleted" => Ok(Self::Deleted),
+                    "renamed" => Ok(Self::Renamed),
+                    "copied" => Ok(Self::Copied),
+                    "type_changed" => Ok(Self::TypeChanged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Author/committer identity and timestamp evidence for one commit.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Author/committer identity and timestamp evidence for one commit.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "at",
+        ///    "email",
+        ///    "name"
+        ///  ],
+        ///  "properties": {
+        ///    "at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "email": {
+        ///      "type": "string"
+        ///    },
+        ///    "name": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitIdentityV1 {
+            pub at: UtcMicros,
+            pub email: ::std::string::String,
+            pub name: ::std::string::String,
+        }
+        /**Bounded commit metadata. The full message is not retained;
+        `message_digest` is its canonical digest evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit metadata. The full message is not retained;\n`message_digest` is its canonical digest evidence.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "commit",
+        ///    "committer",
+        ///    "message_digest",
+        ///    "parents",
+        ///    "subject",
+        ///    "tree"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "committer": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "message_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "parents": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitOidV1"
+        ///      }
+        ///    },
+        ///    "subject": {
+        ///      "description": "First line of the commit message, bounded at capture.",
+        ///      "type": "string"
+        ///    },
+        ///    "tree": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitMetadataV1 {
+            pub author: GitCommitIdentityV1,
+            pub commit: GitOidV1,
+            pub committer: GitCommitIdentityV1,
+            pub message_digest: ManifestDigest,
+            pub parents: ::std::vec::Vec<GitOidV1>,
+            ///First line of the commit message, bounded at capture.
+            pub subject: ::std::string::String,
+            pub tree: GitOidV1,
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Diff scope: unstaged worktree changes, staged index changes, or an exact
+        commit range. Range diffs are read-only evidence and carry no index
+        relationship, so they cannot mint an applicable `HunkRefV1`.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Diff scope: unstaged worktree changes, staged index changes, or an exact\ncommit range. Range diffs are read-only evidence and carry no index\nrelationship, so they cannot mint an applicable `HunkRefV1`.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "working_tree"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "staged"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "base",
+        ///        "head",
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "base": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "head": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "commit_range"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "scope")]
+        pub enum GitDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange { base: GitOidV1, head: GitOidV1 },
+        }
+        ///Typed diff result for one scope with explicit coverage.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed diff result for one scope with explicit coverage.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "files",
+        ///    "repository",
+        ///    "scope"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "files": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitFileDiffV1"
+        ///      }
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope": {
+        ///      "$ref": "#/definitions/GitDiffScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitDiffV1 {
+            pub coverage: GitCoverageV1,
+            pub files: ::std::vec::Vec<GitFileDiffV1>,
+            pub repository: RepositoryId,
+            pub scope: GitDiffScopeV1,
+        }
+        /**One file's structured diff record: change kind, modes, blob identities,
+        binary/submodule classification, bounded line totals, and hunks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One file's structured diff record: change kind, modes, blob identities,\nbinary/submodule classification, bounded line totals, and hunks.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "binary",
+        ///    "change",
+        ///    "hunks",
+        ///    "path",
+        ///    "submodule"
+        ///  ],
+        ///  "properties": {
+        ///    "binary": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "change": {
+        ///      "$ref": "#/definitions/GitChangeKindV1"
+        ///    },
+        ///    "deletions": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitHunkV1"
+        ///      }
+        ///    },
+        ///    "insertions": {
+        ///      "description": "Inserted/deleted line totals; absent for binary and submodule records.",
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "new_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Source path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "submodule": {
+        ///      "description": "True when the entry is a gitlink (submodule) change.",
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitFileDiffV1 {
+            pub binary: bool,
+            pub change: GitChangeKindV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deletions: ::std::option::Option<u32>,
+            pub hunks: ::std::vec::Vec<GitHunkV1>,
+            ///Inserted/deleted line totals; absent for binary and submodule records.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub insertions: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_mode: ::std::option::Option<GitFileModeV1>,
+            ///Source path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub path: ::std::string::String,
+            ///True when the entry is a gitlink (submodule) change.
+            pub submodule: bool,
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Bounded commit history in native traversal order. `truncated` is true
+        when the capture bound cut the walk; shallow/partial-clone boundaries are
+        coverage degradations, never silently clean.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit history in native traversal order. `truncated` is true\nwhen the capture bound cut the walk; shallow/partial-clone boundaries are\ncoverage degradations, never silently clean.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commits",
+        ///    "coverage",
+        ///    "repository",
+        ///    "truncated"
+        ///  ],
+        ///  "properties": {
+        ///    "commits": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitCommitMetadataV1"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "truncated": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHistoryV1 {
+            pub commits: ::std::vec::Vec<GitCommitMetadataV1>,
+            pub coverage: GitCoverageV1,
+            pub repository: RepositoryId,
+            pub truncated: bool,
+        }
+        /**One structured diff hunk. The hunk body is not retained; `patch_digest`
+        is the canonical digest of the normalized header plus body lines, which
+        is the stable hunk identity evidence (Plan 36 bounded-result rule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One structured diff hunk. The hunk body is not retained; `patch_digest`\nis the canonical digest of the normalized header plus body lines, which\nis the stable hunk identity evidence (Plan 36 bounded-result rule).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "new_lines",
+        ///    "new_start",
+        ///    "old_lines",
+        ///    "old_start",
+        ///    "patch_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "new_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "section": {
+        ///      "description": "Function/section heading from the hunk header when Git emitted one.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHunkV1 {
+            pub new_lines: u32,
+            pub new_start: u32,
+            pub old_lines: u32,
+            pub old_start: u32,
+            pub patch_digest: ManifestDigest,
+            ///Function/section heading from the hunk header when Git emitted one.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub section: ::std::option::Option<::std::string::String>,
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitStatusSummaryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV1 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitStatusSummaryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitDiffV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV12 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitDiffV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitHistoryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV13 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitHistoryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitBlameV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV14 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitBlameV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV15 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: ::std::vec::Vec<HunkRefV1>,
+        }
+        ///Actual payload emitted by each public Git read operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitReadResultV1",
+        ///  "description": "Actual payload emitted by each public Git read operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "diff"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV12"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "history"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV13"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "blame"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV14"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "hunks"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV15"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "query", content = "result")]
+        pub enum GitReadResultV1 {
+            #[serde(rename = "status")]
+            Status(GitQueryEnvelopeV1),
+            #[serde(rename = "diff")]
+            Diff(GitQueryEnvelopeV12),
+            #[serde(rename = "history")]
+            History(GitQueryEnvelopeV13),
+            #[serde(rename = "blame")]
+            Blame(GitQueryEnvelopeV14),
+            #[serde(rename = "hunks")]
+            Hunks(GitQueryEnvelopeV15),
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV1> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV1) -> Self {
+                Self::Status(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV12> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV12) -> Self {
+                Self::Diff(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV13> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV13) -> Self {
+                Self::History(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV14> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV14) -> Self {
+                Self::Blame(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV15> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV15) -> Self {
+                Self::Hunks(value)
+            }
+        }
+        ///Bounded status summary returned by `git_status`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded status summary returned by `git_status`.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "changed_paths",
+        ///    "conflicted",
+        ///    "head",
+        ///    "ignored",
+        ///    "operation",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "staged",
+        ///    "unstaged",
+        ///    "untracked"
+        ///  ],
+        ///  "properties": {
+        ///    "changed_paths": {
+        ///      "description": "Sorted, de-duplicated paths, capped by the query entry bound.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "conflicted": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "ignored": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "staged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "unstaged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "untracked": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitStatusSummaryV1 {
+            ///Sorted, de-duplicated paths, capped by the query entry bound.
+            pub changed_paths: ::std::vec::Vec<::std::string::String>,
+            pub conflicted: u32,
+            pub head: GitHeadStateV1,
+            pub ignored: u32,
+            pub operation: GitOperationStateV1,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            pub staged: u32,
+            pub unstaged: u32,
+            pub untracked: u32,
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitDiffSurfaceRequest;
+    pub type Result = result::GitReadResultV1;
+}
+typed_operation!(
+    GitDiff,
+    git_diff,
+    "operation.application.git.diff",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_diff"
+    },
+    "binding.mcp.git_diff.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    "schema.application.git.diff.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod git_history {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Request shape for the public `git_history` surface.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitHistorySurfaceRequest",
+        ///  "description": "Request shape for the public `git_history` surface.",
+        ///  "type": "object",
+        ///  "properties": {
+        ///    "count": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "first_parent": {
+        ///      "default": false,
+        ///      "type": "boolean"
+        ///    },
+        ///    "follow": {
+        ///      "default": false,
+        ///      "type": "boolean"
+        ///    },
+        ///    "max_bytes": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "max_entries": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "path": {
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHistorySurfaceRequest {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub count: ::std::option::Option<u32>,
+            #[serde(default)]
+            pub first_parent: bool,
+            #[serde(default)]
+            pub follow: bool,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_bytes: ::std::option::Option<u64>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_entries: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub path: ::std::option::Option<::std::string::String>,
+        }
+        impl ::std::default::Default for GitHistorySurfaceRequest {
+            fn default() -> Self {
+                Self {
+                    count: Default::default(),
+                    first_parent: Default::default(),
+                    follow: Default::default(),
+                    max_bytes: Default::default(),
+                    max_entries: Default::default(),
+                    path: Default::default(),
+                }
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Why blame/line provenance is unavailable for a path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why blame/line provenance is unavailable for a path.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "available",
+        ///    "path_not_tracked",
+        ///    "unborn_branch",
+        ///    "binary_file"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitBlameAvailabilityV1 {
+            #[serde(rename = "available")]
+            Available,
+            #[serde(rename = "path_not_tracked")]
+            PathNotTracked,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "binary_file")]
+            BinaryFile,
+        }
+        impl ::std::fmt::Display for GitBlameAvailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Available => f.write_str("available"),
+                    Self::PathNotTracked => f.write_str("path_not_tracked"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::BinaryFile => f.write_str("binary_file"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitBlameAvailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "available" => Ok(Self::Available),
+                    "path_not_tracked" => Ok(Self::PathNotTracked),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "binary_file" => Ok(Self::BinaryFile),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Line provenance for one final (current) line.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Line provenance for one final (current) line.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "boundary",
+        ///    "commit",
+        ///    "final_line",
+        ///    "origin_line"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "boundary": {
+        ///      "description": "True when the origin commit is a history boundary (e.g. shallow root).",
+        ///      "type": "boolean"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "final_line": {
+        ///      "description": "1-based line number in the blamed revision.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "origin_line": {
+        ///      "description": "1-based line number in the origin commit.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "previous": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlamePreviousV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameLineV1 {
+            pub author: GitCommitIdentityV1,
+            ///True when the origin commit is a history boundary (e.g. shallow root).
+            pub boundary: bool,
+            pub commit: GitOidV1,
+            ///1-based line number in the blamed revision.
+            pub final_line: u32,
+            ///1-based line number in the origin commit.
+            pub origin_line: u32,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub previous: ::std::option::Option<GitBlamePreviousV1>,
+        }
+        ///Rename-following evidence for one blamed line (`previous` record).
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Rename-following evidence for one blamed line (`previous` record).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commit",
+        ///    "path"
+        ///  ],
+        ///  "properties": {
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlamePreviousV1 {
+            pub commit: GitOidV1,
+            pub path: ::std::string::String,
+        }
+        /**Typed blame result: per-line provenance plus boundary, rename-following,
+        and unavailable states.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed blame result: per-line provenance plus boundary, rename-following,\nand unavailable states.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "availability",
+        ///    "coverage",
+        ///    "lines",
+        ///    "path",
+        ///    "repository"
+        ///  ],
+        ///  "properties": {
+        ///    "availability": {
+        ///      "$ref": "#/definitions/GitBlameAvailabilityV1"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "lines": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitBlameLineV1"
+        ///      }
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameV1 {
+            pub availability: GitBlameAvailabilityV1,
+            pub coverage: GitCoverageV1,
+            pub lines: ::std::vec::Vec<GitBlameLineV1>,
+            pub path: ::std::string::String,
+            pub repository: RepositoryId,
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Native change kind for one side (index or worktree) of a status entry,
+        or for a whole-file diff record.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native change kind for one side (index or worktree) of a status entry,\nor for a whole-file diff record.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "unmodified",
+        ///    "modified",
+        ///    "added",
+        ///    "deleted",
+        ///    "renamed",
+        ///    "copied",
+        ///    "type_changed",
+        ///    "unmerged"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitChangeKindV1 {
+            #[serde(rename = "unmodified")]
+            Unmodified,
+            #[serde(rename = "modified")]
+            Modified,
+            #[serde(rename = "added")]
+            Added,
+            #[serde(rename = "deleted")]
+            Deleted,
+            #[serde(rename = "renamed")]
+            Renamed,
+            #[serde(rename = "copied")]
+            Copied,
+            #[serde(rename = "type_changed")]
+            TypeChanged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+        }
+        impl ::std::fmt::Display for GitChangeKindV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Unmodified => f.write_str("unmodified"),
+                    Self::Modified => f.write_str("modified"),
+                    Self::Added => f.write_str("added"),
+                    Self::Deleted => f.write_str("deleted"),
+                    Self::Renamed => f.write_str("renamed"),
+                    Self::Copied => f.write_str("copied"),
+                    Self::TypeChanged => f.write_str("type_changed"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitChangeKindV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "unmodified" => Ok(Self::Unmodified),
+                    "modified" => Ok(Self::Modified),
+                    "added" => Ok(Self::Added),
+                    "deleted" => Ok(Self::Deleted),
+                    "renamed" => Ok(Self::Renamed),
+                    "copied" => Ok(Self::Copied),
+                    "type_changed" => Ok(Self::TypeChanged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Author/committer identity and timestamp evidence for one commit.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Author/committer identity and timestamp evidence for one commit.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "at",
+        ///    "email",
+        ///    "name"
+        ///  ],
+        ///  "properties": {
+        ///    "at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "email": {
+        ///      "type": "string"
+        ///    },
+        ///    "name": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitIdentityV1 {
+            pub at: UtcMicros,
+            pub email: ::std::string::String,
+            pub name: ::std::string::String,
+        }
+        /**Bounded commit metadata. The full message is not retained;
+        `message_digest` is its canonical digest evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit metadata. The full message is not retained;\n`message_digest` is its canonical digest evidence.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "commit",
+        ///    "committer",
+        ///    "message_digest",
+        ///    "parents",
+        ///    "subject",
+        ///    "tree"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "committer": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "message_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "parents": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitOidV1"
+        ///      }
+        ///    },
+        ///    "subject": {
+        ///      "description": "First line of the commit message, bounded at capture.",
+        ///      "type": "string"
+        ///    },
+        ///    "tree": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitMetadataV1 {
+            pub author: GitCommitIdentityV1,
+            pub commit: GitOidV1,
+            pub committer: GitCommitIdentityV1,
+            pub message_digest: ManifestDigest,
+            pub parents: ::std::vec::Vec<GitOidV1>,
+            ///First line of the commit message, bounded at capture.
+            pub subject: ::std::string::String,
+            pub tree: GitOidV1,
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Diff scope: unstaged worktree changes, staged index changes, or an exact
+        commit range. Range diffs are read-only evidence and carry no index
+        relationship, so they cannot mint an applicable `HunkRefV1`.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Diff scope: unstaged worktree changes, staged index changes, or an exact\ncommit range. Range diffs are read-only evidence and carry no index\nrelationship, so they cannot mint an applicable `HunkRefV1`.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "working_tree"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "staged"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "base",
+        ///        "head",
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "base": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "head": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "commit_range"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "scope")]
+        pub enum GitDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange { base: GitOidV1, head: GitOidV1 },
+        }
+        ///Typed diff result for one scope with explicit coverage.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed diff result for one scope with explicit coverage.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "files",
+        ///    "repository",
+        ///    "scope"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "files": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitFileDiffV1"
+        ///      }
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope": {
+        ///      "$ref": "#/definitions/GitDiffScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitDiffV1 {
+            pub coverage: GitCoverageV1,
+            pub files: ::std::vec::Vec<GitFileDiffV1>,
+            pub repository: RepositoryId,
+            pub scope: GitDiffScopeV1,
+        }
+        /**One file's structured diff record: change kind, modes, blob identities,
+        binary/submodule classification, bounded line totals, and hunks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One file's structured diff record: change kind, modes, blob identities,\nbinary/submodule classification, bounded line totals, and hunks.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "binary",
+        ///    "change",
+        ///    "hunks",
+        ///    "path",
+        ///    "submodule"
+        ///  ],
+        ///  "properties": {
+        ///    "binary": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "change": {
+        ///      "$ref": "#/definitions/GitChangeKindV1"
+        ///    },
+        ///    "deletions": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitHunkV1"
+        ///      }
+        ///    },
+        ///    "insertions": {
+        ///      "description": "Inserted/deleted line totals; absent for binary and submodule records.",
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "new_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Source path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "submodule": {
+        ///      "description": "True when the entry is a gitlink (submodule) change.",
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitFileDiffV1 {
+            pub binary: bool,
+            pub change: GitChangeKindV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deletions: ::std::option::Option<u32>,
+            pub hunks: ::std::vec::Vec<GitHunkV1>,
+            ///Inserted/deleted line totals; absent for binary and submodule records.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub insertions: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_mode: ::std::option::Option<GitFileModeV1>,
+            ///Source path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub path: ::std::string::String,
+            ///True when the entry is a gitlink (submodule) change.
+            pub submodule: bool,
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Bounded commit history in native traversal order. `truncated` is true
+        when the capture bound cut the walk; shallow/partial-clone boundaries are
+        coverage degradations, never silently clean.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit history in native traversal order. `truncated` is true\nwhen the capture bound cut the walk; shallow/partial-clone boundaries are\ncoverage degradations, never silently clean.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commits",
+        ///    "coverage",
+        ///    "repository",
+        ///    "truncated"
+        ///  ],
+        ///  "properties": {
+        ///    "commits": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitCommitMetadataV1"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "truncated": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHistoryV1 {
+            pub commits: ::std::vec::Vec<GitCommitMetadataV1>,
+            pub coverage: GitCoverageV1,
+            pub repository: RepositoryId,
+            pub truncated: bool,
+        }
+        /**One structured diff hunk. The hunk body is not retained; `patch_digest`
+        is the canonical digest of the normalized header plus body lines, which
+        is the stable hunk identity evidence (Plan 36 bounded-result rule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One structured diff hunk. The hunk body is not retained; `patch_digest`\nis the canonical digest of the normalized header plus body lines, which\nis the stable hunk identity evidence (Plan 36 bounded-result rule).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "new_lines",
+        ///    "new_start",
+        ///    "old_lines",
+        ///    "old_start",
+        ///    "patch_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "new_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "section": {
+        ///      "description": "Function/section heading from the hunk header when Git emitted one.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHunkV1 {
+            pub new_lines: u32,
+            pub new_start: u32,
+            pub old_lines: u32,
+            pub old_start: u32,
+            pub patch_digest: ManifestDigest,
+            ///Function/section heading from the hunk header when Git emitted one.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub section: ::std::option::Option<::std::string::String>,
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitStatusSummaryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV1 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitStatusSummaryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitDiffV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV12 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitDiffV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitHistoryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV13 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitHistoryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitBlameV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV14 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitBlameV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV15 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: ::std::vec::Vec<HunkRefV1>,
+        }
+        ///Actual payload emitted by each public Git read operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitReadResultV1",
+        ///  "description": "Actual payload emitted by each public Git read operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "diff"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV12"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "history"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV13"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "blame"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV14"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "hunks"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV15"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "query", content = "result")]
+        pub enum GitReadResultV1 {
+            #[serde(rename = "status")]
+            Status(GitQueryEnvelopeV1),
+            #[serde(rename = "diff")]
+            Diff(GitQueryEnvelopeV12),
+            #[serde(rename = "history")]
+            History(GitQueryEnvelopeV13),
+            #[serde(rename = "blame")]
+            Blame(GitQueryEnvelopeV14),
+            #[serde(rename = "hunks")]
+            Hunks(GitQueryEnvelopeV15),
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV1> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV1) -> Self {
+                Self::Status(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV12> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV12) -> Self {
+                Self::Diff(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV13> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV13) -> Self {
+                Self::History(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV14> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV14) -> Self {
+                Self::Blame(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV15> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV15) -> Self {
+                Self::Hunks(value)
+            }
+        }
+        ///Bounded status summary returned by `git_status`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded status summary returned by `git_status`.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "changed_paths",
+        ///    "conflicted",
+        ///    "head",
+        ///    "ignored",
+        ///    "operation",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "staged",
+        ///    "unstaged",
+        ///    "untracked"
+        ///  ],
+        ///  "properties": {
+        ///    "changed_paths": {
+        ///      "description": "Sorted, de-duplicated paths, capped by the query entry bound.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "conflicted": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "ignored": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "staged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "unstaged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "untracked": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitStatusSummaryV1 {
+            ///Sorted, de-duplicated paths, capped by the query entry bound.
+            pub changed_paths: ::std::vec::Vec<::std::string::String>,
+            pub conflicted: u32,
+            pub head: GitHeadStateV1,
+            pub ignored: u32,
+            pub operation: GitOperationStateV1,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            pub staged: u32,
+            pub unstaged: u32,
+            pub untracked: u32,
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitHistorySurfaceRequest;
+    pub type Result = result::GitReadResultV1;
+}
+typed_operation!(
+    GitHistory,
+    git_history,
+    "operation.application.git.history",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_history"
+    },
+    "binding.mcp.git_history.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    "schema.application.git.history.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod git_hunks {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Request shape for the public `git_hunks` surface.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitHunksSurfaceRequest",
+        ///  "description": "Request shape for the public `git_hunks` surface.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "preview_id",
+        ///    "snapshot_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "max_bytes": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "max_entries": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "scope": {
+        ///      "default": "working_tree",
+        ///      "$ref": "#/definitions/GitSurfaceDiffScopeV1"
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHunksSurfaceRequest {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_bytes: ::std::option::Option<u64>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_entries: ::std::option::Option<u32>,
+            pub preview_id: ::std::string::String,
+            #[serde(default = "defaults::git_hunks_surface_request_scope")]
+            pub scope: GitSurfaceDiffScopeV1,
+            pub snapshot_digest: ManifestDigest,
+        }
+        /**Flat public selector for an admitted Git diff scope.
+
+        This intentionally differs from [`GitDiffScopeV1`]: MCP and CLI accept
+        `scope`, `base`, and `head` as sibling fields, then transport parsing builds
+        the canonical domain scope after checking their legal combinations.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Flat public selector for an admitted Git diff scope.\n\nThis intentionally differs from [`GitDiffScopeV1`]: MCP and CLI accept\n`scope`, `base`, and `head` as sibling fields, then transport parsing builds\nthe canonical domain scope after checking their legal combinations.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree",
+        ///    "staged",
+        ///    "commit_range"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitSurfaceDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange,
+        }
+        impl ::std::fmt::Display for GitSurfaceDiffScopeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTree => f.write_str("working_tree"),
+                    Self::Staged => f.write_str("staged"),
+                    Self::CommitRange => f.write_str("commit_range"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitSurfaceDiffScopeV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree" => Ok(Self::WorkingTree),
+                    "staged" => Ok(Self::Staged),
+                    "commit_range" => Ok(Self::CommitRange),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitSurfaceDiffScopeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitSurfaceDiffScopeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitSurfaceDiffScopeV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /// Generation of default values for serde.
+        pub mod defaults {
+            pub(super) fn git_hunks_surface_request_scope() -> super::GitSurfaceDiffScopeV1 {
+                super::GitSurfaceDiffScopeV1::WorkingTree
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Why blame/line provenance is unavailable for a path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why blame/line provenance is unavailable for a path.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "available",
+        ///    "path_not_tracked",
+        ///    "unborn_branch",
+        ///    "binary_file"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitBlameAvailabilityV1 {
+            #[serde(rename = "available")]
+            Available,
+            #[serde(rename = "path_not_tracked")]
+            PathNotTracked,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "binary_file")]
+            BinaryFile,
+        }
+        impl ::std::fmt::Display for GitBlameAvailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Available => f.write_str("available"),
+                    Self::PathNotTracked => f.write_str("path_not_tracked"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::BinaryFile => f.write_str("binary_file"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitBlameAvailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "available" => Ok(Self::Available),
+                    "path_not_tracked" => Ok(Self::PathNotTracked),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "binary_file" => Ok(Self::BinaryFile),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Line provenance for one final (current) line.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Line provenance for one final (current) line.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "boundary",
+        ///    "commit",
+        ///    "final_line",
+        ///    "origin_line"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "boundary": {
+        ///      "description": "True when the origin commit is a history boundary (e.g. shallow root).",
+        ///      "type": "boolean"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "final_line": {
+        ///      "description": "1-based line number in the blamed revision.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "origin_line": {
+        ///      "description": "1-based line number in the origin commit.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "previous": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlamePreviousV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameLineV1 {
+            pub author: GitCommitIdentityV1,
+            ///True when the origin commit is a history boundary (e.g. shallow root).
+            pub boundary: bool,
+            pub commit: GitOidV1,
+            ///1-based line number in the blamed revision.
+            pub final_line: u32,
+            ///1-based line number in the origin commit.
+            pub origin_line: u32,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub previous: ::std::option::Option<GitBlamePreviousV1>,
+        }
+        ///Rename-following evidence for one blamed line (`previous` record).
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Rename-following evidence for one blamed line (`previous` record).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commit",
+        ///    "path"
+        ///  ],
+        ///  "properties": {
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlamePreviousV1 {
+            pub commit: GitOidV1,
+            pub path: ::std::string::String,
+        }
+        /**Typed blame result: per-line provenance plus boundary, rename-following,
+        and unavailable states.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed blame result: per-line provenance plus boundary, rename-following,\nand unavailable states.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "availability",
+        ///    "coverage",
+        ///    "lines",
+        ///    "path",
+        ///    "repository"
+        ///  ],
+        ///  "properties": {
+        ///    "availability": {
+        ///      "$ref": "#/definitions/GitBlameAvailabilityV1"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "lines": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitBlameLineV1"
+        ///      }
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameV1 {
+            pub availability: GitBlameAvailabilityV1,
+            pub coverage: GitCoverageV1,
+            pub lines: ::std::vec::Vec<GitBlameLineV1>,
+            pub path: ::std::string::String,
+            pub repository: RepositoryId,
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Native change kind for one side (index or worktree) of a status entry,
+        or for a whole-file diff record.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native change kind for one side (index or worktree) of a status entry,\nor for a whole-file diff record.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "unmodified",
+        ///    "modified",
+        ///    "added",
+        ///    "deleted",
+        ///    "renamed",
+        ///    "copied",
+        ///    "type_changed",
+        ///    "unmerged"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitChangeKindV1 {
+            #[serde(rename = "unmodified")]
+            Unmodified,
+            #[serde(rename = "modified")]
+            Modified,
+            #[serde(rename = "added")]
+            Added,
+            #[serde(rename = "deleted")]
+            Deleted,
+            #[serde(rename = "renamed")]
+            Renamed,
+            #[serde(rename = "copied")]
+            Copied,
+            #[serde(rename = "type_changed")]
+            TypeChanged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+        }
+        impl ::std::fmt::Display for GitChangeKindV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Unmodified => f.write_str("unmodified"),
+                    Self::Modified => f.write_str("modified"),
+                    Self::Added => f.write_str("added"),
+                    Self::Deleted => f.write_str("deleted"),
+                    Self::Renamed => f.write_str("renamed"),
+                    Self::Copied => f.write_str("copied"),
+                    Self::TypeChanged => f.write_str("type_changed"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitChangeKindV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "unmodified" => Ok(Self::Unmodified),
+                    "modified" => Ok(Self::Modified),
+                    "added" => Ok(Self::Added),
+                    "deleted" => Ok(Self::Deleted),
+                    "renamed" => Ok(Self::Renamed),
+                    "copied" => Ok(Self::Copied),
+                    "type_changed" => Ok(Self::TypeChanged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Author/committer identity and timestamp evidence for one commit.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Author/committer identity and timestamp evidence for one commit.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "at",
+        ///    "email",
+        ///    "name"
+        ///  ],
+        ///  "properties": {
+        ///    "at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "email": {
+        ///      "type": "string"
+        ///    },
+        ///    "name": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitIdentityV1 {
+            pub at: UtcMicros,
+            pub email: ::std::string::String,
+            pub name: ::std::string::String,
+        }
+        /**Bounded commit metadata. The full message is not retained;
+        `message_digest` is its canonical digest evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit metadata. The full message is not retained;\n`message_digest` is its canonical digest evidence.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "commit",
+        ///    "committer",
+        ///    "message_digest",
+        ///    "parents",
+        ///    "subject",
+        ///    "tree"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "committer": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "message_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "parents": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitOidV1"
+        ///      }
+        ///    },
+        ///    "subject": {
+        ///      "description": "First line of the commit message, bounded at capture.",
+        ///      "type": "string"
+        ///    },
+        ///    "tree": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitMetadataV1 {
+            pub author: GitCommitIdentityV1,
+            pub commit: GitOidV1,
+            pub committer: GitCommitIdentityV1,
+            pub message_digest: ManifestDigest,
+            pub parents: ::std::vec::Vec<GitOidV1>,
+            ///First line of the commit message, bounded at capture.
+            pub subject: ::std::string::String,
+            pub tree: GitOidV1,
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Diff scope: unstaged worktree changes, staged index changes, or an exact
+        commit range. Range diffs are read-only evidence and carry no index
+        relationship, so they cannot mint an applicable `HunkRefV1`.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Diff scope: unstaged worktree changes, staged index changes, or an exact\ncommit range. Range diffs are read-only evidence and carry no index\nrelationship, so they cannot mint an applicable `HunkRefV1`.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "working_tree"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "staged"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "base",
+        ///        "head",
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "base": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "head": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "commit_range"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "scope")]
+        pub enum GitDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange { base: GitOidV1, head: GitOidV1 },
+        }
+        ///Typed diff result for one scope with explicit coverage.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed diff result for one scope with explicit coverage.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "files",
+        ///    "repository",
+        ///    "scope"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "files": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitFileDiffV1"
+        ///      }
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope": {
+        ///      "$ref": "#/definitions/GitDiffScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitDiffV1 {
+            pub coverage: GitCoverageV1,
+            pub files: ::std::vec::Vec<GitFileDiffV1>,
+            pub repository: RepositoryId,
+            pub scope: GitDiffScopeV1,
+        }
+        /**One file's structured diff record: change kind, modes, blob identities,
+        binary/submodule classification, bounded line totals, and hunks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One file's structured diff record: change kind, modes, blob identities,\nbinary/submodule classification, bounded line totals, and hunks.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "binary",
+        ///    "change",
+        ///    "hunks",
+        ///    "path",
+        ///    "submodule"
+        ///  ],
+        ///  "properties": {
+        ///    "binary": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "change": {
+        ///      "$ref": "#/definitions/GitChangeKindV1"
+        ///    },
+        ///    "deletions": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitHunkV1"
+        ///      }
+        ///    },
+        ///    "insertions": {
+        ///      "description": "Inserted/deleted line totals; absent for binary and submodule records.",
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "new_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Source path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "submodule": {
+        ///      "description": "True when the entry is a gitlink (submodule) change.",
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitFileDiffV1 {
+            pub binary: bool,
+            pub change: GitChangeKindV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deletions: ::std::option::Option<u32>,
+            pub hunks: ::std::vec::Vec<GitHunkV1>,
+            ///Inserted/deleted line totals; absent for binary and submodule records.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub insertions: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_mode: ::std::option::Option<GitFileModeV1>,
+            ///Source path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub path: ::std::string::String,
+            ///True when the entry is a gitlink (submodule) change.
+            pub submodule: bool,
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Bounded commit history in native traversal order. `truncated` is true
+        when the capture bound cut the walk; shallow/partial-clone boundaries are
+        coverage degradations, never silently clean.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit history in native traversal order. `truncated` is true\nwhen the capture bound cut the walk; shallow/partial-clone boundaries are\ncoverage degradations, never silently clean.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commits",
+        ///    "coverage",
+        ///    "repository",
+        ///    "truncated"
+        ///  ],
+        ///  "properties": {
+        ///    "commits": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitCommitMetadataV1"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "truncated": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHistoryV1 {
+            pub commits: ::std::vec::Vec<GitCommitMetadataV1>,
+            pub coverage: GitCoverageV1,
+            pub repository: RepositoryId,
+            pub truncated: bool,
+        }
+        /**One structured diff hunk. The hunk body is not retained; `patch_digest`
+        is the canonical digest of the normalized header plus body lines, which
+        is the stable hunk identity evidence (Plan 36 bounded-result rule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One structured diff hunk. The hunk body is not retained; `patch_digest`\nis the canonical digest of the normalized header plus body lines, which\nis the stable hunk identity evidence (Plan 36 bounded-result rule).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "new_lines",
+        ///    "new_start",
+        ///    "old_lines",
+        ///    "old_start",
+        ///    "patch_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "new_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "section": {
+        ///      "description": "Function/section heading from the hunk header when Git emitted one.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHunkV1 {
+            pub new_lines: u32,
+            pub new_start: u32,
+            pub old_lines: u32,
+            pub old_start: u32,
+            pub patch_digest: ManifestDigest,
+            ///Function/section heading from the hunk header when Git emitted one.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub section: ::std::option::Option<::std::string::String>,
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitStatusSummaryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV1 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitStatusSummaryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitDiffV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV12 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitDiffV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitHistoryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV13 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitHistoryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitBlameV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV14 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitBlameV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV15 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: ::std::vec::Vec<HunkRefV1>,
+        }
+        ///Actual payload emitted by each public Git read operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitReadResultV1",
+        ///  "description": "Actual payload emitted by each public Git read operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "diff"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV12"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "history"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV13"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "blame"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV14"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "hunks"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV15"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "query", content = "result")]
+        pub enum GitReadResultV1 {
+            #[serde(rename = "status")]
+            Status(GitQueryEnvelopeV1),
+            #[serde(rename = "diff")]
+            Diff(GitQueryEnvelopeV12),
+            #[serde(rename = "history")]
+            History(GitQueryEnvelopeV13),
+            #[serde(rename = "blame")]
+            Blame(GitQueryEnvelopeV14),
+            #[serde(rename = "hunks")]
+            Hunks(GitQueryEnvelopeV15),
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV1> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV1) -> Self {
+                Self::Status(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV12> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV12) -> Self {
+                Self::Diff(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV13> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV13) -> Self {
+                Self::History(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV14> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV14) -> Self {
+                Self::Blame(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV15> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV15) -> Self {
+                Self::Hunks(value)
+            }
+        }
+        ///Bounded status summary returned by `git_status`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded status summary returned by `git_status`.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "changed_paths",
+        ///    "conflicted",
+        ///    "head",
+        ///    "ignored",
+        ///    "operation",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "staged",
+        ///    "unstaged",
+        ///    "untracked"
+        ///  ],
+        ///  "properties": {
+        ///    "changed_paths": {
+        ///      "description": "Sorted, de-duplicated paths, capped by the query entry bound.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "conflicted": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "ignored": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "staged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "unstaged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "untracked": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitStatusSummaryV1 {
+            ///Sorted, de-duplicated paths, capped by the query entry bound.
+            pub changed_paths: ::std::vec::Vec<::std::string::String>,
+            pub conflicted: u32,
+            pub head: GitHeadStateV1,
+            pub ignored: u32,
+            pub operation: GitOperationStateV1,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            pub staged: u32,
+            pub unstaged: u32,
+            pub untracked: u32,
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitHunksSurfaceRequest;
+    pub type Result = result::GitReadResultV1;
+}
+typed_operation!(
+    GitHunks,
+    git_hunks,
+    "operation.application.git.hunks",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_hunks"
+    },
+    "binding.mcp.git_hunks.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    "schema.application.git.hunks.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod git_preview {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        ///Author/committer identity and timestamp evidence for one commit.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Author/committer identity and timestamp evidence for one commit.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "at",
+        ///    "email",
+        ///    "name"
+        ///  ],
+        ///  "properties": {
+        ///    "at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "email": {
+        ///      "type": "string"
+        ///    },
+        ///    "name": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitIdentityV1 {
+            pub at: UtcMicros,
+            pub email: ::std::string::String,
+            pub name: ::std::string::String,
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Structured, bounded commit input for the `commit_index` operation.
+
+        The message is retained only while the native transaction is in flight;
+        previews and durable receipts retain its digest rather than the text.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Structured, bounded commit input for the `commit_index` operation.\n\nThe message is retained only while the native transaction is in flight;\npreviews and durable receipts retain its digest rather than the text.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "committer",
+        ///    "message",
+        ///    "message_digest",
+        ///    "signing_policy"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "committer": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "message": {
+        ///      "type": "string"
+        ///    },
+        ///    "message_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "signing_policy": {
+        ///      "$ref": "#/definitions/GitIndexSigningPolicyV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexCommitIntentV1 {
+            pub author: GitCommitIdentityV1,
+            pub committer: GitCommitIdentityV1,
+            pub message: ::std::string::String,
+            pub message_digest: ManifestDigest,
+            pub signing_policy: GitIndexSigningPolicyV1,
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        ///Strongly typed canonical identity: `GitIndexPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `GitIndexPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitIndexPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for GitIndexPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitIndexPreviewId> for ::std::string::String {
+            fn from(value: GitIndexPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitIndexPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitIndexPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitIndexPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**The fixed commit-signing policy understood by `commit_index`. It is not a
+        generic collection of Git flags and does not authorize hook bypasses.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The fixed commit-signing policy understood by `commit_index`. It is not a\ngeneric collection of Git flags and does not authorize hook bypasses.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "policy"
+        ///      ],
+        ///      "properties": {
+        ///        "policy": {
+        ///          "type": "string",
+        ///          "const": "unsigned_permitted"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "key_reference",
+        ///        "policy"
+        ///      ],
+        ///      "properties": {
+        ///        "key_reference": {
+        ///          "type": "string"
+        ///        },
+        ///        "policy": {
+        ///          "type": "string",
+        ///          "const": "signature_required"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "policy", content = "key_reference")]
+        pub enum GitIndexSigningPolicyV1 {
+            #[serde(rename = "unsigned_permitted")]
+            UnsignedPermitted,
+            #[serde(rename = "signature_required")]
+            SignatureRequired(::std::string::String),
+        }
+        /**The only native Git mutations represented by PR11. Generic Git execution,
+        ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
+        deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only native Git mutations represented by PR11. Generic Git execution,\nref rewrites, merge/rebase/cherry-pick, push, and worktree writes are\ndeliberately absent.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "stage_hunks",
+        ///    "unstage_hunks",
+        ///    "commit_index"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexTransactionOperationV1 {
+            #[serde(rename = "stage_hunks")]
+            StageHunks,
+            #[serde(rename = "unstage_hunks")]
+            UnstageHunks,
+            #[serde(rename = "commit_index")]
+            CommitIndex,
+        }
+        impl ::std::fmt::Display for GitIndexTransactionOperationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::StageHunks => f.write_str("stage_hunks"),
+                    Self::UnstageHunks => f.write_str("unstage_hunks"),
+                    Self::CommitIndex => f.write_str("commit_index"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexTransactionOperationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "stage_hunks" => Ok(Self::StageHunks),
+                    "unstage_hunks" => Ok(Self::UnstageHunks),
+                    "commit_index" => Ok(Self::CommitIndex),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Repository object format, derived from object-id length.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Repository object format, derived from object-id length.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "sha1",
+        ///    "sha256"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitObjectFormatV1 {
+            #[serde(rename = "sha1")]
+            Sha1,
+            #[serde(rename = "sha256")]
+            Sha256,
+        }
+        impl ::std::fmt::Display for GitObjectFormatV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Sha1 => f.write_str("sha1"),
+                    Self::Sha256 => f.write_str("sha256"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitObjectFormatV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "sha1" => Ok(Self::Sha1),
+                    "sha256" => Ok(Self::Sha256),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Public MCP/CLI request for one daemon-owned Git index preview.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitPreviewSurfaceRequest",
+        ///  "description": "Public MCP/CLI request for one daemon-owned Git index preview.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "operation",
+        ///    "repository_snapshot"
+        ///  ],
+        ///  "properties": {
+        ///    "commit_intent": {
+        ///      "default": null,
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitIndexCommitIntentV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitIndexTransactionOperationV1"
+        ///    },
+        ///    "preview_id": {
+        ///      "description": "Compatibility input only. The daemon always replaces this value with a\nfreshly minted preview identity before application admission.",
+        ///      "default": "preview.pending",
+        ///      "$ref": "#/definitions/GitIndexPreviewId"
+        ///    },
+        ///    "repository_snapshot": {
+        ///      "$ref": "#/definitions/RepositoryStateSnapshotV1"
+        ///    },
+        ///    "selected_hunks": {
+        ///      "default": [],
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitPreviewSurfaceRequest {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub commit_intent: ::std::option::Option<GitIndexCommitIntentV1>,
+            pub operation: GitIndexTransactionOperationV1,
+            /**Compatibility input only. The daemon always replaces this value with a
+            freshly minted preview identity before application admission.*/
+            #[serde(default = "defaults::git_preview_surface_request_preview_id")]
+            pub preview_id: GitIndexPreviewId,
+            pub repository_snapshot: RepositoryStateSnapshotV1,
+            #[serde(default, skip_serializing_if = "::std::vec::Vec::is_empty")]
+            pub selected_hunks: ::std::vec::Vec<HunkRefV1>,
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RepositoryIndexSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "checksum",
+        ///    "state"
+        ///  ],
+        ///  "properties": {
+        ///    "checksum": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/RepositoryIndexStateV1"
+        ///    },
+        ///    "tree_id": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryIndexSnapshotV1 {
+            pub checksum: ManifestDigest,
+            pub state: RepositoryIndexStateV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub tree_id: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage_digest: ::std::option::Option<ManifestDigest>,
+        }
+        ///`RepositoryIndexStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "clean",
+        ///    "staged",
+        ///    "unmerged",
+        ///    "intent_to_add",
+        ///    "split",
+        ///    "sparse",
+        ///    "unreadable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum RepositoryIndexStateV1 {
+            #[serde(rename = "clean")]
+            Clean,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+            #[serde(rename = "intent_to_add")]
+            IntentToAdd,
+            #[serde(rename = "split")]
+            Split,
+            #[serde(rename = "sparse")]
+            Sparse,
+            #[serde(rename = "unreadable")]
+            Unreadable,
+        }
+        impl ::std::fmt::Display for RepositoryIndexStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Clean => f.write_str("clean"),
+                    Self::Staged => f.write_str("staged"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                    Self::IntentToAdd => f.write_str("intent_to_add"),
+                    Self::Split => f.write_str("split"),
+                    Self::Sparse => f.write_str("sparse"),
+                    Self::Unreadable => f.write_str("unreadable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for RepositoryIndexStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "clean" => Ok(Self::Clean),
+                    "staged" => Ok(Self::Staged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    "intent_to_add" => Ok(Self::IntentToAdd),
+                    "split" => Ok(Self::Split),
+                    "sparse" => Ok(Self::Sparse),
+                    "unreadable" => Ok(Self::Unreadable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable content-addressed native repository state. Missing/partial
+        evidence remains typed by fields and coverage instead of being upgraded to
+        a guessed clean snapshot.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable content-addressed native repository state. Missing/partial\nevidence remains typed by fields and coverage instead of being upgraded to\na guessed clean snapshot.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "captured_at",
+        ///    "coverage",
+        ///    "head",
+        ///    "index",
+        ///    "object_format",
+        ///    "observation_epoch",
+        ///    "operation_state",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "snapshot_id",
+        ///    "working_tree"
+        ///  ],
+        ///  "properties": {
+        ///    "adapter_revision": {
+        ///      "description": "Revision of the fixed native adapter that interpreted this state.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "attributes_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "captured_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "filesystem_capabilities_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "git_version": {
+        ///      "description": "Exact native Git implementation observed by the fixed adapter. A\nread-only partial snapshot may omit this, but omitted native evidence\nis never mutation eligible.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "index": {
+        ///      "$ref": "#/definitions/RepositoryIndexSnapshotV1"
+        ///    },
+        ///    "object_format": {
+        ///      "$ref": "#/definitions/GitObjectFormatV1"
+        ///    },
+        ///    "observation_epoch": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation_state": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "refs_digest": {
+        ///      "description": "Digest of the complete native ref namespace at capture time.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "snapshot_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "sparse_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "submodule_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "working_tree": {
+        ///      "$ref": "#/definitions/RepositoryWorkingTreeSnapshotV1"
+        ///    },
+        ///    "worktree_id": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorktreeId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryStateSnapshotV1 {
+            ///Revision of the fixed native adapter that interpreted this state.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub adapter_revision: ::std::option::Option<::std::string::String>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub captured_at: UtcMicros,
+            pub coverage: GitCoverageV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub filesystem_capabilities_digest: ::std::option::Option<ManifestDigest>,
+            /**Exact native Git implementation observed by the fixed adapter. A
+            read-only partial snapshot may omit this, but omitted native evidence
+            is never mutation eligible.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub git_version: ::std::option::Option<::std::string::String>,
+            pub head: GitHeadStateV1,
+            pub index: RepositoryIndexSnapshotV1,
+            pub object_format: GitObjectFormatV1,
+            pub observation_epoch: u64,
+            pub operation_state: GitOperationStateV1,
+            pub project_id: ProjectId,
+            ///Digest of the complete native ref namespace at capture time.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub refs_digest: ::std::option::Option<ManifestDigest>,
+            pub repository_id: RepositoryId,
+            pub snapshot_id: ::std::string::String,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub sparse_digest: ::std::option::Option<ManifestDigest>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub submodule_digest: ::std::option::Option<ManifestDigest>,
+            pub working_tree: RepositoryWorkingTreeSnapshotV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub worktree_id: ::std::option::Option<WorktreeId>,
+        }
+        ///`RepositoryWorkingTreeSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "state",
+        ///    "tracked_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "ignored_collision_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/RepositoryWorkingTreeStateV1"
+        ///    },
+        ///    "tracked_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "untracked_name_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryWorkingTreeSnapshotV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub ignored_collision_digest: ::std::option::Option<ManifestDigest>,
+            pub state: RepositoryWorkingTreeStateV1,
+            pub tracked_digest: ManifestDigest,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub untracked_name_digest: ::std::option::Option<ManifestDigest>,
+        }
+        ///`RepositoryWorkingTreeStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "clean",
+        ///    "tracked_dirty",
+        ///    "untracked_only",
+        ///    "mixed",
+        ///    "conflicted",
+        ///    "unreadable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum RepositoryWorkingTreeStateV1 {
+            #[serde(rename = "clean")]
+            Clean,
+            #[serde(rename = "tracked_dirty")]
+            TrackedDirty,
+            #[serde(rename = "untracked_only")]
+            UntrackedOnly,
+            #[serde(rename = "mixed")]
+            Mixed,
+            #[serde(rename = "conflicted")]
+            Conflicted,
+            #[serde(rename = "unreadable")]
+            Unreadable,
+        }
+        impl ::std::fmt::Display for RepositoryWorkingTreeStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Clean => f.write_str("clean"),
+                    Self::TrackedDirty => f.write_str("tracked_dirty"),
+                    Self::UntrackedOnly => f.write_str("untracked_only"),
+                    Self::Mixed => f.write_str("mixed"),
+                    Self::Conflicted => f.write_str("conflicted"),
+                    Self::Unreadable => f.write_str("unreadable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for RepositoryWorkingTreeStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "clean" => Ok(Self::Clean),
+                    "tracked_dirty" => Ok(Self::TrackedDirty),
+                    "untracked_only" => Ok(Self::UntrackedOnly),
+                    "mixed" => Ok(Self::Mixed),
+                    "conflicted" => Ok(Self::Conflicted),
+                    "unreadable" => Ok(Self::Unreadable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /// Generation of default values for serde.
+        pub mod defaults {
+            pub(super) fn git_preview_surface_request_preview_id() -> super::GitIndexPreviewId {
+                super::GitIndexPreviewId("preview.pending".to_string())
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        ///Whether a captured preview may reach the daemon's native apply path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Whether a captured preview may reach the daemon's native apply path.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "applicable"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "reason",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "reason": {
+        ///          "$ref": "#/definitions/GitIndexUnsupportedStateV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unsupported"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state", content = "reason")]
+        pub enum GitIndexPreviewDispositionV1 {
+            #[serde(rename = "applicable")]
+            Applicable,
+            #[serde(rename = "unsupported")]
+            Unsupported(GitIndexUnsupportedStateV1),
+        }
+        impl ::std::convert::From<GitIndexUnsupportedStateV1> for GitIndexPreviewDispositionV1 {
+            fn from(value: GitIndexUnsupportedStateV1) -> Self {
+                Self::Unsupported(value)
+            }
+        }
+        ///Strongly typed canonical identity: `GitIndexPreviewId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `GitIndexPreviewId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitIndexPreviewId(pub ::std::string::String);
+        impl ::std::ops::Deref for GitIndexPreviewId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitIndexPreviewId> for ::std::string::String {
+            fn from(value: GitIndexPreviewId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitIndexPreviewId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitIndexPreviewId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitIndexPreviewId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Immutable, content-bound preview for one daemon-serialized index
+        transaction. Applicability is only a precondition: the daemon must capture
+        and compare the entire snapshot and every contained `HunkRefV1` again
+        immediately before a native mutation.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitIndexPreviewV1",
+        ///  "description": "Immutable, content-bound preview for one daemon-serialized index\ntransaction. Applicability is only a precondition: the daemon must capture\nand compare the entire snapshot and every contained `HunkRefV1` again\nimmediately before a native mutation.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "created_at",
+        ///    "disposition",
+        ///    "expires_at",
+        ///    "operation",
+        ///    "preview_digest",
+        ///    "preview_id",
+        ///    "repository_snapshot",
+        ///    "repository_snapshot_digest",
+        ///    "selected_hunks"
+        ///  ],
+        ///  "properties": {
+        ///    "candidate_index_tree": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "commit_intent_digest": {
+        ///      "description": "Canonical commitment to the full commit input. It is present exactly\nfor `commit_index`; plaintext message, identity, timestamp, key, and\nsigning policy remain process-local ephemeral material.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "created_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "disposition": {
+        ///      "$ref": "#/definitions/GitIndexPreviewDispositionV1"
+        ///    },
+        ///    "expires_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitIndexTransactionOperationV1"
+        ///    },
+        ///    "preview_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "preview_id": {
+        ///      "$ref": "#/definitions/GitIndexPreviewId"
+        ///    },
+        ///    "repository_snapshot": {
+        ///      "$ref": "#/definitions/RepositoryStateSnapshotV1"
+        ///    },
+        ///    "repository_snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "selected_hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexPreviewV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub candidate_index_tree: ::std::option::Option<GitOidV1>,
+            /**Canonical commitment to the full commit input. It is present exactly
+            for `commit_index`; plaintext message, identity, timestamp, key, and
+            signing policy remain process-local ephemeral material.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub commit_intent_digest: ::std::option::Option<ManifestDigest>,
+            pub created_at: UtcMicros,
+            pub disposition: GitIndexPreviewDispositionV1,
+            pub expires_at: UtcMicros,
+            pub operation: GitIndexTransactionOperationV1,
+            pub preview_digest: ManifestDigest,
+            pub preview_id: GitIndexPreviewId,
+            pub repository_snapshot: RepositoryStateSnapshotV1,
+            pub repository_snapshot_digest: ManifestDigest,
+            pub selected_hunks: ::std::vec::Vec<HunkRefV1>,
+        }
+        /**The only native Git mutations represented by PR11. Generic Git execution,
+        ref rewrites, merge/rebase/cherry-pick, push, and worktree writes are
+        deliberately absent.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "The only native Git mutations represented by PR11. Generic Git execution,\nref rewrites, merge/rebase/cherry-pick, push, and worktree writes are\ndeliberately absent.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "stage_hunks",
+        ///    "unstage_hunks",
+        ///    "commit_index"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexTransactionOperationV1 {
+            #[serde(rename = "stage_hunks")]
+            StageHunks,
+            #[serde(rename = "unstage_hunks")]
+            UnstageHunks,
+            #[serde(rename = "commit_index")]
+            CommitIndex,
+        }
+        impl ::std::fmt::Display for GitIndexTransactionOperationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::StageHunks => f.write_str("stage_hunks"),
+                    Self::UnstageHunks => f.write_str("unstage_hunks"),
+                    Self::CommitIndex => f.write_str("commit_index"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexTransactionOperationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "stage_hunks" => Ok(Self::StageHunks),
+                    "unstage_hunks" => Ok(Self::UnstageHunks),
+                    "commit_index" => Ok(Self::CommitIndex),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexTransactionOperationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Why a preview is intentionally read-only. A caller must re-preview after
+        resolving the condition; no variant grants a relaxed or partial apply.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why a preview is intentionally read-only. A caller must re-preview after\nresolving the condition; no variant grants a relaxed or partial apply.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "bare_repository",
+        ///    "detached_head",
+        ///    "unborn_branch",
+        ///    "index_lock_present",
+        ///    "applicable_commit_hooks",
+        ///    "signing_key_unavailable",
+        ///    "unmerged_index",
+        ///    "intent_to_add",
+        ///    "split_index",
+        ///    "sparse_index",
+        ///    "unreadable_index",
+        ///    "conflicted_working_tree",
+        ///    "unreadable_working_tree",
+        ///    "in_progress_operation",
+        ///    "unsupported_object_format",
+        ///    "binary_hunk",
+        ///    "submodule",
+        ///    "symlink",
+        ///    "file_mode_only",
+        ///    "rename_or_copy",
+        ///    "filters_or_end_of_line",
+        ///    "partial_hunk_selection"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitIndexUnsupportedStateV1 {
+            #[serde(rename = "bare_repository")]
+            BareRepository,
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "index_lock_present")]
+            IndexLockPresent,
+            #[serde(rename = "applicable_commit_hooks")]
+            ApplicableCommitHooks,
+            #[serde(rename = "signing_key_unavailable")]
+            SigningKeyUnavailable,
+            #[serde(rename = "unmerged_index")]
+            UnmergedIndex,
+            #[serde(rename = "intent_to_add")]
+            IntentToAdd,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "sparse_index")]
+            SparseIndex,
+            #[serde(rename = "unreadable_index")]
+            UnreadableIndex,
+            #[serde(rename = "conflicted_working_tree")]
+            ConflictedWorkingTree,
+            #[serde(rename = "unreadable_working_tree")]
+            UnreadableWorkingTree,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "binary_hunk")]
+            BinaryHunk,
+            #[serde(rename = "submodule")]
+            Submodule,
+            #[serde(rename = "symlink")]
+            Symlink,
+            #[serde(rename = "file_mode_only")]
+            FileModeOnly,
+            #[serde(rename = "rename_or_copy")]
+            RenameOrCopy,
+            #[serde(rename = "filters_or_end_of_line")]
+            FiltersOrEndOfLine,
+            #[serde(rename = "partial_hunk_selection")]
+            PartialHunkSelection,
+        }
+        impl ::std::fmt::Display for GitIndexUnsupportedStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::BareRepository => f.write_str("bare_repository"),
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::IndexLockPresent => f.write_str("index_lock_present"),
+                    Self::ApplicableCommitHooks => f.write_str("applicable_commit_hooks"),
+                    Self::SigningKeyUnavailable => f.write_str("signing_key_unavailable"),
+                    Self::UnmergedIndex => f.write_str("unmerged_index"),
+                    Self::IntentToAdd => f.write_str("intent_to_add"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::SparseIndex => f.write_str("sparse_index"),
+                    Self::UnreadableIndex => f.write_str("unreadable_index"),
+                    Self::ConflictedWorkingTree => f.write_str("conflicted_working_tree"),
+                    Self::UnreadableWorkingTree => f.write_str("unreadable_working_tree"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::BinaryHunk => f.write_str("binary_hunk"),
+                    Self::Submodule => f.write_str("submodule"),
+                    Self::Symlink => f.write_str("symlink"),
+                    Self::FileModeOnly => f.write_str("file_mode_only"),
+                    Self::RenameOrCopy => f.write_str("rename_or_copy"),
+                    Self::FiltersOrEndOfLine => f.write_str("filters_or_end_of_line"),
+                    Self::PartialHunkSelection => f.write_str("partial_hunk_selection"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitIndexUnsupportedStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "bare_repository" => Ok(Self::BareRepository),
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "index_lock_present" => Ok(Self::IndexLockPresent),
+                    "applicable_commit_hooks" => Ok(Self::ApplicableCommitHooks),
+                    "signing_key_unavailable" => Ok(Self::SigningKeyUnavailable),
+                    "unmerged_index" => Ok(Self::UnmergedIndex),
+                    "intent_to_add" => Ok(Self::IntentToAdd),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "sparse_index" => Ok(Self::SparseIndex),
+                    "unreadable_index" => Ok(Self::UnreadableIndex),
+                    "conflicted_working_tree" => Ok(Self::ConflictedWorkingTree),
+                    "unreadable_working_tree" => Ok(Self::UnreadableWorkingTree),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "binary_hunk" => Ok(Self::BinaryHunk),
+                    "submodule" => Ok(Self::Submodule),
+                    "symlink" => Ok(Self::Symlink),
+                    "file_mode_only" => Ok(Self::FileModeOnly),
+                    "rename_or_copy" => Ok(Self::RenameOrCopy),
+                    "filters_or_end_of_line" => Ok(Self::FiltersOrEndOfLine),
+                    "partial_hunk_selection" => Ok(Self::PartialHunkSelection),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitIndexUnsupportedStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitIndexUnsupportedStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitIndexUnsupportedStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Repository object format, derived from object-id length.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Repository object format, derived from object-id length.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "sha1",
+        ///    "sha256"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitObjectFormatV1 {
+            #[serde(rename = "sha1")]
+            Sha1,
+            #[serde(rename = "sha256")]
+            Sha256,
+        }
+        impl ::std::fmt::Display for GitObjectFormatV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Sha1 => f.write_str("sha1"),
+                    Self::Sha256 => f.write_str("sha256"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitObjectFormatV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "sha1" => Ok(Self::Sha1),
+                    "sha256" => Ok(Self::Sha256),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitObjectFormatV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `ProjectId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `ProjectId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ProjectId(pub ::std::string::String);
+        impl ::std::ops::Deref for ProjectId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ProjectId> for ::std::string::String {
+            fn from(value: ProjectId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ProjectId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ProjectId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ProjectId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///`RepositoryIndexSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "checksum",
+        ///    "state"
+        ///  ],
+        ///  "properties": {
+        ///    "checksum": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/RepositoryIndexStateV1"
+        ///    },
+        ///    "tree_id": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryIndexSnapshotV1 {
+            pub checksum: ManifestDigest,
+            pub state: RepositoryIndexStateV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub tree_id: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage_digest: ::std::option::Option<ManifestDigest>,
+        }
+        ///`RepositoryIndexStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "clean",
+        ///    "staged",
+        ///    "unmerged",
+        ///    "intent_to_add",
+        ///    "split",
+        ///    "sparse",
+        ///    "unreadable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum RepositoryIndexStateV1 {
+            #[serde(rename = "clean")]
+            Clean,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+            #[serde(rename = "intent_to_add")]
+            IntentToAdd,
+            #[serde(rename = "split")]
+            Split,
+            #[serde(rename = "sparse")]
+            Sparse,
+            #[serde(rename = "unreadable")]
+            Unreadable,
+        }
+        impl ::std::fmt::Display for RepositoryIndexStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Clean => f.write_str("clean"),
+                    Self::Staged => f.write_str("staged"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                    Self::IntentToAdd => f.write_str("intent_to_add"),
+                    Self::Split => f.write_str("split"),
+                    Self::Sparse => f.write_str("sparse"),
+                    Self::Unreadable => f.write_str("unreadable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for RepositoryIndexStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "clean" => Ok(Self::Clean),
+                    "staged" => Ok(Self::Staged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    "intent_to_add" => Ok(Self::IntentToAdd),
+                    "split" => Ok(Self::Split),
+                    "sparse" => Ok(Self::Sparse),
+                    "unreadable" => Ok(Self::Unreadable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for RepositoryIndexStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable content-addressed native repository state. Missing/partial
+        evidence remains typed by fields and coverage instead of being upgraded to
+        a guessed clean snapshot.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable content-addressed native repository state. Missing/partial\nevidence remains typed by fields and coverage instead of being upgraded to\na guessed clean snapshot.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "captured_at",
+        ///    "coverage",
+        ///    "head",
+        ///    "index",
+        ///    "object_format",
+        ///    "observation_epoch",
+        ///    "operation_state",
+        ///    "project_id",
+        ///    "repository_id",
+        ///    "snapshot_id",
+        ///    "working_tree"
+        ///  ],
+        ///  "properties": {
+        ///    "adapter_revision": {
+        ///      "description": "Revision of the fixed native adapter that interpreted this state.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "attributes_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "captured_at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "filesystem_capabilities_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "git_version": {
+        ///      "description": "Exact native Git implementation observed by the fixed adapter. A\nread-only partial snapshot may omit this, but omitted native evidence\nis never mutation eligible.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "index": {
+        ///      "$ref": "#/definitions/RepositoryIndexSnapshotV1"
+        ///    },
+        ///    "object_format": {
+        ///      "$ref": "#/definitions/GitObjectFormatV1"
+        ///    },
+        ///    "observation_epoch": {
+        ///      "type": "integer",
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation_state": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "project_id": {
+        ///      "$ref": "#/definitions/ProjectId"
+        ///    },
+        ///    "refs_digest": {
+        ///      "description": "Digest of the complete native ref namespace at capture time.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "repository_id": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "snapshot_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "sparse_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "submodule_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "working_tree": {
+        ///      "$ref": "#/definitions/RepositoryWorkingTreeSnapshotV1"
+        ///    },
+        ///    "worktree_id": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/WorktreeId"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryStateSnapshotV1 {
+            ///Revision of the fixed native adapter that interpreted this state.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub adapter_revision: ::std::option::Option<::std::string::String>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub captured_at: UtcMicros,
+            pub coverage: GitCoverageV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub filesystem_capabilities_digest: ::std::option::Option<ManifestDigest>,
+            /**Exact native Git implementation observed by the fixed adapter. A
+            read-only partial snapshot may omit this, but omitted native evidence
+            is never mutation eligible.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub git_version: ::std::option::Option<::std::string::String>,
+            pub head: GitHeadStateV1,
+            pub index: RepositoryIndexSnapshotV1,
+            pub object_format: GitObjectFormatV1,
+            pub observation_epoch: u64,
+            pub operation_state: GitOperationStateV1,
+            pub project_id: ProjectId,
+            ///Digest of the complete native ref namespace at capture time.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub refs_digest: ::std::option::Option<ManifestDigest>,
+            pub repository_id: RepositoryId,
+            pub snapshot_id: ::std::string::String,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub sparse_digest: ::std::option::Option<ManifestDigest>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub submodule_digest: ::std::option::Option<ManifestDigest>,
+            pub working_tree: RepositoryWorkingTreeSnapshotV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub worktree_id: ::std::option::Option<WorktreeId>,
+        }
+        ///`RepositoryWorkingTreeSnapshotV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "object",
+        ///  "required": [
+        ///    "state",
+        ///    "tracked_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "ignored_collision_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "state": {
+        ///      "$ref": "#/definitions/RepositoryWorkingTreeStateV1"
+        ///    },
+        ///    "tracked_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "untracked_name_digest": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct RepositoryWorkingTreeSnapshotV1 {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub ignored_collision_digest: ::std::option::Option<ManifestDigest>,
+            pub state: RepositoryWorkingTreeStateV1,
+            pub tracked_digest: ManifestDigest,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub untracked_name_digest: ::std::option::Option<ManifestDigest>,
+        }
+        ///`RepositoryWorkingTreeStateV1`
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "clean",
+        ///    "tracked_dirty",
+        ///    "untracked_only",
+        ///    "mixed",
+        ///    "conflicted",
+        ///    "unreadable"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum RepositoryWorkingTreeStateV1 {
+            #[serde(rename = "clean")]
+            Clean,
+            #[serde(rename = "tracked_dirty")]
+            TrackedDirty,
+            #[serde(rename = "untracked_only")]
+            UntrackedOnly,
+            #[serde(rename = "mixed")]
+            Mixed,
+            #[serde(rename = "conflicted")]
+            Conflicted,
+            #[serde(rename = "unreadable")]
+            Unreadable,
+        }
+        impl ::std::fmt::Display for RepositoryWorkingTreeStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Clean => f.write_str("clean"),
+                    Self::TrackedDirty => f.write_str("tracked_dirty"),
+                    Self::UntrackedOnly => f.write_str("untracked_only"),
+                    Self::Mixed => f.write_str("mixed"),
+                    Self::Conflicted => f.write_str("conflicted"),
+                    Self::Unreadable => f.write_str("unreadable"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for RepositoryWorkingTreeStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "clean" => Ok(Self::Clean),
+                    "tracked_dirty" => Ok(Self::TrackedDirty),
+                    "untracked_only" => Ok(Self::UntrackedOnly),
+                    "mixed" => Ok(Self::Mixed),
+                    "conflicted" => Ok(Self::Conflicted),
+                    "unreadable" => Ok(Self::Unreadable),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for RepositoryWorkingTreeStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitPreviewSurfaceRequest;
+    pub type Result = result::GitIndexPreviewV1;
+}
+typed_operation!(
+    GitPreview,
+    git_preview,
+    "operation.application.git.preview",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_preview"
+    },
+    "binding.mcp.git_preview.v1",
+    EffectClass::Preview,
+    IdempotencyContract::NotRequired,
+    "schema.application.git.preview.result",
+    1
+);
+#[allow(clippy::all)]
+pub mod git_status {
+    pub mod request {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Request shape for the public `git_status` surface.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitStatusSurfaceRequest",
+        ///  "description": "Request shape for the public `git_status` surface.",
+        ///  "type": "object",
+        ///  "properties": {
+        ///    "max_bytes": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint64",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "max_entries": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitStatusSurfaceRequest {
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_bytes: ::std::option::Option<u64>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub max_entries: ::std::option::Option<u32>,
+        }
+        impl ::std::default::Default for GitStatusSurfaceRequest {
+            fn default() -> Self {
+                Self {
+                    max_bytes: Default::default(),
+                    max_entries: Default::default(),
+                }
+            }
+        }
+    }
+    pub mod result {
+        /// Error types.
+        pub mod error {
+            /// Error from a `TryFrom` or `FromStr` implementation.
+            pub struct ConversionError(::std::borrow::Cow<'static, str>);
+            impl ::std::error::Error for ConversionError {}
+            impl ::std::fmt::Display for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Display::fmt(&self.0, f)
+                }
+            }
+            impl ::std::fmt::Debug for ConversionError {
+                fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> Result<(), ::std::fmt::Error> {
+                    ::std::fmt::Debug::fmt(&self.0, f)
+                }
+            }
+            impl From<&'static str> for ConversionError {
+                fn from(value: &'static str) -> Self {
+                    Self(value.into())
+                }
+            }
+            impl From<String> for ConversionError {
+                fn from(value: String) -> Self {
+                    Self(value.into())
+                }
+            }
+        }
+        ///Why blame/line provenance is unavailable for a path.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Why blame/line provenance is unavailable for a path.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "available",
+        ///    "path_not_tracked",
+        ///    "unborn_branch",
+        ///    "binary_file"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitBlameAvailabilityV1 {
+            #[serde(rename = "available")]
+            Available,
+            #[serde(rename = "path_not_tracked")]
+            PathNotTracked,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "binary_file")]
+            BinaryFile,
+        }
+        impl ::std::fmt::Display for GitBlameAvailabilityV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Available => f.write_str("available"),
+                    Self::PathNotTracked => f.write_str("path_not_tracked"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::BinaryFile => f.write_str("binary_file"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitBlameAvailabilityV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "available" => Ok(Self::Available),
+                    "path_not_tracked" => Ok(Self::PathNotTracked),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "binary_file" => Ok(Self::BinaryFile),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitBlameAvailabilityV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Line provenance for one final (current) line.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Line provenance for one final (current) line.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "boundary",
+        ///    "commit",
+        ///    "final_line",
+        ///    "origin_line"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "boundary": {
+        ///      "description": "True when the origin commit is a history boundary (e.g. shallow root).",
+        ///      "type": "boolean"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "final_line": {
+        ///      "description": "1-based line number in the blamed revision.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "origin_line": {
+        ///      "description": "1-based line number in the origin commit.",
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "previous": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlamePreviousV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameLineV1 {
+            pub author: GitCommitIdentityV1,
+            ///True when the origin commit is a history boundary (e.g. shallow root).
+            pub boundary: bool,
+            pub commit: GitOidV1,
+            ///1-based line number in the blamed revision.
+            pub final_line: u32,
+            ///1-based line number in the origin commit.
+            pub origin_line: u32,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub previous: ::std::option::Option<GitBlamePreviousV1>,
+        }
+        ///Rename-following evidence for one blamed line (`previous` record).
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Rename-following evidence for one blamed line (`previous` record).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commit",
+        ///    "path"
+        ///  ],
+        ///  "properties": {
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlamePreviousV1 {
+            pub commit: GitOidV1,
+            pub path: ::std::string::String,
+        }
+        /**Typed blame result: per-line provenance plus boundary, rename-following,
+        and unavailable states.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed blame result: per-line provenance plus boundary, rename-following,\nand unavailable states.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "availability",
+        ///    "coverage",
+        ///    "lines",
+        ///    "path",
+        ///    "repository"
+        ///  ],
+        ///  "properties": {
+        ///    "availability": {
+        ///      "$ref": "#/definitions/GitBlameAvailabilityV1"
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "lines": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitBlameLineV1"
+        ///      }
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitBlameV1 {
+            pub availability: GitBlameAvailabilityV1,
+            pub coverage: GitCoverageV1,
+            pub lines: ::std::vec::Vec<GitBlameLineV1>,
+            pub path: ::std::string::String,
+            pub repository: RepositoryId,
+        }
+        ///Expected blob identity, or explicit absent-file state.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected blob identity, or explicit absent-file state.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "absent_file"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "present"
+        ///      ],
+        ///      "properties": {
+        ///        "present": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        }
+        ///      },
+        ///      "additionalProperties": false
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        pub enum GitBlobExpectationV1 {
+            #[serde(rename = "absent_file")]
+            AbsentFile,
+            #[serde(rename = "present")]
+            Present(GitOidV1),
+        }
+        impl ::std::convert::From<GitOidV1> for GitBlobExpectationV1 {
+            fn from(value: GitOidV1) -> Self {
+                Self::Present(value)
+            }
+        }
+        /**Native change kind for one side (index or worktree) of a status entry,
+        or for a whole-file diff record.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native change kind for one side (index or worktree) of a status entry,\nor for a whole-file diff record.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "unmodified",
+        ///    "modified",
+        ///    "added",
+        ///    "deleted",
+        ///    "renamed",
+        ///    "copied",
+        ///    "type_changed",
+        ///    "unmerged"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitChangeKindV1 {
+            #[serde(rename = "unmodified")]
+            Unmodified,
+            #[serde(rename = "modified")]
+            Modified,
+            #[serde(rename = "added")]
+            Added,
+            #[serde(rename = "deleted")]
+            Deleted,
+            #[serde(rename = "renamed")]
+            Renamed,
+            #[serde(rename = "copied")]
+            Copied,
+            #[serde(rename = "type_changed")]
+            TypeChanged,
+            #[serde(rename = "unmerged")]
+            Unmerged,
+        }
+        impl ::std::fmt::Display for GitChangeKindV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::Unmodified => f.write_str("unmodified"),
+                    Self::Modified => f.write_str("modified"),
+                    Self::Added => f.write_str("added"),
+                    Self::Deleted => f.write_str("deleted"),
+                    Self::Renamed => f.write_str("renamed"),
+                    Self::Copied => f.write_str("copied"),
+                    Self::TypeChanged => f.write_str("type_changed"),
+                    Self::Unmerged => f.write_str("unmerged"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitChangeKindV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "unmodified" => Ok(Self::Unmodified),
+                    "modified" => Ok(Self::Modified),
+                    "added" => Ok(Self::Added),
+                    "deleted" => Ok(Self::Deleted),
+                    "renamed" => Ok(Self::Renamed),
+                    "copied" => Ok(Self::Copied),
+                    "type_changed" => Ok(Self::TypeChanged),
+                    "unmerged" => Ok(Self::Unmerged),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitChangeKindV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Author/committer identity and timestamp evidence for one commit.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Author/committer identity and timestamp evidence for one commit.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "at",
+        ///    "email",
+        ///    "name"
+        ///  ],
+        ///  "properties": {
+        ///    "at": {
+        ///      "$ref": "#/definitions/UtcMicros"
+        ///    },
+        ///    "email": {
+        ///      "type": "string"
+        ///    },
+        ///    "name": {
+        ///      "type": "string"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitIdentityV1 {
+            pub at: UtcMicros,
+            pub email: ::std::string::String,
+            pub name: ::std::string::String,
+        }
+        /**Bounded commit metadata. The full message is not retained;
+        `message_digest` is its canonical digest evidence.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit metadata. The full message is not retained;\n`message_digest` is its canonical digest evidence.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "author",
+        ///    "commit",
+        ///    "committer",
+        ///    "message_digest",
+        ///    "parents",
+        ///    "subject",
+        ///    "tree"
+        ///  ],
+        ///  "properties": {
+        ///    "author": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "commit": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    },
+        ///    "committer": {
+        ///      "$ref": "#/definitions/GitCommitIdentityV1"
+        ///    },
+        ///    "message_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "parents": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitOidV1"
+        ///      }
+        ///    },
+        ///    "subject": {
+        ///      "description": "First line of the commit message, bounded at capture.",
+        ///      "type": "string"
+        ///    },
+        ///    "tree": {
+        ///      "$ref": "#/definitions/GitOidV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCommitMetadataV1 {
+            pub author: GitCommitIdentityV1,
+            pub commit: GitOidV1,
+            pub committer: GitCommitIdentityV1,
+            pub message_digest: ManifestDigest,
+            pub parents: ::std::vec::Vec<GitOidV1>,
+            ///First line of the commit message, bounded at capture.
+            pub subject: ::std::string::String,
+            pub tree: GitOidV1,
+        }
+        /**Typed coverage of a read-only Git result: the sorted, de-duplicated set
+        of degradations observed while capturing it.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage of a read-only Git result: the sorted, de-duplicated set\nof degradations observed while capturing it.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "degradations"
+        ///  ],
+        ///  "properties": {
+        ///    "degradations": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitDegradationV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitCoverageV1 {
+            pub degradations: ::std::vec::Vec<GitDegradationV1>,
+        }
+        /**Typed coverage/degradation reasons for a read-only Git result. A result
+        carrying any degradation is truthful but not complete; callers must not
+        treat it as a clean full view.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed coverage/degradation reasons for a read-only Git result. A result\ncarrying any degradation is truthful but not complete; callers must not\ntreat it as a clean full view.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "string",
+        ///      "enum": [
+        ///        "detached_head",
+        ///        "unborn_branch",
+        ///        "sparse_checkout",
+        ///        "split_index",
+        ///        "unreadable_state",
+        ///        "unsupported_object_format",
+        ///        "in_progress_operation",
+        ///        "shallow_boundary",
+        ///        "truncated_output"
+        ///      ]
+        ///    },
+        ///    {
+        ///      "description": "Ignored content shares a directory with live tracked/untracked\nentries, so the untracked/ignored view may be collapsed by Git.",
+        ///      "type": "string",
+        ///      "const": "ignored_collision"
+        ///    },
+        ///    {
+        ///      "description": "Unmerged index stages are present.",
+        ///      "type": "string",
+        ///      "const": "conflicted_state"
+        ///    },
+        ///    {
+        ///      "description": "Submodule entries exist; the adapter does not recurse into them.",
+        ///      "type": "string",
+        ///      "const": "submodule_state"
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitDegradationV1 {
+            #[serde(rename = "detached_head")]
+            DetachedHead,
+            #[serde(rename = "unborn_branch")]
+            UnbornBranch,
+            #[serde(rename = "sparse_checkout")]
+            SparseCheckout,
+            #[serde(rename = "split_index")]
+            SplitIndex,
+            #[serde(rename = "unreadable_state")]
+            UnreadableState,
+            #[serde(rename = "unsupported_object_format")]
+            UnsupportedObjectFormat,
+            #[serde(rename = "in_progress_operation")]
+            InProgressOperation,
+            #[serde(rename = "shallow_boundary")]
+            ShallowBoundary,
+            #[serde(rename = "truncated_output")]
+            TruncatedOutput,
+            /**Ignored content shares a directory with live tracked/untracked
+            entries, so the untracked/ignored view may be collapsed by Git.*/
+            #[serde(rename = "ignored_collision")]
+            IgnoredCollision,
+            ///Unmerged index stages are present.
+            #[serde(rename = "conflicted_state")]
+            ConflictedState,
+            ///Submodule entries exist; the adapter does not recurse into them.
+            #[serde(rename = "submodule_state")]
+            SubmoduleState,
+        }
+        impl ::std::fmt::Display for GitDegradationV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::DetachedHead => f.write_str("detached_head"),
+                    Self::UnbornBranch => f.write_str("unborn_branch"),
+                    Self::SparseCheckout => f.write_str("sparse_checkout"),
+                    Self::SplitIndex => f.write_str("split_index"),
+                    Self::UnreadableState => f.write_str("unreadable_state"),
+                    Self::UnsupportedObjectFormat => f.write_str("unsupported_object_format"),
+                    Self::InProgressOperation => f.write_str("in_progress_operation"),
+                    Self::ShallowBoundary => f.write_str("shallow_boundary"),
+                    Self::TruncatedOutput => f.write_str("truncated_output"),
+                    Self::IgnoredCollision => f.write_str("ignored_collision"),
+                    Self::ConflictedState => f.write_str("conflicted_state"),
+                    Self::SubmoduleState => f.write_str("submodule_state"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitDegradationV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "detached_head" => Ok(Self::DetachedHead),
+                    "unborn_branch" => Ok(Self::UnbornBranch),
+                    "sparse_checkout" => Ok(Self::SparseCheckout),
+                    "split_index" => Ok(Self::SplitIndex),
+                    "unreadable_state" => Ok(Self::UnreadableState),
+                    "unsupported_object_format" => Ok(Self::UnsupportedObjectFormat),
+                    "in_progress_operation" => Ok(Self::InProgressOperation),
+                    "shallow_boundary" => Ok(Self::ShallowBoundary),
+                    "truncated_output" => Ok(Self::TruncatedOutput),
+                    "ignored_collision" => Ok(Self::IgnoredCollision),
+                    "conflicted_state" => Ok(Self::ConflictedState),
+                    "submodule_state" => Ok(Self::SubmoduleState),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitDegradationV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Diff scope: unstaged worktree changes, staged index changes, or an exact
+        commit range. Range diffs are read-only evidence and carry no index
+        relationship, so they cannot mint an applicable `HunkRefV1`.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Diff scope: unstaged worktree changes, staged index changes, or an exact\ncommit range. Range diffs are read-only evidence and carry no index\nrelationship, so they cannot mint an applicable `HunkRefV1`.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "working_tree"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "staged"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "base",
+        ///        "head",
+        ///        "scope"
+        ///      ],
+        ///      "properties": {
+        ///        "base": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "head": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "scope": {
+        ///          "type": "string",
+        ///          "const": "commit_range"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "scope")]
+        pub enum GitDiffScopeV1 {
+            #[serde(rename = "working_tree")]
+            WorkingTree,
+            #[serde(rename = "staged")]
+            Staged,
+            #[serde(rename = "commit_range")]
+            CommitRange { base: GitOidV1, head: GitOidV1 },
+        }
+        ///Typed diff result for one scope with explicit coverage.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Typed diff result for one scope with explicit coverage.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "files",
+        ///    "repository",
+        ///    "scope"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "files": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitFileDiffV1"
+        ///      }
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "scope": {
+        ///      "$ref": "#/definitions/GitDiffScopeV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitDiffV1 {
+            pub coverage: GitCoverageV1,
+            pub files: ::std::vec::Vec<GitFileDiffV1>,
+            pub repository: RepositoryId,
+            pub scope: GitDiffScopeV1,
+        }
+        /**One file's structured diff record: change kind, modes, blob identities,
+        binary/submodule classification, bounded line totals, and hunks.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One file's structured diff record: change kind, modes, blob identities,\nbinary/submodule classification, bounded line totals, and hunks.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "binary",
+        ///    "change",
+        ///    "hunks",
+        ///    "path",
+        ///    "submodule"
+        ///  ],
+        ///  "properties": {
+        ///    "binary": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "change": {
+        ///      "$ref": "#/definitions/GitChangeKindV1"
+        ///    },
+        ///    "deletions": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "hunks": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitHunkV1"
+        ///      }
+        ///    },
+        ///    "insertions": {
+        ///      "description": "Inserted/deleted line totals; absent for binary and submodule records.",
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "new_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_blob": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "old_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Source path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "submodule": {
+        ///      "description": "True when the entry is a gitlink (submodule) change.",
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitFileDiffV1 {
+            pub binary: bool,
+            pub change: GitChangeKindV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub deletions: ::std::option::Option<u32>,
+            pub hunks: ::std::vec::Vec<GitHunkV1>,
+            ///Inserted/deleted line totals; absent for binary and submodule records.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub insertions: ::std::option::Option<u32>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub new_mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_blob: ::std::option::Option<GitOidV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub old_mode: ::std::option::Option<GitFileModeV1>,
+            ///Source path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub path: ::std::string::String,
+            ///True when the entry is a gitlink (submodule) change.
+            pub submodule: bool,
+        }
+        /**A native Git file mode as stored in tree/index records (six octal digits,
+        e.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git file mode as stored in tree/index records (six octal digits,\ne.g. `100644`, `100755`, `120000` symlink, `160000` gitlink/submodule).",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitFileModeV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitFileModeV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitFileModeV1> for ::std::string::String {
+            fn from(value: GitFileModeV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitFileModeV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitFileModeV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitFileModeV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        /**Native HEAD state. Missing, unborn, and detached states are explicit,
+        never guessed (Plan 36, PR7 provenance rule carried into query reads).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Native HEAD state. Missing, unborn, and detached states are explicit,\nnever guessed (Plan 36, PR7 provenance rule carried into query reads).",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "attached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "commit",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "commit": {
+        ///          "$ref": "#/definitions/GitOidV1"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "detached"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "branch",
+        ///        "state"
+        ///      ],
+        ///      "properties": {
+        ///        "branch": {
+        ///          "type": "string"
+        ///        },
+        ///        "state": {
+        ///          "type": "string",
+        ///          "const": "unborn"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "state")]
+        pub enum GitHeadStateV1 {
+            #[serde(rename = "attached")]
+            Attached {
+                branch: ::std::string::String,
+                commit: GitOidV1,
+            },
+            #[serde(rename = "detached")]
+            Detached { commit: GitOidV1 },
+            #[serde(rename = "unborn")]
+            Unborn { branch: ::std::string::String },
+        }
+        /**Bounded commit history in native traversal order. `truncated` is true
+        when the capture bound cut the walk; shallow/partial-clone boundaries are
+        coverage degradations, never silently clean.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded commit history in native traversal order. `truncated` is true\nwhen the capture bound cut the walk; shallow/partial-clone boundaries are\ncoverage degradations, never silently clean.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "commits",
+        ///    "coverage",
+        ///    "repository",
+        ///    "truncated"
+        ///  ],
+        ///  "properties": {
+        ///    "commits": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/GitCommitMetadataV1"
+        ///      }
+        ///    },
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "truncated": {
+        ///      "type": "boolean"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHistoryV1 {
+            pub commits: ::std::vec::Vec<GitCommitMetadataV1>,
+            pub coverage: GitCoverageV1,
+            pub repository: RepositoryId,
+            pub truncated: bool,
+        }
+        /**One structured diff hunk. The hunk body is not retained; `patch_digest`
+        is the canonical digest of the normalized header plus body lines, which
+        is the stable hunk identity evidence (Plan 36 bounded-result rule).*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "One structured diff hunk. The hunk body is not retained; `patch_digest`\nis the canonical digest of the normalized header plus body lines, which\nis the stable hunk identity evidence (Plan 36 bounded-result rule).",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "new_lines",
+        ///    "new_start",
+        ///    "old_lines",
+        ///    "old_start",
+        ///    "patch_digest"
+        ///  ],
+        ///  "properties": {
+        ///    "new_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "new_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_lines": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "old_start": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "section": {
+        ///      "description": "Function/section heading from the hunk header when Git emitted one.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitHunkV1 {
+            pub new_lines: u32,
+            pub new_start: u32,
+            pub old_lines: u32,
+            pub old_start: u32,
+            pub patch_digest: ManifestDigest,
+            ///Function/section heading from the hunk header when Git emitted one.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub section: ::std::option::Option<::std::string::String>,
+        }
+        /**Expected index entry state for compare-and-swap: blob identity (or
+        absent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a
+        merged (stage-0) entry.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Expected index entry state for compare-and-swap: blob identity (or\nabsent), mode, and unmerged-stage state. `unmerged_stage` is `None` for a\nmerged (stage-0) entry.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "blob"
+        ///  ],
+        ///  "properties": {
+        ///    "blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "unmerged_stage": {
+        ///      "type": [
+        ///        "integer",
+        ///        "null"
+        ///      ],
+        ///      "format": "uint8",
+        ///      "maximum": 255.0,
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitIndexEntryExpectationV1 {
+            pub blob: GitBlobExpectationV1,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub mode: ::std::option::Option<GitFileModeV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub unmerged_stage: ::std::option::Option<u8>,
+        }
+        /**A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or
+        SHA-256 length. This is identity evidence only; it never authorizes
+        object reconstruction or traversal outside native Git.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "A native Git object id (commit, tree, or blob), lowercase hex, SHA-1 or\nSHA-256 length. This is identity evidence only; it never authorizes\nobject reconstruction or traversal outside native Git.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct GitOidV1(pub ::std::string::String);
+        impl ::std::ops::Deref for GitOidV1 {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<GitOidV1> for ::std::string::String {
+            fn from(value: GitOidV1) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for GitOidV1 {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for GitOidV1 {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for GitOidV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///In-progress native Git operation state, read from repository metadata.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "In-progress native Git operation state, read from repository metadata.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "none",
+        ///    "merge",
+        ///    "rebase",
+        ///    "cherry_pick",
+        ///    "revert",
+        ///    "bisect",
+        ///    "sequencer",
+        ///    "unknown"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum GitOperationStateV1 {
+            #[serde(rename = "none")]
+            None,
+            #[serde(rename = "merge")]
+            Merge,
+            #[serde(rename = "rebase")]
+            Rebase,
+            #[serde(rename = "cherry_pick")]
+            CherryPick,
+            #[serde(rename = "revert")]
+            Revert,
+            #[serde(rename = "bisect")]
+            Bisect,
+            #[serde(rename = "sequencer")]
+            Sequencer,
+            #[serde(rename = "unknown")]
+            Unknown,
+        }
+        impl ::std::fmt::Display for GitOperationStateV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::None => f.write_str("none"),
+                    Self::Merge => f.write_str("merge"),
+                    Self::Rebase => f.write_str("rebase"),
+                    Self::CherryPick => f.write_str("cherry_pick"),
+                    Self::Revert => f.write_str("revert"),
+                    Self::Bisect => f.write_str("bisect"),
+                    Self::Sequencer => f.write_str("sequencer"),
+                    Self::Unknown => f.write_str("unknown"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for GitOperationStateV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "none" => Ok(Self::None),
+                    "merge" => Ok(Self::Merge),
+                    "rebase" => Ok(Self::Rebase),
+                    "cherry_pick" => Ok(Self::CherryPick),
+                    "revert" => Ok(Self::Revert),
+                    "bisect" => Ok(Self::Bisect),
+                    "sequencer" => Ok(Self::Sequencer),
+                    "unknown" => Ok(Self::Unknown),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for GitOperationStateV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitStatusSummaryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV1 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitStatusSummaryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitDiffV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV12 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitDiffV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitHistoryV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV13 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitHistoryV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "$ref": "#/definitions/GitBlameV1"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV14 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: GitBlameV1,
+        }
+        ///Bounded native-query payload shared by all public Git read results.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded native-query payload shared by all public Git read results.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "coverage",
+        ///    "truncated_by_bound",
+        ///    "value"
+        ///  ],
+        ///  "properties": {
+        ///    "coverage": {
+        ///      "$ref": "#/definitions/GitCoverageV1"
+        ///    },
+        ///    "truncated_by_bound": {
+        ///      "type": "boolean"
+        ///    },
+        ///    "value": {
+        ///      "type": "array",
+        ///      "items": {
+        ///        "$ref": "#/definitions/HunkRefV1"
+        ///      }
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitQueryEnvelopeV15 {
+            pub coverage: GitCoverageV1,
+            pub truncated_by_bound: bool,
+            pub value: ::std::vec::Vec<HunkRefV1>,
+        }
+        ///Actual payload emitted by each public Git read operation.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "title": "GitReadResultV1",
+        ///  "description": "Actual payload emitted by each public Git read operation.",
+        ///  "oneOf": [
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "status"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV1"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "diff"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV12"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "history"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV13"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "blame"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV14"
+        ///        }
+        ///      }
+        ///    },
+        ///    {
+        ///      "type": "object",
+        ///      "required": [
+        ///        "query",
+        ///        "result"
+        ///      ],
+        ///      "properties": {
+        ///        "query": {
+        ///          "type": "string",
+        ///          "const": "hunks"
+        ///        },
+        ///        "result": {
+        ///          "$ref": "#/definitions/GitQueryEnvelopeV15"
+        ///        }
+        ///      }
+        ///    }
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(tag = "query", content = "result")]
+        pub enum GitReadResultV1 {
+            #[serde(rename = "status")]
+            Status(GitQueryEnvelopeV1),
+            #[serde(rename = "diff")]
+            Diff(GitQueryEnvelopeV12),
+            #[serde(rename = "history")]
+            History(GitQueryEnvelopeV13),
+            #[serde(rename = "blame")]
+            Blame(GitQueryEnvelopeV14),
+            #[serde(rename = "hunks")]
+            Hunks(GitQueryEnvelopeV15),
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV1> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV1) -> Self {
+                Self::Status(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV12> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV12) -> Self {
+                Self::Diff(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV13> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV13) -> Self {
+                Self::History(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV14> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV14) -> Self {
+                Self::Blame(value)
+            }
+        }
+        impl ::std::convert::From<GitQueryEnvelopeV15> for GitReadResultV1 {
+            fn from(value: GitQueryEnvelopeV15) -> Self {
+                Self::Hunks(value)
+            }
+        }
+        ///Bounded status summary returned by `git_status`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Bounded status summary returned by `git_status`.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "changed_paths",
+        ///    "conflicted",
+        ///    "head",
+        ///    "ignored",
+        ///    "operation",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "staged",
+        ///    "unstaged",
+        ///    "untracked"
+        ///  ],
+        ///  "properties": {
+        ///    "changed_paths": {
+        ///      "description": "Sorted, de-duplicated paths, capped by the query entry bound.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "string"
+        ///      }
+        ///    },
+        ///    "conflicted": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "head": {
+        ///      "$ref": "#/definitions/GitHeadStateV1"
+        ///    },
+        ///    "ignored": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "operation": {
+        ///      "$ref": "#/definitions/GitOperationStateV1"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "staged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "unstaged": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    },
+        ///    "untracked": {
+        ///      "type": "integer",
+        ///      "format": "uint32",
+        ///      "minimum": 0.0
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct GitStatusSummaryV1 {
+            ///Sorted, de-duplicated paths, capped by the query entry bound.
+            pub changed_paths: ::std::vec::Vec<::std::string::String>,
+            pub conflicted: u32,
+            pub head: GitHeadStateV1,
+            pub ignored: u32,
+            pub operation: GitOperationStateV1,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            pub staged: u32,
+            pub unstaged: u32,
+            pub untracked: u32,
+        }
+        /**`HunkRef` operation direction (Plan 36): working tree to index, or index
+        to HEAD/base. No other direction is encodable.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "`HunkRef` operation direction (Plan 36): working tree to index, or index\nto HEAD/base. No other direction is encodable.",
+        ///  "type": "string",
+        ///  "enum": [
+        ///    "working_tree_to_index",
+        ///    "index_to_head"
+        ///  ]
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Copy,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        pub enum HunkDirectionV1 {
+            #[serde(rename = "working_tree_to_index")]
+            WorkingTreeToIndex,
+            #[serde(rename = "index_to_head")]
+            IndexToHead,
+        }
+        impl ::std::fmt::Display for HunkDirectionV1 {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match *self {
+                    Self::WorkingTreeToIndex => f.write_str("working_tree_to_index"),
+                    Self::IndexToHead => f.write_str("index_to_head"),
+                }
+            }
+        }
+        impl ::std::str::FromStr for HunkDirectionV1 {
+            type Err = self::error::ConversionError;
+            fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                match value {
+                    "working_tree_to_index" => Ok(Self::WorkingTreeToIndex),
+                    "index_to_head" => Ok(Self::IndexToHead),
+                    _ => Err("invalid value".into()),
+                }
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<&::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: &::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<::std::string::String> for HunkDirectionV1 {
+            type Error = self::error::ConversionError;
+            fn try_from(
+                value: ::std::string::String,
+            ) -> ::std::result::Result<Self, self::error::ConversionError> {
+                value.parse()
+            }
+        }
+        /**Immutable hunk identity for compare-and-swap (Plan 36, "`HunkRef`
+        compare-and-swap contract"). A hunk is identified by exact repository,
+        direction, path, expected base/index/worktree identity, normalized hunk
+        header, context and patch digests, and the preview that issued the
+        reference — never by display ordinal or line number alone.
+
+        query mints these as read-only identity evidence only. Applying them is a
+        PR11 daemon mutation path and is not representable here.*/
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Immutable hunk identity for compare-and-swap (Plan 36, \"`HunkRef`\ncompare-and-swap contract\"). A hunk is identified by exact repository,\ndirection, path, expected base/index/worktree identity, normalized hunk\nheader, context and patch digests, and the preview that issued the\nreference — never by display ordinal or line number alone.\n\nquery mints these as read-only identity evidence only. Applying them is a\nPR11 daemon mutation path and is not representable here.",
+        ///  "type": "object",
+        ///  "required": [
+        ///    "context_digest",
+        ///    "direction",
+        ///    "expected_base_blob",
+        ///    "expected_index_entry",
+        ///    "hunk_header",
+        ///    "patch_digest",
+        ///    "path",
+        ///    "preview_id",
+        ///    "repository",
+        ///    "schema_version",
+        ///    "selected_line_bitmap",
+        ///    "snapshot_digest",
+        ///    "worktree"
+        ///  ],
+        ///  "properties": {
+        ///    "attributes_digest": {
+        ///      "description": "Attributes/filter identity relevant to clean/smudge and EOL handling.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/ManifestDigest"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "context_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "direction": {
+        ///      "$ref": "#/definitions/HunkDirectionV1"
+        ///    },
+        ///    "expected_base_blob": {
+        ///      "$ref": "#/definitions/GitBlobExpectationV1"
+        ///    },
+        ///    "expected_index_entry": {
+        ///      "$ref": "#/definitions/GitIndexEntryExpectationV1"
+        ///    },
+        ///    "expected_worktree_blob": {
+        ///      "description": "Expected working-tree identity when the operation reads the worktree:\na native content digest or explicit absent-file state. `None` means\nthe operation direction does not read the worktree.",
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitBlobExpectationV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "expected_worktree_mode": {
+        ///      "anyOf": [
+        ///        {
+        ///          "$ref": "#/definitions/GitFileModeV1"
+        ///        },
+        ///        {
+        ///          "type": "null"
+        ///        }
+        ///      ]
+        ///    },
+        ///    "hunk_header": {
+        ///      "description": "Normalized `@@ -o,l +n,m @@` header text.",
+        ///      "type": "string"
+        ///    },
+        ///    "original_path": {
+        ///      "description": "Old path for a rename or copy.",
+        ///      "type": [
+        ///        "string",
+        ///        "null"
+        ///      ]
+        ///    },
+        ///    "patch_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "path": {
+        ///      "type": "string"
+        ///    },
+        ///    "preview_id": {
+        ///      "type": "string"
+        ///    },
+        ///    "repository": {
+        ///      "$ref": "#/definitions/RepositoryId"
+        ///    },
+        ///    "schema_version": {
+        ///      "type": "string"
+        ///    },
+        ///    "selected_line_bitmap": {
+        ///      "description": "Selected hunk-line bitmap (little-endian word order, line 1 = bit 0\nof word 0). Full-hunk identity covers the larger old/new side so\ndeletion-only hunks remain representable.",
+        ///      "type": "array",
+        ///      "items": {
+        ///        "type": "integer",
+        ///        "format": "uint64",
+        ///        "minimum": 0.0
+        ///      }
+        ///    },
+        ///    "snapshot_digest": {
+        ///      "$ref": "#/definitions/ManifestDigest"
+        ///    },
+        ///    "worktree": {
+        ///      "$ref": "#/definitions/WorktreeId"
+        ///    }
+        ///  },
+        ///  "additionalProperties": false
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(deny_unknown_fields)]
+        pub struct HunkRefV1 {
+            ///Attributes/filter identity relevant to clean/smudge and EOL handling.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub attributes_digest: ::std::option::Option<ManifestDigest>,
+            pub context_digest: ManifestDigest,
+            pub direction: HunkDirectionV1,
+            pub expected_base_blob: GitBlobExpectationV1,
+            pub expected_index_entry: GitIndexEntryExpectationV1,
+            /**Expected working-tree identity when the operation reads the worktree:
+            a native content digest or explicit absent-file state. `None` means
+            the operation direction does not read the worktree.*/
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_blob: ::std::option::Option<GitBlobExpectationV1>,
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub expected_worktree_mode: ::std::option::Option<GitFileModeV1>,
+            ///Normalized `@@ -o,l +n,m @@` header text.
+            pub hunk_header: ::std::string::String,
+            ///Old path for a rename or copy.
+            #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+            pub original_path: ::std::option::Option<::std::string::String>,
+            pub patch_digest: ManifestDigest,
+            pub path: ::std::string::String,
+            pub preview_id: ::std::string::String,
+            pub repository: RepositoryId,
+            pub schema_version: ::std::string::String,
+            /**Selected hunk-line bitmap (little-endian word order, line 1 = bit 0
+            of word 0). Full-hunk identity covers the larger old/new side so
+            deletion-only hunks remain representable.*/
+            pub selected_line_bitmap: ::std::vec::Vec<u64>,
+            pub snapshot_digest: ManifestDigest,
+            pub worktree: WorktreeId,
+        }
+        ///Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct ManifestDigest(pub ::std::string::String);
+        impl ::std::ops::Deref for ManifestDigest {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<ManifestDigest> for ::std::string::String {
+            fn from(value: ManifestDigest) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for ManifestDigest {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for ManifestDigest {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for ManifestDigest {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `RepositoryId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `RepositoryId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct RepositoryId(pub ::std::string::String);
+        impl ::std::ops::Deref for RepositoryId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<RepositoryId> for ::std::string::String {
+            fn from(value: RepositoryId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for RepositoryId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for RepositoryId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for RepositoryId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///UTC timestamp represented as microseconds from the Unix epoch.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+        ///  "type": "integer",
+        ///  "format": "int64"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+        #[serde(transparent)]
+        pub struct UtcMicros(pub i64);
+        impl ::std::ops::Deref for UtcMicros {
+            type Target = i64;
+            fn deref(&self) -> &i64 {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<UtcMicros> for i64 {
+            fn from(value: UtcMicros) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<i64> for UtcMicros {
+            fn from(value: i64) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for UtcMicros {
+            type Err = <i64 as ::std::str::FromStr>::Err;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.parse()?))
+            }
+        }
+        impl ::std::convert::TryFrom<&str> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: &str) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::convert::TryFrom<String> for UtcMicros {
+            type Error = <i64 as ::std::str::FromStr>::Err;
+            fn try_from(value: String) -> ::std::result::Result<Self, Self::Error> {
+                value.parse()
+            }
+        }
+        impl ::std::fmt::Display for UtcMicros {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+        ///Strongly typed canonical identity: `WorktreeId`.
+        ///
+        /// <details><summary>JSON schema</summary>
+        ///
+        /// ```json
+        ///{
+        ///  "description": "Strongly typed canonical identity: `WorktreeId`.",
+        ///  "type": "string"
+        ///}
+        /// ```
+        /// </details>
+        #[derive(
+            ::serde::Deserialize,
+            ::serde::Serialize,
+            Clone,
+            Debug,
+            Eq,
+            Hash,
+            Ord,
+            PartialEq,
+            PartialOrd,
+        )]
+        #[serde(transparent)]
+        pub struct WorktreeId(pub ::std::string::String);
+        impl ::std::ops::Deref for WorktreeId {
+            type Target = ::std::string::String;
+            fn deref(&self) -> &::std::string::String {
+                &self.0
+            }
+        }
+        impl ::std::convert::From<WorktreeId> for ::std::string::String {
+            fn from(value: WorktreeId) -> Self {
+                value.0
+            }
+        }
+        impl ::std::convert::From<::std::string::String> for WorktreeId {
+            fn from(value: ::std::string::String) -> Self {
+                Self(value)
+            }
+        }
+        impl ::std::str::FromStr for WorktreeId {
+            type Err = ::std::convert::Infallible;
+            fn from_str(value: &str) -> ::std::result::Result<Self, Self::Err> {
+                Ok(Self(value.to_string()))
+            }
+        }
+        impl ::std::fmt::Display for WorktreeId {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    }
+    pub type Request = request::GitStatusSurfaceRequest;
+    pub type Result = result::GitReadResultV1;
+}
+typed_operation!(
+    GitStatus,
+    git_status,
+    "operation.application.git.status",
+    OperationTransport::McpTool {
+        tool_name: "tracedecay_git_status"
+    },
+    "binding.mcp.git_status.v1",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
+    "schema.application.git.status.result",
+    1
+);
 #[allow(clippy::all)]
 pub mod work_accept_proposal {
     pub mod request {
@@ -1003,8 +19591,12 @@ typed_operation!(
     WorkAcceptProposal,
     work_accept_proposal,
     "operation.work.accept_proposal",
-    "/application/work/accept-proposal",
+    OperationTransport::Http {
+        route: "/application/work/accept-proposal"
+    },
     "binding.http.work.accept_proposal",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.accept_proposal.result",
     1
 );
@@ -1845,8 +20437,12 @@ typed_operation!(
     WorkAcceptTask,
     work_accept_task,
     "operation.work.accept_task",
-    "/application/work/accept-task",
+    OperationTransport::Http {
+        route: "/application/work/accept-task"
+    },
     "binding.http.work.accept_task",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.accept_task.result",
     1
 );
@@ -2687,8 +21283,12 @@ typed_operation!(
     WorkAdmitExecution,
     work_admit_execution,
     "operation.work.admit_execution",
-    "/application/work/admit-execution",
+    OperationTransport::Http {
+        route: "/application/work/admit-execution"
+    },
     "binding.http.work.admit_execution",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.admit_execution.result",
     1
 );
@@ -3670,8 +22270,12 @@ typed_operation!(
     WorkAttachRuntimeEvidence,
     work_attach_runtime_evidence,
     "operation.work.attach_runtime_evidence",
-    "/application/work/attach-runtime-evidence",
+    OperationTransport::Http {
+        route: "/application/work/attach-runtime-evidence"
+    },
     "binding.http.work.attach_runtime_evidence",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attach_runtime_evidence.result",
     1
 );
@@ -7900,8 +26504,12 @@ typed_operation!(
     WorkAttemptAcquireLease,
     work_attempt_acquire_lease,
     "operation.work.attempt_acquire_lease",
-    "/application/work/attempt/acquire-lease",
+    OperationTransport::Http {
+        route: "/application/work/attempt/acquire-lease"
+    },
     "binding.http.work.attempt_acquire_lease",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_acquire_lease.result",
     1
 );
@@ -10755,8 +29363,12 @@ typed_operation!(
     WorkAttemptCancel,
     work_attempt_cancel,
     "operation.work.attempt_cancel",
-    "/application/work/attempt/cancel",
+    OperationTransport::Http {
+        route: "/application/work/attempt/cancel"
+    },
     "binding.http.work.attempt_cancel",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_cancel.result",
     1
 );
@@ -13536,8 +32148,12 @@ typed_operation!(
     WorkAttemptFinish,
     work_attempt_finish,
     "operation.work.attempt_finish",
-    "/application/work/attempt/finish",
+    OperationTransport::Http {
+        route: "/application/work/attempt/finish"
+    },
     "binding.http.work.attempt_finish",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_finish.result",
     1
 );
@@ -16395,8 +35011,12 @@ typed_operation!(
     WorkAttemptPublishArtifact,
     work_attempt_publish_artifact,
     "operation.work.attempt_publish_artifact",
-    "/application/work/attempt/publish-artifact",
+    OperationTransport::Http {
+        route: "/application/work/attempt/publish-artifact"
+    },
     "binding.http.work.attempt_publish_artifact",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_publish_artifact.result",
     1
 );
@@ -19149,8 +37769,12 @@ typed_operation!(
     WorkAttemptPublishProgress,
     work_attempt_publish_progress,
     "operation.work.attempt_publish_progress",
-    "/application/work/attempt/publish-progress",
+    OperationTransport::Http {
+        route: "/application/work/attempt/publish-progress"
+    },
     "binding.http.work.attempt_publish_progress",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_publish_progress.result",
     1
 );
@@ -21952,8 +40576,12 @@ typed_operation!(
     WorkAttemptRecover,
     work_attempt_recover,
     "operation.work.attempt_recover",
-    "/application/work/attempt/recover",
+    OperationTransport::Http {
+        route: "/application/work/attempt/recover"
+    },
     "binding.http.work.attempt_recover",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_recover.result",
     1
 );
@@ -24673,8 +43301,12 @@ typed_operation!(
     WorkAttemptRenewLease,
     work_attempt_renew_lease,
     "operation.work.attempt_renew_lease",
-    "/application/work/attempt/renew-lease",
+    OperationTransport::Http {
+        route: "/application/work/attempt/renew-lease"
+    },
     "binding.http.work.attempt_renew_lease",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_renew_lease.result",
     1
 );
@@ -27737,8 +46369,12 @@ typed_operation!(
     WorkAttemptStart,
     work_attempt_start,
     "operation.work.attempt_start",
-    "/application/work/attempt/start",
+    OperationTransport::Http {
+        route: "/application/work/attempt/start"
+    },
     "binding.http.work.attempt_start",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_start.result",
     1
 );
@@ -30678,8 +49314,12 @@ typed_operation!(
     WorkAttemptTerminalize,
     work_attempt_terminalize,
     "operation.work.attempt_terminalize",
-    "/application/work/attempt/terminalize",
+    OperationTransport::Http {
+        route: "/application/work/attempt/terminalize"
+    },
     "binding.http.work.attempt_terminalize",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_terminalize.result",
     1
 );
@@ -31534,8 +50174,12 @@ typed_operation!(
     WorkCreate,
     work_create,
     "operation.work.create",
-    "/application/work/create",
+    OperationTransport::Http {
+        route: "/application/work/create"
+    },
     "binding.http.work.create",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.create.result",
     1
 );
@@ -32628,8 +51272,12 @@ typed_operation!(
     WorkDelta,
     work_delta,
     "operation.work.delta",
-    "/application/work/delta",
+    OperationTransport::Http {
+        route: "/application/work/delta"
+    },
     "binding.http.work.delta",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
     "schema.work.delta.result",
     1
 );
@@ -33486,8 +52134,12 @@ typed_operation!(
     WorkReplanDependencies,
     work_replan_dependencies,
     "operation.work.replan_dependencies",
-    "/application/work/replan-dependencies",
+    OperationTransport::Http {
+        route: "/application/work/replan-dependencies"
+    },
     "binding.http.work.replan_dependencies",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.replan_dependencies.result",
     1
 );
@@ -34544,8 +53196,12 @@ typed_operation!(
     WorkReviewProposal,
     work_review_proposal,
     "operation.work.review_proposal",
-    "/application/work/review-proposal",
+    OperationTransport::Http {
+        route: "/application/work/review-proposal"
+    },
     "binding.http.work.review_proposal",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.review_proposal.result",
     1
 );
@@ -35541,8 +54197,12 @@ typed_operation!(
     WorkSnapshot,
     work_snapshot,
     "operation.work.snapshot",
-    "/application/work/snapshot",
+    OperationTransport::Http {
+        route: "/application/work/snapshot"
+    },
     "binding.http.work.snapshot",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
     "schema.work.snapshot.result",
     1
 );
@@ -37697,8 +56357,12 @@ typed_operation!(
     WorkflowExecuteFanOut,
     workflow_execute_fan_out,
     "operation.workflow.execute_fan_out",
-    "/application/workflow/execute-fan-out",
+    OperationTransport::Http {
+        route: "/application/workflow/execute-fan-out"
+    },
     "binding.http.workflow.execute_fan_out",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.workflow.execute_fan_out.result",
     1
 );

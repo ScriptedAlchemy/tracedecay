@@ -282,9 +282,10 @@ describe("TraceDecayClient generated operation bindings", () => {
           !callableOperations.has(operation.operation),
       ),
     ).toBe(true);
-    expect(SERVER_OPERATIONS.map((operation) => operation.operation)).toContain(
+    expect(SERVER_OPERATIONS.map((operation) => operation.operation)).not.toContain(
       "git_status",
     );
+    expect("git_status" in client.operations).toBe(true);
     expect("health_read" in client.operations).toBe(false);
     // @ts-expect-error Base routes have no canonical schema bodies yet.
     void client.operations.health_read;
@@ -408,8 +409,11 @@ describe("TraceDecayClient generated operation bindings", () => {
     );
     expect(descriptor).toBeDefined();
     expect(descriptor?.operationId).toBe("operation.work.attempt_finish");
-    expect(descriptor?.route).toBe("/application/work/attempt/finish");
-    expect(descriptor?.method).toBe("POST");
+    expect(descriptor?.transport).toEqual({
+      kind: "http",
+      route: "/application/work/attempt/finish",
+      method: "POST",
+    });
     expect(descriptor?.bindingId).toBe("binding.http.work.attempt_finish");
     expect(descriptor?.requestSchema).toEqual({
       schemaId: "schema.work.attempt_finish.request",
@@ -419,6 +423,46 @@ describe("TraceDecayClient generated operation bindings", () => {
       schemaId: "schema.work.attempt_finish.result",
       revision: 1,
     });
+  });
+
+  it("publishes canonical availability, effect, and idempotency metadata", () => {
+    const snapshot = OPERATIONS.find(
+      (operation) => operation.operation === "work_snapshot",
+    );
+    const attemptFinish = OPERATIONS.find(
+      (operation) => operation.operation === "work_attempt_finish",
+    );
+
+    expect(snapshot).toMatchObject({
+      availability: "available",
+      effect: "read",
+      idempotency: "not_required",
+    });
+    expect(attemptFinish).toMatchObject({
+      availability: "available",
+      effect: "administrative",
+      idempotency: "required",
+    });
+  });
+
+  it("routes Git operations through the caller's MCP tool adapter", async () => {
+    const calls: Array<{ toolName: string; request: unknown }> = [];
+    const client = createClient({
+      baseUrl: "http://127.0.0.1:43123",
+      projectId: "project.sdk",
+      token: "sdk-secret",
+      mcp: {
+        async callTool(toolName, request) {
+          calls.push({ toolName, request });
+          return {};
+        },
+      },
+    });
+
+    await expect(client.operations.git_status({})).rejects.toBeInstanceOf(
+      TraceDecayMalformedResponseError,
+    );
+    expect(calls).toEqual([{ toolName: "tracedecay_git_status", request: {} }]);
   });
 });
 

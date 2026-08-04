@@ -1,14 +1,31 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde_json::{Value, json};
 use tracedecay_sdk::client::{
-    CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
+    CancellationStatus, Client, ClientError, ConnectionMode, McpToolTransport, StreamOptions,
+    StreamResume,
 };
 use tracedecay_sdk::operations::{
-    TypedOperation, WorkCreate, WorkSnapshot, base_operation_capabilities,
+    GitStatus, TypedOperation, WorkCreate, WorkSnapshot, base_operation_capabilities,
 };
+
+#[derive(Debug, Default)]
+struct RecordingMcpTransport {
+    calls: Mutex<Vec<(String, Value)>>,
+}
+
+impl McpToolTransport for RecordingMcpTransport {
+    fn call_tool(&self, tool_name: &str, request: &Value) -> Result<Value, ClientError> {
+        self.calls
+            .lock()
+            .expect("test MCP calls lock")
+            .push((tool_name.to_owned(), request.clone()));
+        Ok(json!({}))
+    }
+}
 
 fn request(stream: &mut TcpStream) -> String {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -253,6 +270,30 @@ fn typed_work_descriptors_close_the_public_operation_surface() {
     }));
     assert!(capabilities.iter().all(|capability| capability.disposition
         == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable));
+}
+
+#[test]
+fn generated_mcp_descriptor_uses_the_injected_tool_transport() {
+    let mcp = Arc::new(RecordingMcpTransport::default());
+    let client = Client::builder(ConnectionMode::local(
+        "http://127.0.0.1:43123",
+        "project.sdk",
+        "sdk-token",
+    ))
+    .mcp_transport(mcp.clone())
+    .build()
+    .expect("client configuration");
+    let request = <GitStatus as TypedOperation>::Request::default();
+
+    let error = client
+        .execute_mcp::<GitStatus>(&request)
+        .expect_err("malformed MCP result must fail closed");
+
+    assert!(matches!(error, ClientError::Protocol { .. }));
+    assert_eq!(
+        *mcp.calls.lock().expect("test MCP calls lock"),
+        vec![("tracedecay_git_status".to_owned(), json!({}))]
+    );
 }
 
 #[test]
