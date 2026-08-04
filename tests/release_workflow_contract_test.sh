@@ -109,7 +109,7 @@ for required in [
     "target-branch: master",
     "steps.release.outputs.prs_created == 'true'",
     "fromJSON(steps.release.outputs.pr).headBranchName",
-    "cargo metadata --format-version 1 --no-deps",
+    'cargo update -p tracedecay --precise "$release_version"',
     'git push origin "HEAD:$RELEASE_PR_BRANCH"',
     "Check GitHub release version drift",
 ]:
