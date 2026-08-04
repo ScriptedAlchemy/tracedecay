@@ -9,7 +9,9 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
-use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskStatus};
+#[cfg(test)]
+use super::store_shutdown::ShutdownTaskOutcome;
+use super::store_shutdown::ShutdownTaskStatus;
 use super::store_shutdown::{ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
 

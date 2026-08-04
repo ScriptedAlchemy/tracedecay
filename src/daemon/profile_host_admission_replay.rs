@@ -320,6 +320,7 @@ impl ProfileHostAdmissionReplayRegistry {
         receipt.status()
     }
 
+    #[cfg(test)]
     pub(super) async fn shutdown(&self) -> ShutdownStatus {
         self.shutdown_until(
             tokio::time::Instant::now()
