@@ -57,38 +57,6 @@ fn bounded_daemon_admission_permits() -> usize {
     })
 }
 
-/// How long a mount may wait for an admission permit before failing retryably.
-///
-/// Admission is only 2 permits wide, and the work it guards is an O(store)
-/// generation decode. Several large worktrees opening at once therefore queue
-/// N sequential decodes behind one unbounded `acquire()`, and the caller has no
-/// way to learn it is queued rather than working. The wait is bounded instead:
-/// a mount that cannot be admitted in time reports a typed warming error the
-/// caller can retry, which is strictly better than holding the caller's
-/// deadline hostage to a queue whose depth it cannot see.
-const MOUNT_ADMISSION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Deadline-bounded mount admission.
-///
-/// Timing out is not a failure of the mount: the store is intact, the decode is
-/// simply queued behind other worktrees. The typed
-/// [`CodeIndexSchedulerErrorV1::MountAdmissionWarming`] says exactly that, so a
-/// caller retries rather than treating a busy daemon as a broken store.
-async fn acquire_mount_admission(
-    admission: &Arc<tokio::sync::Semaphore>,
-    deadline: std::time::Duration,
-) -> Result<tokio::sync::SemaphorePermit<'_>, CodeIndexSchedulerErrorV1> {
-    match tokio::time::timeout(deadline, admission.acquire()).await {
-        Ok(Ok(permit)) => Ok(permit),
-        Ok(Err(_)) => Err(CodeIndexSchedulerErrorV1::Identity(
-            "code-index mount admission semaphore is closed".to_owned(),
-        )),
-        Err(_) => Err(CodeIndexSchedulerErrorV1::MountAdmissionWarming {
-            waited_ms: u64::try_from(deadline.as_millis()).unwrap_or(u64::MAX),
-        }),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CodeIndexGenerationPublishedV1 {
     pub project_root: PathBuf,
@@ -141,7 +109,6 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
-    mount_admission: Arc<tokio::sync::Semaphore>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     cadence_telemetry: Arc<Mutex<CodeIndexCadenceTelemetryV1>>,
@@ -167,9 +134,6 @@ impl CodeIndexSchedulerRegistryV1 {
             max_worktrees,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
-            mount_admission: Arc::new(tokio::sync::Semaphore::new(
-                bounded_daemon_admission_permits(),
-            )),
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 bounded_daemon_admission_permits(),
             )),
@@ -615,13 +579,6 @@ impl CodeIndexSchedulerRegistryV1 {
         >,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
-        // Bound (not fully serialize) expensive mounts without pinning the
-        // registry map. Restoring a sealed generation for a distinct worktree is
-        // independent work, so a small bound lets concurrent opens proceed while
-        // still capping simultaneous store-open pressure. Holding `mounted` here
-        // would instead block every foreground query across every project.
-        let _mount_admission =
-            acquire_mount_admission(&self.mount_admission, MOUNT_ADMISSION_DEADLINE).await?;
         let mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
@@ -674,7 +631,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let open_project_root = project_root.clone();
         let open_byte_pool = Arc::clone(&self.byte_pool);
         let open_semantic_schedule = semantic_schedule.clone();
-        let (opened, restored_generation) = tokio::task::spawn_blocking(move || {
+        let opened = tokio::task::spawn_blocking(move || {
             let mut opened = CodeIndexWorktreeSchedulerV1::open(
                 open_project_id,
                 &open_project_root,
@@ -684,27 +641,19 @@ impl CodeIndexSchedulerRegistryV1 {
             if let Some(hook) = open_semantic_schedule {
                 opened.replace_semantic_schedule_hook(Some(hook));
             }
-            let restored = opened.latest_complete();
-            Ok::<_, CodeIndexSchedulerErrorV1>((opened, restored))
+            Ok::<_, CodeIndexSchedulerErrorV1>(opened)
         })
         .await
         .map_err(|error| {
             CodeIndexSchedulerErrorV1::Identity(format!("code-index mount task failed: {error}"))
         })??;
-        // When the restore-time freshness witness proved the retained generation
-        // still equals the on-disk source, the mount-time verification pass is
-        // redundant: skip it so an unchanged reopen costs a stat-scan, not a
-        // whole-repo read+hash+parse. Normal tier-1/tier-2 cadence still wakes
-        // the worker on the next git-mediated change or staleness window, so this
-        // never suppresses cadence indefinitely.
-        let restore_verified_fresh = opened.verified_against_source();
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        // Serve any retained complete generation immediately so admission stays
-        // non-blocking, but never treat restore as a verified freshness claim.
-        let serving_generation = Arc::new(RwLock::new(restored_generation.clone()));
+        // Cold mount publishes only the exact route. Sealed bytes remain
+        // unverified and unavailable until the retained owner activates them.
+        let serving_generation = Arc::new(RwLock::new(None));
         let hints = Arc::clone(&opened.hints);
         let wake = Arc::clone(&opened.wake);
         let epoch = Arc::clone(&opened.epoch);
@@ -757,7 +706,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     let mut scheduler = scheduler
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    let result = scheduler.reconcile_now();
+                    let result = scheduler.activate_or_reconcile();
                     let latest = scheduler.latest_complete();
                     // Reconcile completion is an activation point: build this
                     // generation's serving derivations here, on the blocking
@@ -854,34 +803,15 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
-        // Warm the restored generation's serving derivations (exact-admission
-        // sweep, record indices, lane owners) on a detached blocking task. This
-        // used to run inline in the open task above, but the warm is O(store)
-        // and the worktree is invisible to every query until the mount
-        // publishes it — a live daemon sat unmountable for 15+ minutes building
-        // BM25 postings while search failed typed the whole time. The memos are
-        // shared OnceLocks, so a query racing the warm pays at most what it
-        // always paid, and the mount itself stays O(decode).
-        if let Some(latest) = restored_generation.clone() {
-            tokio::task::spawn_blocking(move || latest.warm_serving_caches());
-        }
-        if let (Some(hook), Some(latest)) = (semantic_schedule, restored_generation) {
-            let _ = hook(&latest.generation);
-        }
-        // Schedule a background verification pass UNLESS the restore-time witness
-        // already proved this generation current. Retained-but-unverified
-        // generations keep queries non-blocking, but open-time clocks must not
-        // suppress cadence indefinitely (the live stale-index defect); a
-        // witness-verified generation carries the proof that pass would produce,
-        // so waking the worker would only repeat a whole-repo read for nothing.
-        if !restore_verified_fresh {
-            Self::note_wake(
-                &pending_wake_micros,
-                &pending_wake_trigger,
-                &wake,
-                CodeIndexCadenceTriggerV1::Mount,
-            );
-        }
+        // Decode and truth verification are retained background work. Until
+        // this wake completes, every query observes the mounted route as
+        // warming/unverified instead of serving unproven bytes.
+        Self::note_wake(
+            &pending_wake_micros,
+            &pending_wake_trigger,
+            &wake,
+            CodeIndexCadenceTriggerV1::Mount,
+        );
         Ok(true)
     }
 
@@ -1295,20 +1225,16 @@ impl CodeIndexSchedulerRegistryV1 {
         .ok()
     }
 
-    /// Query-admission entry point: run the freshness ladder (tier-1 git
-    /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
-    /// returning the latest complete generation, so external out-of-band changes
-    /// are reconciled without any standing filesystem watcher.
+    /// Query-admission entry point: serve only an already-decoded generation
+    /// whose exact identity authority still resolves. Freshness verification and
+    /// any rebuild remain retained background work.
     pub(in crate::daemon) async fn latest_complete_fresh(
         &self,
         project_root: &Path,
     ) -> Option<LatestCompleteCodeIndexV1> {
         let project_root = project_root.canonicalize().ok()?;
         // Clone the per-worktree handle under a short map lock, then drop the
-        // registry guard *before* running freshness. The synchronous freshness
-        // ladder (gix status + hashing + build_and_publish) must never run while
-        // the registry map is locked, or one worktree's reconcile would
-        // serialize every other worktree's queries and stall the executor.
+        // registry guard before checking the mounted route.
         let (scheduler, serving_generation, wake, pending_wake_micros, pending_wake_trigger) = {
             let mounted = self.mounted.lock().await;
             let worktree = mounted.get(&project_root)?;
@@ -1320,166 +1246,84 @@ impl CodeIndexSchedulerRegistryV1 {
                 Arc::clone(&worktree.pending_wake_trigger),
             )
         };
-        // Run the synchronous reconcile off the async executor. When the
-        // background worker already owns the scheduler, preserve the last
-        // complete immutable generation instead of joining the in-progress
-        // refresh; the next request observes the newly published generation.
+        // When the background worker already owns the scheduler, preserve the
+        // last complete immutable generation instead of joining its work.
         let authority_root = project_root.clone();
-        let cadence_telemetry = Arc::clone(&self.cadence_telemetry);
-        // `ensure_fresh_for_query` reconciles inline on the winner of the
-        // scheduler lock, and that reconcile can run for as long as a generation
-        // rebuild takes. Hold no admission slot while it does.
-        let (latest, publication) =
-            crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
-                let mut scheduler = match scheduler.try_lock() {
-                    Ok(scheduler) => scheduler,
-                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
-                    Err(std::sync::TryLockError::WouldBlock) => {
-                        // Serve prior generation without waiting, but schedule a
-                        // follow-up verification so busy refresh cannot strand
-                        // cadence indefinitely.
-                        Self::note_wake(
-                            &pending_wake_micros,
-                            &pending_wake_trigger,
-                            &wake,
-                            CodeIndexCadenceTriggerV1::BusyFollowUp,
-                        );
-                        return serving_generation
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone()
-                            .map(|latest| (latest, None));
-                    }
-                };
-                // Serve-old-first, continued: winning the scheduler lock must not
-                // mean paying for the rebuild. `ensure_fresh_for_query` reconciles
-                // inline, and that reconcile is O(store) with no bound of its own —
-                // a live `tracedecay_context` call sat on this exact line for 900
-                // seconds while the daemon ground a failing semantic publish loop,
-                // and only the client's own timeout ended it. The ladder's checks
-                // are cheap; its remedy belongs to the background worker.
-                //
-                // The git authority is still proven inline, because serving
-                // retained bytes under an identity nothing can confirm is the one
-                // thing the old inline reconcile fail-closed on.
-                if !scheduler.git_authority_available() {
-                    return None;
+        let latest = crate::daemon::park_admission(tokio::task::spawn_blocking(move || {
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // Serve prior generation without waiting, but schedule a
+                    // follow-up verification so busy refresh cannot strand
+                    // cadence indefinitely.
+                    Self::note_wake(
+                        &pending_wake_micros,
+                        &pending_wake_trigger,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::BusyFollowUp,
+                    );
+                    return serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
                 }
-                let servable = serving_generation
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-                    .or_else(|| scheduler.latest_complete_already_decoded());
-                if let Some(latest) = servable {
-                    // Something is servable, so freshness is a background concern.
-                    // Only record an arrival when the ladder actually asked for a
-                    // reconcile; a quiet repository must not turn every read into
-                    // a wake, and an unattributed arrival would fabricate a
-                    // cadence sample for work that never ran.
-                    if scheduler.request_fresh_for_query_background() {
-                        Self::note_wake(
-                            &pending_wake_micros,
-                            &pending_wake_trigger,
-                            &wake,
-                            CodeIndexCadenceTriggerV1::QueryAdmission,
-                        );
-                    }
-                    *serving_generation
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-                    return Some((latest, None));
+            };
+            // Serve-old-first, continued: winning the scheduler lock must not
+            // mean paying for the rebuild. `ensure_fresh_for_query` reconciles
+            // inline, and that reconcile is O(store) with no bound of its own —
+            // a live `tracedecay_context` call sat on this exact line for 900
+            // seconds while the daemon ground a failing semantic publish loop,
+            // and only the client's own timeout ended it. The ladder's checks
+            // are cheap; its remedy belongs to the background worker.
+            //
+            // The git authority is still proven inline, because serving
+            // retained bytes under an identity nothing can confirm is the one
+            // thing the old inline reconcile fail-closed on.
+            if !scheduler.git_authority_available() {
+                return None;
+            }
+            let servable = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+                .or_else(|| scheduler.latest_complete_already_decoded());
+            if let Some(latest) = servable {
+                // Something is servable, so freshness is a background concern.
+                // Only record an arrival when the ladder actually asked for a
+                // reconcile; a quiet repository must not turn every read into
+                // a wake, and an unattributed arrival would fabricate a
+                // cadence sample for work that never ran.
+                if scheduler.request_fresh_for_query_background() {
+                    Self::note_wake(
+                        &pending_wake_micros,
+                        &pending_wake_trigger,
+                        &wake,
+                        CodeIndexCadenceTriggerV1::QueryAdmission,
+                    );
                 }
-                // Nothing is servable at all: this is cold open, the one
-                // sanctioned slow path in Principle 6, and the inline ladder is
-                // what converges it. Dequeue instant for that path below.
-                let started_micros = now_micros().0;
-                let outcome = match scheduler.ensure_fresh_for_query() {
-                    Ok(outcome) => outcome,
-                    Err(error) => {
-                        // Cold open is the one sanctioned slow path, and this is
-                        // its only remedy. When it fails the scope has nothing
-                        // servable at all, so the failure must not be swallowed.
-                        tracing::warn!(
-                            event = "code_index_reconcile_failed",
-                            path = "query_admission_cold_open",
-                            error = %error,
-                            "code-index cold-open reconcile failed; no generation is servable"
-                        );
-                        return None;
-                    }
-                };
-                // Await-new must never preempt serve-old. A reconcile installs
-                // the generation it publishes directly, so this normally hits;
-                // when it abstains the active generation is mid-decode
-                // elsewhere, and queuing on that O(store) sweep would block a
-                // lane that already has a complete generation to answer from.
-                let latest = match scheduler.latest_complete_already_decoded() {
-                    Some(latest) => latest,
-                    None => {
-                        let retained = serving_generation
-                            .read()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .clone();
-                        match retained {
-                            Some(retained) => retained,
-                            // Nothing is servable: only now may this await the
-                            // in-flight decode rather than abstain.
-                            None => scheduler.latest_complete()?,
-                        }
-                    }
-                };
                 *serving_generation
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
-                if let Some(outcome) = outcome.as_ref() {
-                    // Prefer the earlier pending wake when one exists; otherwise this
-                    // query-admission reconcile is its own event-to-ready sample.
-                    let _ = pending_wake_micros.compare_exchange(
-                        0,
-                        u64::try_from(started_micros).unwrap_or(u64::MAX),
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    );
-                    if pending_wake_trigger.load(Ordering::Acquire) == 0 {
-                        pending_wake_trigger.store(
-                            Self::pack_trigger(CodeIndexCadenceTriggerV1::QueryAdmission),
-                            Ordering::Release,
-                        );
-                    }
-                    let (arrival, trigger) = Self::take_pending_arrival(
-                        &pending_wake_micros,
-                        &pending_wake_trigger,
-                        CodeIndexCadenceTriggerV1::QueryAdmission,
-                    );
-                    Self::record_reconcile_receipt(
-                        &cadence_telemetry,
-                        project_root.clone(),
-                        arrival,
-                        trigger,
-                        started_micros,
-                        outcome,
-                    );
-                }
-                let publication = outcome.as_ref().and_then(|outcome| match outcome {
-                    CodeIndexReconcileOutcomeV1::Published(evidence) => {
-                        Some(CodeIndexGenerationPublishedV1 {
-                            project_root: project_root.clone(),
-                            repository_id: evidence.repository_id.clone(),
-                            generation_id: evidence.generation_id.clone(),
-                            snapshot_content_identity: evidence.snapshot_content_identity.clone(),
-                            observation_time_micros: now_micros().0,
-                        })
-                    }
-                    CodeIndexReconcileOutcomeV1::Noop(_) => None,
-                });
-                Some((latest, publication))
-            }))
-            .await
-            .ok()
-            .flatten()?;
-        if let Some(publication) = publication {
-            let _ = self.generation_publications.send(publication);
-        }
+                return Some(latest);
+            }
+            // Cold open has no servable generation. Verification and any
+            // rebuild stay with the retained owner; reads only request the
+            // wake and return typed unavailable/unverified.
+            if pending_wake_micros.load(Ordering::Acquire) == 0 {
+                scheduler.request_background_reconcile();
+                Self::note_wake(
+                    &pending_wake_micros,
+                    &pending_wake_trigger,
+                    &wake,
+                    CodeIndexCadenceTriggerV1::QueryAdmission,
+                );
+            }
+            None
+        }))
+        .await
+        .ok()
+        .flatten()?;
         if let Ok(authority) = latest.test_attribution_authority() {
             let mut authorities = self
                 .test_attribution_authorities
@@ -1681,6 +1525,32 @@ impl CodeIndexSchedulerRegistryV1 {
         // Relaxed identity gate: this arm is stale by construction, so a moved
         // reference is exactly the condition it exists to survive.
         Self::latest_matches_scope_identity(&latest, scope).then_some(latest)
+    }
+
+    /// Whether an exact mounted route has no admissible generation because its
+    /// retained owner is still verifying or rebuilding it.
+    pub(super) async fn generation_is_unverified_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        let mounted = self.mounted.lock().await;
+        let mut matched = mounted.values().filter(|worktree| {
+            worktree.repository_id == scope.repository_id
+                && worktree.worktree_id == scope.worktree_id
+        });
+        let Some(worktree) = matched.next() else {
+            return false;
+        };
+        if matched.next().is_some() {
+            return false;
+        }
+        worktree
+            .serving_generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+            && (worktree.reconcile_in_progress.load(Ordering::Acquire)
+                || worktree.pending_wake_micros.load(Ordering::Acquire) != 0)
     }
 
     /// Ask the background worker for a reconcile on behalf of a query admission
@@ -2109,58 +1979,4 @@ fn feedback_document_logical_path(
         .to_str()
         .map(|path| path.replace('\\', "/"))
         .ok_or_else(|| LspRuntimeFailure::new("feedback-document-path-unavailable"))
-}
-
-#[cfg(test)]
-mod mount_admission_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn admission_within_the_deadline_returns_a_permit() {
-        let admission = Arc::new(tokio::sync::Semaphore::new(1));
-        let permit = acquire_mount_admission(&admission, std::time::Duration::from_secs(5))
-            .await
-            .expect("a free permit is admitted immediately");
-        drop(permit);
-    }
-
-    #[tokio::test]
-    async fn an_exhausted_admission_fails_retryably_at_the_deadline() {
-        let admission = Arc::new(tokio::sync::Semaphore::new(1));
-        let held = Arc::clone(&admission)
-            .acquire_owned()
-            .await
-            .expect("semaphore is open");
-        let deadline = std::time::Duration::from_millis(50);
-        let started = std::time::Instant::now();
-        let error = acquire_mount_admission(&admission, deadline)
-            .await
-            .expect_err("an exhausted admission must not wait unbounded");
-        assert!(
-            started.elapsed() >= deadline,
-            "the deadline must be observed before failing"
-        );
-        assert!(
-            matches!(
-                error,
-                CodeIndexSchedulerErrorV1::MountAdmissionWarming { waited_ms } if waited_ms == 50
-            ),
-            "expected a typed warming error, got {error:?}"
-        );
-        assert!(error.is_retryable(), "warming is retryable");
-        drop(held);
-    }
-
-    #[tokio::test]
-    async fn a_closed_admission_is_not_retryable() {
-        let admission = Arc::new(tokio::sync::Semaphore::new(1));
-        admission.close();
-        let error = acquire_mount_admission(&admission, std::time::Duration::from_secs(5))
-            .await
-            .expect_err("a closed semaphore cannot admit");
-        assert!(
-            !error.is_retryable(),
-            "a closed admission never reopens, so retrying cannot succeed"
-        );
-    }
 }

@@ -1412,15 +1412,16 @@ fn empty_generation_restart_preserves_project_identity() {
     );
     drop(reopened);
 
-    let error = match CodeIndexWorktreeSchedulerV1::open(
+    let mut foreign = CodeIndexWorktreeSchedulerV1::open(
         ProjectId::new("project.empty-restart.foreign").expect("valid foreign project"),
         fixture.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
-    ) {
-        Ok(_) => panic!("persisted generation must reject a foreign project"),
-        Err(error) => error,
-    };
+    )
+    .expect("foreground open defers sealed identity validation");
+    let error = foreign
+        .activate_or_reconcile()
+        .expect_err("persisted generation must reject a foreign project");
     assert!(matches!(
         error,
         super::CodeIndexSchedulerErrorV1::Identity(message)
@@ -2316,8 +2317,8 @@ async fn search_requests_one_background_reconcile_when_nothing_is_servable() {
         .execute_query_search(&scope, bundled_search_request("main"))
         .await
     {
-        Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable) => {}
-        Err(other) => panic!("expected the typed fail-fast, got {other:?}"),
+        Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnverified) => {}
+        Err(other) => panic!("expected the typed unverified state, got {other:?}"),
         Ok(_) => panic!("absent generations must not be degraded into an answer"),
     }
     let stamped = registry
@@ -2504,20 +2505,34 @@ fn unchanged_reopen_with_witness_skips_full_reconcile() {
         "a successful reconcile persists the restore-time freshness witness"
     );
 
-    // Reopen against the same store with the worktree unchanged. The witness
-    // proves the sealed generation is still current, so the scheduler adopts it
-    // as verified WITHOUT the forced whole-repo read+hash+parse.
+    // Reopen against the same store with the worktree unchanged. Foreground
+    // open remains unverified and decode-free; the retained owner then uses the
+    // witness to activate the exact sealed generation without a source read.
     let mut reopened = scheduler(&fixture, store.path().to_path_buf(), bytes);
     assert!(
-        reopened.verified_against_source(),
-        "an unchanged reopen with a matching witness is verified without a scan"
+        !reopened.verified_against_source(),
+        "foreground open cannot claim freshness before background proof"
+    );
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "foreground open must not decode sealed bytes"
+    );
+    assert!(
+        matches!(
+            reopened
+                .activate_or_reconcile()
+                .expect("retained activation"),
+            CodeIndexReconcileOutcomeV1::Noop(_)
+        ),
+        "the matching frontier activates the sealed generation without rebuilding"
     );
     assert!(
         reopened
             .ensure_fresh_for_query()
             .expect("freshness ladder runs")
             .is_none(),
-        "a witness-verified reopen skips the forced full reconcile"
+        "background frontier verification establishes the ordinary freshness clocks"
     );
     let served = reopened
         .latest_complete_ready_for_query()
@@ -2587,15 +2602,25 @@ fn restart_rejects_corrupt_sealed_generation() {
     bytes[middle] ^= 0x01;
     std::fs::write(&generation_path, bytes).expect("corrupt sealed generation");
 
-    let result = CodeIndexWorktreeSchedulerV1::open(
+    let mut reopened = CodeIndexWorktreeSchedulerV1::open(
         test_project_id(),
         fixture.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("foreground open defers sealed validation");
+    assert_eq!(
+        reopened.sealed_decode_count(),
+        0,
+        "foreground open must not inspect corrupt sealed bytes"
     );
     assert!(
-        result.is_err(),
-        "corrupt sealed state must fail project open"
+        reopened.activate_or_reconcile().is_err(),
+        "retained activation must reject corrupt sealed state"
+    );
+    assert!(
+        reopened.latest_complete_already_decoded().is_none(),
+        "corrupt sealed state never becomes serving state"
     );
 }
 
@@ -2622,15 +2647,20 @@ fn restart_rejects_pointer_generation_mismatch() {
     )
     .expect("write mismatched pointer");
 
-    let result = CodeIndexWorktreeSchedulerV1::open(
+    let mut reopened = CodeIndexWorktreeSchedulerV1::open(
         test_project_id(),
         fixture.path(),
         store.path().to_path_buf(),
         Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("foreground open defers sealed validation");
+    assert!(
+        reopened.activate_or_reconcile().is_err(),
+        "pointer/generation mismatch must fail retained activation"
     );
     assert!(
-        result.is_err(),
-        "pointer/generation mismatch must fail project open"
+        reopened.latest_complete_already_decoded().is_none(),
+        "a mismatched pointer never becomes serving state"
     );
 }
 
@@ -5505,14 +5535,8 @@ async fn mount_with_retained_generation_verifies_cadence_promptly() {
         .await
         .expect("mount with retained generation");
 
-    // Serve-prior: the retained generation is queryable immediately.
-    let served_before = registry
-        .latest_generation_id(fixture.path())
-        .await
-        .expect("retained generation remains available");
-    assert_eq!(served_before, first_generation);
-
-    // Cadence: mount wake must verify against gix and publish the new content.
+    // The retained generation is not queryable until its freshness frontier is
+    // proved. The mount wake must verify against gix and publish the new content.
     let refreshed = wait_for_generation_change(&registry, fixture.path(), &first_generation).await;
     assert_ne!(refreshed, first_generation);
 
@@ -5557,8 +5581,6 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
         )
         .await
         .expect("mount retained");
-    wait_for_initial_generation(&registry, fixture.path()).await;
-
     let receipt = wait_for_event_to_ready(&registry).await;
     assert!(
         receipt.is_noop(),
@@ -5596,15 +5618,20 @@ async fn mount_verification_noop_emits_event_to_ready_receipt() {
         !read_model.event_to_ready_micros.p99.is_available(),
         "p99 must stay unavailable until 100 samples are retained"
     );
+    assert!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_some(),
+        "the verified generation becomes serving state"
+    );
     registry.shutdown().await;
 }
 
-/// P2: a mount whose restored generation is proved current by its freshness
-/// witness must NOT schedule the mount-time verification reconcile. The whole
-/// point of the witness is to skip that whole-repo read on an unchanged reopen,
-/// so no reconcile runs and no event-to-ready receipt is emitted.
+/// A mount whose restored generation is proved current by its freshness witness
+/// activates that generation without rebuilding it.
 #[tokio::test(flavor = "multi_thread")]
-async fn witness_verified_mount_skips_reconcile() {
+async fn witness_verified_mount_activates_without_rebuild() {
     let fixture = GitFixture::new(ALPHA_LIB_V1);
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
@@ -5632,14 +5659,13 @@ async fn witness_verified_mount_skips_reconcile() {
         .await
         .expect("mount retained");
 
-    // The witness proves the retained generation current, so the mount schedules
-    // no verification reconcile. Give any (incorrectly scheduled) reconcile ample
-    // time to land, then assert none did: no receipt, and the served generation
-    // is still the seeded one — never rebuilt.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The retained owner decodes and proves the frontier in background. A no-op
+    // receipt makes that activation observable while the generation identity
+    // proves no replacement was published.
+    let receipt = wait_for_event_to_ready(&registry).await;
     assert!(
-        registry.latest_event_to_ready_receipt().is_none(),
-        "a witness-verified mount performs no reconcile, so emits no cadence receipt"
+        receipt.is_noop(),
+        "a matching witness activates the retained generation without rebuilding"
     );
     assert_eq!(
         registry.latest_generation_id(fixture.path()).await,
