@@ -366,8 +366,11 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
             healthy: snapshot.healthy,
             writer_present: snapshot.writer_present,
             reader_handles: snapshot.reader_handles,
+            general_reader_waiters: snapshot.general_reader_waiters,
+            health_reader_waiters: snapshot.health_reader_waiters,
             queued_operations: snapshot.queued_operations,
             queued_bytes: snapshot.queued_bytes,
+            writer_busy_events: snapshot.writer_busy_events,
             wal_bytes: snapshot.wal_bytes,
             memory_estimate_bytes: 0,
         }

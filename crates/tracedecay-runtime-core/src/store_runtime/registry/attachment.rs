@@ -20,8 +20,11 @@ pub struct PhysicalRuntimeSnapshot {
     pub healthy: bool,
     pub writer_present: bool,
     pub reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
     pub queued_operations: u32,
     pub queued_bytes: u64,
+    pub writer_busy_events: u64,
     pub wal_bytes: u64,
     pub memory_estimate_bytes: u64,
 }

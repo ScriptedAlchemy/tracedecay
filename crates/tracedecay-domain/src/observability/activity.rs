@@ -49,7 +49,9 @@ impl ActivityObservedV1 {
                     | "opencode_lsp_updated"
             ),
             // These are the exact ids emitted by session ingestion and native
-            // host-history producers; aliases such as `kimi` are not retained.
+            // host-history producers. Host installation ids such as `kimi`
+            // and `opencode` are not session-provider ids and must not enter
+            // this session-ingest label dimension.
             "session_ingest" => matches!(
                 detail,
                 "claude"
@@ -57,8 +59,6 @@ impl ActivityObservedV1 {
                     | "cursor"
                     | "hermes"
                     | "kiro"
-                    | "kimi_code"
-                    | "opencode"
                     | "cline"
                     | "roo-code"
                     | "kilo"
