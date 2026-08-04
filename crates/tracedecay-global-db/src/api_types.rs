@@ -231,6 +231,8 @@ pub struct ProjectRegistryContext {
 /// the registered session-store health route.
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionIngestHealth {
+    /// Providers with durable session rows or daemon-owned source frontiers.
+    pub observed_providers: Vec<String>,
     /// Transcripts referenced by sessions that still exist on disk.
     pub tracked_transcripts: u64,
     /// Transcripts with un-ingested appended bytes.

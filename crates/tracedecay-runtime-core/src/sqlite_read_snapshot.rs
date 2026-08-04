@@ -4,17 +4,18 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use fs2::FileExt;
-use rusqlite::{Connection, OpenFlags, params_from_iter, types::ValueRef};
+use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
-use crate::db::engine::{
-    Error as EngineError, Executor, IntoParams, QueryExecutor, Row, Rows, Value,
-};
+#[path = "sqlite_snapshot_connection.rs"]
+mod connection;
+
+pub use connection::SnapshotConnection;
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
@@ -39,169 +40,6 @@ pub async fn backup_live_sqlite_database(source: &Path, destination: &Path) -> i
     .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
 }
 
-pub struct SnapshotConnection {
-    connection: Arc<Mutex<Connection>>,
-    #[cfg_attr(not(test), allow(dead_code))]
-    interrupt: rusqlite::InterruptHandle,
-}
-
-impl SnapshotConnection {
-    fn open(path: &Path, flags: OpenFlags) -> crate::db::engine::Result<Self> {
-        let connection = Connection::open_with_flags(path, flags)
-            .map_err(|error| snapshot_sqlite_error("open snapshot", error))?;
-        let interrupt = connection.get_interrupt_handle();
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-            interrupt,
-        })
-    }
-
-    pub async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        Executor::execute(self, sql, params).await
-    }
-
-    pub async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
-    where
-        P: IntoParams,
-    {
-        QueryExecutor::query(self, sql, params).await
-    }
-
-    pub async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
-        Executor::execute_batch(self, sql).await
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn interrupt(&self) {
-        self.interrupt.interrupt();
-    }
-}
-
-impl QueryExecutor for SnapshotConnection {
-    async fn query<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<Rows>
-    where
-        P: IntoParams,
-    {
-        let params = params.into_params()?;
-        let connection = Arc::clone(&self.connection);
-        let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let connection = connection
-                .lock()
-                .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
-            let mut statement = connection
-                .prepare(&sql)
-                .map_err(|error| snapshot_sqlite_error("prepare snapshot query", error))?;
-            let columns = statement.column_count();
-            let params = params.into_iter().map(engine_value_to_rusqlite);
-            let mut rows = statement
-                .query(params_from_iter(params))
-                .map_err(|error| snapshot_sqlite_error("query snapshot", error))?;
-            let mut collected = Vec::new();
-            while let Some(row) = rows
-                .next()
-                .map_err(|error| snapshot_sqlite_error("read snapshot row", error))?
-            {
-                let values = (0..columns)
-                    .map(|column| {
-                        row.get_ref(column)
-                            .map_err(|error| snapshot_sqlite_error("read snapshot value", error))
-                            .and_then(snapshot_value)
-                    })
-                    .collect::<crate::db::engine::Result<Vec<_>>>()?;
-                collected.push(Row::from_values(values));
-            }
-            Ok(Rows::from_rows(collected))
-        })
-        .await
-        .map_err(|error| EngineError::Runtime(format!("snapshot query task failed: {error}")))?
-    }
-}
-
-impl Executor for SnapshotConnection {
-    async fn execute<P>(&self, sql: &str, params: P) -> crate::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        let params = params.into_params()?;
-        let connection = Arc::clone(&self.connection);
-        let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let connection = connection
-                .lock()
-                .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?;
-            let changed = connection
-                .execute(
-                    &sql,
-                    params_from_iter(params.into_iter().map(engine_value_to_rusqlite)),
-                )
-                .map_err(|error| snapshot_sqlite_error("execute snapshot statement", error))?;
-            u64::try_from(changed)
-                .map_err(|_| EngineError::Runtime("snapshot row count overflow".into()))
-        })
-        .await
-        .map_err(|error| EngineError::Runtime(format!("snapshot execute task failed: {error}")))?
-    }
-
-    async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
-        let connection = Arc::clone(&self.connection);
-        let sql = sql.to_owned();
-        tokio::task::spawn_blocking(move || {
-            connection
-                .lock()
-                .map_err(|_| EngineError::Runtime("snapshot connection lock poisoned".into()))?
-                .execute_batch(&sql)
-                .map_err(|error| snapshot_sqlite_error("execute snapshot batch", error))
-        })
-        .await
-        .map_err(|error| EngineError::Runtime(format!("snapshot batch task failed: {error}")))?
-    }
-}
-
-fn engine_value_to_rusqlite(value: Value) -> rusqlite::types::Value {
-    match value {
-        Value::Null => rusqlite::types::Value::Null,
-        Value::Integer(value) => rusqlite::types::Value::Integer(value),
-        Value::Real(value) => rusqlite::types::Value::Real(value),
-        Value::Text(value) => rusqlite::types::Value::Text(value),
-        Value::Blob(value) => rusqlite::types::Value::Blob(value),
-    }
-}
-
-fn snapshot_value(value: ValueRef<'_>) -> crate::db::engine::Result<Value> {
-    Ok(match value {
-        ValueRef::Null => Value::Null,
-        ValueRef::Integer(value) => Value::Integer(value),
-        ValueRef::Real(value) => Value::Real(value),
-        ValueRef::Text(value) => Value::Text(
-            std::str::from_utf8(value)
-                .map_err(|error| EngineError::Runtime(format!("invalid snapshot UTF-8: {error}")))?
-                .to_owned(),
-        ),
-        ValueRef::Blob(value) => Value::Blob(value.to_vec()),
-    })
-}
-
-fn snapshot_sqlite_error(operation: &'static str, error: rusqlite::Error) -> EngineError {
-    match error {
-        rusqlite::Error::SqliteFailure(code, message) => EngineError::Sqlite {
-            operation,
-            code: Some(code.extended_code & 0xff),
-            extended_code: Some(code.extended_code),
-            message: message.unwrap_or_else(|| code.to_string()),
-        },
-        error => EngineError::Sqlite {
-            operation,
-            code: None,
-            extended_code: None,
-            message: error.to_string(),
-        },
-    }
-}
-
 pub struct SnapshotDatabase {
     connection: SnapshotConnection,
     source: PathBuf,
@@ -214,7 +52,7 @@ pub struct SnapshotDatabase {
     /// direct-immutable mode, or the scratch copy in copy mode.
     identity_path: PathBuf,
     _scratch: Option<Arc<ScratchDirectory>>,
-    _authority: crate::db::DatabaseAuthority,
+    _authority: Option<crate::db::DatabaseAuthority>,
     #[cfg(any(test, feature = "test-helpers"))]
     copied_bytes: u64,
 }
@@ -316,6 +154,16 @@ impl SnapshotAttachToken<'_> {
         }
         Ok(&self.snapshot.path)
     }
+
+    /// Returns the real frozen database file after the same generation and
+    /// sidecar checks as [`Self::verified_path`].
+    ///
+    /// Source-specific readers use this only when they must construct their
+    /// own immutable URI and query policy.
+    pub fn verified_identity_path(&self) -> io::Result<&Path> {
+        self.verified_path()?;
+        Ok(&self.snapshot.identity_path)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -354,24 +202,46 @@ impl SnapshotSet {
     }
 
     pub async fn capture_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
-        let scratch = Arc::new(create_scratch_directory(root, expected_owner(paths)?)?);
-        let mut unique = paths.to_vec();
-        unique.sort();
-        unique.dedup();
-        let mut prepared = Vec::new();
-        let mut copied_bytes = 0_u64;
-        for (index, path) in unique.into_iter().enumerate() {
-            let snapshot = prepare_one(&path, &scratch, index)?;
-            copied_bytes = copied_bytes.saturating_add(snapshot.copy_bytes);
-            prepared.push(snapshot);
-        }
-        let available = fs2::available_space(&scratch.path)?;
-        if copied_bytes > available {
-            return Err(io::Error::other(format!(
-                "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
-                scratch.path.display()
-            )));
-        }
+        Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Owned).await
+    }
+
+    async fn capture_foreign_in(paths: &[PathBuf], root: &Path) -> io::Result<Self> {
+        Self::capture_with_policy(paths, root, SnapshotSourcePolicy::Foreign).await
+    }
+
+    async fn capture_with_policy(
+        paths: &[PathBuf],
+        root: &Path,
+        policy: SnapshotSourcePolicy,
+    ) -> io::Result<Self> {
+        let owned_paths = paths.to_vec();
+        let owned_root = root.to_path_buf();
+        let (scratch, prepared, copied_bytes) = tokio::task::spawn_blocking(move || {
+            let scratch = Arc::new(create_scratch_directory(
+                &owned_root,
+                expected_owner(&owned_paths)?,
+            )?);
+            let mut unique = owned_paths;
+            unique.sort();
+            unique.dedup();
+            let mut prepared = Vec::new();
+            let mut copied_bytes = 0_u64;
+            for (index, path) in unique.into_iter().enumerate() {
+                let snapshot = prepare_one(&path, &scratch, index, policy)?;
+                copied_bytes = copied_bytes.saturating_add(snapshot.copy_bytes);
+                prepared.push(snapshot);
+            }
+            let available = fs2::available_space(&scratch.path)?;
+            if copied_bytes > available {
+                return Err(io::Error::other(format!(
+                    "insufficient scratch space for SQLite read snapshots: required {copied_bytes} bytes, available {available} bytes at '{}'",
+                    scratch.path.display()
+                )));
+            }
+            Ok((scratch, prepared, copied_bytes))
+        })
+        .await
+        .map_err(|error| io::Error::other(format!("snapshot preparation task failed: {error}")))??;
         let mut databases = BTreeMap::new();
         for snapshot in prepared {
             let source = snapshot.source.clone();
@@ -417,7 +287,7 @@ struct PreparedSnapshot {
     target: PathBuf,
     mode: SnapshotMode,
     copy_bytes: u64,
-    authority: crate::db::DatabaseAuthority,
+    authority: Option<crate::db::DatabaseAuthority>,
 }
 
 #[derive(Clone, Copy)]
@@ -426,6 +296,12 @@ enum SnapshotMode {
     DirectImmutable,
     Reflink,
     Copy,
+}
+
+#[derive(Clone, Copy)]
+enum SnapshotSourcePolicy {
+    Owned,
+    Foreign,
 }
 
 struct ScratchDirectory {
@@ -473,6 +349,23 @@ pub async fn open(path: &Path) -> io::Result<SnapshotDatabase> {
 
 pub async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
     let mut snapshots = SnapshotSet::capture_in(&[path.to_path_buf()], root).await?;
+    snapshots.databases.remove(path).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no frozen SQLite snapshot for '{}'", path.display()),
+        )
+    })
+}
+
+/// Opens one foreign SQLite family as a private, immutable read snapshot.
+///
+/// Foreign host databases do not participate in TraceDecay's database
+/// authority system. This boundary therefore never opens the source as the
+/// returned snapshot: it first reflinks or copies the database family into
+/// private scratch, verifies the source generation, and materializes any WAL
+/// frames into the private standalone database.
+pub async fn open_foreign_in(path: &Path, root: &Path) -> io::Result<SnapshotDatabase> {
+    let mut snapshots = SnapshotSet::capture_foreign_in(&[path.to_path_buf()], root).await?;
     snapshots.databases.remove(path).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -660,12 +553,18 @@ fn prepare_one(
     source: &Path,
     scratch: &ScratchDirectory,
     index: usize,
+    policy: SnapshotSourcePolicy,
 ) -> io::Result<PreparedSnapshot> {
-    let authority = crate::db::DatabaseAuthority::for_runtime(
-        source,
-        "capture SQLite family for offline maintenance",
-    )
-    .map_err(io::Error::other)?;
+    let authority = match policy {
+        SnapshotSourcePolicy::Owned => Some(
+            crate::db::DatabaseAuthority::for_runtime(
+                source,
+                "capture SQLite family for offline maintenance",
+            )
+            .map_err(io::Error::other)?,
+        ),
+        SnapshotSourcePolicy::Foreign => None,
+    };
     let directory = scratch.path.join(index.to_string());
     create_private_directory(&directory)?;
     let target = directory.join("database.db");
@@ -682,7 +581,7 @@ fn prepare_one(
     let has_wal = source_state
         .iter()
         .any(|state| state.path == with_suffix(source, "-wal"));
-    let mode = if has_wal {
+    let mode = if has_wal || matches!(policy, SnapshotSourcePolicy::Foreign) {
         if reflink_copy::reflink(source, &target).is_ok() {
             SnapshotMode::Reflink
         } else {
@@ -739,25 +638,10 @@ async fn finish_one(
     prepared: PreparedSnapshot,
     scratch: Arc<ScratchDirectory>,
 ) -> io::Result<SnapshotDatabase> {
-    if matches!(prepared.mode, SnapshotMode::Copy) {
-        fs::copy(&prepared.source, &prepared.target)?;
-    }
-    if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
-        for suffix in ["-wal", "-shm"] {
-            let source_member = with_suffix(&prepared.source, suffix);
-            let Some(_) = prepared
-                .source_state
-                .iter()
-                .find(|state| state.path == source_member)
-            else {
-                continue;
-            };
-            fs::copy(&source_member, with_suffix(&prepared.target, suffix))?;
-        }
-    }
-    if family_state(&prepared.source)? != prepared.source_state {
-        return Err(changed_during_snapshot(&prepared.source));
-    }
+    let (prepared, scratch) =
+        tokio::task::spawn_blocking(move || copy_snapshot_family(prepared, scratch))
+            .await
+            .map_err(|error| io::Error::other(format!("snapshot copy task failed: {error}")))??;
     if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
         materialize_standalone_snapshot(&prepared.target).await?;
     }
@@ -802,6 +686,32 @@ async fn finish_one(
     };
     snapshot.validate_source()?;
     Ok(snapshot)
+}
+
+fn copy_snapshot_family(
+    prepared: PreparedSnapshot,
+    scratch: Arc<ScratchDirectory>,
+) -> io::Result<(PreparedSnapshot, Arc<ScratchDirectory>)> {
+    if matches!(prepared.mode, SnapshotMode::Copy) {
+        fs::copy(&prepared.source, &prepared.target)?;
+    }
+    if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
+        for suffix in ["-wal", "-shm"] {
+            let source_member = with_suffix(&prepared.source, suffix);
+            let Some(_) = prepared
+                .source_state
+                .iter()
+                .find(|state| state.path == source_member)
+            else {
+                continue;
+            };
+            fs::copy(&source_member, with_suffix(&prepared.target, suffix))?;
+        }
+    }
+    if family_state(&prepared.source)? != prepared.source_state {
+        return Err(changed_during_snapshot(&prepared.source));
+    }
+    Ok((prepared, scratch))
 }
 
 async fn materialize_standalone_snapshot(path: &Path) -> io::Result<()> {
@@ -1231,6 +1141,47 @@ mod tests {
                 suffix
             )
             .exists())
+        );
+        assert_eq!(family_state(&path).unwrap(), before);
+    }
+
+    #[tokio::test]
+    async fn foreign_snapshot_is_private_and_leaves_checkpointed_source_untouched() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("foreign.db");
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('foreign');",
+            )
+            .unwrap();
+        let before = family_state(&path).unwrap();
+
+        let snapshot = open_foreign_in(&path, &temp.path().join("scratch"))
+            .await
+            .unwrap();
+        let identity_path = snapshot
+            .attach_token()
+            .unwrap()
+            .verified_identity_path()
+            .unwrap()
+            .to_path_buf();
+        let mut rows = snapshot
+            .connection()
+            .query("SELECT value FROM durable", ())
+            .await
+            .unwrap();
+
+        assert_ne!(identity_path, path);
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "foreign"
         );
         assert_eq!(family_state(&path).unwrap(), before);
     }

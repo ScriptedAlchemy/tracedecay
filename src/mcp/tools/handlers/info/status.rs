@@ -275,18 +275,45 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
 
 fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
     const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-    (ingest.max_transcript_pending_bytes > THRESHOLD).then(|| {
-        json!({
-            "status": "warming",
-            "coverage": "partial",
-            "authority": "daemon",
-            "reason": "historical_transcript_backlog",
-            "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
-            "pending_bytes": ingest.pending_bytes,
-            "pending_transcripts": ingest.pending_transcripts,
-            "message": "Historical session recall is partially available while the daemon continues bounded background catch-up.",
-        })
-    })
+    let warming = ingest.max_transcript_pending_bytes > THRESHOLD;
+    let observed = &ingest.observed_providers;
+    let source_unavailable = observed.is_empty();
+    let expected = crate::sessions::SessionProvider::ALL.map(|provider| provider.id());
+    let unobserved = expected
+        .iter()
+        .copied()
+        .filter(|provider| !observed.iter().any(|observed| observed == provider))
+        .collect::<Vec<_>>();
+    Some(json!({
+        "status": if source_unavailable {
+            "unavailable"
+        } else if warming {
+            "warming"
+        } else {
+            "current"
+        },
+        "coverage": if source_unavailable || warming { "partial" } else { "complete" },
+        "authority": "daemon",
+        "reason": if source_unavailable {
+            "historical_sources_unobserved"
+        } else if warming {
+            "historical_transcript_backlog"
+        } else {
+            "historical_catch_up_current"
+        },
+        "providers": observed,
+        "unobserved_providers": unobserved,
+        "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
+        "pending_bytes": ingest.pending_bytes,
+        "pending_transcripts": ingest.pending_transcripts,
+        "message": if source_unavailable {
+            "No durable historical source rows or provider frontiers are currently observable."
+        } else if warming {
+            "Historical session recall is partially available while the daemon continues bounded background catch-up."
+        } else {
+            "Historical session recall catch-up is current."
+        },
+    }))
 }
 
 fn render_status_md(value: &Value) -> String {
@@ -342,6 +369,7 @@ mod tests {
     #[test]
     fn historical_backlog_is_typed_daemon_owned_warming() {
         let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["cursor".into()],
             pending_transcripts: 2,
             pending_bytes: 12_000_000,
             max_transcript_pending_bytes:
@@ -354,6 +382,31 @@ mod tests {
         assert_eq!(state["coverage"], "partial");
         assert_eq!(state["authority"], "daemon");
         assert!(!state.to_string().contains("sessions ingest"));
+    }
+
+    #[test]
+    fn historical_status_names_database_and_discovery_backed_providers() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            observed_providers: vec!["kimi".into(), "opencode".into()],
+            ..SessionIngestHealth::default()
+        })
+        .expect("complete historical coverage remains visible");
+        let providers = state["providers"].as_array().unwrap();
+
+        assert!(providers.iter().any(|provider| provider == "kimi"));
+        assert!(providers.iter().any(|provider| provider == "opencode"));
+        assert_eq!(state["status"], "current");
+        assert_eq!(state["coverage"], "complete");
+    }
+
+    #[test]
+    fn historical_status_does_not_fabricate_provider_readiness() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth::default())
+            .expect("missing historical authority remains visible");
+
+        assert_eq!(state["status"], "unavailable");
+        assert_eq!(state["coverage"], "partial");
+        assert!(state["providers"].as_array().unwrap().is_empty());
     }
 }
 fn active_project_context(
