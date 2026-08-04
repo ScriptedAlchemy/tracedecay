@@ -1,5 +1,6 @@
 //! Durable Git index transaction journal and receipt contracts.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::time::UtcMicros;
@@ -198,7 +199,9 @@ impl GitIndexTransactionJournalV1 {
 
 /// Terminal outcome a recovery record can prove without re-running a native
 /// mutation.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitIndexReceiptOutcomeV1 {
     Committed,

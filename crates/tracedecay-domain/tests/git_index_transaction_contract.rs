@@ -1,3 +1,4 @@
+use schemars::schema_for;
 use tracedecay_domain::git::repository_state::{
     RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
@@ -27,6 +28,16 @@ fn oid(byte: char) -> GitOidV1 {
 fn digest(byte: char) -> ManifestDigest {
     ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64)))
         .expect("fixture digest is canonical")
+}
+
+#[test]
+fn receipt_outcome_schema_preserves_the_exact_wire_states() {
+    let schema =
+        serde_json::to_value(schema_for!(GitIndexReceiptOutcomeV1)).expect("outcome schema");
+    assert_eq!(
+        schema["enum"],
+        serde_json::json!(["committed", "aborted_no_change", "needs_inspection"])
+    );
 }
 
 fn snapshot() -> RepositoryStateSnapshotV1 {
