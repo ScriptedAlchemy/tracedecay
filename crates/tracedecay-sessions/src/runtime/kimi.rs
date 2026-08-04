@@ -1,3 +1,4 @@
+use std::io;
 use std::path::{Path, PathBuf};
 
 use md5::{Digest, Md5};
@@ -28,16 +29,52 @@ use crate::runtime::source::{
 
 const PROVIDER: &str = "kimi";
 const MAX_SESSION_FILES: usize = 512;
+const MAX_DISCOVERY_FAILURE_EVIDENCE: usize = 16;
 
 pub struct KimiSource {
     share_dir: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct KimiCaptureOutcome {
     pub bytes_consumed: u64,
     pub deferred: bool,
+    pub discovery_failures: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KimiDiscoveryFailureKind {
+    DirectoryUnavailable,
+    DirectoryEntryUnavailable,
+    EntryTypeUnavailable,
+    ContextMetadataUnavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KimiDiscoveryFailure {
+    kind: KimiDiscoveryFailureKind,
+    path: PathBuf,
+    error_kind: io::ErrorKind,
+}
+
+struct KimiDiscoveryReport {
+    files: FileDiscoveryReport,
+    failures: Vec<KimiDiscoveryFailure>,
+    failure_count: u64,
+}
+
+impl KimiDiscoveryReport {
+    fn record_failure(&mut self, kind: KimiDiscoveryFailureKind, path: PathBuf, error: &io::Error) {
+        self.failure_count = self.failure_count.saturating_add(1);
+        if self.failures.len() < MAX_DISCOVERY_FAILURE_EVIDENCE {
+            self.failures.push(KimiDiscoveryFailure {
+                kind,
+                path,
+                error_kind: error.kind(),
+            });
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -76,56 +113,101 @@ impl KimiSource {
         self
     }
 
-    pub fn discover(
+    fn discover(
         &self,
         project_root: &Path,
         bounds: TranscriptDiscoveryBounds,
-    ) -> TranscriptIngestResult<FileDiscoveryReport> {
+    ) -> TranscriptIngestResult<KimiDiscoveryReport> {
         let Some(metadata) = self.metadata()? else {
-            return Ok(bound_path_list(Vec::new(), bounds));
+            return Ok(KimiDiscoveryReport {
+                files: bound_path_list(Vec::new(), bounds),
+                failures: Vec::new(),
+                failure_count: 0,
+            });
         };
         let matcher =
             TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref());
         let limit = bounds.max_files.min(MAX_SESSION_FILES);
         let mut paths = Vec::with_capacity(limit.saturating_add(1));
+        let mut discovery = KimiDiscoveryReport {
+            files: bound_path_list(Vec::new(), bounds),
+            failures: Vec::new(),
+            failure_count: 0,
+        };
         'work_dirs: for work_dir in metadata.work_dirs {
             if !matcher.accepts(Some(&work_dir.path)) {
                 continue;
             }
-            let Ok(entries) = std::fs::read_dir(self.sessions_dir(&work_dir)) else {
-                continue;
+            let sessions_dir = self.sessions_dir(&work_dir);
+            let entries = match std::fs::read_dir(&sessions_dir) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    discovery.record_failure(
+                        KimiDiscoveryFailureKind::DirectoryUnavailable,
+                        sessions_dir,
+                        &error,
+                    );
+                    continue;
+                }
             };
-            for entry in entries.flatten() {
+            for entry in entries {
                 if paths.len() > limit {
                     break 'work_dirs;
                 }
-                let Ok(file_type) = entry.file_type() else {
-                    continue;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        discovery.record_failure(
+                            KimiDiscoveryFailureKind::DirectoryEntryUnavailable,
+                            sessions_dir.clone(),
+                            &error,
+                        );
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(error) => {
+                        discovery.record_failure(
+                            KimiDiscoveryFailureKind::EntryTypeUnavailable,
+                            path,
+                            &error,
+                        );
+                        continue;
+                    }
                 };
                 if file_type.is_symlink() {
                     continue;
                 }
-                let path = entry.path();
                 if file_type.is_file()
                     && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 {
                     paths.push(path);
                 } else if file_type.is_dir() {
                     let context = path.join("context.jsonl");
-                    if context.is_file() {
-                        paths.push(context);
+                    match std::fs::symlink_metadata(&context) {
+                        Ok(metadata) if metadata.is_file() => paths.push(context),
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => discovery.record_failure(
+                            KimiDiscoveryFailureKind::ContextMetadataUnavailable,
+                            context,
+                            &error,
+                        ),
                     }
                 }
             }
         }
         paths.sort();
-        Ok(bound_path_list(
+        discovery.files = bound_path_list(
             paths,
             TranscriptDiscoveryBounds {
                 max_files: limit,
                 ..bounds
             },
-        ))
+        );
+        Ok(discovery)
     }
 
     fn metadata(&self) -> TranscriptIngestResult<Option<KimiMetadata>> {
@@ -171,12 +253,30 @@ pub async fn capture_kimi_observations(
         project_root,
         TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
     )?;
+    for failure in &discovery.failures {
+        tracing::warn!(
+            provider = PROVIDER,
+            failure_kind = ?failure.kind,
+            error_kind = ?failure.error_kind,
+            path = %failure.path.display(),
+            "Kimi session discovery is incomplete"
+        );
+    }
+    if discovery.failure_count > discovery.failures.len() as u64 {
+        tracing::warn!(
+            provider = PROVIDER,
+            failure_count = discovery.failure_count,
+            reported_failures = discovery.failures.len(),
+            "additional Kimi discovery failures were bounded"
+        );
+    }
     let mut outcome = KimiCaptureOutcome {
-        deferred: discovery.is_truncated(),
+        deferred: discovery.files.is_truncated() || discovery.failure_count > 0,
+        discovery_failures: discovery.failure_count,
         ..KimiCaptureOutcome::default()
     };
     let mut remaining = max_new_bytes.unwrap_or(u64::MAX);
-    for path in discovery.paths {
+    for path in discovery.files.paths {
         if cancellation.is_cancelled() || remaining == 0 {
             outcome.deferred = true;
             break;
@@ -381,6 +481,56 @@ mod tests {
         assert!(!stored.contains("never-persist-kimi-secret"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unreadable_work_dir_preserves_admitted_prefix_and_defers_coverage() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, project, path, source) = fixture();
+        std::fs::write(
+            &path,
+            json!({"role": "user", "content": "available prefix"}).to_string() + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            source.share_dir.join("kimi.json"),
+            json!({
+                "work_dirs": [
+                    {"path": project},
+                    {"path": project, "kaos": "remote"}
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let unavailable_hash = format!("{:x}", Md5::digest(project.to_string_lossy().as_bytes()));
+        let unavailable_sessions = source
+            .share_dir
+            .join("sessions")
+            .join(format!("remote_{unavailable_hash}"));
+        symlink(
+            source.share_dir.join("missing-session-directory"),
+            unavailable_sessions,
+        )
+        .unwrap();
+        let admission = MemoryHostAdmission::default();
+
+        let outcome = capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(admission.observations().len(), 1);
+        assert!(outcome.deferred);
+        assert_eq!(outcome.discovery_failures, 1);
+    }
+
     #[test]
     fn discovery_is_scoped_and_reports_file_count_backpressure() {
         let (_temp, project, first, source) = fixture();
@@ -403,8 +553,8 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(report.paths.len(), 1);
-        assert!(report.is_truncated());
+        assert_eq!(report.files.paths.len(), 1);
+        assert!(report.files.is_truncated());
         assert!(
             source
                 .discover(
@@ -412,6 +562,7 @@ mod tests {
                     TranscriptDiscoveryBounds::default_walk()
                 )
                 .unwrap()
+                .files
                 .paths
                 .is_empty()
         );

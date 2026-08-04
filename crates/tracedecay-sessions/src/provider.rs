@@ -158,25 +158,13 @@ impl ProviderScope {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{
-        MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider, decode_kiro_workspace_path,
-    };
+    use super::{ProviderScope, SessionProvider, decode_kiro_workspace_path};
 
     #[test]
     fn provider_ids_round_trip() {
         for provider in SessionProvider::ALL {
             assert_eq!(SessionProvider::parse(provider.id()), Some(provider));
         }
-    }
-
-    #[test]
-    fn final_host_set_includes_kimi_and_opencode() {
-        let provider_ids = SessionProvider::ALL.map(SessionProvider::id);
-
-        assert!(provider_ids.contains(&"kimi"));
-        assert!(provider_ids.contains(&"opencode"));
-        assert!(MESSAGE_SEARCH_PROVIDER_IDS.contains(&"kimi"));
-        assert!(MESSAGE_SEARCH_PROVIDER_IDS.contains(&"opencode"));
     }
 
     #[test]

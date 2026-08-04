@@ -11,8 +11,8 @@ use crate::runtime::{
 };
 
 use super::failure::{
-    ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
-    warn_transcript_catch_up_failure,
+    ProviderRunOutcome, TranscriptCatchUpFailure, classify_transcript_ingest_failure,
+    claude_catch_up_failure, warn_transcript_catch_up_failure,
 };
 use super::user::{
     try_ingest_user_codex_sessions_with_db_bounded, try_ingest_user_cursor_sessions_with_db_bounded,
@@ -212,11 +212,17 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
         )
         .await
         {
-            Ok(outcome) => ProviderRunOutcome::bounded(
-                TranscriptIngestStats::default(),
-                outcome.bytes_consumed,
-                outcome.deferred,
-            ),
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    TranscriptIngestStats::default(),
+                    outcome.bytes_consumed,
+                    outcome.deferred,
+                );
+                if outcome.discovery_failures > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_discovery_partial("kimi"));
+                }
+                run
+            }
             Err(error) => ProviderRunOutcome::failed(
                 warn_transcript_catch_up_failure(
                     "kimi",
