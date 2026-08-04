@@ -30,11 +30,13 @@
 #![cfg(unix)]
 
 use std::collections::{HashMap, HashSet};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use futures_util::FutureExt;
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio::task::JoinHandle;
@@ -442,11 +444,11 @@ async fn supervise_project(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) 
     loop {
         let inner_c = Arc::clone(&inner);
         let state_c = Arc::clone(&state);
-        let result =
-            tokio::spawn(async move { Box::pin(project_task(inner_c, state_c)).await }).await;
+        let result = AssertUnwindSafe(project_task(inner_c, state_c))
+            .catch_unwind()
+            .await;
         match result {
             Ok(()) => return, // clean exit (watcher gave up gracefully)
-            Err(join_err) if join_err.is_cancelled() => return,
             Err(_panic) => {
                 log_daemon_event(
                     "git_watch_restart",

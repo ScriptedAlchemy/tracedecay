@@ -645,6 +645,18 @@ async fn shutdown_cancels_and_joins_project_watcher_tasks() {
 
     assert!(watcher.inner.projects.lock().await.is_empty());
     assert!(state.task.lock().await.is_none());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while Arc::strong_count(&state) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("supervised watcher future must drop during shutdown");
+    assert_eq!(
+        Arc::strong_count(&state),
+        1,
+        "shutdown must drop the supervised watcher future instead of detaching it"
+    );
 }
 
 /// The safety-critical property that justifies this metadata watcher over the
