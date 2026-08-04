@@ -27,10 +27,42 @@ jobs:
           token: ${{ secrets.RELEASE_PLZ_TOKEN }}
           target-branch: master
 
-      - name: Checkout repository
+      - name: Checkout release PR
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Update release PR lockfile
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          cargo metadata --format-version 1 --no-deps >/dev/null
+
+          if git diff --quiet -- Cargo.lock; then
+            exit 0
+          fi
+
+          unexpected_paths=$(git diff --name-only -- . ':(exclude)Cargo.lock')
+          if [[ -n "$unexpected_paths" ]]; then
+            echo "Cargo metadata changed unexpected paths:" >&2
+            echo "$unexpected_paths" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore(release): update root lockfile"
+          git push origin "HEAD:$RELEASE_PR_BRANCH"
+
+      - name: Checkout master
         if: always()
         uses: actions/checkout@v7
         with:
+          ref: master
           persist-credentials: false
 
       - name: Check GitHub release version drift

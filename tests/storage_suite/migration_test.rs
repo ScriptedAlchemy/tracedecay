@@ -3,7 +3,9 @@ use std::path::Path;
 
 use libsql::{Builder, Connection, Database as LibsqlDatabase};
 use tempfile::TempDir;
-use tracedecay::db::migrations::{create_schema, migrate};
+use tracedecay::db::migrations::{
+    FULL_REINDEX_REQUIRED_KEY, FULL_REINDEX_REQUIRED_VALUE, create_schema, migrate,
+};
 
 use crate::support;
 
@@ -124,6 +126,20 @@ async fn get_user_version(conn: &Connection) -> u32 {
         .expect("user_version should return a row");
     let v: i64 = row.get(0).expect("failed to read user_version value");
     v as u32
+}
+
+async fn metadata_value(conn: &Connection, key: &str) -> Option<String> {
+    let mut rows = conn
+        .query(
+            "SELECT value FROM metadata WHERE key = ?1",
+            libsql::params![key],
+        )
+        .await
+        .expect("failed to query metadata");
+    rows.next()
+        .await
+        .expect("failed to read metadata row")
+        .map(|row| row.get(0).expect("failed to read metadata value"))
 }
 
 /// Checks whether a table exists in sqlite_master.
@@ -558,6 +574,10 @@ async fn test_migrate_from_v0() {
         "migrate should return true when migrations were applied"
     );
     assert_eq!(get_user_version(&conn).await, 18);
+    assert_eq!(
+        metadata_value(&conn, FULL_REINDEX_REQUIRED_KEY).await,
+        Some(FULL_REINDEX_REQUIRED_VALUE.to_string())
+    );
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);

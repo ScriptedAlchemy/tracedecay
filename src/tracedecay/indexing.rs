@@ -8,11 +8,13 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use crate::config::brand_env;
+use crate::db::migrations::FULL_REINDEX_REQUIRED_KEY;
 use crate::errors::Result;
 use crate::resolution::ReferenceResolver;
 use crate::sync;
 use crate::types::*;
 
+use super::locking::{ActiveSyncLease, ActiveSyncLockGuard};
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
 /// Convert any backslash in a *relative* project-root-relative path to a
@@ -220,6 +222,29 @@ impl TraceDecay {
         self.index_all_with_progress_verbose(on_file, |_| {}).await
     }
 
+    pub(super) async fn index_all_for_migration_with_progress<F>(
+        &self,
+        on_file: F,
+        locks: Option<ActiveSyncLockGuard>,
+    ) -> Result<IndexResult>
+    where
+        F: Fn(usize, usize, &str),
+    {
+        self.ensure_branch_writable("full index")?;
+        let sync_lease = match locks {
+            Some(locks) => self.begin_active_sync_with_locks(locks)?,
+            None => self.begin_active_sync()?,
+        };
+        let (result, sync_lease) = self
+            .index_all_with_progress_verbose_under_lease(on_file, |_| {}, sync_lease)
+            .await?;
+        let locks = sync_lease.commit_holding_locks()?;
+        self.db.set_metadata(FULL_REINDEX_REQUIRED_KEY, "0").await?;
+        self.db.checkpoint().await?;
+        drop(locks);
+        Ok(result)
+    }
+
     /// Like `index_all_with_progress()`, but also calls `on_verbose` after
     /// each phase completes with a diagnostic summary line.
     pub async fn index_all_with_progress_verbose<F, V>(
@@ -231,13 +256,30 @@ impl TraceDecay {
         F: Fn(usize, usize, &str),
         V: Fn(&str),
     {
+        self.ensure_branch_writable("full index")?;
+        let sync_lease = self.begin_active_sync()?;
+        let (result, sync_lease) = self
+            .index_all_with_progress_verbose_under_lease(on_file, on_verbose, sync_lease)
+            .await?;
+        sync_lease.commit()?;
+        Ok(result)
+    }
+
+    async fn index_all_with_progress_verbose_under_lease<F, V>(
+        &self,
+        on_file: F,
+        on_verbose: V,
+        sync_lease: ActiveSyncLease,
+    ) -> Result<(IndexResult, ActiveSyncLease)>
+    where
+        F: Fn(usize, usize, &str),
+        V: Fn(&str),
+    {
         debug_assert!(self.project_root.exists(), "project root does not exist");
         debug_assert!(
             self.project_root.is_dir(),
             "project root is not a directory"
         );
-        self.ensure_branch_writable("full index")?;
-        let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
         // 1. Clear existing data and enter bulk-load mode
@@ -377,8 +419,7 @@ impl TraceDecay {
             "non-empty index completed in zero milliseconds"
         );
         self.db.checkpoint().await?;
-        sync_lease.commit()?;
-        Ok(result)
+        Ok((result, sync_lease))
     }
 
     /// Performs an incremental sync: detects changed, new, and removed files

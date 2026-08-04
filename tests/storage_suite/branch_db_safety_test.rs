@@ -331,6 +331,8 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 async fn fallback_writes_are_refused_by_all_sync_entry_points() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
     let (_env, project, fallback) = open_detached_fallback_project().await;
+    let active_dirty = PathBuf::from(format!("{}.dirty", fallback.db_path().display()));
+    let store_dirty = fallback.store_layout().dirty_path.clone();
 
     let err = fallback
         .sync()
@@ -343,6 +345,10 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
         Err(err) => err,
     };
     assert_fallback_write_refused("full index", err);
+    assert!(
+        !active_dirty.exists() && !store_dirty.exists(),
+        "rejected full index must not leave dirty recovery markers"
+    );
 
     let stale_files = ["src/detached_only.rs".to_string()];
     let err = fallback

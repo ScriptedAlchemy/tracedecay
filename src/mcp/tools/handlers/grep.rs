@@ -250,6 +250,7 @@ impl GeneratedDirScope {
             .split('/')
             .filter(|segment| !segment.is_empty())
             .collect();
+        let matches_basename_at_any_depth = !path_glob.contains('/');
         let wildcard_start = segments
             .iter()
             .position(|segment| {
@@ -259,18 +260,22 @@ impl GeneratedDirScope {
                     || segment.contains('{')
             })
             .unwrap_or(segments.len());
-        let literal_prefix =
+        let literal_prefix = if matches_basename_at_any_depth {
+            PathBuf::new()
+        } else {
             segments[..wildcard_start]
                 .iter()
                 .fold(PathBuf::new(), |mut prefix, segment| {
                     prefix.push(segment);
                     prefix
-                });
+                })
+        };
         let wildcard_suffix = &segments[wildcard_start..];
-        let may_match_descendants = wildcard_suffix
-            .iter()
-            .enumerate()
-            .any(|(index, segment)| index > 0 || *segment == "**");
+        let may_match_descendants = matches_basename_at_any_depth
+            || wildcard_suffix
+                .iter()
+                .enumerate()
+                .any(|(index, segment)| index > 0 || *segment == "**");
 
         Some(Self {
             literal_prefix,
@@ -649,6 +654,41 @@ mod tests {
             checks.load(std::sync::atomic::Ordering::Relaxed),
             baseline_checks.load(std::sync::atomic::Ordering::Relaxed),
             "unrelated generated directories must not reach the scan loop"
+        );
+    }
+
+    #[test]
+    fn scan_tree_slashless_glob_includes_generated_directory_descendants() {
+        let project = tempfile::tempdir().expect("temp project");
+        std::fs::create_dir_all(project.path().join("dist")).expect("generated fixture directory");
+        std::fs::write(
+            project.path().join("dist/generated.js"),
+            "SLASHLESS_GENERATED_GLOB_TOKEN\n",
+        )
+        .expect("generated fixture");
+
+        let mut builder = OverrideBuilder::new(project.path());
+        builder.add("*.js").expect("path glob");
+        let overrides = builder.build().expect("overrides");
+        let matcher = Regex::new("SLASHLESS_GENERATED_GLOB_TOKEN").expect("matcher");
+        let scan = scan_tree(
+            project.path(),
+            &matcher,
+            Some(overrides),
+            Some("*.js"),
+            0,
+            10,
+            || false,
+        );
+
+        let files = scan
+            .hits
+            .iter()
+            .map(|hit| hit.file.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            files.contains(&"dist/generated.js"),
+            "slashless basename globs must match generated descendants: {files:?}"
         );
     }
 
