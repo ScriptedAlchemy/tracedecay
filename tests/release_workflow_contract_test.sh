@@ -111,12 +111,17 @@ for required in [
     "target-branch: master",
     "steps.release.outputs.prs_created == 'true'",
     "fromJSON(steps.release.outputs.pr).headBranchName",
+    "RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}",
+    "jq --exit-status --raw-output",
     'cargo update -p tracedecay --precise "$release_version"',
     'git push origin "HEAD:$RELEASE_PR_BRANCH"',
     "Check GitHub release version drift",
 ]:
     if required not in release_please:
         raise SystemExit(f"GitHub-only release workflow missing {required!r}")
+
+if "RELEASE_PR_BRANCH: ${{ fromJSON(" in release_please:
+    raise SystemExit("skipped release PR steps must not parse an absent PR output")
 
 for path, text in [
     (sys.argv[1], release_please),

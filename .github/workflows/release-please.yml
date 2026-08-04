@@ -37,8 +37,13 @@ jobs:
       - name: Update release PR lockfile
         if: steps.release.outputs.prs_created == 'true'
         env:
-          RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
         run: |
+          RELEASE_PR_BRANCH=$(
+            jq --exit-status --raw-output \
+              '.headBranchName | select(type == "string" and length > 0)' \
+              <<<"$RELEASE_PR_JSON"
+          )
           release_version=$(tr -d '[:space:]' < version.txt)
           if [[ -z "$release_version" ]]; then
             echo "Release version is empty" >&2
