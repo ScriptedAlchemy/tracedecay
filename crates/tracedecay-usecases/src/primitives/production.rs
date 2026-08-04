@@ -27,9 +27,9 @@ use tracedecay_application::{
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
-    RetrievalAnchorId, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, canonical_sha256,
+    CodeGenerationId, CommitId, GitHeadStateV1, ManifestDigest, ProjectId,
+    ProviderEvaluationStateV1, RepositoryId, RetrievalAnchorId, RetrievalGrainV1, SessionId,
+    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -2209,6 +2209,8 @@ pub async fn open_pr12_production_primitive_runtime(
     let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
         Arc::new(ProductionManagedTestRunCurrentScope {
             project_root,
+            repository_id: scope.repository_id.clone(),
+            worktree_id: scope.worktree_id.clone(),
             code_index: Arc::clone(&code_index),
         });
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
@@ -2246,15 +2248,20 @@ pub async fn open_pr12_production_primitive_runtime(
 #[derive(Clone)]
 struct ProductionManagedTestRunCurrentScope {
     project_root: PathBuf,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
 }
 
 impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
     fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_> {
         let project_root = self.project_root.clone();
+        let repository_id = self.repository_id.clone();
+        let worktree_id = self.worktree_id.clone();
         let code_index = Arc::clone(&self.code_index);
         Box::pin(async move {
-            let head_commit_id = current_managed_test_run_head(&project_root)?;
+            let head_commit_id =
+                current_managed_test_run_head(&project_root, repository_id, worktree_id)?;
             let current = code_index
                 .current_identity(project_root, None)
                 .await
@@ -2271,19 +2278,30 @@ impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
 
 fn current_managed_test_run_head(
     project_root: &Path,
+    repository_id: RepositoryId,
+    worktree_id: WorktreeId,
 ) -> Result<CommitId, ApplicationContractError> {
-    let repository =
-        gix::open(project_root).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 managed test result repository",
-        })?;
-    let head_commit_id = repository
-        .head_commit()
-        .ok()
-        .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
-        .ok_or(ApplicationContractError::Inconsistent {
+    let head = crate::git_intelligence::NativeGitIntelligence::new(
+        project_root,
+        repository_id,
+        worktree_id,
+    )
+    .head()
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "PR12 managed test result repository",
+    })?;
+    match head {
+        GitHeadStateV1::Attached { commit, .. } | GitHeadStateV1::Detached { commit } => {
+            CommitId::new(commit.as_str().to_owned()).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "PR12 managed test result head",
+                }
+            })
+        }
+        GitHeadStateV1::Unborn { .. } => Err(ApplicationContractError::Inconsistent {
             field: "PR12 managed test result head",
-        })?;
-    Ok(head_commit_id)
+        }),
+    }
 }
 
 pub fn admitted_root_uri_for_project(

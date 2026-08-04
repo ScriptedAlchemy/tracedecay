@@ -3,15 +3,51 @@ use super::*;
 #[tokio::test]
 async fn spawned_loop_is_cancellable_and_joinable() {
     let profile = tempfile::tempdir().unwrap();
-    let handle = spawn(Some(profile.path().join("global.db")));
-
-    handle.abort();
+    let task = spawn(Some(profile.path().join("global.db")));
 
     assert!(
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(Duration::from_secs(1), task.shutdown())
             .await
             .is_ok()
     );
+}
+
+#[test]
+fn pr_git_commands_enforce_deadline_cancellation_and_output_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let expired = PrCommandControl {
+        command_timeout: Duration::ZERO,
+        ..PrCommandControl::default()
+    };
+    assert!(matches!(
+        run_git_with_control(root.path(), &["--version"], &expired),
+        Err(tracedecay_runtime_core::git::GitCommandError::DeadlineExceeded)
+    ));
+
+    let cancellation = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    cancellation.cancel();
+    let cancelled = PrCommandControl {
+        cancellation: Some(cancellation),
+        ..PrCommandControl::default()
+    };
+    assert!(matches!(
+        run_git_with_control(root.path(), &["--version"], &cancelled),
+        Err(tracedecay_runtime_core::git::GitCommandError::Cancelled)
+    ));
+
+    let limited = PrCommandControl {
+        max_stdout_bytes: 1,
+        ..PrCommandControl::default()
+    };
+    assert!(matches!(
+        run_git_with_control(root.path(), &["--version"], &limited),
+        Err(
+            tracedecay_runtime_core::git::GitCommandError::OutputLimitExceeded {
+                stream: "stdout",
+                bound: 1
+            }
+        )
+    ));
 }
 
 // ---- Pure discovery parsers -------------------------------------------------

@@ -32,7 +32,8 @@ use tracedecay_domain::feedback::{
     FeedbackFindingV1, FeedbackImpactStateV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, ManifestDigest, UtcMicros,
+    CodeGenerationId, CommitId, ContentDigest, DiagnosticSeverityV1, GitHeadStateV1,
+    ManifestDigest, UtcMicros,
 };
 use tracedecay_lsp::analyzer::adapters::{LspAdapterDefinition, builtin_adapters};
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
@@ -397,14 +398,22 @@ impl RegisteredProjectLspAuthority {
             .scope()
             .validate()
             .map_err(|_| LspRuntimeFailure::new("registered-project-scope-invalid"))?;
-        let head_commit_id = {
-            let repository = gix::open(&self.project_root)
-                .map_err(|_| LspRuntimeFailure::new("registered-repository-unavailable"))?;
-            repository
-                .head_commit()
-                .ok()
-                .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
-                .ok_or_else(|| LspRuntimeFailure::new("registered-head-unavailable"))?
+        let admitted_scope = self.feedback.scope();
+        let head = crate::git_intelligence::NativeGitIntelligence::new(
+            &self.project_root,
+            admitted_scope.repository_id.clone(),
+            admitted_scope.worktree_id.clone(),
+        )
+        .head()
+        .map_err(|_| LspRuntimeFailure::new("registered-repository-unavailable"))?;
+        let head_commit_id = match head {
+            GitHeadStateV1::Attached { commit, .. } | GitHeadStateV1::Detached { commit } => {
+                CommitId::new(commit.as_str().to_owned())
+                    .map_err(|_| LspRuntimeFailure::new("registered-head-unavailable"))?
+            }
+            GitHeadStateV1::Unborn { .. } => {
+                return Err(LspRuntimeFailure::new("registered-head-unavailable"));
+            }
         };
         let identity = self
             .code_index
