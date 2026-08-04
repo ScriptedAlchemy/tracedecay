@@ -2,7 +2,7 @@ use tracedecay_runtime_core::db::engine::{Value, params};
 
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
-    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ProjectId, RetrievalAnchorId, SessionId,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1, RetrievalAnchorId, SessionId,
 };
 use tracedecay_runtime_core::db::engine;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
@@ -27,7 +27,9 @@ mod semantic_filter_tests;
 #[cfg(test)]
 mod tests;
 
-use super::relations::{SessionRelationError, SessionRelationGraphStore, SummarySourceVisitKind};
+use super::relations::{
+    SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
+};
 use super::sql::{TemporalSqlRead, TemporalSqlRows};
 use super::store::execution_control_graph_cancellation;
 use candidates::*;
@@ -40,11 +42,13 @@ pub const RECORD_OPERATION: &str = "read temporal records";
 pub const SNAPSHOT_OPERATION: &str = "validate temporal read snapshot";
 pub const MIN_CURSOR_CAPACITY: usize = 96;
 pub const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
+const MAX_SESSION_CONTEXT_RELATIONS: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
 
 fn temporal_relation_error(
     error: SessionRelationError,
     control: &tracedecay_temporal_query::ports::ExecutionControl,
+    resource: &'static str,
 ) -> TemporalPortError {
     if error == SessionRelationError::Cancelled
         && let Err(control_error) = control.checkpoint()
@@ -52,9 +56,7 @@ fn temporal_relation_error(
         return control_error;
     }
     match error {
-        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
-            resource: "summary source relations",
-        },
+        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded { resource },
         SessionRelationError::Cancelled => TemporalPortError::Cancelled,
         SessionRelationError::Invalid
         | SessionRelationError::Cycle
@@ -154,7 +156,7 @@ pub struct GlobalDbTemporalReadPort<'a> {
 }
 
 struct SessionReadRelationAuthority<'a> {
-    project_id: &'a ProjectId,
+    scope: &'a SessionRelationScope,
     store: SessionRelationGraphStore,
 }
 
@@ -167,6 +169,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
     }
 
+    #[cfg(test)]
     pub const fn new_registered(read: &'a engine::ReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
@@ -177,23 +180,23 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     #[cfg(test)]
     pub const fn new_with_relations(
         read: &'a engine::Connection,
-        project_id: &'a ProjectId,
+        scope: &'a SessionRelationScope,
         store: SessionRelationGraphStore,
     ) -> Self {
         Self {
             read: TemporalSqlRead::engine_connection(read),
-            relation_authority: Some(SessionReadRelationAuthority { project_id, store }),
+            relation_authority: Some(SessionReadRelationAuthority { scope, store }),
         }
     }
 
     pub const fn new_registered_with_relations(
         read: &'a engine::ReadSnapshot,
-        project_id: &'a ProjectId,
+        scope: &'a SessionRelationScope,
         store: SessionRelationGraphStore,
     ) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
-            relation_authority: Some(SessionReadRelationAuthority { project_id, store }),
+            relation_authority: Some(SessionReadRelationAuthority { scope, store }),
         }
     }
 
@@ -227,7 +230,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate provider is missing"))?;
         if !self
-            .session_matches_filter(session_id, provider, filter)
+            .session_matches_filter(snapshot, session_id, provider, filter)
             .await?
         {
             return Ok(false);
@@ -247,6 +250,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
 
     async fn session_matches_filter(
         &self,
+        snapshot: &TemporalExecutionSnapshot,
         session_id: &str,
         provider: &str,
         filter: &TemporalCandidateFilterV1,
@@ -269,18 +273,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 &mut sql,
                 format_args!(" AND (s.project_key = ?{index} OR s.project_path = ?{index})"),
             );
-        }
-        if let Some(parent) = &filter.parent_session_id {
-            let index = bind(parent.clone());
-            let _ = std::fmt::Write::write_fmt(
-                &mut sql,
-                format_args!(" AND s.parent_session_id = ?{index}"),
-            );
-        }
-        match filter.session_scope {
-            TemporalSessionScopeFilterV1::All => {}
-            TemporalSessionScopeFilterV1::ParentsOnly => sql.push_str(" AND s.is_subagent = 0"),
-            TemporalSessionScopeFilterV1::SubagentsOnly => sql.push_str(" AND s.is_subagent <> 0"),
         }
         if let Some(branch) = &filter.git_branch {
             let index = bind(branch.clone());
@@ -318,26 +310,6 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 ),
             );
         }
-        if let Some(run_id) = &filter.workflow_run {
-            let run = bind(run_id.clone());
-            let _ = std::fmt::Write::write_fmt(
-                &mut sql,
-                format_args!(
-                    " AND EXISTS (SELECT 1 FROM workflow_agents wa \
-                     WHERE wa.run_id = ?{run} \
-                       AND (wa.agent_session_id = s.session_id \
-                            OR wa.transcript_path = s.transcript_path)"
-                ),
-            );
-            if let Some(agent) = &filter.workflow_agent {
-                let agent = bind(agent.clone());
-                let _ = std::fmt::Write::write_fmt(
-                    &mut sql,
-                    format_args!(" AND wa.agent_label = ?{agent}"),
-                );
-            }
-            sql.push(')');
-        }
         sql.push_str(" LIMIT 1)");
         let mut rows = self
             .read
@@ -351,7 +323,69 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .ok_or_else(|| read_message(CANDIDATE_OPERATION, "filter query returned no row"))?
             .get::<i64>(0)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-        Ok(matched == 1)
+        if matched != 1 {
+            return Ok(false);
+        }
+        let requires_context = filter.parent_session_id.is_some()
+            || filter.session_scope != TemporalSessionScopeFilterV1::All
+            || filter.workflow_run.is_some();
+        if !requires_context {
+            return Ok(true);
+        }
+        let authority = self.relation_authority.as_ref().ok_or_else(|| {
+            read_message(
+                CANDIDATE_OPERATION,
+                "mounted session relation graph is unavailable",
+            )
+        })?;
+        let session_id =
+            SessionId::new(session_id).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let control = snapshot.request().execution_control();
+        control.checkpoint()?;
+        let context = authority
+            .store
+            .session_context(
+                authority.scope,
+                &session_id,
+                snapshot.watermarks().generation,
+                MAX_SESSION_CONTEXT_RELATIONS,
+                execution_control_graph_cancellation(control),
+            )
+            .map_err(|error| {
+                temporal_relation_error(error, control, "session context relations")
+            })?;
+        control.checkpoint()?;
+        if filter.parent_session_id.as_deref().is_some_and(|parent| {
+            context
+                .parent_session_id
+                .as_ref()
+                .is_none_or(|actual| actual.as_str() != parent)
+        }) {
+            return Ok(false);
+        }
+        match filter.session_scope {
+            TemporalSessionScopeFilterV1::All => {}
+            TemporalSessionScopeFilterV1::ParentsOnly if context.parent_session_id.is_some() => {
+                return Ok(false);
+            }
+            TemporalSessionScopeFilterV1::SubagentsOnly if context.parent_session_id.is_none() => {
+                return Ok(false);
+            }
+            TemporalSessionScopeFilterV1::ParentsOnly
+            | TemporalSessionScopeFilterV1::SubagentsOnly => {}
+        }
+        if let Some(run_id) = filter.workflow_run.as_deref()
+            && !context.workflow_agents.iter().any(|membership| {
+                membership.run_id == run_id
+                    && filter
+                        .workflow_agent
+                        .as_deref()
+                        .is_none_or(|agent| membership.agent_label == agent)
+            })
+        {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     async fn candidate_observations_match(
@@ -473,14 +507,14 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         let visits = authority
             .store
             .summary_sources(
-                authority.project_id,
+                authority.scope,
                 &session_id,
                 snapshot.watermarks().generation,
                 &candidate.retriever_record_id,
                 MAX_SUMMARY_SOURCES_PER_RECORD,
                 execution_control_graph_cancellation(control),
             )
-            .map_err(|error| temporal_relation_error(error, control))?;
+            .map_err(|error| temporal_relation_error(error, control, "summary source relations"))?;
         control.checkpoint()?;
         let source_anchors = visits
             .into_iter()
@@ -1001,7 +1035,22 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 }
             }
             let query_limit = bounds.items.saturating_sub(sink.len()).saturating_add(1);
-            let query = build_record_query(
+            let relation_authority = self.relation_authority.as_ref().ok_or_else(|| {
+                read_message(
+                    RECORD_OPERATION,
+                    "mounted session relation graph is unavailable",
+                )
+            })?;
+            let relations = load_record_relations(
+                &relation_authority.store,
+                relation_authority.scope,
+                scope,
+                snapshot,
+                window,
+                cursor.candidate,
+                request,
+            )?;
+            let query = build_record_query_with_relations(
                 scope,
                 snapshot,
                 window,
@@ -1009,6 +1058,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 &cursor,
                 query_limit,
                 request,
+                &relations,
             )?;
             let mut rows = self
                 .read

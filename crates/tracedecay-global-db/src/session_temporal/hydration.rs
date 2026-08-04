@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 
 use crate::observation_projection::derive_projection;
 use crate::session_temporal::relations::{
-    SessionRelationError, SessionRelationGraphStore, SummarySourceVisitKind,
+    SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceVisitKind,
 };
 use tracedecay_query::temporal::hydration::{
     HydrationAuthorization, HydrationDenial, HydrationError, HydrationFuture, HydrationGrant,
@@ -207,11 +207,12 @@ pub struct GlobalDbHydrationBackend<'snapshot> {
 }
 
 struct SessionHydrationRelationAuthority<'snapshot> {
-    project_id: &'snapshot ProjectId,
+    scope: &'snapshot SessionRelationScope,
     store: SessionRelationGraphStore,
 }
 
 impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
+    #[cfg(test)]
     pub const fn new_registered(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
@@ -226,13 +227,13 @@ impl<'snapshot> GlobalDbHydrationBackend<'snapshot> {
     pub const fn new_registered_with_relations(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
-        project_id: &'snapshot ProjectId,
+        scope: &'snapshot SessionRelationScope,
         store: SessionRelationGraphStore,
     ) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
             storage_root,
-            relation_authority: Some(SessionHydrationRelationAuthority { project_id, store }),
+            relation_authority: Some(SessionHydrationRelationAuthority { scope, store }),
         }
     }
 }
@@ -241,6 +242,7 @@ pub type GlobalDbTemporalHydrationPort<'snapshot> =
     SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>>;
 
 impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapshot>> {
+    #[cfg(test)]
     pub const fn for_registered_snapshot(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
@@ -251,13 +253,13 @@ impl<'snapshot> SessionTemporalHydrationAdapter<GlobalDbHydrationBackend<'snapsh
     pub const fn for_registered_snapshot_with_relations(
         read: &'snapshot engine::ReadSnapshot,
         storage_root: &'snapshot Path,
-        project_id: &'snapshot ProjectId,
+        scope: &'snapshot SessionRelationScope,
         store: SessionRelationGraphStore,
     ) -> Self {
         Self::new(GlobalDbHydrationBackend::new_registered_with_relations(
             read,
             storage_root,
-            project_id,
+            scope,
             store,
         ))
     }
@@ -924,7 +926,7 @@ async fn resolve_summary(
             summary_has_provider_evidence(
                 conn,
                 &relation_authority.store,
-                relation_authority.project_id,
+                relation_authority.scope,
                 &session,
                 u64::try_from(generation).map_err(|_| ())?,
                 &summary_id,
@@ -966,7 +968,7 @@ async fn resolve_summary(
 async fn summary_has_provider_evidence(
     conn: &TemporalSqlRead<'_>,
     relation_store: &SessionRelationGraphStore,
-    project_id: &ProjectId,
+    scope: &SessionRelationScope,
     session_id: &SessionId,
     generation: u64,
     summary_id: &str,
@@ -976,7 +978,7 @@ async fn summary_has_provider_evidence(
     control.checkpoint()?;
     let visits = relation_store
         .summary_sources(
-            project_id,
+            scope,
             session_id,
             generation,
             summary_id,

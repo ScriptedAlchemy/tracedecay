@@ -5,7 +5,8 @@ use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::{TemporalSqlRead, summary_has_provider_evidence};
 use crate::session_temporal::relations::{
-    SessionRelationGraphStore, SessionRelationProjection, SummaryRelationNode, SummarySourceRef,
+    SessionRelationGraphStore, SessionRelationProjection, SessionRelationScope,
+    SummaryRelationNode, SummarySourceRef,
 };
 
 fn project() -> ProjectId {
@@ -18,7 +19,7 @@ fn session() -> SessionId {
 
 fn projection(anchor_id: &str) -> SessionRelationProjection {
     SessionRelationProjection {
-        project_id: project(),
+        scope: SessionRelationScope::project(project()),
         session_id: session(),
         generation: 1,
         summaries: vec![SummaryRelationNode {
@@ -31,6 +32,8 @@ fn projection(anchor_id: &str) -> SessionRelationProjection {
         logical_copies: Vec::new(),
         thread_hierarchy: Vec::new(),
         agent_hierarchy: Vec::new(),
+        parent_session_id: None,
+        workflow_agents: Vec::new(),
     }
 }
 
@@ -73,7 +76,7 @@ async fn provider_evidence_follows_grafeo_sources_without_a_sql_relation_table()
     let matched = summary_has_provider_evidence(
         &TemporalSqlRead::engine_connection(&connection),
         &relations,
-        &project(),
+        &SessionRelationScope::project(project()),
         &session(),
         1,
         "summary-root",
@@ -95,7 +98,7 @@ async fn missing_relation_projection_is_hydration_unavailable_not_provider_denia
     let error = summary_has_provider_evidence(
         &TemporalSqlRead::engine_connection(&connection),
         &relations,
-        &project(),
+        &SessionRelationScope::project(project()),
         &session(),
         1,
         "summary-root",
@@ -122,7 +125,7 @@ async fn cancelled_provider_evidence_traversal_preserves_control_error() {
     let error = summary_has_provider_evidence(
         &TemporalSqlRead::engine_connection(&connection),
         &relations,
-        &project(),
+        &SessionRelationScope::project(project()),
         &session(),
         1,
         "summary-root",
