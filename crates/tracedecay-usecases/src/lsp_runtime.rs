@@ -3224,6 +3224,7 @@ mod projection_tests {
             completed: 0,
             total: Some(0),
             termination: Some(OperationTermination::Completed),
+            receipt: None,
         };
 
         assert_eq!(
@@ -3257,6 +3258,7 @@ mod projection_tests {
             completed: 1,
             total: Some(1),
             termination: Some(OperationTermination::Completed),
+            receipt: None,
         };
 
         let ContextProjectionOutcome::Ready(envelope) =
@@ -3312,6 +3314,7 @@ mod projection_tests {
             completed: (MAX_CONTEXT_PROJECTION_ITEMS + 1) as u64,
             total: Some((MAX_CONTEXT_PROJECTION_ITEMS + 1) as u64),
             termination: Some(OperationTermination::Completed),
+            receipt: None,
         };
 
         let ContextProjectionOutcome::Ready(envelope) =
@@ -3378,6 +3381,7 @@ mod projection_tests {
             completed: 0,
             total: Some(0),
             termination: Some(OperationTermination::Completed),
+            receipt: None,
         };
 
         assert_eq!(
@@ -3419,6 +3423,7 @@ mod projection_tests {
             completed: 0,
             total: Some(0),
             termination: Some(OperationTermination::Completed),
+            receipt: None,
         };
 
         assert_eq!(
@@ -3454,6 +3459,7 @@ mod projection_tests {
             completed: 0,
             total: Some(1),
             termination: None,
+            receipt: None,
         };
 
         let ContextProjectionOutcome::Ready(envelope) =
@@ -3503,6 +3509,7 @@ mod projection_tests {
                 completed: 0,
                 total: Some(1),
                 termination: Some(termination),
+                receipt: None,
             };
             let ContextProjectionOutcome::Ready(envelope) =
                 test_run_projection(AdmittedRoot::new("file:///root"), None, scope, snapshot)

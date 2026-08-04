@@ -1810,6 +1810,7 @@ async fn recent_test_results(
     let returned = snapshot.results.len() as u64;
     let available_results = snapshot.available_results as u64;
     let termination = snapshot.termination;
+    let receipt = snapshot.receipt;
     let next_cursor = snapshot.next_cursor;
     let partial = !matches!(termination, Some(OperationTermination::Completed))
         || next_cursor.is_some()
@@ -1832,6 +1833,7 @@ async fn recent_test_results(
         "completed": snapshot.completed,
         "total": snapshot.total,
         "termination": termination,
+        "receipt": receipt,
         "result_offset": snapshot.result_offset,
         "available_results": available_results,
     });
