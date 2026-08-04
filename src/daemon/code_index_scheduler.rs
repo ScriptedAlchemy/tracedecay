@@ -2005,6 +2005,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
+        let source_revision = classification
+            .changes()
+            .is_empty()
+            .then(|| self.identity.head_commit().cloned())
+            .flatten();
         let candidate_paths = classification.candidate_paths();
         let changed_paths = classification.changed_paths();
 
@@ -2048,7 +2053,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
                 reference: self.identity.head_ref().cloned(),
-                source_revision: self.identity.head_commit().cloned(),
+                source_revision,
                 sanitizer_revision: id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?,
                 sanitization_receipts,
                 content_identity,
@@ -2263,6 +2268,7 @@ mod tests;
 
 mod activation;
 mod cadence;
+pub(super) mod branch_generations;
 mod classification;
 pub(crate) mod identity;
 pub(in crate::daemon) mod queries;

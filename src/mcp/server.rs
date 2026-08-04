@@ -303,6 +303,8 @@ pub struct McpServer {
     code_index_publication_identity: Option<CodeIndexPublicationIdentityResolver>,
     /// Daemon-owned, authority-gated search bridge.
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
+    /// Daemon-owned exact sealed-generation branch comparison bridge.
+    code_index_branch_diff_executor: Option<CodeIndexBranchDiffExecutor>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -688,6 +690,7 @@ impl McpServer {
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
+            code_index_branch_diff_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
             project_routes,
@@ -882,6 +885,7 @@ impl McpServer {
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
+            code_index_branch_diff_executor,
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,

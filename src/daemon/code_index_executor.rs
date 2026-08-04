@@ -384,8 +384,7 @@ pub(super) fn code_index_search_executor(
                     );
                 }
             };
-            let current_authority = admission.search_authority();
-            let authority = match admission.authorize(&scope, Some(&current_authority)) {
+            let authority = match admission.authorize(&scope, request.authority.as_ref()) {
                 Ok(authority) => authority,
                 Err(error) => {
                     return code_index_search_unavailable(
@@ -441,6 +440,7 @@ pub(super) fn code_index_search_executor(
                 }
             };
             let project_root = request.project_root;
+            let source_revision = request.source_revision;
             let mode = request.mode;
             let deadline = request.deadline;
             let cancellation = request.cancellation;
@@ -475,6 +475,7 @@ pub(super) fn code_index_search_executor(
                 let execution_project_root = project_root.clone();
                 let execution_scope = scope.clone();
                 let execution_control = Arc::clone(&control);
+                let execution_source_revision = source_revision.clone();
                 let execution_request =
                     code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
                         request.query,
@@ -484,15 +485,70 @@ pub(super) fn code_index_search_executor(
                 let mut execution = tokio::task::spawn_blocking(move || {
                     let _execution_permit = execution_permit;
                     runtime.block_on(async move {
-                        execution_schedulers
-                            .execute_query_with_semantic(
-                                &execution_project_root,
+                        let Some(revision) = execution_source_revision else {
+                            return execution_schedulers
+                                .execute_query_with_semantic(
+                                    &execution_project_root,
+                                    &execution_scope,
+                                    execution_request,
+                                    execution_control.as_ref(),
+                                    semantic_mode,
+                                )
+                                .await;
+                        };
+                        let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
+                            deadline: execution_control.deadline.clone(),
+                            cancellation: execution_control.cancellation.clone(),
+                        };
+                        let generations = execution_schedulers
+                            .generations_for_revisions(
+                                &execution_scope,
+                                &revision,
+                                &revision,
+                                control,
+                            )
+                            .await
+                            .map_err(|_| {
+                                code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
+                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
+                                )
+                            })?;
+                        let query = execution_schedulers
+                            .execute_query_search_on_generation(
                                 &execution_scope,
                                 execution_request,
+                                generations.base,
+                            )
+                            .await
+                            .map_err(
+                                code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query,
+                            )?;
+                        let generation = query.generation.clone();
+                        let semantic = execution_schedulers
+                            .execute_semantic_after_query(
+                                &execution_project_root,
+                                &execution_scope,
+                                generations.head.generation(),
+                                query.sanitized.request(),
+                                query.sanitized.query_view(),
+                                &query.authorized,
                                 execution_control.as_ref(),
                                 semantic_mode,
                             )
                             .await
+                            .map_err(|error| match error {
+                                tracedecay_query::retrieval::semantic::SemanticQueryServiceError::StrictUnavailable(
+                                    abstention,
+                                ) => code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                                    generation,
+                                    abstention,
+                                },
+                                error => code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Semantic(error),
+                            })?;
+                        Ok(code_index_scheduler::semantic_query_runtime::ExecutedQuerySemanticSearchV1 {
+                            query,
+                            semantic,
+                        })
                     })
                 });
                 let mut control_poll = tokio::time::interval(std::time::Duration::from_millis(10));

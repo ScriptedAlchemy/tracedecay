@@ -941,6 +941,7 @@ impl McpServer {
                 application_cancellation,
                 code_index_publication_identity: self.code_index_publication_identity.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
+                code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),
                 source_edit_reconciliation_executor: self
                     .source_edit_reconciliation_executor

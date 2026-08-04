@@ -220,6 +220,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
+    pub(crate) code_index_branch_diff_executor:
+        Option<crate::mcp::server::CodeIndexBranchDiffExecutor>,
     pub(crate) source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
     pub(crate) source_edit_reconciliation_executor:
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
@@ -257,6 +259,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_invocation_target: tracedecay_application::InvocationTarget::CurrentProject,
             code_index_publication_identity: None,
             code_index_search_executor: None,
+            code_index_branch_diff_executor: None,
             source_edit_executor: None,
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
