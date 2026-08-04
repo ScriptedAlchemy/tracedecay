@@ -463,14 +463,22 @@ pub async fn load_raw_message(
     let sql = format!(
         "SELECT {}
          FROM lcm_raw_messages
-         WHERE provider = ?1 AND message_id = ?2",
+         WHERE provider = ?1 AND message_id = ?2
+         ORDER BY store_id
+         LIMIT 2",
         raw::RAW_MESSAGE_SELECT_COLUMNS
     );
     let mut rows = conn.query(&sql, params![provider, message_id]).await?;
     let Some(row) = rows.next().await? else {
         return Ok(None);
     };
-    raw::raw_message_from_row(&row).map(Some)
+    let message = raw::verified_raw_message_from_row(&row)?;
+    if rows.next().await?.is_some() {
+        return Err(LcmError::Db(
+            "duplicate raw messages for provider/message identity".to_string(),
+        ));
+    }
+    Ok(Some(message))
 }
 
 async fn carry_forward_legacy_messages_in_transaction(

@@ -17,10 +17,12 @@ use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
     ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
-    MAX_OBSERVATION_RECORD_BYTES, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
-    SanitizationFindingV1, SanitizedPayloadVerificationError, parse_claude_record_v1,
+    LcmSensitiveRedactionPolicyV1, MAX_OBSERVATION_RECORD_BYTES, PrivacyDetectorV1,
+    PrivacySanitizerError, SanitizationActionV1, SanitizationFindingV1,
+    SanitizedPayloadVerificationError, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
-    sanitize_code_source_bytes, verify_sanitized_json_payload,
+    redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_provider_metadata_json,
+    verify_sanitized_json_payload,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -1366,4 +1368,48 @@ fn custom_policy_behavior_has_a_deterministic_version_fingerprint() {
         outcome.receipt().receipt().sanitizer_version(),
         first.version()
     );
+}
+
+#[test]
+fn lcm_sensitive_redaction_parses_structured_payload_before_scanning_values() {
+    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_key"]);
+    let raw = r#"{"nested":{"api_key":"short","password":"owner-kept-value"},"safe":"keep"}"#;
+
+    let outcome =
+        redact_lcm_sensitive_payload(raw, &policy).expect("structured LCM privacy scan succeeds");
+    let sanitized: Value =
+        serde_json::from_str(outcome.text()).expect("structured output remains JSON");
+
+    assert_eq!(
+        sanitized["nested"]["api_key"],
+        "[TraceDecay redacted: sensitive field]"
+    );
+    assert_eq!(sanitized["nested"]["password"], "owner-kept-value");
+    assert_eq!(sanitized["safe"], "keep");
+    assert_eq!(outcome.patterns(), &["api_key".to_string()]);
+}
+
+#[test]
+fn provider_metadata_json_is_structurally_sanitized_or_rejected() {
+    let secret = ["s", "k", "-metadata-", "1234567890abcdef"].concat();
+    let raw = json!({
+        "nested": {
+            "authorization": format!("Bearer {secret}"),
+            "safe": "retained"
+        }
+    })
+    .to_string();
+
+    let sanitized =
+        sanitize_provider_metadata_json(&raw, 4_096).expect("valid bounded metadata is sanitized");
+    assert_eq!(sanitized["nested"]["safe"], "retained");
+    assert!(
+        sanitized["nested"]["authorization"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("[TraceDecay redacted:"))
+    );
+    assert!(!sanitized.to_string().contains(&secret));
+
+    assert!(sanitize_provider_metadata_json("{malformed", 4_096).is_err());
+    assert!(sanitize_provider_metadata_json(&raw, 8).is_err());
 }

@@ -44,7 +44,7 @@ pub async fn load_session(
 
     let mut messages = Vec::new();
     while let Some(row) = rows.next().await? {
-        let raw = raw::raw_message_from_row(&row)?;
+        let raw = raw::verified_raw_message_from_row(&row)?;
         messages.push(load_message_from_raw(raw, request.content_slice));
     }
 
