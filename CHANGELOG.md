@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.73](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.72...v0.0.73) (2026-08-04)
+
+
+### Bug Fixes
+
+* **cli:** retrieve truncated daemon JSON ([#503](https://github.com/ScriptedAlchemy/tracedecay/issues/503)) ([bfc2825](https://github.com/ScriptedAlchemy/tracedecay/commit/bfc2825c87dd4903538f2d2bede1f86bb4e1590f))
+
 ## [0.0.72](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.71...v0.0.72) (2026-08-04)
 
 
