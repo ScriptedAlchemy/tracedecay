@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::state::{StateCache, stable_key};
+use crate::state::{load_entity, load_relation};
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphEntity, GraphEntityId, GraphNamespace,
     GraphRelation, GraphRelationId, GraphSnapshot,
@@ -13,8 +13,16 @@ impl GraphDb {
         identity: &GraphEntityId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
-        let state = self.point_read_state(cancellation.as_ref())?;
-        read_entity(&state, namespace, identity)
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let guard = self.read_database(cancellation.as_ref())?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let entity = load_entity(database, namespace, identity)?;
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        Ok(entity.map(|stored| stored.entity))
     }
 
     pub fn relation(
@@ -23,8 +31,16 @@ impl GraphDb {
         identity: &GraphRelationId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphRelation>, GraphDbError> {
-        let state = self.point_read_state(cancellation.as_ref())?;
-        read_relation(&state, namespace, identity)
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        let guard = self.read_database(cancellation.as_ref())?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        let relation = load_relation(database, namespace, identity)?;
+        if cancellation.is_cancelled() {
+            return Err(GraphDbError::Cancelled);
+        }
+        Ok(relation.map(|stored| stored.relation))
     }
 }
 
@@ -35,10 +51,7 @@ impl GraphSnapshot {
         identity: &GraphEntityId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphEntity>, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        read_entity(&self.state, namespace, identity)
+        self.database.entity(namespace, identity, cancellation)
     }
 
     pub fn relation(
@@ -47,47 +60,6 @@ impl GraphSnapshot {
         identity: &GraphRelationId,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Option<GraphRelation>, GraphDbError> {
-        if cancellation.is_cancelled() {
-            return Err(GraphDbError::Cancelled);
-        }
-        read_relation(&self.state, namespace, identity)
+        self.database.relation(namespace, identity, cancellation)
     }
-}
-
-fn read_entity(
-    state: &StateCache,
-    namespace: &GraphNamespace,
-    identity: &GraphEntityId,
-) -> Result<Option<GraphEntity>, GraphDbError> {
-    let Some((_, stored)) = state
-        .entities
-        .get(&stable_key(namespace, identity.as_str()))
-    else {
-        return Ok(None);
-    };
-    if stored.namespace != *namespace || stored.entity.identity != *identity {
-        return Err(GraphDbError::Corrupt {
-            message: "entity point-read index does not match its payload".to_owned(),
-        });
-    }
-    Ok(Some(stored.entity.clone()))
-}
-
-fn read_relation(
-    state: &StateCache,
-    namespace: &GraphNamespace,
-    identity: &GraphRelationId,
-) -> Result<Option<GraphRelation>, GraphDbError> {
-    let Some((_, stored)) = state
-        .relations
-        .get(&stable_key(namespace, identity.as_str()))
-    else {
-        return Ok(None);
-    };
-    if stored.namespace != *namespace || stored.relation.identity != *identity {
-        return Err(GraphDbError::Corrupt {
-            message: "relation point-read index does not match its payload".to_owned(),
-        });
-    }
-    Ok(Some(stored.relation.clone()))
 }

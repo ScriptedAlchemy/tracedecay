@@ -107,7 +107,20 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
             .unwrap(),
         Some(relation("edge", "root", "target"))
     );
+    assert_eq!(
+        snapshot
+            .entity(&namespace(), &entity_id("root"), live())
+            .unwrap(),
+        Some(entity("root", "generation.one"))
+    );
+    assert_eq!(
+        snapshot
+            .relation(&namespace(), &relation_id("edge"), live())
+            .unwrap(),
+        Some(relation("edge", "root", "target"))
+    );
 
+    drop(snapshot);
     db.apply(
         GraphWriteBatch::new(
             namespace(),
@@ -123,12 +136,6 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        snapshot
-            .entity(&namespace(), &entity_id("root"), live())
-            .unwrap(),
-        Some(entity("root", "generation.one"))
-    );
     assert_eq!(
         db.entity(&namespace(), &entity_id("root"), live()).unwrap(),
         Some(entity("root", "generation.two"))

@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
     GraphEntity, GraphEntityId, GraphFormatVersion, GraphIdempotencyKey, GraphLabel, GraphMutation,
     GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName, GraphPublication,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphVector, GraphWatermark,
-    GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest,
-    VectorMetric, VectorSearchRequest,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphTraversalDirection, GraphVector,
+    GraphVectorIndexRequest, GraphVectorIndexStatus, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, ProjectionReplacement, SourceGeneration, TraversalRequest, VectorMetric,
+    VectorSearchRequest,
 };
 
 #[derive(Debug)]
@@ -135,6 +137,7 @@ fn traversal(start: &str) -> TraversalRequest {
         namespace: namespace(),
         start: entity_id(start),
         relation_kinds: BTreeSet::new(),
+        direction: GraphTraversalDirection::Outgoing,
         max_depth: 8,
         max_visits: 100,
         max_results: 100,
@@ -350,18 +353,28 @@ fn snapshot_is_immutable_after_live_write() {
     ))
     .unwrap();
     let snapshot = db.snapshot().unwrap();
-    db.apply(batch(
-        "code",
-        "g2",
-        "w2",
-        vec![
-            GraphMutation::UpsertEntity(entity("c")),
-            GraphMutation::UpsertRelation(relation("bc", "b", "c", "calls")),
-        ],
-    ))
-    .unwrap();
-
+    let writer_db = db.clone();
+    let (sent, received) = std::sync::mpsc::channel();
+    let writer = std::thread::spawn(move || {
+        let result = writer_db.apply(batch(
+            "code",
+            "g2",
+            "w2",
+            vec![
+                GraphMutation::UpsertEntity(entity("c")),
+                GraphMutation::UpsertRelation(relation("bc", "b", "c", "calls")),
+            ],
+        ));
+        sent.send(result).unwrap();
+    });
+    assert!(received.recv_timeout(Duration::from_millis(50)).is_err());
     assert_eq!(snapshot.traverse(traversal("a")).unwrap().visits.len(), 2);
+    drop(snapshot);
+    received
+        .recv_timeout(Duration::from_secs(1))
+        .unwrap()
+        .unwrap();
+    writer.join().unwrap();
     assert_eq!(db.traverse(traversal("a")).unwrap().visits.len(), 3);
 }
 
@@ -425,6 +438,50 @@ fn traversal_filters_before_discovery_and_honors_depth() {
 }
 
 #[test]
+fn traversal_supports_incoming_and_bidirectional_neighbors() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
+            GraphMutation::UpsertRelation(relation("bc", "b", "c", "calls")),
+        ],
+    ))
+    .unwrap();
+
+    let mut incoming = traversal("c");
+    incoming.direction = GraphTraversalDirection::Incoming;
+    incoming.max_depth = 2;
+    assert_eq!(
+        db.traverse(incoming)
+            .unwrap()
+            .visits
+            .into_iter()
+            .map(|visit| visit.entity.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["c", "b", "a"]
+    );
+
+    let mut both = traversal("b");
+    both.direction = GraphTraversalDirection::Both;
+    both.max_depth = 1;
+    assert_eq!(
+        db.traverse(both)
+            .unwrap()
+            .visits
+            .into_iter()
+            .map(|visit| visit.entity.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["b", "a", "c"]
+    );
+}
+
+#[test]
 fn traversal_budget_exhaustion_is_typed() {
     let db = memory_db();
     db.apply(batch(
@@ -436,6 +493,31 @@ fn traversal_budget_exhaustion_is_typed() {
     .unwrap();
     let mut request = traversal("a");
     request.max_visits = 0;
+    assert_eq!(
+        db.traverse(request).unwrap_err(),
+        GraphDbError::BudgetExhausted
+    );
+}
+
+#[test]
+fn traversal_visit_budget_stops_before_scanning_a_wide_frontier() {
+    let db = memory_db();
+    let mut mutations = vec![GraphMutation::UpsertEntity(entity("root"))];
+    for index in 0..32 {
+        let target = format!("target-{index:02}");
+        mutations.push(GraphMutation::UpsertEntity(entity(&target)));
+        mutations.push(GraphMutation::UpsertRelation(relation(
+            &format!("edge-{index:02}"),
+            "root",
+            &target,
+            "calls",
+        )));
+    }
+    db.apply(batch("code", "g1", "w1", mutations)).unwrap();
+
+    let mut request = traversal("root");
+    request.max_visits = 1;
+    request.cancellation = Arc::new(CancelOnPoll::new(6));
     assert_eq!(
         db.traverse(request).unwrap_err(),
         GraphDbError::BudgetExhausted
@@ -479,6 +561,156 @@ fn traversal_honors_cancellation() {
     assert_eq!(db.traverse(request).unwrap_err(), GraphDbError::Cancelled);
 }
 
+#[test]
+fn batch_outgoing_reads_are_filtered_ordered_and_budgeted() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "calls")),
+            GraphMutation::UpsertRelation(relation("ac", "a", "c", "owns")),
+        ],
+    ))
+    .unwrap();
+    let starts = ["a", "missing", "b"].map(entity_id);
+    let kinds = BTreeSet::from([GraphRelationKind::new("calls").unwrap()]);
+    let relations = db
+        .outgoing_relations(&namespace(), &starts, &kinds, 1, live())
+        .unwrap();
+    assert_eq!(
+        relations
+            .iter()
+            .map(|relations| {
+                relations
+                    .iter()
+                    .map(|relation| relation.identity.as_str())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        vec![vec!["ab"], Vec::<&str>::new(), Vec::<&str>::new()]
+    );
+    assert_eq!(
+        db.outgoing_relation_ids(&namespace(), &starts, &kinds, 0, live())
+            .unwrap_err(),
+        GraphDbError::BudgetExhausted
+    );
+    assert_eq!(
+        db.outgoing_relations(&namespace(), &starts, &kinds, 1, Arc::new(Cancelled),)
+            .unwrap_err(),
+        GraphDbError::Cancelled
+    );
+}
+
+#[test]
+fn multi_source_reachability_uses_overlay_and_global_budget() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "g1",
+        "w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertEntity(entity("d")),
+            GraphMutation::UpsertRelation(relation("ab", "a", "b", "depends")),
+            GraphMutation::UpsertRelation(relation("bc", "b", "c", "depends")),
+        ],
+    ))
+    .unwrap();
+    let starts = [entity_id("a"), entity_id("d")];
+    let kinds = BTreeSet::from([GraphRelationKind::new("depends").unwrap()]);
+    let overrides = BTreeMap::from([(entity_id("b"), BTreeSet::from([entity_id("d")]))]);
+    let reachable = db
+        .reachable_entities(
+            &namespace(),
+            &projection("code"),
+            &starts,
+            &kinds,
+            &overrides,
+            4,
+            live(),
+        )
+        .unwrap();
+    assert_eq!(
+        reachable[0]
+            .iter()
+            .map(GraphEntityId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "d"]
+    );
+    assert_eq!(
+        reachable[1]
+            .iter()
+            .map(GraphEntityId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["d"]
+    );
+    assert_eq!(
+        db.reachable_entities(
+            &namespace(),
+            &projection("code"),
+            &starts,
+            &kinds,
+            &overrides,
+            3,
+            live(),
+        )
+        .unwrap_err(),
+        GraphDbError::BudgetExhausted
+    );
+}
+
+#[test]
+fn reachability_excludes_relations_owned_by_another_projection() {
+    let db = memory_db();
+    db.apply(batch(
+        "code",
+        "code-g1",
+        "code-w1",
+        vec![
+            GraphMutation::UpsertEntity(entity("a")),
+            GraphMutation::UpsertEntity(entity("b")),
+            GraphMutation::UpsertEntity(entity("c")),
+            GraphMutation::UpsertRelation(relation("ac", "a", "c", "depends")),
+        ],
+    ))
+    .unwrap();
+    db.apply(batch(
+        "facts",
+        "facts-g1",
+        "facts-w1",
+        vec![GraphMutation::UpsertRelation(relation(
+            "ab", "a", "b", "depends",
+        ))],
+    ))
+    .unwrap();
+
+    let reachable = db
+        .reachable_entities(
+            &namespace(),
+            &projection("code"),
+            &[entity_id("a")],
+            &BTreeSet::from([GraphRelationKind::new("depends").unwrap()]),
+            &BTreeMap::new(),
+            3,
+            live(),
+        )
+        .unwrap();
+    assert_eq!(
+        reachable[0]
+            .iter()
+            .map(GraphEntityId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["a", "c"]
+    );
+}
+
 fn vector_entity(value: &str, vector: Vec<f32>, metric: VectorMetric) -> GraphEntity {
     vector_entity_with_dimension(value, vector.clone(), vector.len(), metric)
 }
@@ -500,6 +732,7 @@ fn vector_entity_with_dimension(
 fn vector_request(metric: VectorMetric, query: Vec<f32>) -> VectorSearchRequest {
     VectorSearchRequest {
         namespace: namespace(),
+        projection: projection("vectors"),
         property: GraphPropertyName::new("embedding").unwrap(),
         query,
         dimension: 2,
@@ -675,6 +908,7 @@ fn vector_upsert_clears_prior_dimension_and_metric_keys() {
     let stale = db
         .vector_search(VectorSearchRequest {
             namespace: namespace(),
+            projection: projection("vectors"),
             property: GraphPropertyName::new("embedding").unwrap(),
             query: vec![1.0, 0.0, 0.0],
             dimension: 3,
@@ -871,7 +1105,7 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
     let path = temp.path().join("graph.grafeo");
     let db = GraphDb::open(persistent_options(path.clone())).unwrap();
     db.apply(batch(
-        "code",
+        "vectors",
         "g1",
         "w1",
         vec![
@@ -885,6 +1119,22 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
 
     let reopened = GraphDb::open(persistent_options(path)).unwrap();
     assert_eq!(reopened.traverse(traversal("a")).unwrap().visits.len(), 2);
+    let index = GraphVectorIndexRequest {
+        namespace: namespace(),
+        projection: projection("vectors"),
+        property: GraphPropertyName::new("embedding").unwrap(),
+        dimension: 2,
+        metric: VectorMetric::Cosine,
+        cancellation: live(),
+    };
+    assert_eq!(
+        reopened.vector_index_status(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Missing
+    );
+    assert_eq!(
+        reopened.ensure_vector_index(index).unwrap(),
+        GraphVectorIndexStatus::Available
+    );
     assert_eq!(
         reopened
             .vector_search(vector_request(VectorMetric::Cosine, vec![1.0, 0.0]))
@@ -893,6 +1143,46 @@ fn persistent_close_and_reopen_preserves_graph_and_vector() {
             .entity
             .as_str(),
         "a"
+    );
+}
+
+#[test]
+fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("large-vector-graph.grafeo");
+    let db = GraphDb::open(persistent_options(path.clone())).unwrap();
+    let vectors = (0..2_049)
+        .map(|ordinal| {
+            GraphMutation::UpsertEntity(vector_entity(
+                &format!("vector-{ordinal:04}"),
+                vec![ordinal as f32, ordinal as f32],
+                VectorMetric::Euclidean,
+            ))
+        })
+        .collect();
+    db.apply(batch("vectors", "g1", "w1", vectors)).unwrap();
+    db.close().unwrap();
+
+    let admission_started = Instant::now();
+    let reopened = GraphDb::open(persistent_options(path)).unwrap();
+    let admission_elapsed = admission_started.elapsed();
+    assert!(
+        admission_elapsed < Duration::from_secs(5),
+        "opening a 2,049-vector graph took {admission_elapsed:?}"
+    );
+    assert_eq!(
+        reopened
+            .vector_index_status(GraphVectorIndexRequest {
+                namespace: namespace(),
+                projection: projection("vectors"),
+                property: GraphPropertyName::new("embedding").unwrap(),
+                dimension: 2,
+                metric: VectorMetric::Euclidean,
+                cancellation: live(),
+            })
+            .unwrap(),
+        GraphVectorIndexStatus::Missing,
+        "GraphDb admission must not synchronously rebuild a corpus index"
     );
 }
 

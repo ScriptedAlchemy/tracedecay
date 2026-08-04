@@ -5935,10 +5935,13 @@ dependencies = [
 name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
+ "criterion",
+ "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",
  "grafeo-engine",
  "hex",
+ "parking_lot",
  "serde",
  "serde_json",
  "sha2 0.11.0",
