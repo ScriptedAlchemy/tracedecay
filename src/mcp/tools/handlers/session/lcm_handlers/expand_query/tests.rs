@@ -106,6 +106,7 @@ async fn expand_query_translates_node_ids_through_summary_expansion() {
                 truncated: false,
             },
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
             summary_sources: Vec::new(),
             payload_ref: None,
@@ -166,6 +167,7 @@ async fn expand_query_omits_typed_unavailable_summary_sources() {
         }),
         content_truncated: false,
         raw_message: None,
+        raw_message_metadata: None,
         summary_node: None,
     };
     service.set_expand_outcome(LcmExpandServiceOutcome::Partial {
@@ -180,6 +182,7 @@ async fn expand_query_omits_typed_unavailable_summary_sources() {
                 truncated: false,
             },
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
             summary_sources: vec![
                 source(1, HydrationStateV1::Available, "visible source"),
@@ -287,6 +290,7 @@ async fn expand_query_forwards_single_node_cursor_to_canonical_expansion() {
                 truncated: false,
             },
             raw_message: None,
+            raw_message_metadata: None,
             summary_node: None,
             summary_sources: Vec::new(),
             payload_ref: None,

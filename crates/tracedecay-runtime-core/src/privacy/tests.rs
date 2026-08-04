@@ -1390,6 +1390,18 @@ fn lcm_sensitive_redaction_parses_structured_payload_before_scanning_values() {
 }
 
 #[test]
+fn lcm_sensitive_redaction_fails_closed_for_unknown_configured_patterns() {
+    let policy = LcmSensitiveRedactionPolicyV1::enabled(["api_keey"]);
+    let secret = "sk-unknown-policy-1234567890";
+
+    let outcome = redact_lcm_sensitive_payload(&format!("api_key={secret}"), &policy)
+        .expect("fail-closed LCM privacy scan succeeds");
+
+    assert!(!outcome.text().contains(secret));
+    assert_eq!(outcome.patterns(), &["api_key".to_string()]);
+}
+
+#[test]
 fn provider_metadata_json_is_structurally_sanitized_or_rejected() {
     let secret = ["s", "k", "-metadata-", "1234567890abcdef"].concat();
     let raw = json!({

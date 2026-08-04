@@ -30,7 +30,15 @@ impl LcmSensitiveRedactionPolicyV1 {
             .map(|pattern| pattern.as_ref().trim().to_ascii_lowercase())
             .filter(|pattern| !pattern.is_empty())
             .collect::<BTreeSet<_>>();
-        if patterns.is_empty() || patterns.contains("all") || patterns.contains("default") {
+        let contains_unknown = patterns.iter().any(|pattern| {
+            !BUILT_IN_PATTERNS.contains(&pattern.as_str())
+                && !matches!(pattern.as_str(), "all" | "default")
+        });
+        if patterns.is_empty()
+            || patterns.contains("all")
+            || patterns.contains("default")
+            || contains_unknown
+        {
             patterns = BUILT_IN_PATTERNS.into_iter().map(str::to_string).collect();
         }
         Self { patterns }

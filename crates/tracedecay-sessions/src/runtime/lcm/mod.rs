@@ -49,12 +49,12 @@ pub use types::{
     LcmGrepOutcome, LcmGrepRequest, LcmGrepSort, LcmLifecycleState, LcmLifecycleUpdate,
     LcmLoadSessionMessage, LcmLoadSessionPage, LcmLoadSessionRequest, LcmMaintenanceDebt,
     LcmPayloadExpansion, LcmPayloadGcStatus, LcmPayloadRef, LcmPreflightRequest,
-    LcmPreflightResponse, LcmRawMessage, LcmRawMessageOverview, LcmRecentSession, LcmReplayMessage,
-    LcmReplaySummaryNode, LcmScope, LcmSessionBoundaryRequest, LcmSessionBoundaryResponse,
-    LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmStorageKind,
-    LcmStoreStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft,
-    LcmSummaryNodeOverview, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-    MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
+    LcmPreflightResponse, LcmRawMessage, LcmRawMessageMetadata, LcmRawMessageOverview,
+    LcmRecentSession, LcmReplayMessage, LcmReplaySummaryNode, LcmScope, LcmSessionBoundaryRequest,
+    LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
+    LcmStatus, LcmStorageKind, LcmStoreStatus, LcmSummaryExpansion, LcmSummaryNode,
+    LcmSummaryNodeDraft, LcmSummaryNodeOverview, LcmSummaryRequest, LcmSummarySourceMessage,
+    LcmSummarySourceRange, MAX_DERIVED_SNIPPET_CHARS, MAX_DERIVED_TEXT_CHARS,
 };
 
 pub use gc::LcmGcReport;
