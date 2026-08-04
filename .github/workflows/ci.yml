@@ -236,6 +236,10 @@ jobs:
     needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
+    # The last production-sized all-feature matrix completed in under five
+    # minutes per platform. Thirty minutes preserves generous runner headroom
+    # while keeping a wedged test process from consuming the whole workflow.
+    timeout-minutes: 30
     env:
       RUSTFLAGS: ${{ matrix.name == 'Linux' && '--cfg tracedecay_observation_fault_harness' || '' }}
     strategy:
@@ -778,11 +782,95 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  tool-sweep:
+    name: Catalog tool sweep
+    needs: dashboard-assets
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    # A cold all-feature build plus a real index and every safe catalog call
+    # fit below this bound with room for hosted-runner variance. Per-call
+    # deadlines below make an individual stalled tool fail much sooner.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/setup-linux-mold
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install ast-grep
+        uses: ./.github/actions/install-ast-grep
+        with:
+          version: ${{ env.AST_GREP_VERSION }}
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-tool-sweep-all-features-${{ runner.os }}
+          cache-on-failure: true
+
+      # See the matching all-feature jobs: cached build-script output can
+      # retain a dead runner-local ONNX Runtime path.
+      - name: Refresh ONNX Runtime binaries for ort-sys
+        run: cargo clean -p ort-sys --locked
+
+      - name: Build all-feature tool surface
+        run: cargo build --all-features --bin tracedecay --locked
+
+      - name: Validate catalog arguments against the built CLI
+        run: >-
+          scripts/tool-sweep.sh --bin target/debug/tracedecay
+          --validate-args
+
+      - name: Exercise safe catalog tools through an isolated daemon
+        run: |
+          set -euo pipefail
+          binary="$GITHUB_WORKSPACE/target/debug/tracedecay"
+          sweep_dir="$GITHUB_WORKSPACE/target/tool-sweep"
+          scripts/with-isolated-tracedecay-daemon.sh \
+            --bin "$binary" \
+            --ready-timeout 60 \
+            --stop-timeout 30 \
+            --lifecycle-label "catalog tool sweep" \
+            -- \
+            scripts/tool-sweep.sh \
+              --bin "$binary" \
+              --project "$GITHUB_WORKSPACE" \
+              --out "$sweep_dir" \
+              --classes read,preview \
+              --timeout 20 \
+              --warm-threshold 5 \
+              --json
+
+      # Preserve the exact live-tool evidence for both failures and slow calls.
+      - name: Upload catalog tool sweep artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: tool-sweep-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/tool-sweep
+          if-no-files-found: warn
+          retention-days: 14
+
   release-compatibility:
     name: Release compatibility
     needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
+    # Packaging the workspace and inspecting the assembled root archive is a
+    # bounded product journey. Leave enough room for a cold Cargo cache while
+    # still surfacing a stalled package build promptly.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -845,6 +933,7 @@ jobs:
     needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
