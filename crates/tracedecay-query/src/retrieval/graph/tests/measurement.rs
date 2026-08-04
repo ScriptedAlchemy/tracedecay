@@ -57,7 +57,7 @@ fn manual_measure_code_graph_projection_and_traversal() {
 
     let rss_before = process_rss_bytes();
     let started = Instant::now();
-    let adapter = CodeGraphEvidenceAdapterV1::new(
+    let adapter = CodeGraphEvidenceReader::new(
         request.generation.clone(),
         None,
         freshness(FreshnessCompatibilityV1::Current),
