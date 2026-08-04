@@ -245,8 +245,8 @@ mod tests {
         DoctorSourceFuture, DoctorStorageFamilyReadV1, HostIntegrationDoctorPort,
         HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1,
         ObservabilityDoctorPort, ObservabilityReadV1, OperationalAuditDoctorPort,
-        OperationalAuditReadV1, ProfileAuthorityReadV1, RuntimeHealthDoctorPort,
-        RuntimeHealthReadV1, StorageDoctorPort,
+        OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
+        RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     };
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -301,6 +301,7 @@ mod tests {
         ) -> DoctorSourceFuture<'a, OperationalAuditReadV1> {
             Box::pin(async {
                 OperationalAuditReadV1 {
+                    remote: RemoteOperationalReadV1::Unavailable,
                     profile_authority: ProfileAuthorityReadV1::Unavailable,
                 }
             })

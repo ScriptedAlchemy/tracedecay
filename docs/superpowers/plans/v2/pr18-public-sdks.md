@@ -27,7 +27,7 @@ SDK for native consumers, with no Python package.)
 - Rust workspace SDK crate and generated wire types.
 - TypeScript package root, generators, conformance fixtures,
   package metadata, examples, and release CI.
-- Bind supported local daemon transports to one operation catalog.
+- Bind local daemon and PR16 remote transports to one operation catalog.
 
 Generated types cover wire schemas. Handwritten façades cover authentication,
 `RequestContext`, paging/cursors, SSE reconnect, cancellation, resume,
@@ -40,6 +40,7 @@ accepted.
 1. Freeze accepted operation/schema manifest.
 2. Generate Rust/TS wire models deterministically.
 3. Implement lifecycle façades and local transport.
+4. Implement remote transport with identical semantics.
 5. Add examples and cross-language golden conformance.
 6. Package/install/publish dry runs and compatibility policy.
 
@@ -62,5 +63,5 @@ unpublishes or yanks a package release according to registry
 policy but never changes server semantics. Measure generation, package size,
 startup, paging/SSE overhead, and conformance duration. Delete private client
 wrappers and aliases only after two-language (Rust and TypeScript)
-local conformance,
+local/remote conformance,
 examples, package/install gates, semver review, and normal CI pass.

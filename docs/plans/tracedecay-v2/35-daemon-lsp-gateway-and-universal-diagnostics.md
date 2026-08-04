@@ -349,6 +349,9 @@ review, CI, proximity, or evidence data.
   stack/PR capability and drift findings through the same bounded diagnostics
   or root-notification path, with standard Git/other-forge fallback when the
   optional GitHub preview is unavailable.
+- **PR16:** Keep live overlays and analyzers on the enrolled workspace node.
+  Route durable clean evidence through Plan 28's fenced authority; failover
+  cannot spool, replicate, or silently move unsaved content.
 - **PR17:** Add an optional authorized task join and ready-commit cue only
   through shipped Plan 24/32/36 application reads. LSP remains a bounded
   projection; it cannot retrieve task history, mutate work, admit execution,
@@ -363,7 +366,7 @@ review, CI, proximity, or evidence data.
   24 task identity/version/context semantics.
 
   Each action carries one 60-second, single-use, kind/destination/session/
-  project/root/cue-or-task-version/authorization/policy/local-authority
+  project/root/cue-or-task-version/authorization/policy/local-or-PR16-authority
   bound token. The owning public application operation reauthenticates and
   reauthorizes scope, expiry, use state, authority, and current owner version
   on consumption. Wrong kind, destination, scope, version, authority, expiry,
@@ -380,9 +383,11 @@ review, CI, proximity, or evidence data.
   `workspace/applyEdit`.
 
   **PR18 direct acceptance.** Real negotiated clients produce both action/token
-  kinds and consume each through Rust and TypeScript against the local daemon.
-  The investigation token opens only the owning investigation surface and the
-  task token only the owning task surface. Wrong-scope, wrong-kind/destination, expired, replayed,
+  kinds and consume each through Rust and TypeScript against a local
+  daemon and a PR16-enrolled remote authority. The investigation token opens
+  only the owning investigation surface and the task token only the owning task
+  surface, with identical application semantics/error taxonomy across local
+  and remote. Wrong-scope, wrong-kind/destination, expired, replayed,
   unauthorized, revoked, partial-authority, and unavailable-authority cases
   remain non-enumerating and perform no LSP-side task retrieval, edit, work
   mutation, Git/provider action, or arbitrary invocation.

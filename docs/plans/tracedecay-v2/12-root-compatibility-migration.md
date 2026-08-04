@@ -66,7 +66,9 @@ older data is read or carried forward.
    independent release proves its contract. It delegates to the canonical
    operation and owns no storage or lifecycle logic.
 
-Reset/recreation preserves the single daemon writer.
+Before PR16, one local daemon owns the live store. With remote shared Brain,
+exactly one fenced daemon owns each mutable shard. Reset/recreation never
+creates another writer.
 
 ## Implementation slices
 

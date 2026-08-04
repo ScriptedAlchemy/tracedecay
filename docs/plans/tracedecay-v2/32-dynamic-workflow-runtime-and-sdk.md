@@ -80,7 +80,7 @@ that the runtime never auto-applies.
 The same runtime also retains product workflow definition versioning,
 validation, activation, execution, history, pause/resume/cancel/retry,
 approval, effect reconciliation, bounded fan-out, optional synthesis,
-placement, and safe Git integration.
+placement, safe Git integration, remote fencing, and backup/restore behavior.
 
 ## End-to-end production path
 
@@ -287,9 +287,11 @@ unknown effects, reconnects only proved sessions, seals proved terminal
 evidence, and releases newly ready nodes. PID, path existence, branch name,
 process exit, task state, or elapsed time is never recovery proof.
 
-One authority epoch owns a run. Restart recovery preserves history,
-idempotency, leases/effects, outbox, artifact references, and reconciliation
-frontiers before admissions resume.
+Remote workers receive bounded addressed execution units and return receipts;
+they never advance history, select work, mint leases, or choose routes. One
+authority epoch owns a run. Backup/restore preserves history, idempotency,
+leases/effects, outbox, artifact references, and reconciliation frontiers
+before admissions resume.
 
 ## Placement, topology, and safe Git effects
 
@@ -446,7 +448,7 @@ the journeys prove:
   cherry-pick where authorized, all preserving TaskId; and
 - pre-target verification, ref CAS, ordinary fast-forward publication,
   version-checked PR retarget, stack order, retention/quarantine, cancellation
-  races, and crash points without force,
+  races, crash points, remote fencing, and backup/restore without force,
   history rewrite, ambiguity replay, or false success.
 
 Focused fixtures may use disposable stock-Git repositories, fake protocol

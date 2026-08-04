@@ -816,7 +816,7 @@ queryable.
   effect. Native Claude Code, Codex app-server, and Codex CLI remain separate
   dimensions; absence or failure of one never counts as success of another.
 - Usage, cost, and measured savings with declared pricing inputs, exclusions, and confidence.
-- Store, index, daemon, and hook health derived from canonical facts rather than incidental row presence.
+- Store, index, daemon, hook, and remote-coverage health derived from canonical facts rather than incidental row presence.
 - Diagnostic and analyzer/provider coverage carry the complete canonical state
   set: `unsupported`, `absent`, `indexing`, `stale`, `cancelled`, `timed-out`,
   `failed`, and `partial`. These remain distinct from

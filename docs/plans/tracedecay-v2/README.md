@@ -61,8 +61,10 @@ version by itself.
 
 ## Storage and authority
 
-- One local daemon is the sole mutable SQLite authority. Hooks, clients,
-  workers, MCP servers, and dashboard handlers send typed operations to it.
+- Before remote delivery, one local daemon is the sole mutable SQLite
+  authority; PR16 preserves exactly one fenced daemon authority per mutable
+  shard. Hooks, clients, workers, MCP servers, dashboard handlers, and remote
+  nodes send typed operations to the owning authority.
 - Project facts and project session/LCM data live in one canonical project-wide
   store shared across branches and worktrees.
 - Profile-wide user activity lives in the user/profile store.

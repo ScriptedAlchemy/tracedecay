@@ -238,6 +238,21 @@ group ownership, and reaping remain in the harness. Product code is not changed
 to make a benchmark pass, and harness cleanup must not reap a daemon or process
 group it does not own.
 
+## Remote integrated journeys
+
+A remote final-V2 journey becomes eligible only after its committed production
+route is mounted in the executable under test and is reachable through the real
+CLI, MCP, hook, or host boundary. A catalog entry, schema declaration, mock-only
+handler, or passing contract test is not route evidence. The hermetic benchmark
+may substitute loopback fixtures for an external service, but it still invokes
+the mounted production route.
+
+Contract-only unwired success is a correctness failure. Capture and comparison
+must reject it instead of recording an available zero, empty result, or
+successful latency sample. Until route mounting is proven, availability is
+truthfully unavailable or unsupported and the journey contributes no latency
+distribution.
+
 ## `n=1` versus distribution policy
 
 Paired comparisons use ABBA ordering and paired log ratios with a seeded
