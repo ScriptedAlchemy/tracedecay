@@ -1571,6 +1571,7 @@ mod tests {
     fn server_key(graph_db_path: &str, scope_prefix: Option<&str>) -> ProjectServerKey {
         ProjectServerKey {
             owner: owner(graph_db_path),
+            project_root: PathBuf::from("/project"),
             scope_prefix: scope_prefix.map(str::to_string),
         }
     }

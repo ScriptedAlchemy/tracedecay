@@ -414,7 +414,7 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn concurrent_same_identity_worktree_and_primary_share_one_project_authority() {
+async fn concurrent_same_identity_worktrees_share_store_authority_with_exact_servers() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let primary = root.join("primary");
@@ -457,15 +457,37 @@ async fn concurrent_same_identity_worktree_and_primary_share_one_project_authori
         engine.project_server(&linked_handshake),
     );
     let primary_server = primary_server.expect("primary project must open");
-    let linked_server =
-        linked_server.expect("linked worktree must concurrently reuse the primary authority");
+    let linked_server = linked_server
+        .expect("linked worktree must concurrently open through the primary authority");
 
     assert!(
-        Arc::ptr_eq(&primary_server, &linked_server),
-        "both routes must resolve one retained project server"
+        !Arc::ptr_eq(&primary_server, &linked_server),
+        "each exact worktree route must retain its own project server"
+    );
+    let primary_graph = primary_server.cg().await;
+    let linked_graph = linked_server.cg().await;
+    assert!(
+        !Arc::ptr_eq(&primary_graph, &linked_graph),
+        "each project server must retain its exact worktree graph runtime"
+    );
+    assert_eq!(primary_graph.project_root(), primary);
+    assert_eq!(linked_graph.project_root(), linked);
+    assert_eq!(
+        primary_graph.db_path(),
+        linked_graph.db_path(),
+        "linked worktrees must share one project store authority"
+    );
+    assert_eq!(
+        primary_graph.db().retained_runtime().runtime_identity(),
+        linked_graph.db().retained_runtime().runtime_identity(),
+        "linked worktree facades must share one physical store runtime"
     );
     let servers = engine.store_administration.project_servers().lock().await;
-    assert_eq!(servers.servers.len(), 1, "one physical project server key");
+    assert_eq!(
+        servers.servers.len(),
+        2,
+        "each exact worktree must retain one project server key"
+    );
     assert_eq!(servers.aliases.len(), 2, "primary and linked route aliases");
     drop(servers);
     assert!(
