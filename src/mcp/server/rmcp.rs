@@ -5,13 +5,14 @@
 //! adapter delegates standard MCP requests to the existing catalog and handler
 //! authority through `rmcp`'s typed server callbacks.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, CustomNotification, ErrorCode,
-    ErrorData, Implementation, InitializeRequestParams, InitializeResult, ListResourcesResult,
-    ListToolsResult, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-    ServerCapabilities, ServerInfo,
+    CallToolRequestParams, CallToolResponse, CallToolResult, CustomNotification, CustomRequest,
+    CustomResult, ErrorCode, ErrorData, Implementation, InitializeRequestParams, InitializeResult,
+    ListResourcesResult, ListToolsResult, ReadResourceRequestParams, ReadResourceResponse,
+    ReadResourceResult, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{RoleServer, ServerHandler};
@@ -30,6 +31,107 @@ use super::{
 pub(crate) type RmcpInitializeResponseDecorator =
     Arc<dyn Fn(&mut JsonRpcResponse) + Send + Sync + 'static>;
 
+#[derive(Clone, Default)]
+pub(crate) struct RmcpRequestIngressRegistry {
+    entries: Arc<StdMutex<HashMap<String, RmcpRequestIngress>>>,
+}
+
+#[derive(Clone)]
+struct RmcpRequestIngress {
+    started: McpRequestStart,
+    response_deadline_at: Option<tokio::time::Instant>,
+    method: Arc<str>,
+    tool_name: Option<Arc<str>>,
+}
+
+impl RmcpRequestIngressRegistry {
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, RmcpRequestIngress>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn request_key(id: &Value) -> Option<String> {
+        (!id.is_null())
+            .then(|| serde_json::to_string(id).ok())
+            .flatten()
+    }
+
+    pub(crate) fn record(
+        &self,
+        id: &Value,
+        method: &str,
+        params: Option<&Value>,
+        started: McpRequestStart,
+    ) {
+        let Some(request_key) = Self::request_key(id) else {
+            return;
+        };
+        let response_deadline_at = (method == "tools/call")
+            .then(|| params?.get("name")?.as_str())
+            .flatten()
+            .and_then(|tool_name| {
+                crate::mcp::tools::dispatch::lifecycle_policy_for_tool(tool_name)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|policy| started.runtime_deadline(policy.maximum_duration()));
+        self.entries().insert(
+            request_key,
+            RmcpRequestIngress {
+                started,
+                response_deadline_at,
+                method: Arc::from(method),
+                tool_name: params
+                    .and_then(|params| params.get("name"))
+                    .and_then(Value::as_str)
+                    .map(Arc::from),
+            },
+        );
+    }
+
+    fn started(&self, id: &Value) -> Option<McpRequestStart> {
+        let request_key = Self::request_key(id)?;
+        self.entries().get(&request_key).map(|entry| entry.started)
+    }
+
+    pub(crate) fn response_deadline(&self, request_key: &str) -> Option<tokio::time::Instant> {
+        self.entries()
+            .get(request_key)
+            .and_then(|entry| entry.response_deadline_at)
+    }
+
+    pub(crate) fn finish(&self, request_key: &str) {
+        self.entries().remove(request_key);
+    }
+
+    pub(crate) fn cancelled_response(
+        &self,
+        id: &Value,
+    ) -> Option<(JsonRpcResponse, Option<tokio::time::Instant>)> {
+        let request_key = Self::request_key(id)?;
+        let ingress = self.entries().remove(&request_key)?;
+        let response = if ingress.method.as_ref() == "tools/call" {
+            super::finish_transport_cancelled_tool_call_response(
+                id.clone(),
+                ingress.tool_name.as_deref().unwrap_or("<unresolved>"),
+                ingress.started,
+            )
+        } else {
+            JsonRpcResponse::error_with_data(
+                id.clone(),
+                crate::mcp::transport::ErrorCode::RequestCancelled,
+                "MCP request cancelled".to_owned(),
+                Some(json!({
+                    "reason_code": "request_cancelled",
+                    "retryable": true,
+                })),
+            )
+        };
+        Some((response, ingress.response_deadline_at))
+    }
+}
+
 /// Per-connection `rmcp` server facade over the existing `TraceDecay` request
 /// authority.
 pub(crate) struct RmcpConnectionAdapter {
@@ -38,6 +140,7 @@ pub(crate) struct RmcpConnectionAdapter {
     memory_request_scope: String,
     timings_enabled: bool,
     initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
+    request_ingress: RmcpRequestIngressRegistry,
     /// The accepted connection's admission slot, captured on the connection task.
     ///
     /// `rmcp` runs the request loop on a task it spawns, which does not inherit
@@ -52,6 +155,7 @@ impl RmcpConnectionAdapter {
         server: Arc<McpServer>,
         timings_enabled: bool,
         initialize_response_decorator: Option<RmcpInitializeResponseDecorator>,
+        request_ingress: RmcpRequestIngressRegistry,
     ) -> Result<Self, crate::request_identity::RequestIdentityError> {
         let connection = server.new_connection_route_state()?;
         let memory_request_scope = connection.memory_request_scope().to_owned();
@@ -61,6 +165,7 @@ impl RmcpConnectionAdapter {
             memory_request_scope,
             timings_enabled,
             initialize_response_decorator,
+            request_ingress,
             admission: crate::daemon::current_connection_admission(),
         })
     }
@@ -84,11 +189,14 @@ impl RmcpConnectionAdapter {
         method: &str,
         params: Option<Value>,
     ) -> Result<JsonRpcResponse, ErrorData> {
-        let started = McpRequestStart::now();
         let request_id = context.id;
         let request_cancellation = context.ct;
         let id = serde_json::to_value(&request_id)
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
+        let started = self
+            .request_ingress
+            .started(&id)
+            .unwrap_or_else(McpRequestStart::now);
         let tool_name = (method == "tools/call")
             .then(|| {
                 params
@@ -342,6 +450,16 @@ impl ServerHandler for RmcpConnectionAdapter {
         let _ = self.cancel_request(notification.request_id);
     }
 
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, ErrorData> {
+        let CustomRequest { method, params, .. } = request;
+        let response = self.dispatch(context, &method, params).await?;
+        Self::response_result::<Value>(response).map(CustomResult::new)
+    }
+
     async fn on_custom_notification(
         &self,
         notification: CustomNotification,
@@ -482,5 +600,35 @@ mod tests {
             .expect("canonical execution receipt");
         assert_eq!(receipt["terminal"], "denied");
         assert_eq!(receipt["worker_settlement"], "not_started");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_rmcp_start_is_expired_at_callback_admission() {
+        let ingress = RmcpRequestIngressRegistry::default();
+        let id = json!(41);
+        let started = McpRequestStart::now();
+        let params = json!({
+            "name": "tracedecay_search",
+            "arguments": {"query": "queued"}
+        });
+        ingress.record(&id, "tools/call", Some(&params), started);
+        let policy = crate::mcp::tools::dispatch::lifecycle_policy_for_tool("tracedecay_search")
+            .expect("catalog policy")
+            .expect("search policy");
+        tokio::time::advance(policy.maximum_duration()).await;
+
+        let error = match super::super::request_lifecycle::McpRequestRegistry::new().admit(
+            "rmcp-queued",
+            "tracedecay_search",
+            ingress.started(&id).expect("wire ingress start"),
+            policy,
+        ) {
+            Ok(_) => panic!("queued request must not receive a fresh callback deadline"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.mcp_tool_dispatch_context().map(|context| context.0),
+            Some("tool_dispatch_deadline_exceeded")
+        );
     }
 }

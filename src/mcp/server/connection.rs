@@ -617,9 +617,49 @@ impl McpServer {
                 break;
             }
 
-            let revocable_response = project_tool_call && !project_request_admitted;
+            let canonical_retirement_response = response.as_ref().is_some_and(|response| {
+                request_receipts::is_project_retirement_reason_code(
+                    response
+                        .error
+                        .as_ref()
+                        .and_then(|error| error.data.as_ref())
+                        .and_then(|data| data.get("reason_code"))
+                        .and_then(Value::as_str),
+                )
+            });
+            let revocable_response =
+                project_tool_call && project_request_admitted && !canonical_retirement_response;
 
-            // Drain and write any pending notifications (e.g., version warnings).
+            if let Some(resp) = response {
+                let json_line = serialize_response_line(&resp);
+                let output = format!("{json_line}\n");
+                match self
+                    .write_response_line_or_revoke(
+                        transport,
+                        &output,
+                        revocable_response,
+                        dispatch_control.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => break 'connection,
+                    Err(error) => {
+                        tracing::error!(error = %error, "failed to write MCP response");
+                        if let Some((id, _)) = &revocable_tool_call {
+                            let _ = self.cancel_application_surface_request(
+                                id,
+                                connection_route.memory_request_scope(),
+                            );
+                        }
+                        self.shutdown_if(shutdown_on_exit).await;
+                        return Err(error);
+                    }
+                }
+            }
+
+            // Terminal responses own the reserved write budget. Advisory
+            // notifications follow only after that response is on the wire.
             {
                 let notifications: Vec<Value> =
                     crate::mcp::server::requests::recover_lock(&self.pending_notifications)
@@ -649,34 +689,6 @@ impl McpServer {
                                 return Err(error);
                             }
                         }
-                    }
-                }
-            }
-
-            if let Some(resp) = response {
-                let json_line = serialize_response_line(&resp);
-                let output = format!("{json_line}\n");
-                match self
-                    .write_response_line_or_revoke(
-                        transport,
-                        &output,
-                        revocable_response,
-                        dispatch_control.as_ref(),
-                    )
-                    .await
-                {
-                    Ok(true) => {}
-                    Ok(false) => break 'connection,
-                    Err(error) => {
-                        tracing::error!(error = %error, "failed to write MCP response");
-                        if let Some((id, _)) = &revocable_tool_call {
-                            let _ = self.cancel_application_surface_request(
-                                id,
-                                connection_route.memory_request_scope(),
-                            );
-                        }
-                        self.shutdown_if(shutdown_on_exit).await;
-                        return Err(error);
                     }
                 }
             }

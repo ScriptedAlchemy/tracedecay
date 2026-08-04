@@ -2,11 +2,19 @@
 
 use serde_json::{Value, json};
 
+use super::request_lifecycle::McpWorkerReconciliationReceipt;
 use super::{McpRequestStart, McpToolDispatchControl, tool_errors::tool_error_response};
 use crate::errors::TraceDecayError;
 use crate::mcp::transport::{ErrorCode, JsonRpcResponse};
 
 pub(super) const EXECUTION_RECEIPT_KEY: &str = "tracedecay/execution_receipt";
+
+pub(crate) fn is_project_retirement_reason_code(reason_code: Option<&str>) -> bool {
+    matches!(
+        reason_code,
+        Some("project_server_health_revoked" | "project_server_retired")
+    )
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum McpToolCallTerminal {
@@ -47,7 +55,6 @@ impl McpToolCallTiming {
         terminal: McpToolCallTerminal,
         control: Option<&McpToolDispatchControl>,
     ) -> Value {
-        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let (worker_settlement, worker_reconciliation) = control.map_or_else(
             || ("not_started", None),
             |control| {
@@ -55,6 +62,16 @@ impl McpToolCallTiming {
                 (settlement.as_str(), reconciliation)
             },
         );
+        self.receipt_with_worker_settlement(terminal, worker_settlement, worker_reconciliation)
+    }
+
+    fn receipt_with_worker_settlement(
+        &self,
+        terminal: McpToolCallTerminal,
+        worker_settlement: &str,
+        worker_reconciliation: Option<McpWorkerReconciliationReceipt>,
+    ) -> Value {
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let mut receipt = json!({
             "total_us": elapsed_us,
             "terminal": terminal.as_str(),
@@ -77,7 +94,17 @@ impl McpToolCallTiming {
 
 fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal {
     let Some(error) = response.error.as_ref() else {
-        return McpToolCallTerminal::Completed;
+        return if response
+            .result
+            .as_ref()
+            .and_then(|result| result.get("isError"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            McpToolCallTerminal::Failed
+        } else {
+            McpToolCallTerminal::Completed
+        };
     };
     let reason_code = error
         .data
@@ -92,6 +119,7 @@ fn terminal_for_tool_response(response: &JsonRpcResponse) -> McpToolCallTerminal
             "catalog_binding_missing"
             | "catalog_binding_unavailable"
             | "daemon_draining"
+            | "mcp_dispatch_effect_journey_unverified"
             | "message_search_unavailable"
             | "project_route_unavailable"
             | "project_server_health_revoked"
@@ -149,6 +177,32 @@ fn attach_execution_receipt(mut response: JsonRpcResponse, receipt: Value) -> Js
             });
         }
     }
+    response
+}
+
+pub(crate) fn finish_transport_cancelled_tool_call_response(
+    id: Value,
+    tool_name: &str,
+    started: McpRequestStart,
+) -> JsonRpcResponse {
+    let mut response = JsonRpcResponse::error_with_data(
+        id,
+        ErrorCode::InternalError,
+        format!("tool '{tool_name}' was cancelled by the MCP client"),
+        Some(json!({
+            "tool": tool_name,
+            "reason_code": "tool_dispatch_cancelled",
+            "retryable": true,
+        })),
+    );
+    response = attach_execution_receipt(
+        response,
+        McpToolCallTiming::new(started).receipt_with_worker_settlement(
+            McpToolCallTerminal::Cancelled,
+            "indeterminate",
+            None,
+        ),
+    );
     response
 }
 
@@ -214,5 +268,43 @@ mod tests {
         let data = error.data.expect("typed terminal data");
         assert_eq!(data["reason_code"], "tool_response_materialization_invalid");
         assert_eq!(data[EXECUTION_RECEIPT_KEY]["terminal"], "failed");
+    }
+
+    #[test]
+    fn semantic_tool_error_is_a_failed_terminal() {
+        let response = JsonRpcResponse::success(
+            json!(1),
+            json!({
+                "content": [{"type": "text", "text": "tool failed"}],
+                "isError": true,
+            }),
+        );
+        let response = finish_early_tool_call_response(response, McpRequestStart::now());
+        assert_eq!(
+            response.result.expect("tool result")["_meta"][EXECUTION_RECEIPT_KEY]["terminal"],
+            "failed"
+        );
+    }
+
+    #[test]
+    fn unverified_effect_journey_is_an_unavailable_terminal() {
+        let response = JsonRpcResponse::error_with_data(
+            json!(2),
+            ErrorCode::InvalidParams,
+            "effect journey is unavailable".to_owned(),
+            Some(json!({
+                "reason_code": "mcp_dispatch_effect_journey_unverified",
+                "retryable": false,
+            })),
+        );
+        let response = finish_early_tool_call_response(response, McpRequestStart::now());
+        assert_eq!(
+            response
+                .error
+                .expect("tool error")
+                .data
+                .expect("error data")[EXECUTION_RECEIPT_KEY]["terminal"],
+            "unavailable"
+        );
     }
 }

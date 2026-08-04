@@ -1,7 +1,10 @@
 //! Request routing and handlers: per-method JSON-RPC dispatch,
 //! handshake handling, resources, and `tools/call` execution.
 
-use super::request_receipts::{McpToolCallTerminal, McpToolCallTiming, finish_tool_call_response};
+use super::request_receipts::{
+    McpToolCallTerminal, McpToolCallTiming, finish_early_tool_call_response,
+    finish_tool_call_response,
+};
 use super::*;
 use crate::mcp::ToolResult;
 use tracedecay_sessions::WorkflowIndexReadPort;
@@ -271,6 +274,7 @@ impl McpServer {
     ///
     /// Returns `None` for notifications (requests without an `id`).
     pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+        let started = McpRequestStart::now();
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
         // exactly like the live connection loop. These callers never dispatch
@@ -278,11 +282,16 @@ impl McpServer {
         // absent-scope special case.
         let Ok(mut connection) = self.new_connection_route_state() else {
             return request.id.clone().map(|id| {
-                JsonRpcResponse::error(
+                let response = JsonRpcResponse::error(
                     id,
                     ErrorCode::InternalError,
                     "MCP connection identity is unavailable".to_owned(),
-                )
+                );
+                if request.method == "tools/call" {
+                    finish_early_tool_call_response(response, started)
+                } else {
+                    response
+                }
             });
         };
         Box::pin(self.handle_request_for_connection(
@@ -290,7 +299,7 @@ impl McpServer {
             self.timings_enabled(),
             &mut connection,
             None,
-            McpRequestStart::now(),
+            started,
         ))
         .await
     }

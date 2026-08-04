@@ -67,6 +67,9 @@ pub(crate) use request_lifecycle::{
     McpRequestRegistry, McpRequestStart, McpToolDispatchControl, McpToolDispatchStage,
     McpToolLifecyclePolicy, McpWorkerReaperShutdown,
 };
+pub(crate) use request_receipts::{
+    finish_transport_cancelled_tool_call_response, is_project_retirement_reason_code,
+};
 
 pub(crate) use project_registry::DaemonProjectRegistryReadService;
 pub(crate) use workflow_index::DaemonWorkflowIndexReadService;
@@ -79,7 +82,9 @@ pub(crate) use lifecycle::{
 };
 pub(crate) use protocol::*;
 use read_coalescing::*;
-pub(crate) use rmcp::{RmcpConnectionAdapter, RmcpInitializeResponseDecorator};
+pub(crate) use rmcp::{
+    RmcpConnectionAdapter, RmcpInitializeResponseDecorator, RmcpRequestIngressRegistry,
+};
 pub(crate) use routing::*;
 pub(crate) use session_refresh::*;
 pub(crate) use session_retrieval::*;

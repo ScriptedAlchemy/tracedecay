@@ -7,7 +7,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
-use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
 use crate::mcp::{JsonRpcResponse, McpTransport};
@@ -16,10 +15,13 @@ use super::BrokerStream;
 use super::transport::{BrokerReadHalf, BrokerWriteHalf};
 use super::*;
 
+const RMCP_WRITE_DEADLINE: Duration = Duration::from_millis(100);
+
 pub(super) struct BrokerStreamTransport {
     reader: tokio::io::BufReader<BrokerReadHalf>,
     writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
     active_requests: Arc<std::sync::Mutex<HashSet<String>>>,
+    request_ingress: crate::mcp::server::RmcpRequestIngressRegistry,
     replay: VecDeque<String>,
     response_lifecycle: Option<crate::mcp::server::ProjectServerResponseLifecycle>,
 }
@@ -31,9 +33,16 @@ impl BrokerStreamTransport {
             reader: tokio::io::BufReader::new(reader),
             writer: Arc::new(tokio::sync::Mutex::new(Some(writer))),
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            request_ingress: crate::mcp::server::RmcpRequestIngressRegistry::default(),
             replay: VecDeque::new(),
             response_lifecycle: None,
         }
+    }
+
+    pub(super) fn request_ingress_registry(
+        &self,
+    ) -> crate::mcp::server::RmcpRequestIngressRegistry {
+        self.request_ingress.clone()
     }
 
     pub(super) fn push_replay(&mut self, line: String) -> std::io::Result<()> {
@@ -103,7 +112,42 @@ impl BrokerStreamTransport {
         Self::write_all_and_flush(writer, bytes).await
     }
 
-    async fn observe_incoming_message(&self, value: &serde_json::Value) {
+    async fn write_before_deadline(
+        writer: Arc<tokio::sync::Mutex<Option<BrokerWriteHalf>>>,
+        active_requests: Arc<std::sync::Mutex<HashSet<String>>>,
+        request_key: Option<String>,
+        bytes: Vec<u8>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> std::io::Result<()> {
+        let write = Self::write_if_active(writer, active_requests, request_key, bytes);
+        let Some(deadline) = deadline else {
+            return write.await;
+        };
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "RMCP response write exceeded the absolute request deadline",
+            )),
+            result = write => result,
+        }
+    }
+
+    fn is_canonical_retirement_response(value: &serde_json::Value) -> bool {
+        crate::mcp::server::is_project_retirement_reason_code(
+            value
+                .get("error")
+                .and_then(|error| error.get("data"))
+                .and_then(|data| data.get("reason_code"))
+                .and_then(serde_json::Value::as_str),
+        )
+    }
+
+    async fn observe_incoming_message(
+        &self,
+        value: &serde_json::Value,
+        started: crate::mcp::server::McpRequestStart,
+    ) {
         let Some(method) = value.get("method").and_then(serde_json::Value::as_str) else {
             return;
         };
@@ -124,21 +168,38 @@ impl BrokerStreamTransport {
             if !cancelled {
                 return;
             }
-            let response = JsonRpcResponse::error_with_data(
-                request_id.clone(),
-                ErrorCode::RequestCancelled,
-                "MCP request cancelled".to_owned(),
-                Some(json!({"reason_code": "request_cancelled"})),
-            );
+            let Some((response, response_deadline)) =
+                self.request_ingress.cancelled_response(request_id)
+            else {
+                return;
+            };
             if let Ok(mut bytes) = serde_json::to_vec(&response) {
                 bytes.push(b'\n');
-                let _ = Self::write_all_and_flush(Arc::clone(&self.writer), bytes).await;
+                let bounded_write_deadline = tokio::time::Instant::now()
+                    .checked_add(RMCP_WRITE_DEADLINE)
+                    .unwrap_or_else(tokio::time::Instant::now);
+                let write_deadline = response_deadline
+                    .map(|deadline| deadline.min(bounded_write_deadline))
+                    .unwrap_or(bounded_write_deadline);
+                let _ = Self::write_before_deadline(
+                    Arc::clone(&self.writer),
+                    Arc::clone(&self.active_requests),
+                    None,
+                    bytes,
+                    Some(write_deadline),
+                )
+                .await;
             }
             return;
         }
-        let Some(request_key) = value.get("id").and_then(Self::request_key) else {
+        let Some(request_id) = value.get("id") else {
             return;
         };
+        let Some(request_key) = Self::request_key(request_id) else {
+            return;
+        };
+        self.request_ingress
+            .record(request_id, method, value.get("params"), started);
         if let Ok(mut active) = self.active_requests.lock() {
             active.insert(request_key);
         }
@@ -225,30 +286,55 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
         let writer = Arc::clone(&self.writer);
         let active_requests = Arc::clone(&self.active_requests);
         let response_lifecycle = self.response_lifecycle.clone();
+        let request_ingress = self.request_ingress.clone();
         async move {
             let value = serde_json::to_value(&item)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             let request_key = Self::response_request_key(&value);
+            let response_deadline = request_key
+                .as_deref()
+                .and_then(|request_key| request_ingress.response_deadline(request_key));
+            let bounded_write_deadline = tokio::time::Instant::now()
+                .checked_add(RMCP_WRITE_DEADLINE)
+                .unwrap_or_else(tokio::time::Instant::now);
+            let write_deadline = response_deadline
+                .map(|deadline| deadline.min(bounded_write_deadline))
+                .unwrap_or(bounded_write_deadline);
+            let canonical_retirement = Self::is_canonical_retirement_response(&value);
             let mut bytes = serde_json::to_vec(&value)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
             bytes.push(b'\n');
-            let Some(lifecycle) = response_lifecycle else {
-                return Self::write_if_active(writer, active_requests, request_key, bytes).await;
+            let write = Self::write_before_deadline(
+                writer,
+                active_requests,
+                request_key.clone(),
+                bytes,
+                Some(write_deadline),
+            );
+            let result = match response_lifecycle {
+                None => write.await,
+                Some(lifecycle)
+                    if lifecycle.response_revoked().is_cancelled() && !canonical_retirement =>
+                {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "project server response was revoked",
+                    ))
+                }
+                Some(_) if canonical_retirement => write.await,
+                Some(lifecycle) => tokio::select! {
+                    biased;
+                    () = lifecycle.response_revoked().cancelled() => Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "project server response was revoked",
+                    )),
+                    result = write => result,
+                },
             };
-            if lifecycle.response_revoked().is_cancelled() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "project server response was revoked",
-                ));
+            if let Some(request_key) = request_key {
+                request_ingress.finish(&request_key);
             }
-            tokio::select! {
-                biased;
-                () = lifecycle.response_revoked().cancelled() => Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "project server response was revoked",
-                )),
-                result = Self::write_if_active(writer, active_requests, request_key, bytes) => result,
-            }
+            result
         }
     }
 
@@ -277,9 +363,10 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
                     return None;
                 }
             };
+            let started = crate::mcp::server::McpRequestStart::now();
             match serde_json::from_str::<serde_json::Value>(&line) {
                 Ok(value) => {
-                    self.observe_incoming_message(&value).await;
+                    self.observe_incoming_message(&value, started).await;
                     match serde_json::from_value(value) {
                         Ok(message) => return Some(message),
                         Err(error) => {
@@ -320,7 +407,92 @@ impl rmcp::transport::Transport<rmcp::RoleServer> for BrokerStreamTransport {
 mod peer_close_tests {
     use super::*;
     use crate::mcp::McpTransport;
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn cancellation_preserves_request_for_the_canonical_receipt() {
+        let (server, mut client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+        let request_id = serde_json::json!("request-1");
+        let request_key = BrokerStreamTransport::request_key(&request_id).expect("request key");
+        transport
+            .observe_incoming_message(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "method": "tools/call",
+                    "params": {}
+                }),
+                crate::mcp::server::McpRequestStart::now(),
+            )
+            .await;
+        transport
+            .observe_incoming_message(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/cancelled",
+                    "params": {"requestId": "request-1"}
+                }),
+                crate::mcp::server::McpRequestStart::now(),
+            )
+            .await;
+        assert!(
+            transport
+                .active_requests
+                .lock()
+                .expect("active request registry")
+                .contains(&request_key),
+            "cancellation must leave response ownership with the adapter"
+        );
+
+        let canonical = br#"{"jsonrpc":"2.0","id":"request-1","error":{"code":-32800,"message":"MCP request cancelled","data":{"reason_code":"tool_dispatch_cancelled","tracedecay/execution_receipt":{"terminal":"cancelled"}}}}"#.to_vec();
+        BrokerStreamTransport::write_if_active(
+            Arc::clone(&transport.writer),
+            Arc::clone(&transport.active_requests),
+            Some(request_key),
+            canonical.clone(),
+        )
+        .await
+        .expect("canonical receipt write");
+        let mut received = vec![0; canonical.len()];
+        client
+            .read_exact(&mut received)
+            .await
+            .expect("read canonical receipt");
+        assert_eq!(received, canonical);
+        assert!(
+            transport
+                .active_requests
+                .lock()
+                .expect("active request registry")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rmcp_notifications_have_a_bounded_write() {
+        let (server, _client) = tokio::net::UnixStream::pair().expect("UnixStream pair");
+        let mut transport = BrokerStreamTransport::new(BrokerStream::Unix(server));
+        let writer = Arc::clone(&transport.writer);
+        let _blocked_writer = writer.lock().await;
+        let notification: rmcp::service::TxJsonRpcMessage<rmcp::RoleServer> =
+            serde_json::from_value(serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {
+                    "level": "info",
+                    "data": "bounded"
+                }
+            }))
+            .expect("server notification");
+
+        let send = rmcp::transport::Transport::send(&mut transport, notification);
+        let error = tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .expect("RMCP transport must bound every write")
+            .expect_err("blocked write must fail");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
 
     #[tokio::test]
     async fn full_close_wait_ignores_request_half_close() {

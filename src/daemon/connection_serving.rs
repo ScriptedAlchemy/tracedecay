@@ -76,11 +76,17 @@ pub(super) async fn serve_routed_rmcp_connection(
     for line in pending_lines {
         transport.push_replay(line)?;
     }
-    let adapter =
-        RmcpConnectionAdapter::new(server, timings_enabled, initialize_response_decorator)
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("MCP connection identity unavailable: {error}"),
-            })?;
+    let request_ingress = transport.request_ingress_registry();
+    let shutdown_server = Arc::clone(&server);
+    let adapter = RmcpConnectionAdapter::new(
+        server,
+        timings_enabled,
+        initialize_response_decorator,
+        request_ingress,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("MCP connection identity unavailable: {error}"),
+    })?;
     let running = adapter
         .serve(transport)
         .await
@@ -93,6 +99,7 @@ pub(super) async fn serve_routed_rmcp_connection(
     let result = tokio::select! {
         result = &mut waiting => result,
         () = lifecycle.wait_for_draining() => {
+            shutdown_server.abort_project_server_requests();
             cancellation.cancel();
             waiting.await
         }

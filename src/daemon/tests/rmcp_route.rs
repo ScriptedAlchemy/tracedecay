@@ -162,13 +162,18 @@ fn assert_delivered_cancellation(responses: &[Value], request_id: u64, context: 
     );
     assert_eq!(
         response["error"]["code"],
-        json!(-32800),
+        json!(-32603),
         "{context}: cancellation response used the wrong error code: {response}"
     );
     assert_eq!(
         response["error"]["data"]["reason_code"],
-        json!("request_cancelled"),
+        json!("tool_dispatch_cancelled"),
         "{context}: cancellation response omitted its typed reason: {response}"
+    );
+    assert_eq!(
+        response["error"]["data"]["tracedecay/execution_receipt"]["terminal"],
+        json!("cancelled"),
+        "{context}: cancellation response omitted its canonical receipt: {response}"
     );
 }
 
@@ -595,17 +600,10 @@ async fn production_rmcp_cancels_registered_and_pre_registration_requests() {
         1,
         "second request registered before its earlier cancellation was observed"
     );
-    executor.release_first.store(true, Ordering::SeqCst);
-    wait_for_count(
-        &executor.completed,
-        2,
-        "cancelled RMCP requests did not terminate",
-    )
-    .await;
     assert_eq!(
         executor.pre_cancelled.load(Ordering::SeqCst),
-        1,
-        "queued request was not cancelled before entering the application executor"
+        0,
+        "pre-registration cancellation must reject before application execution"
     );
 
     writer
@@ -620,6 +618,11 @@ async fn production_rmcp_cancels_registered_and_pre_registration_requests() {
     served
         .expect("join cancelled RMCP task")
         .expect("serve cancelled RMCP task");
+    assert_eq!(
+        executor.completed.load(Ordering::SeqCst),
+        0,
+        "transport cancellation must not wait for cancelled application work"
+    );
     assert_delivered_cancellation(&responses, 10, "registered in-flight cancellation");
     assert_delivered_cancellation(&responses, 11, "pre-registration cancellation");
 }

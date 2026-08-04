@@ -6,7 +6,8 @@ use crate::mcp::transport::McpTransport;
 
 use super::{
     MAX_ACTIVE_REQUESTS, MAX_PENDING_CANCELLATIONS, McpRequestRegistry, McpRequestStart,
-    McpToolDispatchStage, McpToolLifecyclePolicy, McpToolWorkerSettlement, McpWorkerReaperShutdown,
+    McpRequestTermination, McpToolDispatchStage, McpToolLifecyclePolicy, McpToolWorkerSettlement,
+    McpWorkerReaperShutdown,
 };
 
 #[tokio::test(start_paused = true)]
@@ -82,6 +83,32 @@ async fn deadline_terminal_is_stable_after_late_cancellation() {
     assert_eq!(
         second.mcp_tool_dispatch_context().map(|context| context.0),
         Some("tool_dispatch_deadline_exceeded")
+    );
+}
+
+#[test]
+fn termination_authority_is_observed_before_the_signal_propagates() {
+    let registry = McpRequestRegistry::new();
+    let control = registry
+        .admit(
+            "scope:termination-authority",
+            "tracedecay_search",
+            McpRequestStart::now(),
+            McpToolLifecyclePolicy::new(Duration::from_secs(1), true),
+        )
+        .expect("request admission");
+    control
+        .inner
+        .termination
+        .store(McpRequestTermination::Shutdown as u8, Ordering::Release);
+    assert!(!control.is_cancelled());
+
+    let error = control
+        .check(McpToolDispatchStage::Handler)
+        .expect_err("terminal authority must not wait for signal propagation");
+    assert_eq!(
+        error.mcp_tool_dispatch_context().map(|context| context.0),
+        Some("tool_dispatch_shutdown")
     );
 }
 
@@ -433,6 +460,56 @@ async fn uncooperative_worker_cleanup_is_bounded_and_shutdown_is_retryable() {
     .expect("retryable shutdown must eventually complete");
 }
 
+#[tokio::test(start_paused = true)]
+async fn short_policy_worker_runs_until_the_execution_deadline() {
+    let registry = McpRequestRegistry::new();
+    let control = registry
+        .admit(
+            "scope:short-worker",
+            "tracedecay_search",
+            McpRequestStart::now(),
+            McpToolLifecyclePolicy::new(Duration::from_millis(100), true),
+        )
+        .expect("request admission");
+    let reservation = control
+        .reserve_join_required_worker(McpToolDispatchStage::Handler)
+        .expect("worker reservation");
+    let released = Arc::new(tokio::sync::Notify::new());
+    let worker_release = Arc::clone(&released);
+    let worker = tokio::spawn(async move {
+        worker_release.notified().await;
+        Ok::<(), crate::errors::TraceDecayError>(())
+    });
+    let dispatch_control = control.clone();
+    let dispatch = tokio::spawn(async move {
+        dispatch_control
+            .run_owned_join_required(McpToolDispatchStage::Handler, reservation, worker)
+            .await
+    });
+    tokio::task::yield_now().await;
+
+    tokio::time::advance(Duration::from_millis(89)).await;
+    assert!(
+        !dispatch.is_finished(),
+        "cleanup reserve must not shorten execution"
+    );
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let error = dispatch
+        .await
+        .expect("dispatch task")
+        .expect_err("execution deadline");
+    assert_eq!(
+        error.mcp_tool_dispatch_context().map(|context| context.0),
+        Some("tool_dispatch_deadline_exceeded")
+    );
+
+    released.notify_one();
+    assert!(matches!(
+        registry.shutdown_workers(Duration::from_millis(10)).await,
+        McpWorkerReaperShutdown::Complete { .. }
+    ));
+}
+
 #[tokio::test]
 async fn cooperative_worker_joins_before_cancelled_response() {
     let registry = McpRequestRegistry::new();
@@ -487,12 +564,14 @@ async fn aborted_settlement_wrapper_publishes_failed_reconciliation() {
         .reserve_join_required_worker(McpToolDispatchStage::Handler)
         .expect("worker reservation");
     let reconciliation_id = reservation.reconciliation_id();
-    let released = Arc::new(tokio::sync::Notify::new());
-    let worker_release = Arc::clone(&released);
-    let worker = tokio::spawn(async move {
-        worker_release.notified().await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let worker = tokio::task::spawn_blocking(move || {
+        let _ = started_tx.send(());
+        release_rx.recv().expect("release blocking worker");
         Ok::<(), crate::errors::TraceDecayError>(())
     });
+    started_rx.await.expect("blocking worker started");
     assert!(registry.cancel_or_retain("scope:aborted-wrapper"));
     control
         .run_owned_join_required(McpToolDispatchStage::Handler, reservation, worker)
@@ -504,6 +583,13 @@ async fn aborted_settlement_wrapper_publishes_failed_reconciliation() {
         .expect("settlement wrapper")
         .abort_handle();
     abort.abort();
+    tokio::task::yield_now().await;
+    assert_eq!(
+        registry.shutdown_workers(Duration::from_millis(10)).await,
+        McpWorkerReaperShutdown::Retryable { pending: 1 },
+        "shutdown must not complete before the owned worker stops"
+    );
+    release_tx.send(()).expect("release blocking worker");
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if registry
@@ -521,5 +607,8 @@ async fn aborted_settlement_wrapper_publishes_failed_reconciliation() {
     })
     .await
     .expect("aborted settlement wrapper reconciliation");
-    released.notify_one();
+    assert!(matches!(
+        registry.shutdown_workers(Duration::from_millis(10)).await,
+        McpWorkerReaperShutdown::Complete { .. }
+    ));
 }

@@ -49,6 +49,10 @@ impl McpRequestStart {
     pub(crate) fn elapsed(&self) -> Duration {
         self.runtime.elapsed()
     }
+
+    pub(crate) fn runtime_deadline(&self, duration: Duration) -> Option<tokio::time::Instant> {
+        self.runtime.checked_add(duration)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

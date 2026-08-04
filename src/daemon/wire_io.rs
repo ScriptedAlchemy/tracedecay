@@ -263,6 +263,110 @@ mod wire_bound_tests {
     }
 
     #[tokio::test]
+    async fn malformed_tool_calls_have_native_rmcp_receipt_parity() {
+        fn receipt(response: &serde_json::Value) -> &serde_json::Value {
+            if response.get("error").is_some() {
+                &response["error"]["data"]["tracedecay/execution_receipt"]
+            } else {
+                &response["result"]["_meta"]["tracedecay/execution_receipt"]
+            }
+        }
+
+        let (cg, _dir, _pin) = crate::mcp::server::writer_test_support::init_indexed_repo().await;
+        let mcp = crate::mcp::McpServer::new(cg, None).await;
+        let malformed = [
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 21,
+                "method": "tools/call",
+                "params": {"name": 7, "arguments": {}}
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": "tools/call",
+                "params": {"name": "tracedecay_search", "arguments": []}
+            }),
+        ];
+        let mut native = std::collections::HashMap::new();
+        for request in &malformed {
+            let request: crate::mcp::JsonRpcRequest =
+                serde_json::from_value(request.clone()).expect("native request");
+            let response = mcp
+                .handle_request(&request)
+                .await
+                .expect("native tool response");
+            native.insert(
+                request.id.expect("request id").to_string(),
+                serde_json::to_value(response).expect("native JSON response"),
+            );
+        }
+
+        let lifecycle = DaemonLifecycle::default();
+        let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
+            .await
+            .expect("bind");
+        let client = BrokerStream::connect(&bound).await.expect("connect");
+        let server = listener.accept().await.expect("accept");
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "rmcp-malformed-parity", "version": "1"}
+            }
+        })
+        .to_string();
+        let pending = malformed.into_iter().map(|request| request.to_string());
+        let task = tokio::spawn({
+            let mcp = Arc::clone(&mcp);
+            let lifecycle = lifecycle.clone();
+            async move {
+                serve_routed_rmcp_connection(
+                    mcp,
+                    BrokerStreamTransport::new(server),
+                    initialize,
+                    pending,
+                    None,
+                    false,
+                    &lifecycle,
+                )
+                .await
+            }
+        });
+        let mut client = tokio::io::BufReader::new(client);
+        let mut line = String::new();
+        client
+            .read_line(&mut line)
+            .await
+            .expect("initialize response");
+
+        for _ in 0..2 {
+            line.clear();
+            client.read_line(&mut line).await.expect("tool response");
+            let rmcp: serde_json::Value = serde_json::from_str(&line).expect("RMCP JSON response");
+            let id = rmcp["id"].to_string();
+            let native = native.get(&id).expect("matching native response");
+            assert_eq!(rmcp["error"]["code"], native["error"]["code"]);
+            assert_eq!(rmcp["result"]["isError"], native["result"]["isError"]);
+            assert!(receipt(&rmcp).is_object(), "RMCP receipt must be present");
+            assert_eq!(receipt(&rmcp)["terminal"], receipt(native)["terminal"]);
+            assert_eq!(
+                receipt(&rmcp)["worker_settlement"],
+                receipt(native)["worker_settlement"]
+            );
+        }
+
+        lifecycle.begin_draining();
+        task.await
+            .expect("rmcp route task")
+            .expect("rmcp route completion");
+        mcp.shutdown_background_tasks().await;
+    }
+
+    #[tokio::test]
     async fn broker_transport_accepts_exact_cap_and_recovers_next_frame_after_oversize() {
         let (listener, bound) = BrokerListener::bind(&default_loopback_endpoint())
             .await

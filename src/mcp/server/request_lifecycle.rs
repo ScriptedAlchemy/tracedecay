@@ -334,12 +334,20 @@ impl McpToolDispatchControl {
     }
 
     pub(crate) fn check(&self, stage: McpToolDispatchStage) -> Result<()> {
+        if stage != McpToolDispatchStage::ResponseWrite
+            && (McpRequestTermination::from_raw(self.inner.termination.load(Ordering::Acquire))
+                != McpRequestTermination::Active
+                || self.is_cancelled())
+        {
+            return Err(self.terminal_error(stage));
+        }
         if tokio::time::Instant::now() >= self.stage_deadline(stage) {
             self.terminate(McpRequestTermination::Deadline);
-            return Err(self.deadline_error(stage));
-        }
-        if stage != McpToolDispatchStage::ResponseWrite && self.is_cancelled() {
-            return Err(self.terminal_error(stage));
+            return Err(if stage == McpToolDispatchStage::ResponseWrite {
+                self.deadline_error(stage)
+            } else {
+                self.terminal_error(stage)
+            });
         }
         Ok(())
     }
@@ -365,7 +373,7 @@ impl McpToolDispatchControl {
             biased;
             () = tokio::time::sleep_until(stage_deadline) => {
                 self.terminate(McpRequestTermination::Deadline);
-                Err(self.deadline_error(stage))
+                Err(self.terminal_error(stage))
             }
             () = crate::daemon_client::wait_for_cancellation(self.inner.cancellation.clone()) => {
                 Err(self.terminal_error(stage))
@@ -403,17 +411,11 @@ impl McpToolDispatchControl {
         worker: tokio::task::JoinHandle<Result<T>>,
     ) -> Result<T> {
         let mut worker = OwnedMcpToolWorker::new(self, reservation, worker);
-        let cleanup_at = self
-            .inner
-            .deadline_at
-            .checked_sub(self.inner.policy.cancellation_cleanup)
-            .unwrap_or_else(tokio::time::Instant::now);
         tokio::select! {
             biased;
-            () = tokio::time::sleep_until(cleanup_at) => {
+            () = tokio::time::sleep_until(self.inner.deadline_at) => {
                 self.terminate(McpRequestTermination::Deadline);
-                self.wait_for_worker_cleanup(stage, &mut worker).await;
-                Err(self.deadline_error(stage))
+                Err(self.terminal_error(stage))
             }
             () = crate::daemon_client::wait_for_cancellation(self.inner.cancellation.clone()) => {
                 self.wait_for_worker_cleanup(stage, &mut worker).await;
@@ -807,15 +809,10 @@ impl McpWorkerSettlementReaper {
             reaper: self.clone(),
             reconciliation_id,
             worker_state: Some(worker_state),
-            _permit: permit,
+            permit: Some(permit),
+            worker: Some(worker),
         };
-        let task = tokio::spawn(async move {
-            let status = match worker.await {
-                Ok(_) => McpWorkerReconciliationStatus::Joined,
-                Err(_) => McpWorkerReconciliationStatus::Failed,
-            };
-            settlement.complete(status);
-        });
+        let task = tokio::spawn(settlement.settle());
         lock(&self.inner.tasks).push(task);
     }
 
@@ -847,14 +844,27 @@ impl McpWorkerSettlementReaper {
     }
 }
 
-struct PendingMcpWorkerSettlement {
+struct PendingMcpWorkerSettlement<T: Send + 'static> {
     reaper: McpWorkerSettlementReaper,
     reconciliation_id: u64,
     worker_state: Option<McpToolWorkerState>,
-    _permit: OwnedSemaphorePermit,
+    permit: Option<OwnedSemaphorePermit>,
+    worker: Option<tokio::task::JoinHandle<Result<T>>>,
 }
 
-impl PendingMcpWorkerSettlement {
+impl<T: Send + 'static> PendingMcpWorkerSettlement<T> {
+    async fn settle(mut self) {
+        let status = match self.worker.as_mut() {
+            Some(worker) => match worker.await {
+                Ok(_) => McpWorkerReconciliationStatus::Joined,
+                Err(_) => McpWorkerReconciliationStatus::Failed,
+            },
+            None => McpWorkerReconciliationStatus::Failed,
+        };
+        self.worker.take();
+        self.complete(status);
+    }
+
     fn complete(mut self, status: McpWorkerReconciliationStatus) {
         if let Some(worker_state) = self.worker_state.take() {
             self.reaper
@@ -863,18 +873,36 @@ impl PendingMcpWorkerSettlement {
     }
 }
 
-impl Drop for PendingMcpWorkerSettlement {
+impl<T: Send + 'static> Drop for PendingMcpWorkerSettlement<T> {
     fn drop(&mut self) {
-        // Tokio drops task futures on abort and unwinds them on panic. Publish
-        // the terminal state before releasing settlement capacity so a
-        // finished wrapper can never be reaped while its receipt stays pending.
-        if let Some(worker_state) = self.worker_state.take() {
-            self.reaper.publish(
-                self.reconciliation_id,
+        let Some(worker) = self.worker.take() else {
+            if let Some(worker_state) = self.worker_state.take() {
+                self.reaper.publish(
+                    self.reconciliation_id,
+                    McpWorkerReconciliationStatus::Failed,
+                    worker_state,
+                );
+            }
+            return;
+        };
+        worker.abort();
+        let Some(worker_state) = self.worker_state.take() else {
+            return;
+        };
+        let permit = self.permit.take();
+        let reaper = self.reaper.clone();
+        let task_reaper = reaper.clone();
+        let reconciliation_id = self.reconciliation_id;
+        let task = tokio::spawn(async move {
+            let _ = worker.await;
+            task_reaper.publish(
+                reconciliation_id,
                 McpWorkerReconciliationStatus::Failed,
                 worker_state,
             );
-        }
+            drop(permit);
+        });
+        lock(&reaper.inner.tasks).push(task);
     }
 }
 
