@@ -112,6 +112,9 @@ pub mod lane_reason {
 pub enum CodeIndexLaneStatusV1 {
     /// The lane served from the current complete code generation.
     Complete,
+    /// The lane served an admitted prefix, but its bounded work stopped before
+    /// it could establish full recall for the current generation.
+    Partial,
     /// The lane served from an older complete generation while a newer one is
     /// still being built. Recall is sound for that generation; freshness is
     /// not, and the caller is told which generation answered.
@@ -123,12 +126,13 @@ pub enum CodeIndexLaneStatusV1 {
 impl CodeIndexLaneStatusV1 {
     /// Whether this lane contributed results to the response.
     pub const fn is_servable(&self) -> bool {
-        matches!(self, Self::Complete | Self::Stale { .. })
+        matches!(self, Self::Complete | Self::Partial | Self::Stale { .. })
     }
 
     pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Complete => "complete",
+            Self::Partial => "partial",
             Self::Stale { .. } => "stale",
             Self::Unavailable { .. } => "unavailable",
         }
@@ -311,6 +315,16 @@ mod tests {
                 .degraded_or_fail(CodeIndexSearchUnavailableReasonV1::Internal)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn partial_lane_is_servable_and_marks_recall_degraded() {
+        let mut coverage = CodeIndexSearchCoverageV1::warm();
+        coverage.graph = CodeIndexLaneStatusV1::Partial;
+
+        assert!(coverage.graph.is_servable());
+        assert_eq!(coverage.graph.as_str(), "partial");
+        assert!(coverage.is_degraded());
     }
 
     #[test]

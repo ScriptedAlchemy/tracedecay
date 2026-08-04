@@ -9,14 +9,14 @@ use std::path::Path;
 use std::sync::Arc;
 
 use thiserror::Error;
-use tracedecay_application::ResolvedScope;
+use tracedecay_application::{CancellationSignal, Deadline, ResolvedScope};
 use tracedecay_domain::{
     AuthorizationRevision, CodeGenerationId, ComponentRevision, DiversityPolicy,
     ExactAdmissionRuleRevision, FreshnessVectorDigest, FusionProfile, FusionProfileId, PrincipalId,
     PrivacyDomainId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalAnchorId,
     RetrievalCursor, RetrievalFailure, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId, SingleRootScopeV1,
-    TemporalModeV1, VectorWatermark,
+    RetrieverBatch, RetrieverKind, RetrieverOutcome, SanitizerRevision, ScoreDomainId,
+    SingleRootScopeV1, TemporalModeV1, VectorWatermark,
 };
 
 use super::CodeIndexSchedulerRegistryV1;
@@ -29,6 +29,7 @@ use tracedecay_query::retrieval::graph::{GraphLaneRequest, GraphLaneRetriever};
 use tracedecay_query::retrieval::lexical::{
     LexicalLaneEvidence, LexicalLaneRequest, LexicalLaneRetriever, lexical_query_parts,
 };
+use tracedecay_query::retrieval::semantic::SemanticExecutionControl;
 use tracedecay_query::retrieval::{
     AuthorizedQueryFallbackV1, QueryAuthorityErrorV1, QueryAuthorityV1, RawRetrievalRequestV1,
     RetrievalPortError, SanitizedRetrievalRequestV1,
@@ -194,6 +195,8 @@ pub(in crate::daemon) struct QuerySearchExecutionRequestV1 {
     pub graph_max_depth: u32,
     pub page_size: usize,
     pub cursor: Option<RetrievalCursor>,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
 }
 
 impl QuerySearchExecutionRequestV1 {
@@ -212,6 +215,8 @@ impl QuerySearchExecutionRequestV1 {
             graph_max_depth: policy.graph_max_depth,
             page_size: policy.page_size,
             cursor: policy.cursor,
+            deadline: policy.deadline,
+            cancellation: policy.cancellation,
         }
     }
 }
@@ -230,6 +235,8 @@ pub(in crate::daemon) struct QuerySearchExecutionPolicyV1 {
     pub graph_max_depth: u32,
     pub page_size: usize,
     pub cursor: Option<RetrievalCursor>,
+    pub deadline: Option<Deadline>,
+    pub cancellation: Option<CancellationSignal>,
 }
 
 pub(in crate::daemon) struct ExecutedQuerySearchV1 {
@@ -268,6 +275,19 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &ResolvedScope,
         input: QuerySearchExecutionRequestV1,
     ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
+        self.execute_query_search_with_control(scope, input, &ReadyQuerySearchControl)
+            .await
+    }
+
+    pub(super) async fn execute_query_search_with_control<C>(
+        &self,
+        scope: &ResolvedScope,
+        input: QuerySearchExecutionRequestV1,
+        control: &C,
+    ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1>
+    where
+        C: SemanticExecutionControl + Sync,
+    {
         scope
             .validate()
             .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
@@ -353,7 +373,12 @@ impl CodeIndexSchedulerRegistryV1 {
             literals: parser.parse_literals(query_view, request),
             budget: request.budget,
         };
-        let exact = owners.exact()?.retrieve_exact(&exact_request)?;
+        let exact = execute_generation_lane(
+            input.deadline.as_ref(),
+            input.cancellation.as_ref(),
+            control,
+            || owners.exact()?.retrieve_exact(&exact_request),
+        )?;
 
         let lexical_parts = lexical_query_parts(query_view.as_str())?;
         let lexical_request = LexicalLaneRequest {
@@ -369,7 +394,12 @@ impl CodeIndexSchedulerRegistryV1 {
             score_domain: input.lexical_score_domain,
             budget: request.budget,
         };
-        let lexical = owners.lexical()?.retrieve_lexical(&lexical_request)?;
+        let lexical = execute_generation_lane(
+            input.deadline.as_ref(),
+            input.cancellation.as_ref(),
+            control,
+            || owners.lexical()?.retrieve_lexical(&lexical_request),
+        )?;
 
         let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
         let graph = if graph_seeds.is_empty() {
@@ -377,20 +407,33 @@ impl CodeIndexSchedulerRegistryV1 {
                 detail: "exact and lexical lanes produced no graph seed".to_owned(),
             })
         } else {
-            match owners.graph() {
-                Ok(graph) => graph.retrieve_graph(&GraphLaneRequest {
-                    base: request.clone(),
-                    generation: generation.clone(),
-                    seed_anchors: graph_seeds,
-                    edge_kinds: input.graph_edge_kinds,
-                    max_depth: input.graph_max_depth,
-                    budget: request.budget,
-                })?,
-                Err(_) => RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                    detail: "graph serving lane is unavailable".to_owned(),
-                }),
-            }
+            execute_generation_lane(
+                input.deadline.as_ref(),
+                input.cancellation.as_ref(),
+                control,
+                || {
+                    owners.graph()?.retrieve_graph(&GraphLaneRequest {
+                        base: request.clone(),
+                        generation: generation.clone(),
+                        seed_anchors: graph_seeds,
+                        edge_kinds: input.graph_edge_kinds,
+                        max_depth: input.graph_max_depth,
+                        budget: request.budget,
+                    })
+                },
+            )?
         };
+        if !lane_served(&exact) || !lane_served(&lexical) {
+            return Err(RetrievalPortError::AuthorityUnavailable(
+                "a required exact or lexical serving lane is unavailable".to_owned(),
+            )
+            .into());
+        }
+        ensure_query_control(
+            input.deadline.as_ref(),
+            input.cancellation.as_ref(),
+            control,
+        )?;
         let lanes = vec![
             CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
                 .map_err(QueryAuthorityErrorV1::from)?,
@@ -416,6 +459,70 @@ impl CodeIndexSchedulerRegistryV1 {
             served_stale,
         })
     }
+}
+
+struct ReadyQuerySearchControl;
+
+impl SemanticExecutionControl for ReadyQuerySearchControl {
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+fn ensure_query_control<C>(
+    deadline: Option<&Deadline>,
+    cancellation: Option<&CancellationSignal>,
+    control: &C,
+) -> Result<(), RetrievalPortError>
+where
+    C: SemanticExecutionControl + Sync,
+{
+    if cancellation.is_some_and(CancellationSignal::is_cancelled)
+        || deadline.is_some_and(|deadline| {
+            tracedecay_application::clock::now_micros().0 >= deadline.expires_at.0
+        })
+        || control.is_cancelled()
+    {
+        Err(RetrievalPortError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn execute_generation_lane<E, C>(
+    deadline: Option<&Deadline>,
+    cancellation: Option<&CancellationSignal>,
+    control: &C,
+    retrieve: impl FnOnce() -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalPortError>,
+) -> Result<RetrieverOutcome<RetrieverBatch<E>>, RetrievalPortError>
+where
+    C: SemanticExecutionControl + Sync,
+{
+    ensure_query_control(deadline, cancellation, control)?;
+    let outcome = match retrieve() {
+        Ok(outcome) => outcome,
+        Err(RetrievalPortError::AuthorityUnavailable(detail)) => {
+            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable { detail })
+        }
+        Err(RetrievalPortError::Cancelled) => return Err(RetrievalPortError::Cancelled),
+        Err(error) => return Err(error),
+    };
+    ensure_query_control(deadline, cancellation, control)?;
+    if matches!(outcome, RetrieverOutcome::Cancelled) {
+        return Err(RetrievalPortError::Cancelled);
+    }
+    Ok(outcome)
+}
+
+fn lane_served<E>(outcome: &RetrieverOutcome<RetrieverBatch<E>>) -> bool {
+    matches!(
+        outcome,
+        RetrieverOutcome::Complete(_) | RetrieverOutcome::Partial { .. }
+    )
 }
 
 fn validate_search_policy(
@@ -513,6 +620,29 @@ fn graph_seeds_from_outcomes(
         _ => {}
     }
     seeds
+}
+
+#[cfg(test)]
+mod partial_tests {
+    use super::*;
+
+    #[test]
+    fn required_serving_lane_unavailability_never_fabricates_partial_recall() {
+        let outcome: RetrieverOutcome<RetrieverBatch<ExactLaneEvidence>> =
+            execute_generation_lane(None, None, &ReadyQuerySearchControl, || {
+                Err(RetrievalPortError::AuthorityUnavailable(
+                    "exact serving lane is warming".to_owned(),
+                ))
+            })
+            .expect("owner absence remains a typed lane outcome");
+
+        match outcome {
+            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable { detail }) => {
+                assert_eq!(detail, "exact serving lane is warming");
+            }
+            other => panic!("expected typed unavailable outcome, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

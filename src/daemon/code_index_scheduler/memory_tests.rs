@@ -12,7 +12,7 @@ use tracedecay_runtime_core::resident_memory::ProcessResidentMemoryV1;
 use super::queries::relation_records_with_edge_probe;
 use super::{
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexSchedulerRegistryV1,
-    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, ServingLaneV1,
+    CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1, ServingLane,
     SharedCodeIndexBytePoolV1,
 };
 use crate::code_index::production::{CodeIndexProductionErrorV1, CodeIndexPublicationStoreErrorV1};
@@ -368,10 +368,10 @@ fn lane_admission_retains_only_independently_admitted_owners() {
 #[test]
 fn one_lane_warm_failure_never_poison_caches_or_blocks_other_lanes() {
     for lane in [
-        ServingLaneV1::RecordIndex,
-        ServingLaneV1::Exact,
-        ServingLaneV1::Lexical,
-        ServingLaneV1::Graph,
+        ServingLane::RecordIndex,
+        ServingLane::Exact,
+        ServingLane::Lexical,
+        ServingLane::Graph,
     ] {
         let project = fixture();
         let store = TempDir::new().expect("store root");
@@ -396,25 +396,25 @@ fn one_lane_warm_failure_never_poison_caches_or_blocks_other_lanes() {
         );
 
         match lane {
-            ServingLaneV1::RecordIndex => {
+            ServingLane::RecordIndex => {
                 assert!(latest.record_index().is_err());
                 owners.exact().expect("exact remains independent");
                 owners.lexical().expect("lexical remains independent");
                 owners.graph().expect("graph remains independent");
             }
-            ServingLaneV1::Exact => {
+            ServingLane::Exact => {
                 assert!(owners.exact().is_err());
                 latest.record_index().expect("record remains independent");
                 owners.lexical().expect("lexical remains independent");
                 owners.graph().expect("graph remains independent");
             }
-            ServingLaneV1::Lexical => {
+            ServingLane::Lexical => {
                 assert!(owners.lexical().is_err());
                 latest.record_index().expect("record remains independent");
                 owners.exact().expect("exact remains independent");
                 owners.graph().expect("graph remains independent");
             }
-            ServingLaneV1::Graph => {
+            ServingLane::Graph => {
                 assert!(owners.graph().is_err());
                 latest.record_index().expect("record remains independent");
                 owners.exact().expect("exact remains independent");
@@ -622,9 +622,9 @@ fn realistic_corpus_retains_every_serving_component_within_authority() {
     for component in [
         "code_index.capture_working_set.v1",
         "code_index.canonical_generation.v1",
-        "code_index.serving_record_index.v1",
-        "code_index.serving_exact_lexical.v1",
-        "code_index.serving_graph.v1",
+        "code_index.serving_record_index",
+        "code_index.serving_exact_lexical",
+        "code_index.serving_graph",
     ] {
         assert!(
             snapshot

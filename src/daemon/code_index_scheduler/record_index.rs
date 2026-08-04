@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tracedecay_domain::{CodeSearchChunkId, FileOccurrenceId, SymbolOccurrenceId};
 use tracedecay_query::retrieval::ports::RetrievalPortError;
 
-use super::ServingWarmControlV1;
+use super::ServingWarmControl;
 
 /// One-time point-lookup indices over a sealed generation's record vectors.
 ///
@@ -22,7 +22,7 @@ pub(super) struct GenerationRecordIndexV1 {
 impl GenerationRecordIndexV1 {
     pub(super) fn build(
         generation: &tracedecay_code_index::production::CodeIndexPublishedGenerationV1,
-        control: &ServingWarmControlV1,
+        control: &ServingWarmControl,
     ) -> Result<Self, RetrievalPortError> {
         let files = &generation.snapshot().files;
         let mut files_by_occurrence = HashMap::with_capacity(files.len());

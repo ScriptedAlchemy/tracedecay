@@ -83,8 +83,11 @@ fn generation_lane_status(
     use tracedecay_domain::PublicRetrieverStatus;
 
     match statuses.get(&lane) {
-        Some(PublicRetrieverStatus::Complete | PublicRetrieverStatus::Partial) if !served_stale => {
+        Some(PublicRetrieverStatus::Complete) if !served_stale => {
             code_search::CodeIndexLaneStatusV1::Complete
+        }
+        Some(PublicRetrieverStatus::Partial) if !served_stale => {
+            code_search::CodeIndexLaneStatusV1::Partial
         }
         Some(
             PublicRetrieverStatus::Complete
@@ -495,6 +498,8 @@ pub(super) fn code_index_search_executor(
                     graph_max_depth: 1,
                     page_size: request.limit,
                     cursor: request.cursor,
+                    deadline: request.deadline.clone(),
+                    cancellation: request.cancellation.clone(),
                 },
                 _ => {
                     return code_index_search_unavailable(
@@ -560,23 +565,45 @@ pub(super) fn code_index_search_executor(
                 });
                 let mut control_poll = tokio::time::interval(std::time::Duration::from_millis(10));
                 control_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
+                let mut completed = None;
+                let termination = loop {
                     tokio::select! {
-                        result = &mut execution => match result {
-                            Ok(result) => break result,
-                            Err(_) => return code_index_search_unavailable(
-                                code_search::CodeIndexSearchUnavailableReasonV1::Internal,
-                                "search_task_failed",
-                            ),
-                        },
+                        result = &mut execution => {
+                            completed = Some(result);
+                            break None;
+                        }
                         _ = control_poll.tick() => {
                             if let Some(outcome) =
                                 search_terminated(&control, &admission_provider, None)
                             {
-                                execution.abort();
-                                return outcome;
+                                break Some(outcome);
                             }
                         }
+                    }
+                };
+                if let Some(outcome) = termination {
+                    match execution.await {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "code_index_search_task_failed_after_termination")
+                        }
+                    }
+                    return outcome;
+                }
+                match completed {
+                    Some(Ok(result)) => result,
+                    Some(Err(error)) => {
+                        tracing::warn!(%error, "code_index_search_task_failed");
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "search_task_failed",
+                        );
+                    }
+                    None => {
+                        return code_index_search_unavailable(
+                            code_search::CodeIndexSearchUnavailableReasonV1::Internal,
+                            "search_task_missing_completion",
+                        );
                     }
                 }
             };
@@ -624,6 +651,12 @@ pub(super) fn code_index_search_executor(
                         QuerySearchExecutionErrorV1::GenerationUnavailable => (
                             code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                             code_search::lane_reason::GENERATION_REBUILDING,
+                        ),
+                        QuerySearchExecutionErrorV1::Retrieval(
+                            tracedecay_query::retrieval::RetrievalPortError::AuthorityUnavailable(_),
+                        ) => (
+                            code_search::CodeIndexSearchUnavailableReasonV1::AuthorityUnavailable,
+                            code_search::lane_reason::SERVING_LANE_UNAVAILABLE,
                         ),
                         QuerySearchExecutionErrorV1::InvalidScope(_)
                         | QuerySearchExecutionErrorV1::InvalidPolicy(_) => (
@@ -940,4 +973,23 @@ pub(super) fn code_index_search_executor(
             )
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use tracedecay_domain::{PublicRetrieverStatus, RetrieverKind};
+
+    use super::generation_lane_status;
+
+    #[test]
+    fn partial_lane_remains_partial_in_public_coverage() {
+        let statuses = BTreeMap::from([(RetrieverKind::Graph, PublicRetrieverStatus::Partial)]);
+
+        assert_eq!(
+            generation_lane_status(&statuses, RetrieverKind::Graph, "generation.fixture", false),
+            tracedecay_query::code_search::CodeIndexLaneStatusV1::Partial
+        );
+    }
 }

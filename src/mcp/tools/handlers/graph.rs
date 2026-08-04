@@ -113,6 +113,7 @@ fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> V
     fn lane(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> Value {
         match status {
             crate::mcp::server::CodeIndexLaneStatusV1::Complete => json!("complete"),
+            crate::mcp::server::CodeIndexLaneStatusV1::Partial => json!("partial"),
             crate::mcp::server::CodeIndexLaneStatusV1::Stale { generation } => json!({
                 "status": "stale",
                 "generation": generation,

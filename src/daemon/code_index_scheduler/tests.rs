@@ -1798,6 +1798,8 @@ async fn bundled_query_profile_composes_live_code_index_lanes() {
             graph_max_depth: 1,
             page_size: 10,
             cursor: None,
+            deadline: None,
+            cancellation: None,
         },
     );
     let executed = registry
@@ -1851,6 +1853,8 @@ fn bundled_search_request(query: &str) -> super::query_runtime::QuerySearchExecu
             graph_max_depth: 1,
             page_size: 10,
             cursor: None,
+            deadline: None,
+            cancellation: None,
         },
     )
 }

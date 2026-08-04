@@ -5,6 +5,7 @@ use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use tracedecay_domain::{ComponentRevision, ExactAdmissionRuleRevision, ScoreDomainId};
 use tracedecay_query::retrieval::exact::{CentralExactAdmissionAuthorityV1, ExactLane};
@@ -20,17 +21,29 @@ use tracedecay_runtime_core::resident_memory::{
 
 use super::{LatestCompleteCodeIndexV1, record_index::GenerationRecordIndexV1};
 
-pub(super) struct ResidentReadyV1<T> {
+pub(super) struct ResidentReady<T> {
     value: T,
     _reservation: ResidentMemoryReservationV1,
 }
 
+const MAX_BACKGROUND_WARM_FAILURES: u8 = 3;
+const INITIAL_BACKGROUND_WARM_RETRY: Duration = Duration::from_millis(250);
+const MAX_BACKGROUND_WARM_RETRY: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
-pub(super) struct ServingWarmControlV1 {
-    cancelled: AtomicBool,
+struct BackgroundWarmState {
+    in_flight: bool,
+    consecutive_failures: u8,
+    retry_after: Option<Instant>,
 }
 
-impl ServingWarmControlV1 {
+#[derive(Default)]
+pub(super) struct ServingWarmControl {
+    cancelled: AtomicBool,
+    background: Mutex<BackgroundWarmState>,
+}
+
+impl ServingWarmControl {
     pub(super) fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
@@ -42,14 +55,76 @@ impl ServingWarmControlV1 {
             Ok(())
         }
     }
+
+    fn try_claim_background_warm(&self) -> bool {
+        if self.checkpoint().is_err() {
+            return false;
+        }
+        let mut state = self
+            .background
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.in_flight
+            || state.consecutive_failures >= MAX_BACKGROUND_WARM_FAILURES
+            || state
+                .retry_after
+                .is_some_and(|retry_after| retry_after > Instant::now())
+        {
+            return false;
+        }
+        state.in_flight = true;
+        true
+    }
+
+    fn finish_background_warm(&self, result: &Result<(), RetrievalPortError>) -> Option<Duration> {
+        let mut state = self
+            .background
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.in_flight = false;
+        match result {
+            Ok(()) => {
+                if state.consecutive_failures > 0 {
+                    tracing::info!(
+                        attempts = state.consecutive_failures,
+                        "code_index_serving_warm_recovered"
+                    );
+                }
+                state.consecutive_failures = 0;
+                state.retry_after = None;
+                None
+            }
+            Err(RetrievalPortError::Cancelled) if self.cancelled.load(Ordering::Acquire) => None,
+            Err(error) => {
+                state.consecutive_failures = state
+                    .consecutive_failures
+                    .saturating_add(1)
+                    .min(MAX_BACKGROUND_WARM_FAILURES);
+                let exponent = u32::from(state.consecutive_failures.saturating_sub(1));
+                let delay = INITIAL_BACKGROUND_WARM_RETRY
+                    .checked_mul(1_u32 << exponent)
+                    .unwrap_or(MAX_BACKGROUND_WARM_RETRY)
+                    .min(MAX_BACKGROUND_WARM_RETRY);
+                state.retry_after = Some(Instant::now() + delay);
+                tracing::warn!(
+                    attempt = state.consecutive_failures,
+                    retry_delay_ms = delay.as_millis() as u64,
+                    retry_scheduled = state.consecutive_failures < MAX_BACKGROUND_WARM_FAILURES,
+                    error = %error,
+                    "code_index_serving_warm_failed"
+                );
+                (state.consecutive_failures < MAX_BACKGROUND_WARM_FAILURES).then_some(delay)
+            }
+        }
+    }
 }
 
-struct ServingLaneCellV1<T> {
+struct ServingLaneCell<T> {
     ready: OnceLock<Arc<T>>,
     build_gate: Mutex<()>,
 }
 
-impl<T> ServingLaneCellV1<T> {
+impl<T> ServingLaneCell<T> {
     fn new() -> Self {
         Self {
             ready: OnceLock::new(),
@@ -91,18 +166,18 @@ impl<T> ServingLaneCellV1<T> {
     }
 }
 
-pub(super) struct GenerationServingCachesV1 {
-    pub(super) serving: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
+pub(super) struct GenerationServingCaches {
+    pub(super) serving: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwners>>>,
     pub(super) build_gate: Arc<Mutex<()>>,
-    pub(super) control: Arc<ServingWarmControlV1>,
+    pub(super) control: Arc<ServingWarmControl>,
 }
 
-impl GenerationServingCachesV1 {
+impl GenerationServingCaches {
     pub(super) fn new() -> Self {
         Self {
             serving: Arc::new(OnceLock::new()),
             build_gate: Arc::new(Mutex::new(())),
-            control: Arc::new(ServingWarmControlV1::default()),
+            control: Arc::new(ServingWarmControl::default()),
         }
     }
 
@@ -120,35 +195,35 @@ struct ExactLexicalOwnersV1 {
 }
 
 #[derive(Clone)]
-pub(super) struct ProductionCodeIndexQueryOwnersV1 {
+pub(super) struct ProductionCodeIndexQueryOwners {
     generation: Arc<super::ResidentPublishedGenerationV1>,
-    control: Arc<ServingWarmControlV1>,
-    record_index: Arc<ServingLaneCellV1<ResidentReadyV1<GenerationRecordIndexV1>>>,
-    exact_lexical: Arc<ServingLaneCellV1<ResidentReadyV1<ExactLexicalOwnersV1>>>,
-    exact: Arc<ServingLaneCellV1<()>>,
-    lexical: Arc<ServingLaneCellV1<()>>,
-    graph: Arc<ServingLaneCellV1<ResidentReadyV1<GraphLane<CodeGraphEvidenceAdapterV1>>>>,
+    control: Arc<ServingWarmControl>,
+    record_index: Arc<ServingLaneCell<ResidentReady<GenerationRecordIndexV1>>>,
+    exact_lexical: Arc<ServingLaneCell<ResidentReady<ExactLexicalOwnersV1>>>,
+    exact: Arc<ServingLaneCell<()>>,
+    lexical: Arc<ServingLaneCell<()>>,
+    graph: Arc<ServingLaneCell<ResidentReady<GraphLane<CodeGraphEvidenceAdapterV1>>>>,
     #[cfg(test)]
     faulted_lanes: Arc<AtomicU8>,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-pub(super) enum ServingLaneV1 {
+pub(super) enum ServingLane {
     RecordIndex = 1,
     Exact = 2,
     Lexical = 4,
     Graph = 8,
 }
 
-impl ProductionCodeIndexQueryOwnersV1 {
+impl ProductionCodeIndexQueryOwners {
     #[cfg(test)]
-    pub(super) fn fail_next(&self, lane: ServingLaneV1) {
+    pub(super) fn fail_next(&self, lane: ServingLane) {
         self.faulted_lanes.fetch_or(lane as u8, Ordering::AcqRel);
     }
 
     #[cfg(test)]
-    fn lane_checkpoint(&self, lane: ServingLaneV1) -> Result<(), RetrievalPortError> {
+    fn lane_checkpoint(&self, lane: ServingLane) -> Result<(), RetrievalPortError> {
         let mask = lane as u8;
         let previous = self.faulted_lanes.fetch_and(!mask, Ordering::AcqRel);
         if previous & mask == 0 {
@@ -176,7 +251,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
     fn warm_exact(&self) -> Result<(), RetrievalPortError> {
         self.exact.get_or_try_init(|| {
             #[cfg(test)]
-            self.lane_checkpoint(ServingLaneV1::Exact)?;
+            self.lane_checkpoint(ServingLane::Exact)?;
             self.control.checkpoint()?;
             let _ = self.exact_lexical_owners()?;
             self.control.checkpoint()?;
@@ -195,7 +270,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
     fn warm_lexical(&self) -> Result<(), RetrievalPortError> {
         self.lexical.get_or_try_init(|| {
             #[cfg(test)]
-            self.lane_checkpoint(ServingLaneV1::Lexical)?;
+            self.lane_checkpoint(ServingLane::Lexical)?;
             self.control.checkpoint()?;
             let _ = self.exact_lexical_owners()?;
             self.control.checkpoint()?;
@@ -230,9 +305,9 @@ impl ProductionCodeIndexQueryOwnersV1 {
 
     fn build_record_index(
         &self,
-    ) -> Result<ResidentReadyV1<GenerationRecordIndexV1>, RetrievalPortError> {
+    ) -> Result<ResidentReady<GenerationRecordIndexV1>, RetrievalPortError> {
         #[cfg(test)]
-        self.lane_checkpoint(ServingLaneV1::RecordIndex)?;
+        self.lane_checkpoint(ServingLane::RecordIndex)?;
         self.control.checkpoint()?;
         let record_entries = self
             .generation
@@ -261,10 +336,10 @@ impl ProductionCodeIndexQueryOwnersV1 {
             8 * 1024 * 1024,
         )?;
         let reservation =
-            self.reserve_serving_component("code_index.serving_record_index.v1", record_bytes)?;
+            self.reserve_serving_component("code_index.serving_record_index", record_bytes)?;
         let value = GenerationRecordIndexV1::build(self.generation.as_ref(), &self.control)?;
         self.control.checkpoint()?;
-        Ok(ResidentReadyV1 {
+        Ok(ResidentReady {
             value,
             _reservation: reservation,
         })
@@ -278,14 +353,14 @@ impl ProductionCodeIndexQueryOwnersV1 {
 
     fn build_exact_lexical_owners(
         &self,
-    ) -> Result<ResidentReadyV1<ExactLexicalOwnersV1>, RetrievalPortError> {
+    ) -> Result<ResidentReady<ExactLexicalOwnersV1>, RetrievalPortError> {
         self.control.checkpoint()?;
         let requested_bytes = conservative_exact_lexical_reservation(
             self.generation.sealed_bytes,
             self.generation.chunks().chunks().len(),
         )?;
         let reservation =
-            self.reserve_serving_component("code_index.serving_exact_lexical.v1", requested_bytes)?;
+            self.reserve_serving_component("code_index.serving_exact_lexical", requested_bytes)?;
         let generation_id = self.generation.manifest().generation_id.clone();
         let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
             self.generation.manifest().seal.sealed_at,
@@ -330,7 +405,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
         let exact = ExactLane::new(authority.clone(), projection.exact_adapter(authority));
         let lexical = LexicalLane::new(projection);
         self.control.checkpoint()?;
-        Ok(ResidentReadyV1 {
+        Ok(ResidentReady {
             value: ExactLexicalOwnersV1 { exact, lexical },
             _reservation: reservation,
         })
@@ -338,9 +413,9 @@ impl ProductionCodeIndexQueryOwnersV1 {
 
     fn build_graph_owner(
         &self,
-    ) -> Result<ResidentReadyV1<GraphLane<CodeGraphEvidenceAdapterV1>>, RetrievalPortError> {
+    ) -> Result<ResidentReady<GraphLane<CodeGraphEvidenceAdapterV1>>, RetrievalPortError> {
         #[cfg(test)]
-        self.lane_checkpoint(ServingLaneV1::Graph)?;
+        self.lane_checkpoint(ServingLane::Graph)?;
         self.control.checkpoint()?;
         let graph_entries = self
             .generation
@@ -357,7 +432,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
             8 * 1024 * 1024,
         )?;
         let reservation =
-            self.reserve_serving_component("code_index.serving_graph.v1", requested_bytes)?;
+            self.reserve_serving_component("code_index.serving_graph", requested_bytes)?;
         let freshness = tracedecay_query::retrieval::graph::production_code_index_freshness(
             self.generation.manifest().seal.sealed_at,
             ComponentRevision::new("policy.daemon.v1")
@@ -371,7 +446,7 @@ impl ProductionCodeIndexQueryOwnersV1 {
             self.generation.chunks().shared_chunks(),
         )?);
         self.control.checkpoint()?;
-        Ok(ResidentReadyV1 {
+        Ok(ResidentReady {
             value,
             _reservation: reservation,
         })
@@ -440,6 +515,17 @@ fn conservative_exact_lexical_reservation(
 }
 
 impl LatestCompleteCodeIndexV1 {
+    pub(super) fn try_claim_background_warm(&self) -> bool {
+        self.warm_control.try_claim_background_warm()
+    }
+
+    pub(super) fn finish_background_warm(
+        &self,
+        result: &Result<(), RetrievalPortError>,
+    ) -> Option<Duration> {
+        self.warm_control.finish_background_warm(result)
+    }
+
     pub(super) fn record_index(&self) -> Result<&GenerationRecordIndexV1, RetrievalPortError> {
         let _ = self.production_query_owners()?;
         self.serving
@@ -499,7 +585,7 @@ impl LatestCompleteCodeIndexV1 {
 
     pub(super) fn production_query_owners(
         &self,
-    ) -> Result<Arc<ProductionCodeIndexQueryOwnersV1>, RetrievalPortError> {
+    ) -> Result<Arc<ProductionCodeIndexQueryOwners>, RetrievalPortError> {
         if let Some(owners) = self.serving.get() {
             return Ok(Arc::clone(owners));
         }
@@ -511,18 +597,51 @@ impl LatestCompleteCodeIndexV1 {
             return Ok(Arc::clone(owners));
         }
         self.warm_control.checkpoint()?;
-        let owners = Arc::new(ProductionCodeIndexQueryOwnersV1 {
+        let owners = Arc::new(ProductionCodeIndexQueryOwners {
             generation: Arc::clone(&self.generation),
             control: Arc::clone(&self.warm_control),
-            record_index: Arc::new(ServingLaneCellV1::new()),
-            exact_lexical: Arc::new(ServingLaneCellV1::new()),
-            exact: Arc::new(ServingLaneCellV1::new()),
-            lexical: Arc::new(ServingLaneCellV1::new()),
-            graph: Arc::new(ServingLaneCellV1::new()),
+            record_index: Arc::new(ServingLaneCell::new()),
+            exact_lexical: Arc::new(ServingLaneCell::new()),
+            exact: Arc::new(ServingLaneCell::new()),
+            lexical: Arc::new(ServingLaneCell::new()),
+            graph: Arc::new(ServingLaneCell::new()),
             #[cfg(test)]
             faulted_lanes: Arc::new(AtomicU8::new(0)),
         });
         let _ = self.serving.set(Arc::clone(&owners));
         Ok(self.serving.get().map(Arc::clone).unwrap_or(owners))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn background_warm_failure_persists_a_bounded_retry() {
+        let control = ServingWarmControl {
+            cancelled: AtomicBool::new(false),
+            background: Mutex::new(BackgroundWarmState::default()),
+        };
+        let failure = Err(RetrievalPortError::AuthorityUnavailable(
+            "graph serving lane is warming".to_owned(),
+        ));
+        for attempt in 1..=MAX_BACKGROUND_WARM_FAILURES {
+            assert!(control.try_claim_background_warm());
+            let retry_after = control.finish_background_warm(&failure);
+            let mut state = control
+                .background
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(state.consecutive_failures, attempt);
+            assert_eq!(
+                retry_after,
+                (attempt < MAX_BACKGROUND_WARM_FAILURES)
+                    .then_some(INITIAL_BACKGROUND_WARM_RETRY * (1_u32 << (attempt - 1)))
+            );
+            state.retry_after = None;
+        }
+
+        assert!(!control.try_claim_background_warm());
     }
 }

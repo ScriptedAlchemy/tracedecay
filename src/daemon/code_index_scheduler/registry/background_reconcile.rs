@@ -51,11 +51,31 @@ pub(super) fn spawn_bounded_warm(
     admission: Arc<tokio::sync::Semaphore>,
     latest: LatestCompleteCodeIndexV1,
 ) {
+    if !latest.try_claim_background_warm() {
+        return;
+    }
     tokio::spawn(async move {
-        let Ok(_admission) = admission.acquire_owned().await else {
+        let Ok(_admission) = admission.clone().acquire_owned().await else {
             latest.warm_control.cancel();
             return;
         };
-        let _ = tokio::task::spawn_blocking(move || latest.warm_serving_caches()).await;
+        let worker_latest = latest.clone();
+        let result =
+            match tokio::task::spawn_blocking(move || worker_latest.warm_serving_caches()).await {
+                Ok(result) => result,
+                Err(error) => Err(
+                    tracedecay_query::retrieval::ports::RetrievalPortError::AuthorityUnavailable(
+                        format!("serving warm worker terminated: {error}"),
+                    ),
+                ),
+            };
+        if let Some(retry_after) = latest.finish_background_warm(&result) {
+            let retry_admission = admission.clone();
+            let retry_latest = latest.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(retry_after).await;
+                spawn_bounded_warm(retry_admission, retry_latest);
+            });
+        }
     });
 }

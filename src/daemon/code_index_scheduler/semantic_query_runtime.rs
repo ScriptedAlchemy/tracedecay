@@ -337,7 +337,9 @@ impl CodeIndexSchedulerRegistryV1 {
     where
         C: SemanticExecutionControl + Sync,
     {
-        let query = self.execute_query_search(scope, input).await?;
+        let query = self
+            .execute_query_search_with_control(scope, input, control)
+            .await?;
         let Some(latest) = self.generation_for(scope, &query.generation).await else {
             let semantic = semantic_abstention(
                 mode,

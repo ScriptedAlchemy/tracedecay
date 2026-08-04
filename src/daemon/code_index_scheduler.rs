@@ -27,9 +27,11 @@ use tracedecay_domain::{
     SanitizedCodeSnapshotV1, SanitizerDispositionV1, SanitizerRevision, SensitivityLevelV1,
     SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
 };
+#[cfg(test)]
+use tracedecay_runtime_core::resident_memory::DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1;
 use tracedecay_runtime_core::resident_memory::{
-    DEFAULT_PROCESS_RESIDENT_MEMORY_LIMIT_V1, ProcessResidentMemoryV1, ResidentMemoryComponentIdV1,
-    ResidentMemoryKeyV1, ResidentMemoryReclaimerRegistrationV1, ResidentMemoryReservationV1,
+    ProcessResidentMemoryV1, ResidentMemoryComponentIdV1, ResidentMemoryKeyV1,
+    ResidentMemoryReclaimerRegistrationV1, ResidentMemoryReservationV1,
 };
 
 use crate::{
@@ -862,13 +864,13 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: Arc<ResidentPublishedGenerationV1>,
-    serving: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwnersV1>>>,
+    serving: Arc<OnceLock<Arc<ProductionCodeIndexQueryOwners>>>,
     /// Single-flight gate for the O(store) lane-owner build. Without it every
     /// query that raced the activation warm rebuilt the full lexical/exact
     /// projection inline — N concurrent cold queries did N store-sized builds,
     /// each blowing its own dispatch deadline while the warm was still running.
     query_owners_build_gate: Arc<Mutex<()>>,
-    warm_control: Arc<ServingWarmControlV1>,
+    warm_control: Arc<ServingWarmControl>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1027,7 +1029,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     shutting_down: Arc<AtomicBool>,
     reconcile_in_progress: Arc<AtomicBool>,
     latest_content_identity: Option<ContentDigest>,
-    query_owners: Arc<Mutex<BTreeMap<CodeGenerationId, Arc<GenerationServingCachesV1>>>>,
+    query_owners: Arc<Mutex<BTreeMap<CodeGenerationId, Arc<GenerationServingCaches>>>>,
     _serving_reclaimer: Arc<ResidentMemoryReclaimerRegistrationV1>,
     /// Optional semantic hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
@@ -1181,7 +1183,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // witness above already proved the generation current.
         let query_owners = Arc::new(Mutex::new(BTreeMap::<
             CodeGenerationId,
-            Arc<GenerationServingCachesV1>,
+            Arc<GenerationServingCaches>,
         >::new()));
         let weak_query_owners = Arc::downgrade(&query_owners);
         let serving_reclaimer = publication
@@ -1697,7 +1699,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let caches = cached
             .entry(generation_id.clone())
-            .or_insert_with(|| Arc::new(GenerationServingCachesV1::new()))
+            .or_insert_with(|| Arc::new(GenerationServingCaches::new()))
             .clone();
         while cached.len() > DECODED_GENERATION_CACHE_CAPACITY + 1 {
             let evicted = cached

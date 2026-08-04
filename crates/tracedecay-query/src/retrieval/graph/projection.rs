@@ -52,6 +52,8 @@ pub struct CodeGraphEvidenceAdapterV1 {
     nodes: Arc<BTreeMap<SymbolOccurrenceId, NodeId>>,
     edges: Arc<BTreeMap<EdgeId, GraphPathSegmentV1>>,
     symbols: Arc<BTreeMap<SymbolOccurrenceId, SymbolBindingV1>>,
+    _canonical_edges: Arc<Vec<CanonicalRelationEdgeV1>>,
+    _canonical_chunks: Arc<Vec<CodeSearchChunkV1>>,
 }
 
 impl fmt::Debug for CodeGraphEvidenceAdapterV1 {
@@ -77,6 +79,23 @@ impl CodeGraphEvidenceAdapterV1 {
         edges: &[CanonicalRelationEdgeV1],
         chunks: &[CodeSearchChunkV1],
     ) -> Result<Self, RetrievalPortError> {
+        Self::new_shared(
+            generation,
+            repository_id,
+            freshness,
+            Arc::new(edges.to_vec()),
+            Arc::new(chunks.to_vec()),
+        )
+    }
+
+    /// Build a graph view over the generation's canonical allocations.
+    pub fn new_shared(
+        generation: CodeGenerationId,
+        repository_id: Option<RepositoryId>,
+        freshness: SourceFreshness,
+        edges: Arc<Vec<CanonicalRelationEdgeV1>>,
+        chunks: Arc<Vec<CodeSearchChunkV1>>,
+    ) -> Result<Self, RetrievalPortError> {
         generation.validate().map_err(contract_error)?;
         if let Some(repository_id) = &repository_id {
             repository_id.validate().map_err(contract_error)?;
@@ -95,7 +114,7 @@ impl CodeGraphEvidenceAdapterV1 {
             .map_err(contract_error)?;
 
         let mut symbols = BTreeMap::new();
-        for chunk in chunks {
+        for chunk in chunks.iter() {
             if chunk.anchor.generation_id != generation {
                 return Err(RetrievalPortError::GenerationMismatch);
             }
@@ -207,6 +226,8 @@ impl CodeGraphEvidenceAdapterV1 {
             nodes: Arc::new(nodes),
             edges: Arc::new(projected_edges),
             symbols: Arc::new(symbols),
+            _canonical_edges: edges,
+            _canonical_chunks: chunks,
         })
     }
 
