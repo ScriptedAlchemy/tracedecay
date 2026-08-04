@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 #[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
@@ -12,11 +12,32 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Notify};
 
 use super::{DirtySet, ProjectHealth};
+use crate::application::context::CancellationToken;
 use crate::daemon::maintenance::MaintenanceCoordinator;
 
 pub(super) enum WorktreeRegistration {
     Ready,
     Capacity,
+}
+
+#[derive(Clone)]
+pub(super) struct WatchCancellation {
+    daemon: CancellationToken,
+    repository: CancellationToken,
+}
+
+impl WatchCancellation {
+    pub(super) fn is_cancelled(&self) -> bool {
+        self.daemon.is_cancelled() || self.repository.is_cancelled()
+    }
+
+    pub(super) async fn cancelled(&self) {
+        tokio::select! {
+            biased;
+            () = self.daemon.cancelled() => {}
+            () = self.repository.cancelled() => {}
+        }
+    }
 }
 
 #[cfg(test)]
@@ -35,10 +56,7 @@ impl OperationScanProbe {
         self.armed.store(true, Ordering::Release);
     }
 
-    pub(super) fn block_if_armed(
-        &self,
-        cancellation: &crate::application::context::CancellationToken,
-    ) {
+    pub(super) fn block_if_armed(&self, cancellation: &WatchCancellation) {
         if !self.armed.swap(false, Ordering::AcqRel) {
             return;
         }
@@ -80,6 +98,7 @@ pub(super) struct WatchState {
     pub(super) maintenance: MaintenanceCoordinator,
     pub(super) health: ProjectHealth,
     pub(super) task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    retirement: CancellationToken,
     #[cfg(test)]
     pub(super) entered_debounce: Notify,
     #[cfg(test)]
@@ -107,6 +126,7 @@ impl WatchState {
             maintenance,
             health: ProjectHealth::default(),
             task: Mutex::new(None),
+            retirement: CancellationToken::new(),
             #[cfg(test)]
             entered_debounce: Notify::new(),
             #[cfg(test)]
@@ -163,40 +183,30 @@ impl WatchState {
             .collect()
     }
 
-    /// Git directories whose operation markers can transiently move shared
-    /// repository refs. This includes linked worktrees not yet mounted by the
-    /// daemon: their operation still affects every registered root.
-    pub(super) fn operation_git_dirs(
-        &self,
-        max_worktrees: usize,
-        mut should_stop: impl FnMut() -> bool,
-    ) -> Option<Vec<PathBuf>> {
-        if should_stop() {
-            return None;
+    pub(super) fn worktrees(&self) -> Vec<(PathBuf, PathBuf)> {
+        self.worktrees
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(root, git_dir)| (root.clone(), git_dir.clone()))
+            .collect()
+    }
+
+    pub(super) fn cancellation(&self, daemon: &CancellationToken) -> WatchCancellation {
+        WatchCancellation {
+            daemon: daemon.clone(),
+            repository: self.retirement.clone(),
         }
-        let mut git_dirs = self.git_dirs().into_iter().collect::<BTreeSet<_>>();
-        if git_dirs.len() > max_worktrees {
-            return None;
-        }
-        match std::fs::read_dir(self.common_dir.join("worktrees")) {
-            Ok(entries) => {
-                for entry in entries {
-                    if should_stop() {
-                        return None;
-                    }
-                    let entry = entry.ok()?;
-                    if entry.file_type().ok()?.is_dir() {
-                        git_dirs.insert(entry.path());
-                        if git_dirs.len() > max_worktrees {
-                            return None;
-                        }
-                    }
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return None,
-        }
-        Some(git_dirs.into_iter().collect())
+    }
+
+    pub(super) fn retire(&self) {
+        self.retirement.cancel();
+        self.wake.notify_waiters();
+        self.reconfigure.notify_waiters();
+    }
+
+    pub(super) fn is_retired(&self) -> bool {
+        self.retirement.is_cancelled()
     }
 
     pub(super) fn prune_missing_worktrees(&self, mut should_stop: impl FnMut() -> bool) -> bool {
@@ -217,6 +227,13 @@ impl WatchState {
             worktrees.remove(&root);
         }
         true
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.worktrees
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
     }
 
     #[cfg(test)]
