@@ -7,30 +7,31 @@ pub struct Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC> {
     pub ci_exact_evidence: CE,
     pub proximity_evidence: PE,
     pub github_source_access: Option<Arc<dyn GitHubSourceAccessAuthorityV1>>,
-    /// Canonical Plan 20 configuration authority. The proximity owner pins the
+    /// Canonical configuration authority. The proximity owner pins the
     /// effective threshold from this source and has no local default.
     pub configuration: PC,
 }
 
 pub struct Pr13AdvisoryRuntimeOpenV1 {
-    /// Clone of the project database used to open the PR12 feedback runtime.
+    /// Clone of the admitted project database used to open the feedback runtime.
     pub database: Database,
     pub project_root: PathBuf,
     pub resolved_scope: ResolvedScope,
     pub feedback_scope: FeedbackScopeV1,
     pub github: Option<GitHubReviewRuntimeOwnerConfigV1>,
-    /// The already-open PR12 Plan 09 owner. PR13 uses its exact authorization,
-    /// diagnostics/impact ports, publication store, and durable dedupe path.
+    /// The already-open feedback owner. Advisory work uses its exact
+    /// authorization, diagnostics/impact ports, publication store, and durable
+    /// dedupe path.
     pub feedback_cycle: Arc<Pr12FeedbackCycleRuntime>,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum Pr13AdvisoryRuntimeOpenErrorV1 {
-    #[error("PR13 advisory scope does not match the shared PR12 runtime")]
+    #[error("advisory scope does not match the shared feedback runtime")]
     ScopeMismatch,
-    #[error("PR13 GitHub runtime is unavailable")]
+    #[error("GitHub advisory runtime is unavailable")]
     GitHubRuntimeUnavailable,
-    #[error("PR13 proximity runtime is unavailable")]
+    #[error("proximity advisory runtime is unavailable")]
     ProximityRuntimeUnavailable,
 }
 
@@ -42,7 +43,7 @@ pub enum Pr13AdvisoryProviderV1 {
 }
 
 /// No adapter-local lifecycle axes: source records retain their exact
-/// lifecycle/provenance/coverage and composition carries only Plan 09 state.
+/// lifecycle/provenance/coverage and composition carries only admitted state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pr13AdvisoryProviderStateV1 {
     pub provider: Pr13AdvisoryProviderV1,
