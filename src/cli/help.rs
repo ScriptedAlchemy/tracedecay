@@ -224,7 +224,7 @@ Examples:
   tracedecay daemon status                       Service and socket state
   tracedecay daemon install-service              Install + start the user service
   tracedecay daemon restart                      Restart after a version mismatch
-  tracedecay daemon run --socket /tmp/td.sock    Foreground run (debugging)
+  tracedecay daemon run --socket ~/.tracedecay/debug.sock    Foreground run (debugging)
 
 Related: tracedecay doctor (detects daemon problems), tracedecay serve.";
 
