@@ -257,6 +257,7 @@ pub(super) async fn handle_search(
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
             query: query.to_owned(),
+            source_revision: None,
             limit,
             cursor,
             mode: semantic_mode,
@@ -1897,6 +1898,7 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_revision: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
@@ -1926,6 +1928,7 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_revision: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,

@@ -33,7 +33,7 @@ fn symbol_key(symbol: &code_search::CodeIndexBranchSymbolV1) -> SymbolKey {
     )
 }
 
-fn diff_symbols(
+pub(super) fn diff_symbols(
     base_generation: &str,
     base: Vec<code_search::CodeIndexBranchSymbolV1>,
     head_generation: &str,
@@ -74,7 +74,7 @@ fn diff_symbols(
     }
 }
 
-fn generation_symbols(
+pub(super) fn generation_symbols(
     generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
     file_filter: Option<&str>,
     kind_filter: Option<&str>,
