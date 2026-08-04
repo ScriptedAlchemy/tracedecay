@@ -196,39 +196,37 @@ async fn cursor_prompt_memory_recall(event_json: &str) -> Option<String> {
 
 /// Cursor `sessionEnd` hook handler (fire-and-forget).
 ///
-/// Final transcript-ingest flush when a conversation ends (including
-/// `window_close` / `user_close`, which the end-of-turn `stop` hook can
-/// miss). `sessionEnd` receives the common-schema `transcript_path`, so the
-/// regular capped catch-up ingest applies. The response is logged but unused,
-/// so an empty object is emitted. Fail-open.
+/// Legacy Cursor completion command. It still presents the host event to the
+/// canonical V2 decoder; unsupported legacy payloads fail open with an empty
+/// object and never trigger hook-local transcript work.
 pub async fn hook_cursor_session_end() -> i32 {
-    hook_cursor_session_completion("sessionEnd").await
+    let event = read_hook_event!();
+    println!(
+        "{}",
+        cursor_session_completion_response("sessionEnd", &event).await
+    );
+    0
 }
 
-async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
-    let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, hook_name, &event);
-    if hook_name == "stop"
-        && let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+async fn cursor_session_completion_response(hook_name: &str, event: &str) -> String {
+    let root = cursor_project_root_from_event_with_identity(event).await;
+    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Cursor, hook_name, event);
+    let guidance = match root.as_deref() {
+        Some(root) => super::v2::dispatch(
             tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
+            event,
             root,
             Some(&hook_telemetry),
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!("{}", serde_json::json!({ "additional_context": guidance }));
-        } else {
-            println!("{}", serde_json::json!({}));
-        }
-        return 0;
-    }
-    println!("{}", serde_json::json!({}));
-    0
+        .flatten(),
+        None => None,
+    };
+    guidance.map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| serde_json::json!({ "additional_context": guidance }).to_string(),
+    )
 }
 
 /// Cursor `stop` hook handler (fire-and-forget).
@@ -237,7 +235,12 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
 /// the daemon. The adapter stays fail-open and emits an empty object when the
 /// daemon has no immediate guidance.
 pub async fn hook_cursor_stop() -> i32 {
-    hook_cursor_session_completion("stop").await
+    let event = read_hook_event!();
+    println!(
+        "{}",
+        cursor_session_completion_response("stop", &event).await
+    );
+    0
 }
 
 /// Cursor `preCompact` hook handler.
@@ -256,32 +259,36 @@ pub async fn hook_cursor_pre_compact() -> i32 {
 /// schedules any indexing or advisory follow-up after the response returns.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
+    if let Some(response) = cursor_after_file_edit_response(&event).await {
+        println!("{response}");
+    }
+    0
+}
+
+async fn cursor_after_file_edit_response(event: &str) -> Option<String> {
     // One parse for the root, the analytics row, and the daemon notification.
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_parsed_event_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Cursor,
         "afterFileEdit",
-        &event,
+        event,
         &parsed,
     );
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+    match root.as_deref() {
+        Some(root) => super::v2::dispatch(
             tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
+            event,
             root,
             Some(&hook_telemetry),
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!("{}", serde_json::json!({ "additional_context": guidance }));
-        }
-        return 0;
+        .flatten()
+        .map(|guidance| serde_json::json!({ "additional_context": guidance }).to_string()),
+        None => None,
     }
-    0
 }
 
 /// Cursor `sessionStart` hook handler (fire-and-forget).
@@ -290,14 +297,18 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
 /// generating host-local context.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let root = cursor_project_root_from_event_with_identity(&event).await;
+    println!("{}", cursor_session_start_response(&event).await);
+    0
+}
+
+async fn cursor_session_start_response(event: &str) -> String {
+    let root = cursor_project_root_from_event_with_identity(event).await;
     let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
+        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", event);
     let guidance = if let Some(root) = root.as_deref() {
         super::v2::dispatch(
             tracedecay_hooks::HookHostV1::CursorDesktop,
-            &event,
+            event,
             root,
             Some(&hook_telemetry),
         )
@@ -307,11 +318,7 @@ pub async fn hook_cursor_session_start() -> i32 {
     } else {
         None
     };
-    println!(
-        "{}",
-        cursor_session_start_json(None, guidance.as_deref().unwrap_or(""))
-    );
-    0
+    cursor_session_start_json(root.as_deref(), guidance.as_deref().unwrap_or(""))
 }
 
 fn cursor_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
@@ -1030,6 +1037,138 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn bind_v2_project(project_root: &Path, project_id: &str) {
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        crate::hooks::v2::publish_test_binding(
+            project_root,
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+        )
+        .unwrap();
+    }
+
+    fn accepted_admission() -> Value {
+        serde_json::json!({
+            "action": "hook_v2_admit",
+            "status": "accepted",
+            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+            "orchestration": null,
+            "ready_guidance": null,
+            "feedback_notice": null,
+            "reason": null,
+        })
+    }
+
+    fn assert_v2_admission(
+        daemon: &crate::hooks::TestDaemonHookActionGuard,
+        project_root: &Path,
+        session_id: &str,
+    ) {
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some(project_root));
+        assert_eq!(calls[0].1["action"], "hook_v2_admit");
+        assert_eq!(calls[0].1["native_session_id"], session_id);
+        assert_eq!(
+            calls[0].1["envelope"]["producer"],
+            serde_json::json!(tracedecay_hooks::HookHostV1::CursorDesktop)
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_admits_the_native_boundary_within_hook_budget() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        bind_v2_project(&project_root, "proj_cursor_stop_admission");
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([accepted_admission()]);
+        let event = serde_json::json!({
+            "hook_event_name": "stop",
+            "conversation_id": "cursor-stop-session",
+            "generation_id": "cursor-stop-generation",
+            "model": "cursor-test-model",
+            "status": "completed",
+            "loop_count": 0,
+            "cwd": project_root,
+            "workspace_roots": [project_root],
+        })
+        .to_string();
+
+        let started = std::time::Instant::now();
+        let response = cursor_session_completion_response("stop", &event).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "native stop admission exceeded the bounded hook path"
+        );
+        assert_eq!(response, serde_json::json!({}).to_string());
+        assert_v2_admission(&daemon, &project_root, "cursor-stop-session");
+    }
+
+    #[tokio::test]
+    async fn after_file_edit_admits_the_native_edit_within_hook_budget() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        bind_v2_project(&project_root, "proj_cursor_edit_admission");
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([accepted_admission()]);
+        let event = serde_json::json!({
+            "hook_event_name": "afterFileEdit",
+            "conversation_id": "cursor-edit-session",
+            "generation_id": "cursor-edit-generation",
+            "model": "cursor-test-model",
+            "file_path": project_root.join("src/lib.rs"),
+            "edits": [{ "old_string": "", "new_string": "pub fn changed() {}" }],
+            "session_id": "cursor-edit-session",
+            "cursor_version": "test",
+            "workspace_roots": [project_root],
+            "user_email": null,
+            "transcript_path": project_root.join("session.jsonl"),
+        })
+        .to_string();
+
+        let started = std::time::Instant::now();
+        assert_eq!(cursor_after_file_edit_response(&event).await, None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "native edit admission exceeded the bounded hook path"
+        );
+        assert_v2_admission(&daemon, &project_root, "cursor-edit-session");
+    }
+
+    #[tokio::test]
+    async fn session_start_admits_and_returns_the_resolved_workspace_identity() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        bind_v2_project(&project_root, "proj_cursor_start_admission");
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([accepted_admission()]);
+        let event = serde_json::json!({
+            "hook_event_name": "sessionStart",
+            "conversation_id": "cursor-start-session",
+            "workspace_roots": [project_root],
+        })
+        .to_string();
+
+        let started = std::time::Instant::now();
+        let response = cursor_session_start_response(&event).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "native session-start admission exceeded the bounded hook path"
+        );
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            response["env"]["TRACEDECAY_PROJECT_ROOT"],
+            project_root.to_string_lossy().as_ref()
+        );
+        assert_v2_admission(&daemon, &project_root, "cursor-start-session");
     }
 
     /// The `beforeSubmitPrompt` surface must run the same prompt-path `decide_hint`
