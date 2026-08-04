@@ -89,44 +89,18 @@ pub(crate) fn doctor_runtime_request(request_line: &str) -> Option<DoctorRuntime
 }
 
 fn doctor_runtime_temporal_unavailable(reason: &str) -> serde_json::Value {
-    let finding = match reason {
-        "project_store_missing" | "session_store_missing" => "migration_gap",
-        _ => "compatibility_drift",
-    };
     json!({
         "status": if reason.ends_with("_locked") { "locked" } else { "unavailable" },
         "reason": reason,
-        "findings": [{
-            "kind": finding,
-            "count": 1,
-        }],
     })
 }
 
 fn doctor_runtime_temporal_report(
     report: crate::global_db::SessionTemporalHealthReport,
 ) -> serde_json::Value {
-    let mut value = serde_json::to_value(report).unwrap_or_else(|_| {
+    let value = serde_json::to_value(report).unwrap_or_else(|_| {
         doctor_runtime_temporal_unavailable("session_health_serialization_failed")
     });
-    let has_reason = value
-        .get("reason")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|reason| !reason.is_empty());
-    let unavailable_without_findings = value.get("status").and_then(serde_json::Value::as_str)
-        == Some("unavailable")
-        && value
-            .get("findings")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(Vec::is_empty);
-    // Preserve fixed path-API reasons (for example uncheckpointed_wal). Only
-    // synthesize a compatibility finding when the report is reason-less.
-    if unavailable_without_findings && !has_reason {
-        value["findings"] = json!([{
-            "kind": "compatibility_drift",
-            "count": 1,
-        }]);
-    }
     value
 }
 
@@ -250,12 +224,6 @@ async fn doctor_literal_workspace_placeholder_paths(
     paths
 }
 
-fn doctor_sidecar_size(db_path: &Path, suffix: &str) -> u64 {
-    let mut path = db_path.as_os_str().to_os_string();
-    path.push(suffix);
-    std::fs::metadata(PathBuf::from(path)).map_or(0, |metadata| metadata.len())
-}
-
 fn doctor_runtime_coverage(startup_health_only: bool) -> Option<serde_json::Value> {
     startup_health_only.then(|| {
         json!({
@@ -358,8 +326,6 @@ async fn doctor_runtime_value_inner(
             "db_path": graph_path,
             "canonical_db_path": canonical_graph_path,
             "db_size_bytes": db_size_bytes,
-            "wal_size_bytes": doctor_sidecar_size(&graph_path, "-wal"),
-            "shm_size_bytes": doctor_sidecar_size(&graph_path, "-shm"),
             "journal_mode": null,
             "synchronous": null,
             "page_size": page_size,
@@ -607,17 +573,18 @@ where
 mod doctor_runtime_route_tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use rusqlite::Connection;
 
     use super::{
         cold_doctor_runtime_value, doctor_runtime_coverage, doctor_runtime_request,
-        doctor_runtime_store_paths, serve_core_doctor_runtime_request,
+        serve_core_doctor_runtime_request,
     };
     use crate::client_identity::DaemonClientIdentity;
     use crate::daemon::{DaemonHandshake, DaemonLifecycle, StoreAdministration};
-    use crate::mcp::McpTransport;
+    use crate::mcp::server::McpServerConstructionContext;
+    use crate::mcp::{McpServer, McpTransport};
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
     static REGISTERED_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
@@ -647,43 +614,6 @@ mod doctor_runtime_route_tests {
         async fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
-    }
-
-    async fn registered_project_session_database(
-        profile_root: &Path,
-        project_root: &Path,
-    ) -> (
-        crate::db::DaemonDatabaseScope,
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
-        Arc<crate::global_db::RegisteredGlobalDb>,
-    ) {
-        let identity = crate::daemon::profile_identity::load_or_create(profile_root)
-            .expect("load test profile identity");
-        let nonce = REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
-        let scope =
-            crate::db::enter_daemon_database_scope(profile_root, nonce, "core-doctor-test-runtime")
-                .expect("enter test daemon database scope");
-        let registry =
-            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
-                identity,
-            )
-            .await
-            .expect("open test session runtime registry");
-        let layout = crate::storage::resolve_persisted_layout(project_root, profile_root)
-            .expect("resolve test project layout")
-            .expect("test project must be enrolled");
-        let project_id = tracedecay_store::ProjectId::new(
-            layout.identity.project_id.expect("test project identity"),
-        )
-        .expect("valid test project identity");
-        let database = registry
-            .project_sessions(
-                project_id,
-                [project_root.to_path_buf(), layout.project_root],
-            )
-            .await
-            .expect("mount registered test project sessions");
-        (scope, registry, database)
     }
 
     async fn initialize_test_project(
@@ -781,38 +711,6 @@ mod doctor_runtime_route_tests {
         let mut entries = Vec::new();
         visit(root, root, &mut entries);
         entries
-    }
-
-    async fn checkpoint_sqlite_wal(path: &Path) {
-        let connection = Connection::open(path).unwrap();
-        let (busy, log_frames, checkpointed_frames) = connection
-            .query_row("PRAGMA wal_checkpoint(TRUNCATE)", (), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })
-            .unwrap();
-        assert_eq!(busy, 0, "checkpoint must not be busy");
-        assert_eq!(
-            log_frames, checkpointed_frames,
-            "checkpoint must flush every WAL frame"
-        );
-    }
-
-    fn remove_sqlite_sidecars(path: &Path) {
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(sidecar));
-        }
-    }
-
-    fn has_non_empty_wal(path: &Path) -> bool {
-        let mut wal_path = path.as_os_str().to_os_string();
-        wal_path.push("-wal");
-        std::fs::metadata(PathBuf::from(wal_path)).is_ok_and(|metadata| metadata.len() > 0)
     }
 
     #[test]
@@ -1004,8 +902,72 @@ mod doctor_runtime_route_tests {
         ));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
-    async fn cold_missing_store_returns_typed_findings_without_creating_files() {
+    async fn fast_runtime_snapshot_uses_retained_liveness_before_deep_audit() {
+        let root = tempfile::TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let profile = root.path().join("profile");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&profile).unwrap();
+        initialize_test_project(&project, &profile).await;
+        let handshake = handshake(
+            project.clone(),
+            profile.clone(),
+            profile.join("registry.db"),
+        );
+        let store_administration = StoreAdministration::default().with_profile_identity(
+            crate::daemon::profile_identity::load_or_create(&profile)
+                .expect("load fixture profile identity"),
+        );
+        let _database_scope = crate::db::enter_daemon_database_scope(
+            &profile,
+            REGISTERED_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed),
+            "core-doctor-fast-runtime-health",
+        )
+        .expect("enter daemon database scope");
+        let graph =
+            super::super::open_project_for_handshake(&project, &handshake, &store_administration)
+                .await
+                .expect("open retained project graph");
+        let key = crate::daemon::ProjectServerKey::from_open_project(&graph, &handshake)
+            .expect("project server key");
+        let route_live = Arc::new(AtomicBool::new(true));
+        let server = McpServer::new_with_context(
+            McpServerConstructionContext::direct(graph, None)
+                .with_project_server_live(Arc::clone(&route_live)),
+        )
+        .await;
+        store_administration
+            .project_servers()
+            .lock()
+            .await
+            .insert(key, server);
+        let value =
+            super::doctor_runtime_value(&handshake, &store_administration, false, false).await;
+
+        assert_eq!(
+            value.pointer("/doctor_runtime/status"),
+            Some(&serde_json::json!("live")),
+            "fast runtime health must project retained liveness without probing SQLite"
+        );
+        assert_eq!(
+            value.pointer("/database/quick_check_ok"),
+            Some(&serde_json::Value::Null),
+            "only an explicit deep audit may run quick_check"
+        );
+
+        let deep =
+            super::doctor_runtime_value(&handshake, &store_administration, false, true).await;
+        assert!(
+            deep.pointer("/database/wal_size_bytes").is_none()
+                && deep.pointer("/database/shm_size_bytes").is_none(),
+            "runtime health must not expose SQLite sidecar implementation details"
+        );
+    }
+
+    #[tokio::test]
+    async fn cold_missing_store_reports_unavailable_without_creating_files() {
         let root = tempfile::TempDir::new().unwrap();
         let project = root.path().join("project");
         let profile = root.path().join("profile");
@@ -1026,13 +988,14 @@ mod doctor_runtime_route_tests {
             Some(&serde_json::json!("unavailable"))
         );
         assert_eq!(
-            value.pointer("/session_temporal_health/findings/0/kind"),
-            Some(&serde_json::json!("migration_gap"))
+            value.pointer("/session_temporal_health/findings"),
+            None,
+            "a missing current store is an unavailable state, not a migration finding"
         );
     }
 
     #[tokio::test]
-    async fn malformed_store_returns_fixed_safe_error_without_sidecars() {
+    async fn malformed_store_returns_fixed_safe_error_without_mutation() {
         let root = tempfile::TempDir::new().unwrap();
         let project = root.path().join("project");
         let profile = root.path().join("profile");
@@ -1041,11 +1004,6 @@ mod doctor_runtime_route_tests {
         let layout = initialize_test_project(&project, &profile).await;
         let db_path = layout.graph_db_path;
         std::fs::write(&db_path, b"malformed doctor fixture").unwrap();
-        for suffix in ["-wal", "-shm"] {
-            let mut sidecar = db_path.as_os_str().to_os_string();
-            sidecar.push(suffix);
-            let _ = std::fs::remove_file(PathBuf::from(sidecar));
-        }
         let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
         let before = filesystem_manifest(root.path());
 
@@ -1061,70 +1019,6 @@ mod doctor_runtime_route_tests {
             Some(&serde_json::json!("project_store_authority_unavailable"))
         );
         assert!(!value.to_string().contains("malformed doctor fixture"));
-    }
-
-    #[tokio::test]
-    async fn old_graph_schema_returns_fixed_compatibility_finding_without_migrating() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let data_root = crate::config::get_tracedecay_dir(&project);
-        std::fs::create_dir_all(&data_root).unwrap();
-        let db_path = data_root.join(crate::config::db_filename(&data_root));
-        let connection = Connection::open(&db_path).unwrap();
-        connection
-            .execute_batch("PRAGMA user_version=1; CREATE TABLE legacy_graph(id INTEGER);")
-            .unwrap();
-        drop(connection);
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_authority_unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/findings/0/kind"),
-            Some(&serde_json::json!("compatibility_drift"))
-        );
-    }
-
-    #[tokio::test]
-    async fn old_session_schema_returns_typed_findings_without_migrating() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let layout = initialize_test_project(&project, &profile).await;
-        let session_path = layout.sessions_db_path;
-        std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
-        let connection = Connection::open(&session_path).unwrap();
-        connection
-            .execute("CREATE TABLE legacy_sessions(id INTEGER PRIMARY KEY)", ())
-            .unwrap();
-        drop(connection);
-        let handshake = handshake(project, profile.clone(), profile.join("registry.db"));
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_ne!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("complete"))
-        );
-        assert!(
-            value
-                .pointer("/session_temporal_health/findings")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|findings| !findings.is_empty())
-        );
     }
 
     #[tokio::test]
@@ -1156,88 +1050,6 @@ mod doctor_runtime_route_tests {
         );
         assert!(!value.to_string().contains(&db_path.display().to_string()));
         connection.execute("ROLLBACK", ()).unwrap();
-    }
-
-    #[tokio::test]
-    async fn cold_complete_route_uses_immutable_session_health_without_authority_wal_shm() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let layout = initialize_test_project(&project, &profile).await;
-        let graph_path = layout.graph_db_path.clone();
-        let session_path = layout.sessions_db_path.clone();
-        assert_eq!(
-            doctor_runtime_store_paths(&project, &profile)
-                .expect("resolve initialized cold Doctor store paths"),
-            (graph_path.clone(), session_path.clone()),
-            "cold Doctor must resolve the initialized profile-sharded store"
-        );
-        checkpoint_sqlite_wal(&graph_path).await;
-        // Init leaves a zero-byte sessions placeholder; install + checkpoint a
-        // real temporal store so immutable=1 can observe a complete snapshot.
-        let (scope, registry, session_db) =
-            registered_project_session_database(&profile, &project).await;
-        assert_eq!(session_db.db_path(), session_path);
-        drop(session_db);
-        drop(registry);
-        drop(scope);
-        checkpoint_sqlite_wal(&session_path).await;
-        for path in [&graph_path, &session_path, &registry_path] {
-            remove_sqlite_sidecars(path);
-        }
-        let handshake = handshake(project, profile.clone(), registry_path.clone());
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("unavailable")),
-            "{value}"
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/reason"),
-            Some(&serde_json::json!("project_store_authority_unavailable"))
-        );
-        // The cold route never reaches the audit, so it must say so rather than
-        // publish a verdict: `ok` stays null and the typed reason survives on
-        // both the current and the legacy key.
-        assert_eq!(
-            value.pointer("/database/authority_audit_ok"),
-            Some(&serde_json::Value::Null),
-            "an audit that did not run must not report a verdict"
-        );
-        assert_eq!(
-            value.pointer("/database/authority_audit_reason"),
-            Some(&serde_json::json!("authority_audit_not_run"))
-        );
-        assert_eq!(
-            value.pointer("/database/authority_audit_error"),
-            Some(&serde_json::json!("authority_audit_not_run"))
-        );
-        for path in [
-            graph_path.as_path(),
-            session_path.as_path(),
-            registry_path.as_path(),
-        ] {
-            for suffix in ["-wal", "-shm"] {
-                let mut sidecar = path.as_os_str().to_os_string();
-                sidecar.push(suffix);
-                assert!(
-                    !PathBuf::from(sidecar).exists(),
-                    "cold doctor must not create {suffix} for {}",
-                    path.display()
-                );
-            }
-        }
     }
 
     #[tokio::test]
@@ -1278,102 +1090,6 @@ mod doctor_runtime_route_tests {
     }
 
     #[tokio::test]
-    async fn cold_uncheckpointed_session_wal_is_unavailable_without_artifacts() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let layout = initialize_test_project(&project, &profile).await;
-        let graph_path = layout.graph_db_path;
-        let session_path = layout.sessions_db_path;
-        checkpoint_sqlite_wal(&graph_path).await;
-        for path in [&graph_path, &registry_path] {
-            remove_sqlite_sidecars(path);
-        }
-        let (_scope, _registry, session_db) =
-            registered_project_session_database(&profile, &project).await;
-        session_db
-            .writer_connection()
-            .expect("registered session writer")
-            .execute(
-                "CREATE TABLE cold_doctor_session_wal_probe(id INTEGER PRIMARY KEY)",
-                (),
-            )
-            .await
-            .expect("create an uncheckpointed temporal store");
-        assert!(
-            has_non_empty_wal(&session_path),
-            "fixture must retain a non-empty temporal WAL"
-        );
-        let handshake = handshake(project, profile.clone(), registry_path);
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/reason"),
-            Some(&serde_json::json!("project_store_authority_unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/session_temporal_health/findings"),
-            Some(&serde_json::json!([{
-                "kind": "compatibility_drift",
-                "count": 1,
-            }]))
-        );
-        drop(session_db);
-    }
-
-    #[tokio::test]
-    async fn cold_uncheckpointed_graph_wal_is_unavailable_without_artifacts() {
-        let root = tempfile::TempDir::new().unwrap();
-        let project = root.path().join("project");
-        let profile = root.path().join("profile");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::create_dir_all(&profile).unwrap();
-        let registry_path = profile.join("registry.db");
-        let layout = initialize_test_project(&project, &profile).await;
-        let graph_path = layout.graph_db_path;
-        let graph_conn = Connection::open(&graph_path).unwrap();
-        graph_conn
-            .execute(
-                "CREATE TABLE cold_doctor_wal_probe(id INTEGER PRIMARY KEY)",
-                (),
-            )
-            .unwrap();
-        assert!(
-            has_non_empty_wal(&graph_path),
-            "fixture must retain a non-empty graph WAL"
-        );
-        let handshake = handshake(project, profile.clone(), registry_path);
-        let before = filesystem_manifest(root.path());
-
-        let value = cold_doctor_runtime_value(&handshake).await;
-
-        assert_eq!(filesystem_manifest(root.path()), before);
-        assert_eq!(
-            value.pointer("/doctor_runtime/status"),
-            Some(&serde_json::json!("unavailable"))
-        );
-        assert_eq!(
-            value.pointer("/doctor_runtime/reason"),
-            Some(&serde_json::json!("project_store_authority_unavailable"))
-        );
-        drop(graph_conn);
-    }
-
-    #[tokio::test]
     async fn cold_uninitialized_sessions_store_reports_fixed_reason_without_artifacts() {
         let root = tempfile::TempDir::new().unwrap();
         let project = root.path().join("project");
@@ -1382,12 +1098,7 @@ mod doctor_runtime_route_tests {
         std::fs::create_dir_all(&profile).unwrap();
         let registry_path = profile.join("registry.db");
         let layout = initialize_test_project(&project, &profile).await;
-        let graph_path = layout.graph_db_path;
         let session_path = layout.sessions_db_path;
-        checkpoint_sqlite_wal(&graph_path).await;
-        for path in [&graph_path, &registry_path] {
-            remove_sqlite_sidecars(path);
-        }
         std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
         std::fs::write(&session_path, []).unwrap();
         assert!(
