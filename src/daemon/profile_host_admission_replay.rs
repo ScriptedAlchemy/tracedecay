@@ -22,6 +22,8 @@ use crate::application::host_admission::{
 };
 
 use super::log_daemon_event;
+use super::shutdown_coordination::ShutdownStatus;
+use super::store_shutdown::join_shutdown_tasks_until;
 
 const REPLAY_BACKOFF_SHIFT_CAP: u32 = 16;
 const IDLE_EVICTION_AFTER: Duration = Duration::from_secs(30);
@@ -262,22 +264,69 @@ impl ProfileHostAdmissionReplayRegistry {
         self.cancellation.cancel();
     }
 
-    pub(super) async fn shutdown(&self) {
+    pub(super) async fn shutdown_until(&self, deadline: tokio::time::Instant) -> ShutdownStatus {
         self.cancel();
-        let replay_entries = {
-            let mut workers = self.workers.lock().await;
-            workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
+        let replay_entries = match tokio::time::timeout_at(deadline, self.workers.lock()).await {
+            Ok(mut workers) => workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
+            Err(_) => return ShutdownStatus::TimedOut,
         };
-        let bootstrap_entries = {
-            let mut workers = self.bootstrap_workers.lock().await;
-            workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>()
-        };
-        for entry in replay_entries {
-            let _ = entry.task.await;
-        }
-        for entry in bootstrap_entries {
-            let _ = entry.task.await;
-        }
+        let bootstrap_entries =
+            match tokio::time::timeout_at(deadline, self.bootstrap_workers.lock()).await {
+                Ok(mut workers) => workers.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
+                Err(_) => return ShutdownStatus::TimedOut,
+            };
+        let mut receipt = join_shutdown_tasks_until(
+            deadline,
+            replay_entries
+                .into_iter()
+                .enumerate()
+                .map(|(ordinal, entry)| {
+                    let task_abort = entry.task.abort_handle();
+                    (
+                        format!("host_admission_replay[{ordinal}]"),
+                        Some(task_abort),
+                        async move {
+                            match entry.task.await {
+                                Ok(()) => ShutdownStatus::Clean,
+                                Err(error) => ShutdownStatus::Failed(error.to_string()),
+                            }
+                        },
+                    )
+                }),
+        )
+        .await;
+        receipt.extend(
+            join_shutdown_tasks_until(
+                deadline,
+                bootstrap_entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(ordinal, entry)| {
+                        let task_abort = entry.task.abort_handle();
+                        (
+                            format!("host_admission_bootstrap[{ordinal}]"),
+                            Some(task_abort),
+                            async move {
+                                match entry.task.await {
+                                    Ok(()) => ShutdownStatus::Clean,
+                                    Err(error) => ShutdownStatus::Failed(error.to_string()),
+                                }
+                            },
+                        )
+                    }),
+            )
+            .await,
+        );
+        receipt.status()
+    }
+
+    pub(super) async fn shutdown(&self) -> ShutdownStatus {
+        self.shutdown_until(
+            tokio::time::Instant::now()
+                + super::DAEMON_CLIENT_DRAIN_DEADLINE
+                + super::DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await
     }
 
     pub(super) async fn wait_idle(&self, broker_path: &Path, timeout: Duration) -> bool {
@@ -1368,6 +1417,34 @@ mod tests {
                 .await,
             "shutdown replay authority must never report ready"
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_until_preserves_bootstrap_task_panic() {
+        let registry = ProfileHostAdmissionReplayRegistry::default();
+        let worker = Arc::new(ProfileHostAdmissionBootstrapWorker::new(
+            Arc::clone(&registry.cancellation),
+            BOOTSTRAP_RETRY_BUDGET,
+        ));
+        registry.bootstrap_workers.lock().await.insert(
+            PathBuf::from("panicked-bootstrap"),
+            ProfileHostAdmissionBootstrapEntry {
+                worker,
+                task: tokio::spawn(async {
+                    panic!("host admission bootstrap shutdown task panic");
+                }),
+            },
+        );
+
+        let status = registry
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(10))
+            .await;
+
+        assert!(matches!(
+            status,
+            ShutdownStatus::Failed(error)
+                if error.contains("host admission bootstrap shutdown task panic")
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -7,6 +7,8 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use super::branch_admin::StoreAdministration;
+use super::shutdown_coordination::ShutdownStatus;
+use super::store_shutdown::join_shutdown_tasks_until;
 
 const COLD_STORE_PAGE_LIMIT: usize = 8;
 /// Upper bound on mounted session databases + project graphs a single
@@ -196,12 +198,37 @@ impl MaintenanceCoordinator {
         self.wake.notify_one();
     }
 
-    pub(super) async fn shutdown(&self) {
+    pub(super) async fn shutdown_until(&self, deadline: tokio::time::Instant) -> ShutdownStatus {
         self.cancel();
         self.wake.notify_waiters();
-        if let Some(task) = self.task.lock().await.take() {
-            let _ = task.await;
-        }
+        let task = match tokio::time::timeout_at(deadline, self.task.lock()).await {
+            Ok(mut task) => task.take(),
+            Err(_) => return ShutdownStatus::TimedOut,
+        };
+        let Some(task) = task else {
+            return ShutdownStatus::Clean;
+        };
+        let task_abort = task.abort_handle();
+        join_shutdown_tasks_until(
+            deadline,
+            [("maintenance".to_owned(), Some(task_abort), async move {
+                match task.await {
+                    Ok(()) => ShutdownStatus::Clean,
+                    Err(error) => ShutdownStatus::Failed(error.to_string()),
+                }
+            })],
+        )
+        .await
+        .status()
+    }
+
+    pub(super) async fn shutdown(&self) -> ShutdownStatus {
+        self.shutdown_until(
+            tokio::time::Instant::now()
+                + super::DAEMON_CLIENT_DRAIN_DEADLINE
+                + super::DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await
     }
 
     pub(super) fn cancel(&self) {
@@ -583,9 +610,11 @@ mod tests {
 
     use super::{
         ColdStoreCursorV1, MAINTENANCE_STORE_PAGE_LIMIT, MaintenanceCadence,
-        MaintenanceStoreOutcomeV1, checkpoint_path, classify_cold_store_state, load_cursor,
-        next_cold_store_cursor, persist_cursor, select_store_window,
+        MaintenanceCoordinator, MaintenanceStoreOutcomeV1, checkpoint_path,
+        classify_cold_store_state, load_cursor, next_cold_store_cursor, persist_cursor,
+        select_store_window,
     };
+    use crate::daemon::shutdown_coordination::ShutdownStatus;
 
     #[test]
     fn cadence_rate_limits_failures_and_successes() {
@@ -739,5 +768,22 @@ mod tests {
             classify_cold_store_state(true, true, true),
             MaintenanceStoreOutcomeV1::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn shutdown_until_preserves_maintenance_task_panic() {
+        let coordinator = MaintenanceCoordinator::default();
+        *coordinator.task.lock().await = Some(tokio::spawn(async {
+            panic!("maintenance shutdown task panic");
+        }));
+
+        let status = coordinator
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(10))
+            .await;
+
+        assert!(matches!(
+            status,
+            ShutdownStatus::Failed(error) if error.contains("maintenance shutdown task panic")
+        ));
     }
 }

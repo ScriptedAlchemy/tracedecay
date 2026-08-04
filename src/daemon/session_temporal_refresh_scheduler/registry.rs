@@ -16,6 +16,8 @@ use super::wake::{
     SessionTemporalRefreshWakeState,
 };
 use super::worker::run_session_temporal_refresh_scheduler;
+use crate::daemon::shutdown_coordination::ShutdownStatus;
+use crate::daemon::store_shutdown::join_shutdown_tasks_until;
 use crate::global_db::RegisteredGlobalDb;
 
 #[derive(Default, Debug, Eq, PartialEq)]
@@ -59,13 +61,24 @@ struct SessionTemporalRefreshSchedulerEntry {
 }
 
 impl SessionTemporalRefreshSchedulerEntry {
-    async fn shutdown(self, deadline: tokio::time::Instant) {
+    async fn shutdown(self, deadline: tokio::time::Instant) -> ShutdownStatus {
         self.state.cancel();
-        let mut task = self.task;
-        if tokio::time::timeout_at(deadline, &mut task).await.is_err() {
-            task.abort();
-            let _ = task.await;
-        }
+        let task_abort = self.task.abort_handle();
+        join_shutdown_tasks_until(
+            deadline,
+            [(
+                "session_temporal_refresh".to_owned(),
+                Some(task_abort),
+                async move {
+                    match self.task.await {
+                        Ok(()) => ShutdownStatus::Clean,
+                        Err(error) => ShutdownStatus::Failed(error.to_string()),
+                    }
+                },
+            )],
+        )
+        .await
+        .status()
     }
 }
 
@@ -356,37 +369,61 @@ impl SessionTemporalRefreshSchedulerRegistry {
         }
     }
 
-    pub(in crate::daemon) async fn shutdown_until(&self, deadline: tokio::time::Instant) {
+    pub(in crate::daemon) async fn shutdown_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> ShutdownStatus {
         self.cancel();
-        let _guard = self.shutdown_guard.lock().await;
-        let _project_lifecycle = self.project_lifecycle.lock().await;
-        let project = self
-            .project
-            .lock()
-            .await
-            .drain()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let profile = self
-            .profile
-            .lock()
-            .await
-            .drain()
-            .map(|(_, entry)| entry)
-            .collect::<Vec<_>>();
-        let mut retirements = tokio::task::JoinSet::new();
-        for entry in project.into_iter().chain(profile) {
-            retirements.spawn(entry.shutdown(deadline));
-        }
-        while retirements.join_next().await.is_some() {}
+        let _guard = match tokio::time::timeout_at(deadline, self.shutdown_guard.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => return ShutdownStatus::TimedOut,
+        };
+        let _project_lifecycle =
+            match tokio::time::timeout_at(deadline, self.project_lifecycle.lock()).await {
+                Ok(lifecycle) => lifecycle,
+                Err(_) => return ShutdownStatus::TimedOut,
+            };
+        let project = match tokio::time::timeout_at(deadline, self.project.lock()).await {
+            Ok(mut project) => project.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
+            Err(_) => return ShutdownStatus::TimedOut,
+        };
+        let profile = match tokio::time::timeout_at(deadline, self.profile.lock()).await {
+            Ok(mut profile) => profile.drain().map(|(_, entry)| entry).collect::<Vec<_>>(),
+            Err(_) => return ShutdownStatus::TimedOut,
+        };
+        join_shutdown_tasks_until(
+            deadline,
+            project
+                .into_iter()
+                .chain(profile)
+                .enumerate()
+                .map(|(ordinal, entry)| {
+                    entry.state.cancel();
+                    let task_abort = entry.task.abort_handle();
+                    (
+                        format!("session_temporal_refresh[{ordinal}]"),
+                        Some(task_abort),
+                        async move {
+                            match entry.task.await {
+                                Ok(()) => ShutdownStatus::Clean,
+                                Err(error) => ShutdownStatus::Failed(error.to_string()),
+                            }
+                        },
+                    )
+                }),
+        )
+        .await
+        .status()
     }
 
     #[cfg(any(test, feature = "test-transport"))]
-    pub(in crate::daemon) async fn shutdown(&self) {
+    pub(in crate::daemon) async fn shutdown(&self) -> ShutdownStatus {
         self.shutdown_until(
-            tokio::time::Instant::now() + super::super::DAEMON_CLIENT_DRAIN_DEADLINE,
+            tokio::time::Instant::now()
+                + super::super::DAEMON_CLIENT_DRAIN_DEADLINE
+                + super::super::DAEMON_TASK_ABORT_DEADLINE,
         )
-        .await;
+        .await
     }
 
     #[cfg(test)]
@@ -477,4 +514,41 @@ pub(super) fn session_refresh_retry_delay(
         SessionTemporalRefreshRetryClass::Deadline => 6,
     };
     crate::application::host_admission::replay_backoff(attempt, shift_cap)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::{
+        SessionTemporalRefreshSchedulerEntry, SessionTemporalRefreshSchedulerRegistry,
+        SessionTemporalRefreshWakeState, inert_session_temporal_refresh_wake,
+    };
+    use crate::daemon::shutdown_coordination::ShutdownStatus;
+
+    #[tokio::test]
+    async fn shutdown_until_preserves_worker_task_panic() {
+        let registry = SessionTemporalRefreshSchedulerRegistry::default();
+        registry.profile.lock().await.insert(
+            PathBuf::from("panicked-session-refresh"),
+            SessionTemporalRefreshSchedulerEntry {
+                state: Arc::new(SessionTemporalRefreshWakeState::default()),
+                wake: inert_session_temporal_refresh_wake(),
+                task: tokio::spawn(async {
+                    panic!("session refresh shutdown task panic");
+                }),
+            },
+        );
+
+        let status = registry
+            .shutdown_until(tokio::time::Instant::now() + Duration::from_secs(10))
+            .await;
+
+        assert!(matches!(
+            status,
+            ShutdownStatus::Failed(error) if error.contains("session refresh shutdown task panic")
+        ));
+    }
 }
