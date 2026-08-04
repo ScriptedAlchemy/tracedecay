@@ -112,12 +112,19 @@ impl McpRequestRegistry {
                     message: "MCP request deadline exceeds the domain clock".to_owned(),
                 }
             })?;
-        let deadline = tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-            started.wall.0.saturating_add(deadline_micros),
-        ))
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("invalid MCP request deadline: {error}"),
-        })?;
+        let deadline_wall =
+            started
+                .wall
+                .0
+                .checked_add(deadline_micros)
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "MCP request deadline exceeds the domain clock".to_owned(),
+                })?;
+        let deadline =
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(deadline_wall))
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("invalid MCP request deadline: {error}"),
+                })?;
         let request_id =
             tracedecay_application::RequestId::new(request_key.to_owned()).map_err(|error| {
                 TraceDecayError::Config {
@@ -796,14 +803,18 @@ impl McpWorkerSettlementReaper {
         worker_state: McpToolWorkerState,
     ) {
         worker_state.handoff(reconciliation_id);
-        let reaper = self.clone();
+        let settlement = PendingMcpWorkerSettlement {
+            reaper: self.clone(),
+            reconciliation_id,
+            worker_state: Some(worker_state),
+            _permit: permit,
+        };
         let task = tokio::spawn(async move {
             let status = match worker.await {
                 Ok(_) => McpWorkerReconciliationStatus::Joined,
                 Err(_) => McpWorkerReconciliationStatus::Failed,
             };
-            reaper.publish(reconciliation_id, status, worker_state);
-            drop(permit);
+            settlement.complete(status);
         });
         lock(&self.inner.tasks).push(task);
     }
@@ -833,6 +844,37 @@ impl McpWorkerSettlementReaper {
 
     fn reap_finished(&self) {
         lock(&self.inner.tasks).retain(|task| !task.is_finished());
+    }
+}
+
+struct PendingMcpWorkerSettlement {
+    reaper: McpWorkerSettlementReaper,
+    reconciliation_id: u64,
+    worker_state: Option<McpToolWorkerState>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl PendingMcpWorkerSettlement {
+    fn complete(mut self, status: McpWorkerReconciliationStatus) {
+        if let Some(worker_state) = self.worker_state.take() {
+            self.reaper
+                .publish(self.reconciliation_id, status, worker_state);
+        }
+    }
+}
+
+impl Drop for PendingMcpWorkerSettlement {
+    fn drop(&mut self) {
+        // Tokio drops task futures on abort and unwinds them on panic. Publish
+        // the terminal state before releasing settlement capacity so a
+        // finished wrapper can never be reaped while its receipt stays pending.
+        if let Some(worker_state) = self.worker_state.take() {
+            self.reaper.publish(
+                self.reconciliation_id,
+                McpWorkerReconciliationStatus::Failed,
+                worker_state,
+            );
+        }
     }
 }
 

@@ -512,6 +512,37 @@ async fn commit_context_clean_worktree_returns_json() {
 }
 
 #[tokio::test]
+async fn commit_context_unborn_head_returns_typed_git_error() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    let status = Command::new("git")
+        .arg("init")
+        .current_dir(project)
+        .output()
+        .expect("git init");
+    assert!(status.status.success());
+
+    let (cg, _env) = init_test_project(project).await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_commit_context",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .expect("typed commit context result");
+    let output: Value = serde_json::from_str(extract_text(&result.value)).expect("JSON result");
+    assert_eq!(output["error"]["kind"], "git");
+    assert_eq!(output["error"]["operation"], "log");
+    assert!(
+        output["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("HEAD"))
+    );
+}
+
+#[tokio::test]
 async fn test_changelog_with_real_git() {
     let dir = test_temp_dir();
     let project = dir.path();

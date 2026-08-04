@@ -14,7 +14,7 @@ struct PreparedToolCall {
 }
 
 struct DispatchedToolCall {
-    cg: Arc<TraceDecay>,
+    cg: Option<Arc<TraceDecay>>,
     selected_owner: Option<crate::global_db::ProjectRegistryContext>,
     selected_scope: Option<tracedecay_application::ResolvedScope>,
     outcome: Result<ToolResult>,
@@ -1029,7 +1029,7 @@ impl McpServer {
             Ok(value) => value,
             Err(error) => {
                 return DispatchedToolCall {
-                    cg: self.cg().await,
+                    cg: None,
                     selected_owner: None,
                     selected_scope: None,
                     outcome: Err(error),
@@ -1052,7 +1052,7 @@ impl McpServer {
             Ok(routed) => routed,
             Err(error) => {
                 return DispatchedToolCall {
-                    cg: active_cg,
+                    cg: Some(active_cg),
                     selected_owner: None,
                     selected_scope: None,
                     outcome: Err(error),
@@ -1090,7 +1090,7 @@ impl McpServer {
             .await
         {
             return DispatchedToolCall {
-                cg,
+                cg: Some(cg),
                 selected_owner,
                 selected_scope,
                 outcome: Err(error),
@@ -1119,7 +1119,7 @@ impl McpServer {
             Ok(dispatch) => dispatch,
             Err(error) => {
                 return DispatchedToolCall {
-                    cg,
+                    cg: Some(cg),
                     selected_owner,
                     selected_scope,
                     outcome: Err(error),
@@ -1141,7 +1141,7 @@ impl McpServer {
             )
             .await;
         DispatchedToolCall {
-            cg,
+            cg: Some(cg),
             selected_owner,
             selected_scope,
             outcome,
@@ -1590,6 +1590,15 @@ impl McpServer {
 
         match outcome {
             Ok(mut result) => {
+                let Some(cg) = cg else {
+                    let error = TraceDecayError::mcp_tool_dispatch(
+                        "tool_dispatch_snapshot_unavailable",
+                        McpToolDispatchStage::ResultMaterialization.as_str(),
+                        true,
+                        format!("tool '{tool_name}' completed without an admitted graph snapshot"),
+                    );
+                    return tool_error_response(id, &tool_name, &error);
+                };
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1627,15 +1636,20 @@ impl McpServer {
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => {
-                self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
-                    project_root: cg.project_root(),
-                    session_id: analytics_session_id,
-                    tool_name: &tool_name,
-                    request_id: &request_id,
-                    arguments: &analytics_arguments,
-                    duration_us: elapsed_us,
-                    error: &error,
-                });
+                // A readiness deadline can fire before a graph snapshot is
+                // admitted. Complete that typed failure without reacquiring
+                // the contended graph after the absolute deadline.
+                if let Some(cg) = cg {
+                    self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
+                        project_root: cg.project_root(),
+                        session_id: analytics_session_id,
+                        tool_name: &tool_name,
+                        request_id: &request_id,
+                        arguments: &analytics_arguments,
+                        duration_us: elapsed_us,
+                        error: &error,
+                    });
+                }
                 tool_error_response(id, &tool_name, &error)
             }
         }

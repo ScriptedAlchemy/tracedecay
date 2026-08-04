@@ -273,10 +273,11 @@ pub(crate) async fn handle_commit_context(
 
     if changed_files.is_empty() {
         let project_root = cg.project_root().to_path_buf();
-        let recent_commits = blocking_git_span(control, move || {
-            git_recent_commits(&project_root, 5).unwrap_or_default()
-        })
-        .await?;
+        let recent_commits =
+            match blocking_git_span(control, move || git_recent_commits(&project_root, 5)).await? {
+                Ok(commits) => commits,
+                Err(error) => return Ok(git_error_result(cg, &args, "log", &error)),
+            };
         let output = json!({
             "changed_files": [],
             "symbols_by_role": {},
@@ -336,10 +337,10 @@ pub(crate) async fn handle_commit_context(
 
     let recent_commits = {
         let project_root = cg.project_root().to_path_buf();
-        blocking_git_span(control, move || {
-            git_recent_commits(&project_root, 5).unwrap_or_default()
-        })
-        .await?
+        match blocking_git_span(control, move || git_recent_commits(&project_root, 5)).await? {
+            Ok(commits) => commits,
+            Err(error) => return Ok(git_error_result(cg, &args, "log", &error)),
+        }
     };
 
     let total_symbols: usize = symbols_by_role.values().map(std::vec::Vec::len).sum();
