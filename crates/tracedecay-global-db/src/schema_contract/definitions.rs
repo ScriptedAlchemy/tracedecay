@@ -169,6 +169,21 @@ pub(super) const TABLES: &[Table] = &[
         )]
     ),
     table!(
+        "remote_deletion_tombstones",
+        [
+            column("profile_id", "TEXT", true, None, 1),
+            column("target_kind", "TEXT", true, None, 2),
+            column("project_id", "TEXT", true, None, 3),
+            column("tombstone_id", "TEXT", true, None, 0),
+            column("recorded_at_micros", "INTEGER", true, None, 0),
+            column("cleanup_status", "TEXT", true, None, 0),
+            column("failure_code", "TEXT", false, None, 0),
+            column("failure_phase", "TEXT", false, None, 0),
+            column("retryable", "INTEGER", false, None, 0),
+        ],
+        []
+    ),
+    table!(
         "sanitization_receipts",
         [
             column("receipt_id", "TEXT", false, None, 1),

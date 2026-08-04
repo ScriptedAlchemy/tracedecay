@@ -20,6 +20,7 @@ use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::any;
+use axum::routing::post;
 use constant_time_eq::constant_time_eq;
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
@@ -35,6 +36,14 @@ type ProjectRouterResolverFuture =
     Pin<Box<dyn Future<Output = Result<Option<Router>>> + Send + 'static>>;
 type ProjectRouterResolver =
     Arc<dyn Fn(ProjectId) -> ProjectRouterResolverFuture + Send + Sync + 'static>;
+type RemoteDeletionExecutorFuture =
+    Pin<Box<dyn Future<Output = super::remote_deletion::RemoteDeletionReceipt> + Send + 'static>>;
+pub(super) type RemoteDeletionExecutor = Arc<
+    dyn Fn(super::remote_deletion::RemoteDeletionHttpRequest) -> RemoteDeletionExecutorFuture
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Default)]
 struct ProjectRouterCache {
@@ -73,6 +82,7 @@ pub(super) struct DaemonHttpApplicationRegistry {
     resolver: Arc<SyncRwLock<Option<ProjectRouterResolver>>>,
     resolver_admission: Arc<Semaphore>,
     active: Arc<AtomicBool>,
+    remote_deletion_executor: Arc<SyncRwLock<Option<RemoteDeletionExecutor>>>,
 }
 
 impl Default for DaemonHttpApplicationRegistry {
@@ -82,6 +92,7 @@ impl Default for DaemonHttpApplicationRegistry {
             resolver: Arc::new(SyncRwLock::new(None)),
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
             active: Arc::new(AtomicBool::new(false)),
+            remote_deletion_executor: Arc::new(SyncRwLock::new(None)),
         }
     }
 }
@@ -116,6 +127,35 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
+    pub(super) fn install_remote_deletion_executor<F, Fut>(&self, executor: F) -> Result<()>
+    where
+        F: Fn(super::remote_deletion::RemoteDeletionHttpRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = super::remote_deletion::RemoteDeletionReceipt> + Send + 'static,
+    {
+        let mut slot =
+            self.remote_deletion_executor
+                .write()
+                .map_err(|_| TraceDecayError::Config {
+                    message: "daemon remote deletion executor lock is poisoned".to_owned(),
+                })?;
+        if slot.is_some() {
+            return Err(TraceDecayError::Config {
+                message: "daemon remote deletion executor is already installed".to_owned(),
+            });
+        }
+        *slot = Some(Arc::new(move |request| Box::pin(executor(request))));
+        Ok(())
+    }
+
+    pub(super) fn remote_deletion_executor(&self) -> Result<Option<RemoteDeletionExecutor>> {
+        self.remote_deletion_executor
+            .read()
+            .map(|executor| executor.clone())
+            .map_err(|_| TraceDecayError::Config {
+                message: "daemon remote deletion executor lock is poisoned".to_owned(),
+            })
+    }
+
     async fn resolve(&self, project_id: &str) -> Option<Router> {
         let project_id = ProjectId::new(project_id.to_owned()).ok()?;
         if let Some(router) = self.routers.lock().await.get(project_id.as_str()) {
@@ -138,6 +178,10 @@ impl DaemonHttpApplicationRegistry {
 
     fn router(self) -> Router {
         Router::new()
+            .route(
+                "/remote/deletions",
+                post(super::remote_deletion::dispatch_remote_deletion),
+            )
             .route(
                 "/projects/{project_id}/application/{*tail}",
                 any(dispatch_project_application),

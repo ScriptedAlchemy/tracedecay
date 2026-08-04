@@ -27,6 +27,7 @@ mod registered_analytics;
 mod registered_dashboard;
 mod registered_lcm;
 mod registered_sessions;
+mod remote_deletion;
 pub mod schema_contract;
 pub mod schema_stages;
 pub use schema_stages::ensure_registered_schema;
@@ -67,6 +68,11 @@ pub use project_registry::{
     RetainedRegistryEntry, alias_key_path, ephemeral_root_rejection, is_ephemeral_path,
 };
 pub use registered::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
+pub use remote_deletion::{
+    RemoteDeletionCleanupState, RemoteDeletionFailureCode, RemoteDeletionPhase,
+    RemoteDeletionTarget, RemoteDeletionTombstone, RemoteDeletionTombstoneRecordOutcome,
+    RemoteDeletionTombstoneTransitionOutcome,
+};
 pub use session_temporal::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
 };

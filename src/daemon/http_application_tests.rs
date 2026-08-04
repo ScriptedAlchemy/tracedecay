@@ -47,15 +47,28 @@ async fn request_path(
     authorization: Option<&str>,
     origin: Option<&str>,
 ) -> String {
+    request_path_with_body(service, method, path, authorization, origin, None, "").await
+}
+
+async fn request_path_with_body(
+    service: &DaemonHttpApplicationService,
+    method: &str,
+    path: &str,
+    authorization: Option<&str>,
+    origin: Option<&str>,
+    content_type: Option<&str>,
+    body: &str,
+) -> String {
     let mut stream = tokio::net::TcpStream::connect(service.endpoint())
         .await
         .expect("connect daemon HTTP application service");
     let mut request = format!(
         "{method} {path} HTTP/1.1\r\n\
          Host: {}\r\n\
-         Content-Length: 0\r\n\
+         Content-Length: {}\r\n\
          Connection: close\r\n",
-        service.endpoint()
+        service.endpoint(),
+        body.len()
     );
     if let Some(authorization) = authorization {
         request.push_str("Authorization: ");
@@ -67,7 +80,13 @@ async fn request_path(
         request.push_str(origin);
         request.push_str("\r\n");
     }
+    if let Some(content_type) = content_type {
+        request.push_str("Content-Type: ");
+        request.push_str(content_type);
+        request.push_str("\r\n");
+    }
     request.push_str("\r\n");
+    request.push_str(body);
     stream
         .write_all(request.as_bytes())
         .await
@@ -209,6 +228,13 @@ fn status(response: &str) -> StatusCode {
     StatusCode::from_u16(code).expect("known HTTP status")
 }
 
+fn json_body(response: &str) -> serde_json::Value {
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .expect("HTTP response body separator");
+    serde_json::from_str(body).expect("JSON response body")
+}
+
 async fn service_with_probe() -> (DaemonHttpApplicationService, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let probe_calls = Arc::clone(&calls);
@@ -286,6 +312,96 @@ async fn daemon_http_dispatches_authenticated_project_route_to_canonical_router(
 
     assert_eq!(status(&response), StatusCode::NO_CONTENT);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn remote_deletion_authority_unavailable_uses_the_typed_receipt_contract() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    let response = request_path_with_body(
+        &service,
+        "POST",
+        "/remote/deletions",
+        Some(&authorization),
+        Some(&origin),
+        Some("application/json"),
+        r#"{"target":"account","tombstone_id":"tombstone.unavailable"}"#,
+    )
+    .await;
+
+    assert_eq!(status(&response), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        json_body(&response),
+        serde_json::json!({
+            "status": "failed",
+            "target": "account",
+            "profile_id": null,
+            "tombstone_id": "tombstone.unavailable",
+            "project_id": null,
+            "tombstone_recorded": false,
+            "removed_project_ids": [],
+            "pending_project_ids": [],
+            "failure": {
+                "code": "authority_unavailable",
+                "phase": "resolve_authority",
+                "retryable": true
+            }
+        })
+    );
+    service.shutdown().await.expect("shutdown HTTP service");
+}
+
+#[tokio::test]
+async fn remote_deletion_malformed_body_and_content_type_use_typed_receipts() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+    let authorization = format!("Bearer {AUTH_TOKEN}");
+    let origin = service.origin().to_owned();
+    for (content_type, body) in [
+        ("application/json", "{"),
+        (
+            "text/plain",
+            r#"{"target":"account","tombstone_id":"tombstone.invalid"}"#,
+        ),
+    ] {
+        let response = request_path_with_body(
+            &service,
+            "POST",
+            "/remote/deletions",
+            Some(&authorization),
+            Some(&origin),
+            Some(content_type),
+            body,
+        )
+        .await;
+
+        assert_eq!(status(&response), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            json_body(&response),
+            serde_json::json!({
+                "status": "failed",
+                "target": null,
+                "profile_id": null,
+                "tombstone_id": null,
+                "project_id": null,
+                "tombstone_recorded": false,
+                "removed_project_ids": [],
+                "pending_project_ids": [],
+                "failure": {
+                    "code": "invalid_request",
+                    "phase": "validate_request",
+                    "retryable": false
+                }
+            })
+        );
+    }
     service.shutdown().await.expect("shutdown HTTP service");
 }
 
