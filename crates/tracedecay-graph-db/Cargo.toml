@@ -8,9 +8,9 @@ repository = "https://github.com/ScriptedAlchemy/tracedecay"
 include = ["/src/**"]
 
 [dependencies]
-grafeo-common.workspace = true
-grafeo-core.workspace = true
-grafeo-engine.workspace = true
+grafeo-common = { version = "=0.5.42", default-features = false }
+grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
+grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "wal", "grafeo-file", "vector-index"] }
 hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

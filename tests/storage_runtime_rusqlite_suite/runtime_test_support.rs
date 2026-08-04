@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::{Connection, Savepoint, Transaction};
-use serde::Deserialize;
 use serde_json::json;
 use tempfile::TempDir;
 use tracedecay_rusqlite_runtime::{
@@ -13,82 +12,97 @@ use tracedecay_rusqlite_runtime::{
     reader::{ExistingReaderLocator, ReaderQueryExecutor},
 };
 use tracedecay_store::{
-    AdmissionConfigV1, LocatorDigest, RepositoryOperationEnvelopeV1, RepositoryWritePayloadV1,
-    RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1, RuntimeDeadlineV1,
-    RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, RuntimeSubmitRequestV1,
-    RuntimeTransactionIdV1, RuntimeTransactionScopeV1, StorageRuntimeErrorV1,
-    StoreOperationMetadataV1, StoreRuntimeBindingV1, TransactionalOutboxEntryV1,
-    VerifiedStoreLocatorV1,
+    AdmissionConfigV1, CommitSequenceV1, LocatorDigest, RepositoryOperationEnvelopeV1,
+    RepositoryWritePayloadV1, RuntimeBatchCompatibilityV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
+    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1,
+    RuntimeSubmitRequestV1, RuntimeTransactionIdV1, RuntimeTransactionScopeV1, ShardWatermarkV1,
+    StorageRuntimeErrorV1, StoreOperationMetadataV1, StoreRuntimeBindingV1,
+    TransactionalOutboxEntryV1, VerifiedStoreLocatorV1,
 };
 
-const FIXTURE: &str = include_str!("../fixtures/storage_runtime_cutover/cutover-v1.json");
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct CutoverFixture {
-    pub(crate) s5: S5Fixture,
-    pub(crate) s6: S6Fixture,
-    pub(crate) s7: S7Fixture,
-    pub(crate) s8: S8Fixture,
-    pub(crate) s9: S9Fixture,
-    pub(crate) s10: S10Fixture,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct S5Fixture {
+pub(crate) struct ReaderRuntimeFixture {
     pub(crate) binding: StoreRuntimeBindingV1,
     pub(crate) reader_budget: ReaderBudgetFixture,
     pub(crate) initial_commit_sequence: u64,
     pub(crate) published_commit_sequence: u64,
 }
 
-#[derive(Debug, Deserialize)]
 pub(crate) struct ReaderBudgetFixture {
     pub(crate) min_per_hot_shard: u16,
     pub(crate) max_per_hot_shard: u16,
     pub(crate) idle_burst_retire_ms: u64,
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct S6Fixture {
-    pub(crate) maintenance_telemetry: tracedecay_store::MaintenanceTelemetryV1,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct S7Fixture {
-    pub(crate) worktree_binding: StoreRuntimeBindingV1,
-    pub(crate) snapshot_binding: StoreRuntimeBindingV1,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct S8Fixture {
-    pub(crate) families: Vec<RepositoryFamilyFixture>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct RepositoryFamilyFixture {
-    pub(crate) family: String,
-    pub(crate) write_payloads: Vec<String>,
-    pub(crate) read_operations: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct S9Fixture {
+pub(crate) struct WriterRuntimeFixture {
     pub(crate) origin_binding: StoreRuntimeBindingV1,
     pub(crate) target_binding: StoreRuntimeBindingV1,
-    pub(crate) effect_id: String,
-    pub(crate) ordering_key: String,
+    pub(crate) effect_id: &'static str,
+    pub(crate) ordering_key: &'static str,
+    pub(crate) commit_sequences: [u64; 2],
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct S10Fixture {
-    pub(crate) effect_id: String,
-    pub(crate) ordering_key: String,
-    pub(crate) commit_sequences: Vec<u64>,
+pub(crate) fn reader_runtime_fixture() -> ReaderRuntimeFixture {
+    ReaderRuntimeFixture {
+        binding: serde_json::from_value(json!({
+            "shard_id": {
+                "brain_id": "brain.runtime-reader",
+                "profile_id": "profile.runtime-reader",
+                "scope": { "kind": "project", "project_id": "project.runtime-reader" }
+            },
+            "incarnation": 1,
+            "authority_epoch": 7
+        }))
+        .expect("construct reader runtime binding"),
+        reader_budget: ReaderBudgetFixture {
+            min_per_hot_shard: 2,
+            max_per_hot_shard: 2,
+            idle_burst_retire_ms: 30_000,
+        },
+        initial_commit_sequence: 4,
+        published_commit_sequence: 5,
+    }
 }
 
-pub(crate) fn fixture() -> CutoverFixture {
-    serde_json::from_str(FIXTURE).expect("storage-runtime cutover fixture must decode")
+pub(crate) fn maintenance_binding() -> StoreRuntimeBindingV1 {
+    serde_json::from_value(json!({
+        "shard_id": {
+            "brain_id": "brain.runtime-maintenance",
+            "profile_id": "profile.runtime-maintenance",
+            "scope": { "kind": "project", "project_id": "project.runtime-maintenance" }
+        },
+        "incarnation": 3,
+        "authority_epoch": 11
+    }))
+    .expect("construct maintenance runtime binding")
+}
+
+pub(crate) fn writer_runtime_fixture() -> WriterRuntimeFixture {
+    WriterRuntimeFixture {
+        origin_binding: serde_json::from_value(json!({
+            "shard_id": {
+                "brain_id": "brain.runtime-writer",
+                "profile_id": "profile.runtime-writer",
+                "scope": { "kind": "project", "project_id": "project.runtime-writer-origin" }
+            },
+            "incarnation": 5,
+            "authority_epoch": 13
+        }))
+        .expect("construct writer origin binding"),
+        target_binding: serde_json::from_value(json!({
+            "shard_id": {
+                "brain_id": "brain.runtime-writer",
+                "profile_id": "profile.runtime-writer",
+                "scope": { "kind": "project_sessions", "project_id": "project.runtime-writer-origin" }
+            },
+            "incarnation": 6,
+            "authority_epoch": 17
+        }))
+        .expect("construct writer target binding"),
+        effect_id: "effect.runtime.writer",
+        ordering_key: "project.runtime-writer.serialized",
+        commit_sequences: [1, 2],
+    }
 }
 
 pub(crate) struct TestDatabase {
@@ -166,7 +180,7 @@ impl ReaderQueryExecutor for CountExecutor {
     fn execute_read(
         &mut self,
         snapshot: &Transaction<'_>,
-        _request: &RuntimeReadRequestV1,
+        request: &RuntimeReadRequestV1,
     ) -> Result<RuntimeReadOutcomeV1, StorageRuntimeErrorV1> {
         let count = snapshot
             .query_row("SELECT COUNT(*) FROM acceptance_rows", [], |row| {
@@ -175,9 +189,19 @@ impl ReaderQueryExecutor for CountExecutor {
             .map_err(|error| StorageRuntimeErrorV1::Infrastructure {
                 operation: format!("read acceptance row count: {error}"),
             })?;
+        let watermark = ShardWatermarkV1 {
+            shard_id: request.binding().shard_id.clone(),
+            incarnation: request.binding().incarnation,
+            authority_epoch: request.binding().authority_epoch,
+            commit_sequence: CommitSequenceV1(if count > 0 { 1 } else { 0 }),
+        };
         RuntimeReadOutcomeV1::new(
-            Some(RuntimeReadResultV1::GraphQuickCheck { healthy: count > 0 }),
-            RuntimeReadCoverageV1::Latest { observed: None },
+            Some(RuntimeReadResultV1::CurrentWatermark {
+                watermark: watermark.clone(),
+            }),
+            RuntimeReadCoverageV1::Latest {
+                observed: Some(watermark),
+            },
         )
         .map_err(|error| StorageRuntimeErrorV1::Infrastructure {
             operation: format!("construct acceptance read outcome: {error}"),
@@ -227,14 +251,14 @@ pub(crate) fn read_request(
     serde_json::from_value(json!({
         "binding": binding,
         "consistency": { "kind": "latest_available" },
-        "operation": { "kind": "graph_quick_check" },
+        "operation": { "kind": "current_watermark" },
         "priority": priority,
         "admission_bytes": 64,
         "control": {
             "requested_at": 1,
-            "deadline": { "deadline_id": format!("deadline.cutover.{priority}") },
+            "deadline": { "deadline_id": format!("deadline.runtime.{priority}") },
             "cancellation": {
-                "cancellation_id": format!("cancellation.cutover.{priority}"),
+                "cancellation_id": format!("cancellation.runtime.{priority}"),
                 "generation": 1
             }
         }
@@ -252,7 +276,7 @@ pub(crate) fn outbox_request(
     let digest = format!("sha256:{}", "a".repeat(64));
     let metadata: StoreOperationMetadataV1 = serde_json::from_value(json!({
         "operation_id": operation_id,
-        "client_id": "client.cutover.acceptance",
+        "client_id": "client.runtime.acceptance",
         "shard_id": binding.shard_id,
         "incarnation": binding.incarnation,
         "authority_epoch": binding.authority_epoch,
@@ -330,10 +354,10 @@ impl StorageOperationExecutor for NoopRepositoryWrite {
         _payload: &RepositoryWritePayloadV1,
     ) -> rusqlite::Result<()> {
         savepoint.execute_batch(
-            "CREATE TABLE IF NOT EXISTS cutover_writes (
+            "CREATE TABLE IF NOT EXISTS runtime_writes (
                 operation INTEGER PRIMARY KEY AUTOINCREMENT
             );
-            INSERT INTO cutover_writes DEFAULT VALUES;",
+            INSERT INTO runtime_writes DEFAULT VALUES;",
         )
     }
 }
@@ -356,12 +380,12 @@ impl StorageOperationExecutor for RecordingEffect {
         entry: &TransactionalOutboxEntryV1,
     ) -> rusqlite::Result<()> {
         savepoint.execute_batch(
-            "CREATE TABLE IF NOT EXISTS cutover_effects (
+            "CREATE TABLE IF NOT EXISTS runtime_effects (
                 effect_json TEXT NOT NULL
             );",
         )?;
         savepoint.execute(
-            "INSERT INTO cutover_effects(effect_json) VALUES (?1)",
+            "INSERT INTO runtime_effects(effect_json) VALUES (?1)",
             [serde_json::to_string(&entry.effect)
                 .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?],
         )?;

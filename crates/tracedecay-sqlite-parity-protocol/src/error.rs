@@ -13,8 +13,6 @@ pub enum ErrorCode {
     RefusedLiveProfile,
     OpenFailed,
     ReadOnlyInvariant,
-    InvalidFtsQuery,
-    InvalidFtsLimit,
     InvalidStoreFamily,
     InvalidPageCursor,
     InvalidPageLimit,

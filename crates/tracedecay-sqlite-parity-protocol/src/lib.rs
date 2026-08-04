@@ -9,7 +9,7 @@ mod results;
 mod session;
 
 pub use codec::{CanonicalRowHasher, decode_request_value};
-pub use command::{Command, GraphFtsTable, GraphTable, IntegrityCheck, validate_command};
+pub use command::{Command, IntegrityCheck, validate_command};
 pub use error::{ErrorCode, ErrorPayload};
 pub use request::{
     CopiedDatabase, CopiedSnapshotProvenance, DatabaseKind, Request, SnapshotFileIdentity,
@@ -18,9 +18,9 @@ pub use request::{
 };
 pub use response::{Response, ResponseOutcome};
 pub use results::{
-    EffectiveJournalMode, FtsMatch, FtsParity, IntegrityReport, JournalModeMetadata,
-    JournalModeNormalization, Metadata, Output, RowParity, SchemaMetadata, SchemaObject,
-    SchemaObjectKind, SourceHeaderJournalMode, SourceJournalMode,
+    EffectiveJournalMode, IntegrityReport, JournalModeMetadata, JournalModeNormalization, Metadata,
+    Output, SchemaMetadata, SchemaObject, SchemaObjectKind, SourceHeaderJournalMode,
+    SourceJournalMode,
 };
 pub use session::{
     SessionStoreColumn, SessionStoreCount, SessionStoreCursor, SessionStoreFamily,
@@ -31,8 +31,6 @@ pub use session::{
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 pub const MAX_REQUEST_ID_BYTES: usize = 128;
-pub const MAX_FTS_QUERY_BYTES: usize = 4096;
-pub const MAX_FTS_RESULTS: u16 = 100;
 pub const MAX_SESSION_STORE_PAGE_SIZE: u16 = 100;
 pub const MAX_CURSOR_TEXT_BYTES: usize = 4096;
 pub const MAX_AUTHORITY_ID_BYTES: usize = 4096;
@@ -53,8 +51,6 @@ pub type VerifiedCopiedSnapshotV1 = VerifiedCopiedSnapshot;
 pub type DatabaseKindV1 = DatabaseKind;
 pub type SnapshotFileIdentityV1 = SnapshotFileIdentity;
 pub type IntegrityCheckV1 = IntegrityCheck;
-pub type GraphTableV1 = GraphTable;
-pub type GraphFtsTableV1 = GraphFtsTable;
 pub type SessionStoreFamilyV1 = SessionStoreFamily;
 pub type SessionStoreTableV1 = SessionStoreTable;
 pub type SessionStoreCursorV1 = SessionStoreCursor;
@@ -68,9 +64,6 @@ pub type SourceJournalModeV1 = SourceJournalMode;
 pub type EffectiveJournalModeV1 = EffectiveJournalMode;
 pub type JournalModeNormalizationV1 = JournalModeNormalization;
 pub type IntegrityReportV1 = IntegrityReport;
-pub type RowParityV1 = RowParity;
-pub type FtsParityV1 = FtsParity;
-pub type FtsMatchV1 = FtsMatch;
 pub type SessionStoreCountV1 = SessionStoreCount;
 pub type SessionStoreSchemaV1 = SessionStoreSchema;
 pub type SessionStoreColumnV1 = SessionStoreColumn;

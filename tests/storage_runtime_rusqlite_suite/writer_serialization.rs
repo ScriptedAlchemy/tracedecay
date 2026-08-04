@@ -3,29 +3,29 @@ use std::sync::Arc;
 use tracedecay_rusqlite_runtime::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
 use tracedecay_store::{CommitSequenceV1, RuntimeSubmitOutcomeV1};
 
-use crate::cutover_support::{Probe, TestDatabase, fixture, outbox_request, run, writer};
+use crate::runtime_test_support::{
+    Probe, TestDatabase, outbox_request, run, writer, writer_runtime_fixture,
+};
 
 #[test]
 fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks() {
-    let fixture = fixture();
-    let s9 = fixture.s9;
-    let s10 = fixture.s10;
-    let database = TestDatabase::new("s10-serialized.sqlite3");
+    let fixture = writer_runtime_fixture();
+    let database = TestDatabase::new("writer-serialized.sqlite3");
     let first = outbox_request(
-        &s9.origin_binding,
-        &s9.target_binding,
-        "operation.cutover.serialized.first",
-        &format!("{}.first", s10.effect_id),
-        &format!("{}.first", s10.ordering_key),
+        &fixture.origin_binding,
+        &fixture.target_binding,
+        "operation.runtime.serialized.first",
+        &format!("{}.first", fixture.effect_id),
+        &format!("{}.first", fixture.ordering_key),
     );
     let second = outbox_request(
-        &s9.origin_binding,
-        &s9.target_binding,
-        "operation.cutover.serialized.second",
-        &format!("{}.second", s10.effect_id),
-        &format!("{}.second", s10.ordering_key),
+        &fixture.origin_binding,
+        &fixture.target_binding,
+        "operation.runtime.serialized.second",
+        &format!("{}.second", fixture.effect_id),
+        &format!("{}.second", fixture.ordering_key),
     );
-    let writer = Arc::new(writer(&database, &s9.origin_binding));
+    let writer = Arc::new(writer(&database, &fixture.origin_binding));
     let watermarks = writer.commit_watermark_source();
 
     let mut sequences = run(async {
@@ -50,19 +50,19 @@ fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks(
             .collect::<Vec<_>>()
     });
     sequences.sort_unstable();
-    assert_eq!(sequences, s10.commit_sequences);
+    assert_eq!(sequences, fixture.commit_sequences.to_vec());
     assert_eq!(
-        watermarks.current(&s9.origin_binding.shard_id),
+        watermarks.current(&fixture.origin_binding.shard_id),
         WatermarkSourceState::Available(tracedecay_store::ShardWatermarkV1 {
-            shard_id: s9.origin_binding.shard_id.clone(),
-            incarnation: s9.origin_binding.incarnation,
-            authority_epoch: s9.origin_binding.authority_epoch,
+            shard_id: fixture.origin_binding.shard_id.clone(),
+            incarnation: fixture.origin_binding.incarnation,
+            authority_epoch: fixture.origin_binding.authority_epoch,
             commit_sequence: CommitSequenceV1(2),
         })
     );
 
     Arc::try_unwrap(writer)
-        .unwrap_or_else(|_| panic!("submit tasks retained the S10 writer"))
+        .unwrap_or_else(|_| panic!("submit tasks retained the writer"))
         .shutdown_and_join()
-        .expect("close S10 writer");
+        .expect("close writer");
 }

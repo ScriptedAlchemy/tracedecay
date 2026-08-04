@@ -19,7 +19,7 @@ fn subprocess_never_creates_missing_files_or_accepts_write_sql() {
     let before = fs::read(&fixture.path).expect("fixture before invalid command");
     let response = invoke(&request(
         &fixture.path,
-        json!({ "type": "sql", "sql": "DELETE FROM nodes" }),
+        json!({ "type": "sql", "sql": "DELETE FROM observations" }),
     ));
     assert_eq!(response["status"], "error");
     assert_eq!(response["error"]["code"], "invalid_request");
@@ -51,13 +51,6 @@ fn subprocess_rejects_unknown_fields_and_closed_command_semantic_errors() {
     let response = invoke(&unknown_field);
     assert_eq!(response["status"], "error");
     assert_eq!(response["error"]["code"], "invalid_request");
-
-    let response = invoke(&request(
-        &fixture.path,
-        json!({ "type": "fts_parity", "table": "nodes", "query": " ", "limit": 1 }),
-    ));
-    assert_eq!(response["status"], "error");
-    assert_eq!(response["error"]["code"], "invalid_fts_query");
 
     let response = invoke(&request(
         &fixture.path,

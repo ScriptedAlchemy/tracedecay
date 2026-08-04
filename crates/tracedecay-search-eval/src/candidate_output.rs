@@ -35,6 +35,7 @@ use tracedecay_application::{
     NativeHistoricalBlobReaderV1, ResolvedScope, is_canonical_repository_relative_path,
 };
 use tracedecay_code_index::chunks::content_digest;
+use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 use tracedecay_code_index::production::{
     CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -67,8 +68,7 @@ use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, CompositionOutputV1, FusionStageInput,
 };
 use tracedecay_query::retrieval::graph::{
-    CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneRequest, GraphLaneRetriever,
-    production_code_index_freshness,
+    GraphLane, GraphLaneRequest, GraphLaneRetriever, production_code_index_freshness,
 };
 use tracedecay_query::retrieval::hydrate::{
     CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
@@ -590,7 +590,7 @@ struct OccurrenceMapEntry {
 /// Retrieval adapters keyed by canonical allowed-scope key (sorted, deduped),
 /// as produced by [`canonical_scope_key`].
 type ScopedLexicalProjections = BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>;
-type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceAdapterV1>;
+type ScopedGraphEvidence = BTreeMap<Vec<String>, CodeGraphEvidenceReader>;
 
 struct PublishedCorpus {
     generation: CodeIndexPublishedGenerationV1,
@@ -696,7 +696,7 @@ fn build_query_projections(
             .collect::<Vec<_>>();
         graph.insert(
             scope_key,
-            CodeGraphEvidenceAdapterV1::new(
+            CodeGraphEvidenceReader::new(
                 generation_id.clone(),
                 Some(generation.snapshot().repository.clone()),
                 freshness.clone(),

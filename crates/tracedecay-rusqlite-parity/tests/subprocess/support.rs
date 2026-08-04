@@ -28,13 +28,6 @@ pub(crate) fn fixture() -> Fixture {
         .execute_batch(
             "
             PRAGMA user_version = 11;
-            CREATE TABLE nodes (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                qualified_name TEXT NOT NULL,
-                docstring TEXT,
-                signature TEXT
-            );
             CREATE TABLE observations (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                 observation_id TEXT NOT NULL UNIQUE,
@@ -50,14 +43,7 @@ pub(crate) fn fixture() -> Fixture {
         .expect("create shared session-store schema");
     connection
         .execute_batch(
-            "            CREATE VIRTUAL TABLE nodes_fts USING fts5(
-                name, qualified_name, docstring, signature,
-                content='nodes', content_rowid='rowid'
-            );
-            INSERT INTO nodes VALUES (
-                'unicode', 'naïve 東京', 'crate::東京', 'Unicode', 'fn 東京()'
-            );
-            INSERT INTO observations(
+            "INSERT INTO observations(
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
             ) VALUES
@@ -219,8 +205,7 @@ pub(crate) fn fixture() -> Fixture {
                 ('event-1', 'actor', 'idempotency-1', 'mutate', 'revision-1', 'revision-2',
                  NULL, 'commitment-1', 'receipt-digest-1', NULL, NULL, 2),
                 ('event-2', 'actor', NULL, 'denied', 'revision-2', NULL, NULL,
-                 'commitment-2', NULL, NULL, 'unauthorized', 3);
-            INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild');",
+                 'commitment-2', NULL, NULL, 'unauthorized', 3);",
         )
         .expect("create fixture schema");
     drop(connection);
