@@ -5,10 +5,17 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::time::{Duration, interval};
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{DaemonInvocationClient, DaemonLspSessionClient};
+use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
-use tracedecay_lsp::{ContentLengthCodec, FramePoll, FrameSend};
+use tracedecay_lsp::{
+    ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS, FramePoll, FrameSend,
+    ProcessLocalRequestSequence,
+};
 
 use crate::cli::LspAction;
+
+static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
+    ProcessLocalRequestSequence::starting_at(1);
 
 pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::Result<()> {
     match action {
@@ -50,6 +57,7 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::
         .ok_or_else(|| bridge_config_error("LSP initialize did not identify a workspace root"))?;
     let handshake = DaemonHandshake::for_current_client(Some(project_root), None, false, false)?;
     let invocation = DaemonInvocationClient::for_current(handshake)?;
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     let mut session = DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),
@@ -60,8 +68,11 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::
             .as_ref()
             .map(|binding| binding.workspace_folders.clone())
             .unwrap_or_default(),
+        deadline,
+        cancellation,
     )
-    .await?;
+    .await
+    .map_err(lsp_invocation_error)?;
     let mut stdout = tokio::io::stdout();
     let mut pending_client_frame = initialize.map(|binding| binding.frame);
     let mut poll_timer = interval(Duration::from_millis(25));
@@ -100,7 +111,9 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::
             read = stdin.read(&mut read_buffer), if pending_client_frame.is_none() => {
                 let read = read?;
                 if read == 0 {
-                    let _ = session.detach().await;
+                    if let Ok((deadline, cancellation)) = lsp_request_control() {
+                        let _ = session.detach(deadline, cancellation).await;
+                    }
                     codec
                         .finish()
                         .map_err(|error| bridge_error("decode", error))?;
@@ -315,36 +328,99 @@ async fn send_client_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
     frame: &str,
 ) -> tracedecay::errors::Result<FrameSend> {
-    match session.try_send_client_frame(frame).await {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    match session
+        .try_send_client_frame(frame, deadline, cancellation)
+        .await
+    {
         Ok(outcome) => Ok(outcome),
-        Err(_) => {
-            session.reconnect().await?;
-            session.try_send_client_frame(frame).await
+        Err(InvocationError::Unavailable) => {
+            reconnect_session(session).await?;
+            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+            session
+                .try_send_client_frame(frame, deadline, cancellation)
+                .await
+                .map_err(lsp_invocation_error)
         }
+        Err(error) => Err(lsp_invocation_error(error)),
     }
 }
 
 async fn poll_daemon_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
 ) -> tracedecay::errors::Result<FramePoll> {
-    match session.poll_daemon_frame().await {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    match session.poll_daemon_frame(deadline, cancellation).await {
         Ok(outcome) => Ok(outcome),
-        Err(_) => {
-            session.reconnect().await?;
-            session.poll_daemon_frame().await
+        Err(InvocationError::Unavailable) => {
+            reconnect_session(session).await?;
+            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+            session
+                .poll_daemon_frame(deadline, cancellation)
+                .await
+                .map_err(lsp_invocation_error)
         }
+        Err(error) => Err(lsp_invocation_error(error)),
     }
 }
 
 async fn acknowledge_daemon_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
 ) -> tracedecay::errors::Result<()> {
-    match session.acknowledge_daemon_frame().await {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    match session
+        .acknowledge_daemon_frame(deadline, cancellation)
+        .await
+    {
         Ok(()) => Ok(()),
-        Err(_) => {
-            session.reconnect().await?;
-            session.acknowledge_daemon_frame().await
+        Err(InvocationError::Unavailable) => {
+            reconnect_session(session).await?;
+            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+            session
+                .acknowledge_daemon_frame(deadline, cancellation)
+                .await
+                .map_err(lsp_invocation_error)
         }
+        Err(error) => Err(lsp_invocation_error(error)),
+    }
+}
+
+async fn reconnect_session(session: &mut DaemonLspSessionClient) -> tracedecay::errors::Result<()> {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    session
+        .reconnect(deadline, cancellation)
+        .await
+        .map_err(lsp_invocation_error)
+}
+
+fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationError> {
+    let sequence = LSP_BRIDGE_CONTROL_SEQUENCE
+        .next_string("lsp-bridge.")
+        .map_err(|_| InvocationError::Unavailable)?;
+    let budget_micros = i64::try_from(DEFAULT_LSP_REQUEST_DEADLINE_MS)
+        .map_err(|_| InvocationError::Unavailable)?
+        .saturating_mul(1_000);
+    let expires_at = tracedecay_application::clock::now_micros()
+        .0
+        .saturating_add(budget_micros);
+    let deadline =
+        Deadline::new(tracedecay_domain::UtcMicros(expires_at)).map_err(InvocationError::from)?;
+    let cancellation = CancellationSignal::active(format!("cancellation.{sequence}"))
+        .map_err(InvocationError::from)?;
+    Ok((deadline, cancellation))
+}
+
+fn lsp_invocation_error(error: InvocationError) -> tracedecay::errors::TraceDecayError {
+    let message = match error {
+        InvocationError::Cancelled => "LSP gateway request was cancelled",
+        InvocationError::DeadlineExceeded => "LSP gateway request deadline elapsed",
+        InvocationError::Denied => "LSP gateway request was not authorized",
+        InvocationError::InvalidRequest => "LSP gateway request was invalid",
+        InvocationError::Conflict => "LSP gateway request conflicted with current state",
+        InvocationError::Unavailable => "LSP gateway authority is unavailable",
+    };
+    tracedecay::errors::TraceDecayError::Config {
+        message: message.to_owned(),
     }
 }
 

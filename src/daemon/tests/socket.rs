@@ -5,6 +5,59 @@ use super::*;
 #[cfg(unix)]
 use tracedecay_lsp::{FramePoll, FrameSend};
 
+#[cfg(unix)]
+fn future_lsp_deadline(after: std::time::Duration) -> tracedecay_application::Deadline {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_micros();
+    let now = i64::try_from(now).unwrap_or(i64::MAX);
+    let delta = i64::try_from(after.as_micros()).unwrap_or(i64::MAX);
+    tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(now.saturating_add(delta)))
+        .expect("LSP deadline")
+}
+
+#[cfg(unix)]
+fn active_lsp_control(
+    token: &str,
+) -> (
+    tracedecay_application::Deadline,
+    tracedecay_application::CancellationSignal,
+) {
+    (
+        future_lsp_deadline(std::time::Duration::from_secs(2)),
+        tracedecay_application::CancellationSignal::active(token).expect("LSP cancellation"),
+    )
+}
+
+#[cfg(unix)]
+fn lsp_test_invocation(
+    endpoint: super::super::transport::DaemonEndpoint,
+    profile: &TempDir,
+    client_instance_id: &str,
+) -> crate::daemon_client::DaemonInvocationClient {
+    let handshake = DaemonHandshake {
+        project_path: Some(profile.path().to_path_buf()),
+        scope_prefix: None,
+        timings: false,
+        allow_init: false,
+        allow_initialize_root_routing: false,
+        client_identity: test_client_identity_for(profile.path().to_path_buf()),
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
+        client_instance_id: client_instance_id.to_owned(),
+        tool_list_changed_capable: false,
+        catalog_version: String::new(),
+    };
+    crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+        super::super::DaemonConnection {
+            endpoint,
+            auth_token: None,
+            authority_record: None,
+        },
+        handshake,
+    )
+}
+
 #[tokio::test]
 async fn project_owner_wait_stops_when_the_client_disconnects() {
     struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
@@ -139,36 +192,183 @@ async fn dropping_lsp_client_sends_immediate_session_detach() {
         assert_eq!(detach["session"]["session_id"], "lsp-drop-test");
     });
     let profile = TempDir::new().expect("profile");
-    let handshake = DaemonHandshake {
-        project_path: Some(profile.path().to_path_buf()),
-        scope_prefix: None,
-        timings: false,
-        allow_init: false,
-        allow_initialize_root_routing: false,
-        client_identity: test_client_identity_for(profile.path().to_path_buf()),
-        client_version: env!("CARGO_PKG_VERSION").to_owned(),
-        client_instance_id: "client.drop-test".to_owned(),
-        tool_list_changed_capable: false,
-        catalog_version: String::new(),
-    };
-    let invocation = crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
-        super::super::DaemonConnection {
-            endpoint,
-            auth_token: None,
-            authority_record: None,
-        },
-        handshake,
-    );
+    let invocation = lsp_test_invocation(endpoint, &profile, "client.drop-test");
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.drop-test");
     let session = crate::daemon_client::DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),
         None,
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open LSP session");
 
     drop(session);
+    server.await.expect("server task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let deadline = future_lsp_deadline(std::time::Duration::from_millis(40));
+    let expected_deadline = deadline.expires_at.0;
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        let (reader, _writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake");
+        let open: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read open")
+                .expect("open request"),
+        )
+        .expect("open json");
+        assert_eq!(open["operation"], "lsp_open");
+        assert_eq!(open["deadline"]["expires_at"], expected_deadline);
+        assert_eq!(open["cancellation"]["state"], "active");
+        lines.next_line().await.expect("client disconnect");
+    });
+    let profile = TempDir::new().expect("profile");
+    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-deadline-test");
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.lsp.deadline-test")
+            .expect("cancellation");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::daemon_client::DaemonLspSessionClient::open(
+            invocation,
+            env!("CARGO_PKG_VERSION"),
+            None,
+            Vec::new(),
+            deadline,
+            cancellation,
+        ),
+    )
+    .await
+    .expect("gateway deadline must terminate the open");
+
+    assert!(matches!(
+        result,
+        Err(tracedecay_application::InvocationError::DeadlineExceeded)
+    ));
+    server.await.expect("server task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lsp_gateway_open_returns_typed_cancellation() {
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        let (reader, _writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake");
+        lines
+            .next_line()
+            .await
+            .expect("read open")
+            .expect("open request");
+        lines.next_line().await.expect("client disconnect");
+    });
+    let profile = TempDir::new().expect("profile");
+    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-cancel-test");
+    let cancellation = tracedecay_application::CancellationSignal::active("cancel.lsp.cancel-test")
+        .expect("cancellation");
+    let cancellation_request = cancellation.clone();
+    let cancel = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        cancellation_request.cancel(tracedecay_application::clock::now_micros());
+    });
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::daemon_client::DaemonLspSessionClient::open(
+            invocation,
+            env!("CARGO_PKG_VERSION"),
+            None,
+            Vec::new(),
+            future_lsp_deadline(std::time::Duration::from_secs(1)),
+            cancellation,
+        ),
+    )
+    .await
+    .expect("gateway cancellation must terminate the open");
+
+    assert!(matches!(
+        result,
+        Err(tracedecay_application::InvocationError::Cancelled)
+    ));
+    cancel.await.expect("cancellation task");
+    server.await.expect("server task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lsp_gateway_open_returns_typed_unavailable_when_daemon_disconnects() {
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        let (reader, _writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake");
+        lines
+            .next_line()
+            .await
+            .expect("read open")
+            .expect("open request");
+    });
+    let profile = TempDir::new().expect("profile");
+    let invocation = lsp_test_invocation(endpoint, &profile, "client.lsp-unavailable-test");
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.unavailable-test");
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::daemon_client::DaemonLspSessionClient::open(
+            invocation,
+            env!("CARGO_PKG_VERSION"),
+            None,
+            Vec::new(),
+            deadline,
+            cancellation,
+        ),
+    )
+    .await
+    .expect("daemon disconnect must terminate the open");
+
+    assert!(matches!(
+        result,
+        Err(tracedecay_application::InvocationError::Unavailable)
+    ));
     server.await.expect("server task");
 }
 
@@ -373,34 +573,55 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
         },
         handshake,
     );
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect-open");
     let mut session = crate::daemon_client::DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),
         None,
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open LSP session");
 
-    assert!(session.poll_daemon_frame().await.is_err());
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.interrupted-poll");
+    assert!(
+        session
+            .poll_daemon_frame(deadline, cancellation)
+            .await
+            .is_err()
+    );
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.reconnect");
     session
-        .reconnect()
+        .reconnect(deadline, cancellation)
         .await
         .expect("reconnect over fresh daemon connection");
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.resumed-poll");
     assert!(matches!(
-        session.poll_daemon_frame().await.expect("resumed poll"),
+        session
+            .poll_daemon_frame(deadline, cancellation)
+            .await
+            .expect("resumed poll"),
         FramePoll::Frame(frame) if frame.ends_with(b"\"resumed\"}}")
     ));
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.resumed-frame");
     assert_eq!(
         session
             .try_send_client_frame(
-                "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{}}"
+                "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{}}",
+                deadline,
+                cancellation,
             )
             .await
             .expect("resumed client frame"),
         FrameSend::Sent
     );
-    session.detach().await.expect("detach resumed session");
+    let (deadline, cancellation) = active_lsp_control("cancel.lsp.resumed-detach");
+    session
+        .detach(deadline, cancellation)
+        .await
+        .expect("detach resumed session");
     server.await.expect("server task");
 }
 

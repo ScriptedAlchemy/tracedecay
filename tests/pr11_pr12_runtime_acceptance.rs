@@ -244,6 +244,18 @@ fn git_stdout(project: &Path, args: &[&str]) -> String {
         .to_owned()
 }
 
+static LSP_CONTROL_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn lsp_control() -> (Deadline, CancellationSignal) {
+    let sequence = LSP_CONTROL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (
+        Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(5_000_000)))
+            .expect("LSP gateway deadline"),
+        CancellationSignal::active(format!("cancel.lsp-gateway.{sequence}"))
+            .expect("LSP gateway cancellation"),
+    )
+}
+
 async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
     // Semantic requests are answered asynchronously: while an operation is in
     // flight the gateway writes no frame at all, so silence means "not yet"
@@ -252,16 +264,18 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
     // cold start — sysroot load and crate graph build — cannot beat.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     while std::time::Instant::now() < deadline {
+        let (operation_deadline, cancellation) = lsp_control();
         match session
-            .poll_daemon_frame()
+            .poll_daemon_frame(operation_deadline, cancellation)
             .await
             .expect("poll daemon LSP frame")
         {
             FramePoll::Frame(frame) => {
                 let value: Value =
                     serde_json::from_slice(frame.as_slice()).expect("daemon LSP JSON");
+                let (operation_deadline, cancellation) = lsp_control();
                 session
-                    .acknowledge_daemon_frame()
+                    .acknowledge_daemon_frame(operation_deadline, cancellation)
                     .await
                     .expect("acknowledge daemon LSP frame");
                 if value.get("id").and_then(Value::as_u64) == Some(response_id) {
@@ -276,9 +290,10 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
 }
 
 async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
+    let (deadline, cancellation) = lsp_control();
     assert_eq!(
         session
-            .try_send_client_frame(&value.to_string())
+            .try_send_client_frame(&value.to_string(), deadline, cancellation)
             .await
             .expect("send daemon LSP frame"),
         FrameSend::Sent
@@ -292,8 +307,9 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         "method": "shutdown",
         "params": {},
     });
+    let (deadline, cancellation) = lsp_control();
     match session
-        .try_send_client_frame(&shutdown_request.to_string())
+        .try_send_client_frame(&shutdown_request.to_string(), deadline, cancellation)
         .await
         .expect("send daemon LSP shutdown frame")
     {
@@ -308,8 +324,9 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         "method": "exit",
         "params": {},
     });
+    let (deadline, cancellation) = lsp_control();
     match session
-        .try_send_client_frame(&exit_notification.to_string())
+        .try_send_client_frame(&exit_notification.to_string(), deadline, cancellation)
         .await
         .expect("send daemon LSP exit frame")
     {
@@ -318,8 +335,9 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
     }
     for _ in 0..100 {
+        let (deadline, cancellation) = lsp_control();
         match session
-            .poll_daemon_frame()
+            .poll_daemon_frame(deadline, cancellation)
             .await
             .expect("poll closed daemon LSP session")
         {
@@ -1600,11 +1618,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .to_string();
     let source = std::fs::read_to_string(fixture.project.join("src/auth/login.rs"))
         .expect("checked-in fixture source");
+    let (deadline, cancellation) = lsp_control();
     let mut session = DaemonLspSessionClient::open(
         fixture.client.clone(),
         "3.17",
         Some(root_uri.clone()),
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open production daemon LSP session");
@@ -2130,11 +2151,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         );
     }
 
+    let (deadline, cancellation) = lsp_control();
     let mut incompatible = DaemonLspSessionClient::open(
         fixture.client.clone(),
         "3.17",
         Some(root_uri.clone()),
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open incompatible-version daemon LSP session");
@@ -2212,11 +2236,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     .expect("cross-scope daemon handshake");
     let other_client =
         DaemonInvocationClient::for_current(other_handshake).expect("cross-scope daemon client");
+    let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(
         other_client,
         "3.17",
         Some(other_root_uri.clone()),
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open cross-scope daemon LSP session");
@@ -2279,8 +2306,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     }
     shutdown_lsp(&mut cross_scope, 603).await;
 
+    let (deadline, cancellation) = lsp_control();
     session
-        .reconnect()
+        .reconnect(deadline, cancellation)
         .await
         .expect("reconnect production LSP session");
     send_lsp(

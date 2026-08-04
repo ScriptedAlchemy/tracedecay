@@ -560,39 +560,80 @@ impl DaemonInvocationService {
                 client_revision,
                 requested_root_uri,
                 workspace_folders,
-            } => {
-                self.open_lsp_session(
-                    lsp_registry,
-                    lsp_workspace,
-                    request_id,
-                    client_revision,
-                    requested_root_uri,
-                    workspace_folders,
-                    now_ms,
-                    lsp_owner,
-                )
-                .await
-            }
-            DaemonInvocationPayload::LspFrame { session, frame } => {
-                self.send_lsp_frame(lsp_registry, request_id, session, frame, now_ms)
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.open_lsp_session(
+                        lsp_registry,
+                        lsp_workspace,
+                        request_id,
+                        client_revision,
+                        requested_root_uri,
+                        workspace_folders,
+                        now_ms,
+                        lsp_owner,
+                    )
                     .await
-            }
-            DaemonInvocationPayload::LspPoll { session } => {
-                self.poll_lsp_frame(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
-            DaemonInvocationPayload::LspAcknowledge { session } => {
-                self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
-            DaemonInvocationPayload::LspReconnect { session } => {
-                self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
-            DaemonInvocationPayload::LspDetach { session } => {
-                self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
-                    .await
-            }
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspFrame {
+                session,
+                frame,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.send_lsp_frame(lsp_registry, request_id, session, frame, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspPoll {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.poll_lsp_frame(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspAcknowledge {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspReconnect {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
+            DaemonInvocationPayload::LspDetach {
+                session,
+                deadline,
+                cancellation,
+            } => match lsp::admit_lsp_control(request_id.clone(), &deadline, &cancellation) {
+                Ok(()) => {
+                    self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
+                        .await
+                }
+                Err(response) => response,
+            },
         };
         if plan26_observable_operation(operation) {
             observe_plan26_invocation_response(
