@@ -1,5 +1,9 @@
 //! Canonical, payload-safe Plan 26 observability contracts.
 
+mod activity;
+#[cfg(test)]
+mod activity_tests;
+
 pub mod accounting {
     /// A single parsed turn from a Claude Code session transcript, ready for
     /// insertion into the `turns` accounting projection.
@@ -20,6 +24,7 @@ pub mod accounting {
 }
 
 pub use accounting::CostTurn;
+pub use activity::ActivityObservedV1;
 
 use std::collections::BTreeMap;
 
@@ -187,15 +192,7 @@ impl ObservabilityEnvelopeV1 {
                 }
             }
             ObservabilityPayloadV1::Activity(activity) => {
-                if activity.units == 0
-                    || !matches!(
-                        activity.family.as_str(),
-                        "hook" | "session_ingest" | "code_index" | "tool_call" | "task"
-                    )
-                    || activity.detail.as_deref().is_some_and(|detail| {
-                        !crate::canonical_text::is_canonical_text_within(detail, 128)
-                    })
-                {
+                if !activity.is_valid() {
                     return Err("activity");
                 }
             }
@@ -560,15 +557,6 @@ pub struct HealthSnapshotObservedV1 {
     pub files_analyzed: u64,
     pub function_denominator: u64,
     pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
-}
-
-/// One bounded project activity observation. `family` and `detail` are
-/// producer-controlled finite labels; paths, source, and messages are excluded.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ActivityObservedV1 {
-    pub family: String,
-    pub units: u64,
-    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

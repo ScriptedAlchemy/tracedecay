@@ -8,15 +8,13 @@ import { ObservatoryPage } from './ObservatoryPage.tsx';
  * contract (src/dashboard/storage_telemetry_api.rs).
  *
  * The endpoint's honesty rules are the assertions here: an unconfigured budget
- * is a missing owner *setting* and never reads as unsupported or as a pass; a
- * first watermark is a real baseline and never reads as zero growth; a growth
- * delta is signed and always carries its since-daemon-start coverage verbatim;
- * and roles that share one database appear once, naming every role.
+ * is a missing owner *setting* and never reads as unsupported or as a pass;
+ * size is live but growth stays explicitly unknown until an execution-owned
+ * sampler exists; and roles that share one database appear once, naming every
+ * role.
  */
 
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
-const COVERAGE =
-  'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
 /** Two watermarks an hour apart, so the rendered pair is a real UTC instant
  * rather than the epoch and the two ends are distinguishable. */
 const SAMPLE_PREVIOUS_MICROS = 1_753_000_000_000_000;
@@ -55,24 +53,9 @@ describe('ObservatoryPage store telemetry', () => {
     // Unknown budget never renders as a pass.
     expect(screen.getAllByText('budget could not be determined').length).toBe(2);
 
-    // Baseline is a real first sample, explicitly not zero growth.
-    expect(
-      screen.getByText(/first sample this daemon lifetime — not zero growth · 71\.1 MiB measured/),
-    ).toBeTruthy();
-
-    // Observed growth is signed, counts store watermarks, and the retired
-    // per-table wording is gone.
-    expect(
-      screen.getByText(/\+6\.1 MiB over 12 store-size watermarks · 198\.6 MiB → 204\.7 MiB/),
-    ).toBeTruthy();
-    expect(screen.getByText(/−4\.0 MiB over 24 store-size watermarks/)).toBeTruthy();
-    expect(screen.queryByText(/table samples/)).toBeNull();
-
-    // The coverage sentence appears verbatim on every real growth read.
-    expect(screen.getAllByText(COVERAGE).length).toBe(4);
-
-    // A failed pragma read stays unknown on both dimensions, never zeroed.
-    expect(screen.getByText('growth could not be determined')).toBeTruthy();
+    // A live size read does not manufacture a growth baseline. Every store is
+    // explicit about the missing execution-owned history.
+    expect(screen.getAllByText('growth could not be determined').length).toBe(5);
     expect(screen.getByText(/telemetry could not be determined for this store/)).toBeTruthy();
   });
 
@@ -645,18 +628,8 @@ function telemetryPayload() {
           reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
         },
         growth: {
-          state: 'observed',
-          coverage: COVERAGE,
-          first_measured_at: 1,
-          last_measured_at: 100,
-          sample_count: 12,
-          first_total_bytes: 208_207_872,
-          current_total_bytes: 214_630_400,
-          growth_bytes: 6_422_528,
-          samples: [
-            { measured_at: 1, total_bytes: 208_207_872, free_bytes: 4_112_384 },
-            { measured_at: 100, total_bytes: 214_630_400, free_bytes: 5_242_880 },
-          ],
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
         },
       },
       {
@@ -689,18 +662,8 @@ function telemetryPayload() {
           reason: 'evaluated against the owner-configured soft limit of 536870912 bytes',
         },
         growth: {
-          state: 'observed',
-          coverage: COVERAGE,
-          first_measured_at: 1,
-          last_measured_at: 100,
-          sample_count: 24,
-          first_total_bytes: 742_391_808,
-          current_total_bytes: 738_197_504,
-          growth_bytes: -4_194_304,
-          samples: [
-            { measured_at: 1, total_bytes: 742_391_808, free_bytes: 12_582_912 },
-            { measured_at: 100, total_bytes: 738_197_504, free_bytes: 8_388_608 },
-          ],
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
         },
       },
       {
@@ -727,11 +690,8 @@ function telemetryPayload() {
           setting_key: SETTING_KEY,
         },
         growth: {
-          state: 'baseline',
-          coverage: COVERAGE,
-          measured_at: 100,
-          total_bytes: 74_547_200,
-          reason: 'first watermark recorded in this daemon lifetime',
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
         },
       },
       {
@@ -757,11 +717,8 @@ function telemetryPayload() {
           reason: 'the resolved runtime configuration could not be read',
         },
         growth: {
-          state: 'baseline',
-          coverage: COVERAGE,
-          measured_at: 100,
-          total_bytes: 39_321_600,
-          reason: 'first watermark recorded in this daemon lifetime',
+          state: 'unknown',
+          reason: 'no execution-owned store-size watermark is available',
         },
       },
       {
@@ -779,7 +736,7 @@ function telemetryPayload() {
         },
         growth: {
           state: 'unknown',
-          reason: 'no watermark could be recorded because the store size read did not produce a sample',
+          reason: 'no execution-owned store-size watermark is available',
         },
       },
     ].map((store) => ({ ...store, table_growth: tableGrowth[tableGrowthIndex++] })),
@@ -833,7 +790,7 @@ function byteOnlyStore() {
     },
     growth: {
       state: 'unknown',
-      reason: 'no watermark could be recorded because the read produced no page sample',
+      reason: 'no execution-owned store-size watermark is available',
     },
     table_growth: {
       state: 'unknown',

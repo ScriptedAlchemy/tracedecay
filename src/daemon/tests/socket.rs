@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use std::process::Command;
+
 use super::*;
 #[cfg(unix)]
 use tracedecay_lsp::{FramePoll, FrameSend};

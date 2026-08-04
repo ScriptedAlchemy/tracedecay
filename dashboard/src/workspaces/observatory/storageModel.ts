@@ -148,28 +148,6 @@ export function budgetPresentation(budget: StoreBudgetDimensionV1): DimensionPre
 
 export function growthPresentation(growth: StoreGrowthDimensionV1): DimensionPresentation {
   switch (growth.state) {
-    case 'baseline':
-      return {
-        state: 'baseline',
-        tone: 'baseline',
-        summary: `first sample this daemon lifetime — not zero growth · ${formatBytes(
-          growth.total_bytes,
-        )} measured`,
-        // `coverage` states that the window is since-daemon-start, not
-        // historical. It is surfaced verbatim.
-        notes: [growth.reason, growth.coverage],
-      };
-    case 'observed':
-      return {
-        state: 'observed',
-        // An observed delta is a measurement, not a verdict: growing is not
-        // itself unhealthy, so the tone stays "observed" in either direction.
-        tone: 'ready',
-        summary: `${formatSignedBytes(growth.growth_bytes)} over ${growth.sample_count} store-size watermarks · ${formatBytes(
-          growth.first_total_bytes,
-        )} → ${formatBytes(growth.current_total_bytes)}`,
-        notes: [growth.coverage],
-      };
     case 'unknown':
       return {
         state: 'unknown',
@@ -177,8 +155,6 @@ export function growthPresentation(growth: StoreGrowthDimensionV1): DimensionPre
         summary: 'growth could not be determined',
         notes: [growth.reason],
       };
-    default:
-      return assertNever(growth);
   }
 }
 

@@ -12,8 +12,8 @@ use super::capacity::CapacityReservation;
 use super::leases::validate_profile_authority;
 use super::{
     PublishedShardRuntime, ReadyRuntime, RegistryEntry, RegistryState, RuntimeLocatorRecord,
-    ShardRuntimeBuildRequest, StoreRuntimeHandle, StoreRuntimeHandleInner, StoreRuntimeKey,
-    StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeRegistry,
+    ShardRuntimeBuildRequest, StoreRuntimeAccessMode, StoreRuntimeHandle, StoreRuntimeHandleInner,
+    StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeOpenRequest, StoreRuntimeRegistry,
     StoreRuntimeRegistryFailure, StoreRuntimeRegistryFuture, utc_now,
 };
 
@@ -109,6 +109,7 @@ pub(super) struct OpeningRuntime {
     pub(super) updates: watch::Sender<OpenState>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
     pub(super) mode: StoreRuntimeOpenMode,
+    pub(super) access: StoreRuntimeAccessMode,
 }
 
 impl StoreRuntimeRegistry {
@@ -123,16 +124,29 @@ impl StoreRuntimeRegistry {
                 .database_authority
                 .as_ref()
                 .map(|authority| authority.canonical_database_path())
-                && let Some(reservation) = state
+            {
+                if let Some(reservation) = state
                     .destructive_paths
                     .values()
                     .find(|reservation| super::destructive::reservation_matches(reservation, path))
-            {
-                return StoreRuntimeOpenBegin::Rejected(
-                    StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
-                        root: reservation.root.clone(),
-                    },
-                );
+                {
+                    return StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::DestructiveMaintenanceInProgress {
+                            root: reservation.root.clone(),
+                        },
+                    );
+                }
+                if let Some(retained) = retained_database_key(&state, path)
+                    && retained != key
+                {
+                    return StoreRuntimeOpenBegin::Rejected(
+                        StoreRuntimeRegistryFailure::DatabaseRuntimeIdentityConflict {
+                            requested: Box::new(key),
+                            retained: Box::new(retained),
+                            path: path.to_path_buf(),
+                        },
+                    );
+                }
             }
             if let Err(failure) = validate_profile_authority(&state, request) {
                 return StoreRuntimeOpenBegin::Rejected(failure);
@@ -140,18 +154,18 @@ impl StoreRuntimeRegistry {
             if let Some(entry) = state.entries.get(&key) {
                 return match entry {
                     RegistryEntry::Ready(ready)
-                        if matching_database_authority(
-                            request.database_authority.as_ref(),
-                            ready.handle.inner.database_authority.as_ref(),
-                        ) =>
+                        if request.access == StoreRuntimeAccessMode::ReadOnly
+                            || (ready.handle.writer_present()
+                                && matching_database_authority(
+                                    request.database_authority.as_ref(),
+                                    ready.handle.inner.database_authority.as_ref(),
+                                )) =>
                     {
                         StoreRuntimeOpenBegin::Ready(ready.handle.clone())
                     }
                     RegistryEntry::Opening(opening)
-                        if matching_database_authority(
-                            request.database_authority.as_ref(),
-                            opening.database_authority.as_ref(),
-                        ) && request.mode == opening.mode =>
+                        if open_access_compatible(request, opening)
+                            && request.mode == opening.mode =>
                     {
                         StoreRuntimeOpenBegin::Joined(StoreRuntimeOpenJoin {
                             key: Box::new(key),
@@ -211,6 +225,7 @@ impl StoreRuntimeRegistry {
                     updates: updates.clone(),
                     database_authority: request.database_authority.clone(),
                     mode: request.mode,
+                    access: request.access,
                 }),
             );
             let join = StoreRuntimeOpenJoin {
@@ -230,10 +245,11 @@ impl StoreRuntimeRegistry {
         let registry = self.clone();
         let database_authority = request.database_authority.clone();
         let mode = request.mode;
+        let access = request.access;
         tokio::spawn(async move {
             let guard = OpenAttemptGuard::new(registry.clone(), key.clone(), attempt, updates);
             let outcome = registry
-                .build_runtime(&key, binding, database_authority, mode)
+                .build_runtime(&key, binding, database_authority, mode, access)
                 .await;
             guard.complete(outcome);
         });
@@ -294,6 +310,7 @@ impl StoreRuntimeRegistry {
         binding: StoreRuntimeBindingV1,
         database_authority: Option<crate::db::DatabaseAuthority>,
         mode: StoreRuntimeOpenMode,
+        access: StoreRuntimeAccessMode,
     ) -> StoreRuntimeRegistryFuture<
         'a,
         Result<BuiltShardRuntimePublication, StoreRuntimeRegistryFailure>,
@@ -336,6 +353,7 @@ impl StoreRuntimeRegistry {
                     binding.clone(),
                     locator.clone(),
                     mode,
+                    access,
                     database_authority.clone(),
                 ))
                 .await?;
@@ -348,6 +366,46 @@ impl StoreRuntimeRegistry {
             Ok((published, locator, database_authority))
         })
     }
+}
+
+fn open_access_compatible(request: &StoreRuntimeOpenRequest, opening: &OpeningRuntime) -> bool {
+    match request.access {
+        StoreRuntimeAccessMode::ReadOnly => true,
+        StoreRuntimeAccessMode::ReadWrite => {
+            opening.access == StoreRuntimeAccessMode::ReadWrite
+                && matching_database_authority(
+                    request.database_authority.as_ref(),
+                    opening.database_authority.as_ref(),
+                )
+        }
+    }
+}
+
+fn retained_database_key(state: &RegistryState, path: &std::path::Path) -> Option<StoreRuntimeKey> {
+    state.entries.iter().find_map(|(key, entry)| {
+        let candidate = match entry {
+            RegistryEntry::Opening(opening)
+                if opening.access == StoreRuntimeAccessMode::ReadWrite =>
+            {
+                opening
+                    .database_authority
+                    .as_ref()
+                    .map(crate::db::DatabaseAuthority::canonical_database_path)
+            }
+            RegistryEntry::Ready(ready) if ready.handle.writer_present() => {
+                Some(ready.handle.canonical_path())
+            }
+            RegistryEntry::Evicting(evicting) if evicting.handle.writer_present() => {
+                Some(evicting.handle.canonical_path())
+            }
+            RegistryEntry::Opening(_) | RegistryEntry::Ready(_) | RegistryEntry::Evicting(_) => {
+                None
+            }
+        };
+        candidate
+            .is_some_and(|candidate| candidate == path)
+            .then(|| key.clone())
+    })
 }
 
 struct OpenAttemptGuard {

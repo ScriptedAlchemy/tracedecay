@@ -19,8 +19,6 @@ import {
 } from './storageModel.ts';
 
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
-const COVERAGE =
-  'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
 
 describe('Observatory storage read models', () => {
   it('renders refresh only from a server-supplied legal action reference', () => {
@@ -171,11 +169,8 @@ describe('Observatory storage read models', () => {
           free_page_ratio: 0.25,
           budget: { state: 'unset', reason: 'no configured budget', setting_key: SETTING_KEY },
           growth: {
-            state: 'baseline',
-            coverage: COVERAGE,
-            measured_at: 123,
-            total_bytes: 32768,
-            reason: 'first watermark recorded in this daemon lifetime',
+            state: 'unknown',
+            reason: 'no execution-owned store-size watermark is available',
           },
           table_growth: {
             state: 'baseline_established',
@@ -221,7 +216,7 @@ describe('Observatory storage read models', () => {
     const store = payload.stores[0]!;
     expect(store.budget.reason).toBe('no configured budget');
     expect(store.budget.state === 'unset' && store.budget.setting_key).toBe(SETTING_KEY);
-    expect(store.growth.state).toBe('baseline');
+    expect(store.growth.state).toBe('unknown');
     expect(store.roles).toEqual(['graph', 'memory']);
     expect(store.read.kind).toBe('observed');
   });
@@ -379,58 +374,20 @@ describe('store budget dimension presentation', () => {
 });
 
 describe('store growth dimension presentation', () => {
-  it('states a baseline as a real first sample, not zero growth', () => {
-    const view = growthPresentation({
-      state: 'baseline',
-      coverage: COVERAGE,
-      measured_at: 1,
-      total_bytes: 32768,
-      reason: 'first watermark recorded in this daemon lifetime',
-    });
-    expect(view.state).toBe('baseline');
-    expect(view.summary).toContain('first sample this daemon lifetime — not zero growth');
-    expect(view.summary).toContain('32.0 KiB measured');
-    // The coverage sentence is surfaced verbatim, never paraphrased.
-    expect(view.notes).toContain(COVERAGE);
-  });
-
-  it('shows a signed delta and the verbatim since-daemon-start coverage', () => {
-    const grew = growthPresentation({
-      state: 'observed',
-      coverage: COVERAGE,
-      first_measured_at: 1,
-      last_measured_at: 2,
-      sample_count: 12,
-      first_total_bytes: 32768,
-      current_total_bytes: 65536,
-      growth_bytes: 32768,
-      samples: [
-        { measured_at: 1, total_bytes: 32768, free_bytes: 0 },
-        { measured_at: 2, total_bytes: 65536, free_bytes: 0 },
-      ],
-    });
-    expect(grew.summary).toBe(
-      '+32.0 KiB over 12 store-size watermarks · 32.0 KiB → 64.0 KiB',
-    );
-    expect(grew.notes).toEqual([COVERAGE]);
-    // The retired per-table wording must be gone: these are store watermarks.
-    expect(grew.summary).not.toMatch(/table samples/);
-  });
-
   it('renders a shrinking store as a negative delta and an unchanged store honestly', () => {
     expect(formatSignedBytes(-2048)).toBe('−2.0 KiB');
     expect(formatSignedBytes(0)).toBe('no size change');
     expect(formatSignedBytes(1536)).toBe('+1.5 KiB');
   });
 
-  it('renders an unrecordable growth read as unknown', () => {
+  it('renders absent execution-owned growth history as unknown', () => {
     const view = growthPresentation({
       state: 'unknown',
-      reason: 'no watermark could be recorded because the store size read did not produce a sample',
+      reason: 'no execution-owned store-size watermark is available',
     });
     expect(view.tone).toBe('unknown');
     expect(view.summary).toBe('growth could not be determined');
-    expect(view.notes[0]).toContain('no watermark could be recorded');
+    expect(view.notes[0]).toContain('execution-owned');
   });
 });
 

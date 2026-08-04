@@ -1,3 +1,6 @@
+#[cfg(unix)]
+use std::process::Command;
+
 use super::*;
 use crate::daemon::ProjectServerRequirement;
 

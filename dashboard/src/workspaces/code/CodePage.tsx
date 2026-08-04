@@ -401,6 +401,7 @@ function GraphSlicePane({
               height={300}
               canvasClassName="md:min-h-[400px]"
               activation={activation}
+              fallbackDescription="the symbol results and inspector below remain available as a text alternative"
               encoding={{
                 body: 'symbol',
                 size: 'connectedness',

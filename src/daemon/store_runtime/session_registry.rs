@@ -2,14 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
 
 use tokio::sync::Mutex;
 use tracedecay_agent_hosts::ports::project_runtime::{
     MemoryCurateOptions as AgentMemoryCurateOptions, ProfileRuntime, RuntimeFuture,
 };
-use tracedecay_domain::RefId;
 use tracedecay_store::{AdmissionConfigV1, ProjectId, StoreIncarnationV1, StoreShardIdV1};
 
 use super::register_registered_schema_installer;
@@ -20,7 +19,6 @@ use super::registry::{
     StoreRuntimeRegistry, StoreRuntimeRegistryFailure, StoreRuntimeResolver,
 };
 use super::resolver::{
-    LocalCodeStoreAuthorityRegistrationOutcomeV1, LocalCodeStoreAuthorityV1,
     LocalProfileStoreAuthorityV1, LocalProjectEnrollmentAuthorityV1, LocalStoreLocatorResolutionV1,
     LocalStoreRuntimeResolverV1,
 };
@@ -74,7 +72,6 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
-    code_graph_open_gates: Mutex<BTreeMap<StoreShardIdV1, Weak<Mutex<()>>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
     #[cfg(test)]
     long_lived_session_maintenance_for_test: AtomicBool,

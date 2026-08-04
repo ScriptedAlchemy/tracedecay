@@ -58,6 +58,7 @@ pub enum OperationTermination {
     Cancelled,
     TimedOut,
     Failed,
+    Unavailable,
     Partial,
     EffectUnknown,
 }
@@ -135,6 +136,23 @@ impl From<EffectTermination> for OperationTermination {
             EffectTermination::Partial => Self::Partial,
             EffectTermination::EffectUnknown => Self::EffectUnknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OperationTermination;
+
+    #[test]
+    fn unavailable_read_receipt_has_a_distinct_wire_state() {
+        let encoded =
+            serde_json::to_string(&OperationTermination::Unavailable).expect("encode termination");
+
+        assert_eq!(encoded, "\"unavailable\"");
+        assert_eq!(
+            serde_json::from_str::<OperationTermination>(&encoded).expect("decode termination"),
+            OperationTermination::Unavailable
+        );
     }
 }
 

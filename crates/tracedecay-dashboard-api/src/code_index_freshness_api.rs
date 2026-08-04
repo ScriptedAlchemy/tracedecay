@@ -44,7 +44,9 @@ pub struct CodeIndexWorktreeFreshnessV1 {
     pub sealed_at_micros: Option<i64>,
     /// Last reconcile observation time (microseconds since the Unix epoch).
     pub last_reconcile_micros: Option<i64>,
-    /// Staleness-ladder state label (e.g. `fresh`, `stale`, `reresolving`).
+    /// Staleness-ladder state from the last scheduler execution. `fresh` means
+    /// the scheduler most recently observed a fresh source; the status read
+    /// does not probe the worktree to revalidate that observation.
     pub staleness_state: Option<String>,
     /// Pending hook-hint count, when cheaply available.
     pub hook_hint_count: Option<u64>,
@@ -63,8 +65,7 @@ pub struct CodeIndexFreshnessPayloadV1 {
     pub note: String,
 }
 
-const LIVE_NOTE: &str =
-    "live daemon scheduler state; generation and scope come from the durable sealed generation";
+const LIVE_NOTE: &str = "last daemon scheduler execution state; generation and scope come from the durable sealed generation";
 const UNAVAILABLE_NOTE: &str =
     "the dashboard is not attached to a daemon-owned code-index scheduler registry";
 
