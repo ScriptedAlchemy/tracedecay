@@ -24,6 +24,7 @@ use crate::observation::{
 use crate::store::observation::GlobalDbObservationStore;
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_runtime_core::privacy::RecordSanitizerV1;
+use tracedecay_sessions::observation::RepositoryProvenanceBatchContext;
 use tracedecay_sessions::repository_provenance::RepositoryProvenanceAdmissionContext;
 
 mod disposition;
@@ -388,7 +389,7 @@ pub struct HostAdmissionAuthorities<'a> {
     brain_id: Option<BrainId>,
     profile_id: Option<UserProfileId>,
     profile_registered: Option<&'a RegisteredGlobalDb>,
-    repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    repository_provenance: Option<RepositoryProvenanceBatchContext>,
 }
 
 impl<'a> HostAdmissionAuthorities<'a> {
@@ -514,7 +515,8 @@ impl<'a> HostAdmissionAuthorities<'a> {
         mut self,
         repository_provenance: RepositoryProvenanceAdmissionContext,
     ) -> Self {
-        self.repository_provenance = Some(repository_provenance);
+        self.repository_provenance =
+            Some(RepositoryProvenanceBatchContext::new(repository_provenance));
         self
     }
 
@@ -860,12 +862,13 @@ impl<'a> HostAdmissionFacade<'a> {
             .registered_database(host_scope(&scope))?
             .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
         let application = self.application(&provider, &scope)?;
-        let outcome = application
-            .capture_observation(
-                request.with_repository_provenance(self.authorities.repository_provenance.clone()),
-            )
-            .await
-            .map_err(|error| classify_error(&error))?;
+        let outcome =
+            application
+                .capture_observation(request.with_repository_provenance_batch(
+                    self.authorities.repository_provenance.clone(),
+                ))
+                .await
+                .map_err(|error| classify_error(&error))?;
         if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
             crate::external_source_store::RuntimeExternalSourceStore::new(
                 database.runtime().clone(),

@@ -11,13 +11,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tempfile::TempDir;
 
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::git_correlation::{
     BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
-    SessionsForQuery, normalize_worktree,
+    GitScanFailure, SessionsForQuery, normalize_worktree,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay_domain::ProjectId;
@@ -129,7 +130,7 @@ struct FakeGit {
 }
 
 impl GitReflogSource for FakeGit {
-    fn reflog(&self, _worktree: &Path) -> Option<String> {
+    fn reflog(&self, _worktree: &Path) -> Result<String, GitScanFailure> {
         // Rendered newest-first, the shape branch_timeline_from_reflog parses.
         let mut lines: Vec<String> = self
             .timeline
@@ -140,14 +141,20 @@ impl GitReflogSource for FakeGit {
             })
             .collect();
         lines.reverse();
-        Some(lines.join("\n"))
+        Ok(lines.join("\n"))
     }
 
-    fn current_branch(&self, _worktree: &Path) -> Option<String> {
-        self.current.clone()
+    fn current_branch(&self, _worktree: &Path) -> Result<Option<String>, GitScanFailure> {
+        Ok(self.current.clone())
     }
 
-    fn commit_log(&self, _worktree: &Path, branch: &str, since: i64) -> Option<String> {
+    fn commit_log(
+        &self,
+        _worktree: &Path,
+        branch: &str,
+        since: i64,
+        max_commits: usize,
+    ) -> Result<String, GitScanFailure> {
         // Delegate to the real repo so commit shas/times are authentic.
         let out = Command::new(common::git_program())
             .args([
@@ -155,14 +162,15 @@ impl GitReflogSource for FakeGit {
                 branch,
                 "--pretty=%H %ct",
                 &format!("--since={since}"),
+                &format!("--max-count={}", max_commits.saturating_add(1)),
             ])
             .current_dir(&self.real_repo)
             .output()
-            .ok()?;
+            .map_err(|_| GitScanFailure::CommandFailed)?;
         if !out.status.success() {
-            return None;
+            return Err(GitScanFailure::CommandFailed);
         }
-        String::from_utf8(out.stdout).ok()
+        String::from_utf8(out.stdout).map_err(|_| GitScanFailure::InvalidOutput)
     }
 }
 
@@ -260,6 +268,23 @@ async fn backfill_attributes_branch_switch_and_commits() {
         "both sessions map to the repo worktree"
     );
     assert!(stats.spans_written >= 2);
+    assert_eq!(
+        stats.git_reflog_calls, 1,
+        "sessions sharing one worktree watermark must reuse its reflog"
+    );
+    assert_eq!(
+        stats.git_current_branch_calls, 1,
+        "sessions sharing one worktree watermark must reuse HEAD resolution"
+    );
+    assert_eq!(
+        stats.git_log_calls, 2,
+        "the batch should scan each touched branch once, not once per session"
+    );
+    assert!(
+        stats.max_writer_hold_micros < 25_000,
+        "backfill writer hold exceeded 25ms: {}us",
+        stats.max_writer_hold_micros
+    );
 
     // s_switch touched both branches; s_main only main.
     let feature_hits = db
@@ -417,6 +442,72 @@ fn incremental_git(repo: &Path) -> FakeGit {
         current: Some("main".to_string()),
         real_repo: repo.to_path_buf(),
     }
+}
+
+struct CancelReflogOnceGit {
+    inner: FakeGit,
+    cancel_next_reflog: AtomicBool,
+}
+
+impl GitReflogSource for CancelReflogOnceGit {
+    fn reflog(&self, worktree: &Path) -> Result<String, GitScanFailure> {
+        if self.cancel_next_reflog.swap(false, Ordering::SeqCst) {
+            Err(GitScanFailure::Cancelled)
+        } else {
+            self.inner.reflog(worktree)
+        }
+    }
+
+    fn current_branch(&self, worktree: &Path) -> Result<Option<String>, GitScanFailure> {
+        self.inner.current_branch(worktree)
+    }
+
+    fn commit_log(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        since: i64,
+        max_commits: usize,
+    ) -> Result<String, GitScanFailure> {
+        self.inner.commit_log(worktree, branch, since, max_commits)
+    }
+}
+
+#[tokio::test]
+async fn incremental_backfill_cancellation_preserves_the_restart_position() {
+    let (_base, repo, _main, _feature) = build_repo();
+    let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
+    let git = CancelReflogOnceGit {
+        inner: incremental_git(&repo),
+        cancel_next_reflog: AtomicBool::new(true),
+    };
+
+    let cancelled = db
+        .run_incremental_git_backfill_for_test(&git, 50)
+        .await
+        .unwrap();
+    assert_eq!(cancelled.sessions_scanned, 1);
+    assert_eq!(cancelled.skipped_git_error, 1);
+    assert_eq!(
+        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        None,
+        "a cancelled row must remain eligible for the restart"
+    );
+
+    let resumed = db
+        .run_incremental_git_backfill_for_test(&git, 50)
+        .await
+        .unwrap();
+    assert_eq!(resumed.sessions_scanned, 2);
+    assert_eq!(resumed.skipped_git_error, 0);
+    assert_eq!(
+        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+            .await
+            .unwrap(),
+        Some(T_BASE + 850)
+    );
 }
 
 #[tokio::test]

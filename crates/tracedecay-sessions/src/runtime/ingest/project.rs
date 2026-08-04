@@ -285,7 +285,13 @@ async fn ingest_project_sources_for_provider_inner<A: SessionIngestAuthority>(
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
     if !cancelled {
-        finalize_project_ingest(registered, &canonical_project_id, project_root).await;
+        finalize_project_ingest(
+            registered,
+            &canonical_project_id,
+            project_root,
+            cancellation,
+        )
+        .await;
     }
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
@@ -296,10 +302,11 @@ pub(super) async fn finalize_project_ingest<A: SessionIngestAuthority>(
     db: &A,
     project_id: &ProjectId,
     project_root: &Path,
+    cancellation: &ObservationCancellation,
 ) {
     // Now that messages have landed, attribute any commits that fell inside a
     // recorded session span. Fail-open: a git or DB hiccup never blocks ingest.
-    attribute_commits_after_ingest(db).await;
+    attribute_commits_after_ingest(db, cancellation).await;
     // Index Claude Code workflow runs + their agents last, so the parent
     // sessions' git spans already exist and each run inherits them. Fail-open:
     // a workflow-ingest hiccup only logs at debug, never blocks session ingest.
@@ -319,28 +326,46 @@ pub(super) async fn finalize_project_ingest<A: SessionIngestAuthority>(
 /// For each `(branch, worktree)` pair touched since the last sweep, scans that
 /// branch's git log inside the pair's span window (widened by the merge gap)
 /// and attributes overlapping commits to their sessions. Fail-open.
-async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(db: &A) {
+async fn attribute_commits_after_ingest<A: SessionIngestAuthority>(
+    db: &A,
+    cancellation: &ObservationCancellation,
+) {
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let result = commit_attribution_sweep(&db.git_correlation_store(), gap).await;
+    let result = commit_attribution_sweep(&db.git_correlation_store(), gap, cancellation).await;
     if let Err(error) = result {
         tracing::debug!(%error, "commit attribution sweep skipped");
     }
 }
 
-/// One bounded sweep inside a single write transaction, so the sweep watermark
-/// can only advance together with the attribution rows it describes.
+/// One bounded two-phase sweep: snapshot the candidate windows, close the read
+/// authority, run Git, then open a short writer only for CAS publication.
 async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
     store: &S,
     gap_secs: i64,
+    cancellation: &ObservationCancellation,
 ) -> Result<usize, git_correlation::GitCorrelationError> {
-    let transaction = store.open_write_transaction().await?;
-    let attributed =
-        git_correlation::run_commit_attribution_sweep(&transaction, gap_secs, |target| {
-            git_scan_commits(target, gap_secs)
-        })
-        .await?;
-    git_correlation::GitCorrelationWriteTxn::commit(transaction).await?;
-    Ok(attributed)
+    let snapshot = store.read_snapshot().await?;
+    let plan = git_correlation::prepare_commit_attribution_sweep(&snapshot).await?;
+    drop(snapshot);
+    let bounds = tracedecay_runtime_core::git::GitCommandBounds {
+        cancel: Some(cancellation.shared_signal()),
+        ..tracedecay_runtime_core::git::GitCommandBounds::default()
+    };
+    let scanned = git_correlation::scan_commit_attribution_plan(&plan, gap_secs, |target| {
+        git_scan_commits_with_bounds(target, gap_secs, &bounds)
+    });
+    let publication =
+        git_correlation::publish_commit_attribution_plan_to_store(store, scanned).await?;
+    if publication.max_writer_hold_micros >= 25_000 {
+        tracing::warn!(
+            writer_hold_micros = publication.max_writer_hold_micros,
+            "commit attribution publication exceeded writer-hold target"
+        );
+    }
+    Ok(match publication.outcome {
+        git_correlation::CommitAttributionPublication::Published { inserted, .. } => inserted,
+        git_correlation::CommitAttributionPublication::Stale => 0,
+    })
 }
 
 /// Reads commits on one span target's branch within its (gap-widened) window
@@ -350,43 +375,88 @@ async fn commit_attribution_sweep<S: GitCorrelationSessionStore>(
 /// recorded worktree is gone or `git log` fails, so the sweep holds its
 /// watermark and retries the target rather than treating "could not look" as
 /// "nothing there" and never revisiting those spans.
+#[cfg(test)]
 pub(super) fn git_scan_commits(
     target: &git_correlation::SpanScanTarget,
     gap_secs: i64,
 ) -> git_correlation::TargetScan {
+    git_scan_commits_with_bounds(
+        target,
+        gap_secs,
+        &tracedecay_runtime_core::git::GitCommandBounds::default(),
+    )
+}
+
+fn git_scan_commits_with_bounds(
+    target: &git_correlation::SpanScanTarget,
+    gap_secs: i64,
+    bounds: &tracedecay_runtime_core::git::GitCommandBounds,
+) -> git_correlation::TargetScan {
     let worktree = Path::new(&target.worktree);
     if !worktree.is_dir() {
-        return git_correlation::TargetScan::Unavailable;
+        return git_correlation::TargetScan::Unavailable(
+            git_correlation::GitScanFailure::WorktreeUnavailable,
+        );
     }
     let since = target.window_start.saturating_sub(gap_secs);
     let until = target.window_end.saturating_add(gap_secs);
-    let mut command = std::process::Command::new(tracedecay_runtime_core::git::git_program());
-    command
-        .current_dir(worktree)
-        .arg("log")
-        .arg(format!("--since={since}"))
-        .arg(format!("--until={until}"))
-        .arg("--pretty=format:%H %ct");
+    let since_arg = format!("--since={since}");
+    let until_arg = format!("--until={until}");
+    let mut args = vec![
+        "log",
+        since_arg.as_str(),
+        until_arg.as_str(),
+        "--max-count=5001",
+        "--pretty=format:%H %ct",
+    ];
     // Scope to the recorded branch when known; detached-HEAD spans scan HEAD.
     match target.branch.as_deref() {
         Some(branch) if !branch.is_empty() => {
-            command.arg(branch);
+            args.push(branch);
         }
         _ => {}
     }
-    let Ok(output) = command.output() else {
-        return git_correlation::TargetScan::Unavailable;
+    let output = match tracedecay_runtime_core::git::bounded_git_output(worktree, &args, bounds) {
+        Ok(output) => output,
+        Err(error) => {
+            let reason = match error {
+                tracedecay_runtime_core::git::GitCommandError::Cancelled => {
+                    git_correlation::GitScanFailure::Cancelled
+                }
+                tracedecay_runtime_core::git::GitCommandError::DeadlineExceeded => {
+                    git_correlation::GitScanFailure::DeadlineExceeded
+                }
+                tracedecay_runtime_core::git::GitCommandError::OutputLimitExceeded { .. } => {
+                    git_correlation::GitScanFailure::OutputLimitExceeded
+                }
+                tracedecay_runtime_core::git::GitCommandError::Unavailable(_)
+                | tracedecay_runtime_core::git::GitCommandError::ReadOutput { .. }
+                | tracedecay_runtime_core::git::GitCommandError::Wait(_) => {
+                    git_correlation::GitScanFailure::CommandFailed
+                }
+            };
+            return git_correlation::TargetScan::Unavailable(reason);
+        }
     };
     if !output.status.success() {
-        return git_correlation::TargetScan::Unavailable;
+        return git_correlation::TargetScan::Unavailable(
+            git_correlation::GitScanFailure::CommandFailed,
+        );
     }
-    git_correlation::TargetScan::Scanned(parse_git_log_commits(&String::from_utf8_lossy(
-        &output.stdout,
-    )))
+    let Ok(stdout) = String::from_utf8(output.stdout) else {
+        return git_correlation::TargetScan::Unavailable(
+            git_correlation::GitScanFailure::InvalidOutput,
+        );
+    };
+    match git_correlation::parse_bounded_git_log(&stdout, 5_000) {
+        Ok(commits) => git_correlation::TargetScan::Scanned(commits),
+        Err(reason) => git_correlation::TargetScan::Unavailable(reason),
+    }
 }
 
 /// Parses `%H %ct` lines from `git log` into scanned commits, skipping
 /// malformed rows.
+#[cfg(test)]
 pub(super) fn parse_git_log_commits(stdout: &str) -> Vec<git_correlation::ScannedCommit> {
     stdout
         .lines()
@@ -394,7 +464,9 @@ pub(super) fn parse_git_log_commits(stdout: &str) -> Vec<git_correlation::Scanne
             let (sha, ts) = line.trim().split_once(' ')?;
             let committed_at: i64 = ts.trim().parse().ok()?;
             let sha = sha.trim().to_ascii_lowercase();
-            if sha.is_empty() {
+            if !(7..=64).contains(&sha.len())
+                || !sha.chars().all(|character| character.is_ascii_hexdigit())
+            {
                 return None;
             }
             Some(git_correlation::ScannedCommit { sha, committed_at })

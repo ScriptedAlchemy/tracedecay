@@ -17,6 +17,20 @@ use tracedecay_runtime_core::privacy::parse_claude_record_v1;
 
 use super::*;
 
+#[test]
+fn observation_cancellation_shares_the_runtime_token_with_bounded_reads() {
+    let cancellation = ObservationCancellation::default();
+    let bounded_read = cancellation.shared_signal();
+    assert!(!bounded_read.is_cancelled());
+
+    cancellation.cancel();
+
+    assert!(
+        bounded_read.is_cancelled(),
+        "the Git boundary must observe the live request cancellation"
+    );
+}
+
 #[derive(Default)]
 struct FakeStore {
     observations: Mutex<Vec<StoredObservation>>,
@@ -413,6 +427,173 @@ async fn repository_provenance_context_refuses_cross_project_reuse() {
             .availability(),
         EvidenceAvailabilityV1::Unavailable
     ));
+}
+
+#[tokio::test]
+async fn one_ingest_batch_freezes_one_repository_snapshot_until_the_next_epoch() {
+    let repository = TempDir::new().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
+            .args(args)
+            .current_dir(repository.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "TraceDecay Test"]);
+    git(&["config", "user.email", "tracedecay@example.invalid"]);
+    fs::write(repository.path().join("tracked.txt"), "base").unwrap();
+    git(&["add", "--", "tracked.txt"]);
+    git(&["commit", "-q", "-m", "base"]);
+
+    let context = RepositoryProvenanceAdmissionContext::new(
+        repository.path().to_path_buf(),
+        ProjectId::new("project.application-test").unwrap(),
+        RepositoryId::new("repository.batch-test").unwrap(),
+        Some(WorktreeId::new("worktree.batch-test").unwrap()),
+        [0x5a; 32],
+    );
+    let batch = RepositoryProvenanceBatchContext::new(context.clone());
+    let application = application();
+    let first_record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "first batch message" }
+    });
+    let first = application
+        .capture_observation(
+            request_at(&first_record, 0).with_repository_provenance_batch(Some(batch.clone())),
+        )
+        .await
+        .unwrap();
+    let first_id = repository_capture_id(&first);
+
+    fs::write(repository.path().join("tracked.txt"), "staged change").unwrap();
+    git(&["add", "--", "tracked.txt"]);
+    let first_len = u64::try_from(serde_json::to_vec(&first_record).unwrap().len()).unwrap();
+    let second_record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "second batch message" }
+    });
+    let second = application
+        .capture_observation(
+            request_at(&second_record, first_len).with_repository_provenance_batch(Some(batch)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        repository_capture_id(&second),
+        first_id,
+        "messages in one ingest epoch must bind the one frozen snapshot"
+    );
+
+    let second_len = u64::try_from(serde_json::to_vec(&second_record).unwrap().len()).unwrap();
+    let next_epoch = RepositoryProvenanceBatchContext::new(context);
+    let third = application
+        .capture_observation(
+            request_at(
+                &json!({
+                    "type": "user",
+                    "message": { "role": "user", "content": "next epoch" }
+                }),
+                first_len + second_len,
+            )
+            .with_repository_provenance_batch(Some(next_epoch)),
+        )
+        .await
+        .unwrap();
+    assert_ne!(
+        repository_capture_id(&third),
+        first_id,
+        "a new epoch must observe the changed persisted index watermark"
+    );
+}
+
+fn repository_capture_id(outcome: &CaptureObservationOutcome) -> String {
+    let CaptureObservationOutcome::Persisted { outcome, .. } = outcome else {
+        panic!("repository observation must persist");
+    };
+    let Some(provenance) = outcome
+        .receipt()
+        .repository_provenance_attachment()
+        .availability()
+        .value()
+    else {
+        panic!("repository provenance must be readable");
+    };
+    provenance.capture_id().as_str().to_owned()
+}
+
+#[tokio::test]
+async fn warm_repository_provenance_binding_p95_is_sub_millisecond() {
+    let repository = TempDir::new().unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new(tracedecay_runtime_core::git::git_program())
+            .args(args)
+            .current_dir(repository.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "TraceDecay Test"]);
+    git(&["config", "user.email", "tracedecay@example.invalid"]);
+    fs::write(repository.path().join("tracked.txt"), "base").unwrap();
+    git(&["add", "--", "tracked.txt"]);
+    git(&["commit", "-q", "-m", "base"]);
+
+    let batch = RepositoryProvenanceBatchContext::new(RepositoryProvenanceAdmissionContext::new(
+        repository.path().to_path_buf(),
+        ProjectId::new("project.application-test").unwrap(),
+        RepositoryId::new("repository.warm-perf").unwrap(),
+        Some(WorktreeId::new("worktree.warm-perf").unwrap()),
+        [0x5a; 32],
+    ));
+    let application = application();
+    let record = json!({
+        "type": "user",
+        "message": { "role": "user", "content": "cold snapshot" }
+    });
+    let cold = application
+        .capture_observation(request(&record).with_repository_provenance_batch(Some(batch.clone())))
+        .await
+        .unwrap();
+    let CaptureObservationOutcome::Persisted { outcome, .. } = cold else {
+        panic!("cold repository observation must persist");
+    };
+    let observation = outcome.receipt().observation().clone();
+    let projection_generation = outcome.receipt().projection_generation().clone();
+    let authorization = build_observation_resolution_authorization_v1(
+        &observation,
+        "observation-provenance-perf.v1",
+    )
+    .unwrap();
+
+    let mut elapsed = Vec::new();
+    for _ in 0..128 {
+        let started = std::time::Instant::now();
+        let prepared = batch.bind_after_sanitization(
+            &observation,
+            &projection_generation,
+            observation_ingested_at(),
+            authorization.clone(),
+        );
+        elapsed.push(started.elapsed());
+        assert!(matches!(
+            prepared.availability(),
+            EvidenceAvailabilityV1::Known(_)
+        ));
+    }
+    elapsed.sort_unstable();
+    let p95 = elapsed[elapsed.len() * 95 / 100];
+    assert!(
+        p95 < std::time::Duration::from_millis(1),
+        "warm per-message provenance p95 was {p95:?}"
+    );
 }
 
 #[test]

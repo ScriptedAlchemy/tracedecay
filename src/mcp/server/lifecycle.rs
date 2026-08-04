@@ -494,7 +494,12 @@ async fn run_startup_session_post_ingest(
     project_root: PathBuf,
     cancellation: crate::application::observation::ObservationCancellation,
 ) -> bool {
-    let git = crate::sessions::git_correlation::SystemGit;
+    let git = crate::sessions::git_correlation::SystemGit::with_bounds(
+        tracedecay_runtime_core::git::GitCommandBounds {
+            cancel: Some(cancellation.shared_signal()),
+            ..tracedecay_runtime_core::git::GitCommandBounds::default()
+        },
+    );
     let _ = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(&db))
         .run_incremental_backfill(
             &git,

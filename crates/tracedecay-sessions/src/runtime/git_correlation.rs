@@ -47,8 +47,8 @@ pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 
 /// `git_correlation_meta` key holding the auto-backfill activity watermark:
-/// the highest session-activity timestamp the incremental backfill has already
-/// attempted. See [`run_incremental_backfill`].
+/// the highest session-activity timestamp the incremental backfill has
+/// completed or permanently skipped. See [`run_incremental_backfill`].
 pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
 
 /// Errors from the git-correlation store.
@@ -1367,11 +1367,17 @@ pub async fn upsert_commit_session(
 }
 
 mod attribution;
+pub(crate) use attribution::parse_bounded_git_log;
+pub use attribution::{
+    CommitAttributionCoverage, CommitAttributionPlan, CommitAttributionPublication,
+    CommitAttributionStorePublication, GitScanFailure, prepare_commit_attribution_sweep,
+    publish_commit_attribution_plan, publish_commit_attribution_plan_to_store, read_meta_value,
+    scan_commit_attribution_plan, write_meta_value,
+};
 pub use attribution::{
     ScannedCommit, SpanScanTarget, SpanWindow, TargetScan, commit_overlap_kind,
     match_commit_to_spans,
 };
-pub use attribution::{read_meta_value, run_commit_attribution_sweep, write_meta_value};
 
 /// Returns sessions correlated with a branch, worktree, or commit, most
 /// recently active first. Branch/worktree queries aggregate span rows per

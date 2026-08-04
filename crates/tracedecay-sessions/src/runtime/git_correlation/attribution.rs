@@ -1,5 +1,6 @@
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, params};
 
+use super::store::{GitCorrelationSessionStore, GitCorrelationWriteTxn};
 use super::{
     CommitEvidence, CommitRelation, CommitSessionRecord, GitCorrelationError, SpanOverlapKind,
     correlation_tables_present, opt_text, upsert_commit_session,
@@ -145,7 +146,8 @@ async fn scan_targets_since(
             "SELECT branch, worktree, MIN(first_ts), MAX(last_ts), MAX(updated_at)
              FROM session_git_spans
              WHERE updated_at >= ?1
-             GROUP BY branch, worktree",
+             GROUP BY branch, worktree
+             ORDER BY MAX(updated_at) ASC, worktree ASC, branch ASC",
             params![since_ts],
         )
         .await?;
@@ -233,74 +235,277 @@ pub enum TargetScan {
     /// repository was unreadable. Distinct from `Scanned(vec![])`: the target's
     /// commits are unknown, not absent, so the sweep watermark must not move
     /// past it or the target would never be revisited.
-    Unavailable,
+    Unavailable(GitScanFailure),
 }
 
-/// Runs commit attribution for span targets touched since the last sweep.
+/// Typed reason a bounded Git scan could not produce complete evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitScanFailure {
+    Cancelled,
+    DeadlineExceeded,
+    OutputLimitExceeded,
+    WorktreeUnavailable,
+    CommandFailed,
+    InvalidOutput,
+}
+
+/// Strictly parses bounded `%H %ct` output from `git log`.
 ///
-/// The watermark advances only through the leading run of targets (ordered by
-/// span write time) that actually scanned. A target the scanner could not read
-/// stops the watermark there, so a transient git failure defers attribution to
-/// the next sweep instead of silently dropping those spans forever.
-pub async fn run_commit_attribution_sweep<F>(
-    conn: &(impl Executor + ?Sized),
-    gap_secs: i64,
-    mut scan: F,
-) -> Result<usize, GitCorrelationError>
-where
-    F: FnMut(&SpanScanTarget) -> TargetScan,
-{
+/// Callers request `max + 1` rows from Git. Seeing that sentinel row is a
+/// typed output-limit failure, while any malformed row makes the evidence
+/// incomplete rather than silently disappearing from the scan.
+pub(crate) fn parse_bounded_git_log(
+    stdout: &str,
+    max: usize,
+) -> Result<Vec<ScannedCommit>, GitScanFailure> {
+    if stdout.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut commits = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(sha) = parts.next() else {
+            return Err(GitScanFailure::InvalidOutput);
+        };
+        let Some(committed_at) = parts.next().and_then(|value| value.parse::<i64>().ok()) else {
+            return Err(GitScanFailure::InvalidOutput);
+        };
+        if parts.next().is_some()
+            || !(7..=64).contains(&sha.len())
+            || !sha.chars().all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(GitScanFailure::InvalidOutput);
+        }
+        if commits.len() >= max {
+            return Err(GitScanFailure::OutputLimitExceeded);
+        }
+        commits.push(ScannedCommit {
+            sha: sha.to_ascii_lowercase(),
+            committed_at,
+        });
+    }
+    Ok(commits)
+}
+
+/// Read-only database snapshot used by the Git phase after the snapshot closes.
+#[derive(Debug, Clone)]
+pub struct CommitAttributionPlan {
+    expected_watermark: i64,
+    targets: Vec<SpanScanTarget>,
+    spans: Vec<Vec<SpanWindow>>,
+}
+
+impl CommitAttributionPlan {
+    pub fn targets(&self) -> &[SpanScanTarget] {
+        &self.targets
+    }
+}
+
+/// Whether one prepared sweep covered every target in its read snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitAttributionCoverage {
+    Complete,
+    Partial,
+}
+
+/// Candidate rows derived entirely outside the database writer lane.
+pub struct ScannedCommitAttributionPlan {
+    expected_watermark: i64,
+    new_watermark: i64,
+    records: Vec<CommitSessionRecord>,
+    coverage: CommitAttributionCoverage,
+}
+
+/// Result of the short compare-and-set publication phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitAttributionPublication {
+    Published {
+        inserted: usize,
+        coverage: CommitAttributionCoverage,
+    },
+    Stale,
+}
+
+/// Store-level publication receipt including the measured longest writer hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitAttributionStorePublication {
+    pub outcome: CommitAttributionPublication,
+    pub max_writer_hold_micros: u64,
+}
+
+const ATTRIBUTION_PUBLICATION_CHUNK: usize = 32;
+
+/// Takes the short read phase of a commit-attribution sweep. The returned plan
+/// owns every span window needed by Git scanning, so callers can close the
+/// snapshot before invoking any subprocess.
+pub async fn prepare_commit_attribution_sweep(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<CommitAttributionPlan, GitCorrelationError> {
     if !correlation_tables_present(conn).await? {
-        return Ok(0);
+        return Ok(CommitAttributionPlan {
+            expected_watermark: 0,
+            targets: Vec::new(),
+            spans: Vec::new(),
+        });
     }
     let watermark = read_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY)
         .await?
         .unwrap_or(0);
     let mut targets = scan_targets_since(conn, watermark).await?;
-    // Oldest write first so the watermark can checkpoint a contiguous prefix.
-    targets.sort_by_key(|target| (target.max_updated_at, target.worktree.clone()));
-    let mut inserted = 0usize;
-    let mut new_watermark = watermark;
-    let mut watermark_blocked = false;
+    targets.sort_by_key(|target| {
+        (
+            target.max_updated_at,
+            target.worktree.clone(),
+            target.branch.clone(),
+        )
+    });
+    let mut spans = Vec::with_capacity(targets.len());
     for target in &targets {
-        let spans = span_windows_for(conn, target.branch.as_deref(), &target.worktree).await?;
+        spans.push(span_windows_for(conn, target.branch.as_deref(), &target.worktree).await?);
+    }
+    Ok(CommitAttributionPlan {
+        expected_watermark: watermark,
+        targets,
+        spans,
+    })
+}
+
+/// Runs bounded Git scans and pure span matching with no database handle live.
+///
+/// A failed target ends this pass at a contiguous prefix. That makes
+/// cancellation and transient failures restartable without advancing past
+/// evidence that was never read.
+pub fn scan_commit_attribution_plan<F>(
+    plan: &CommitAttributionPlan,
+    gap_secs: i64,
+    mut scan: F,
+) -> ScannedCommitAttributionPlan
+where
+    F: FnMut(&SpanScanTarget) -> TargetScan,
+{
+    let mut records = Vec::new();
+    let mut new_watermark = plan.expected_watermark;
+    let mut coverage = CommitAttributionCoverage::Complete;
+    for (target, spans) in plan.targets.iter().zip(&plan.spans) {
         if spans.is_empty() {
-            // No windows to attribute against; nothing to retry either.
-            if !watermark_blocked {
-                new_watermark = new_watermark.max(target.max_updated_at);
-            }
+            new_watermark = new_watermark.max(target.max_updated_at);
             continue;
         }
-        let TargetScan::Scanned(commits) = scan(target) else {
-            // Unknown, not empty: hold the watermark here and keep going, so
-            // later targets are still attributed this pass but all of them are
-            // rescanned next pass.
-            watermark_blocked = true;
-            continue;
+        let commits = match scan(target) {
+            TargetScan::Scanned(commits) => commits,
+            TargetScan::Unavailable(_) => {
+                coverage = CommitAttributionCoverage::Partial;
+                break;
+            }
         };
         for commit in commits {
-            let records = match_commit_to_spans(
+            records.extend(match_commit_to_spans(
                 &commit.sha,
                 target.branch.as_deref(),
                 &target.worktree,
                 commit.committed_at,
-                &spans,
+                spans,
                 gap_secs,
-            );
-            for record in &records {
-                if upsert_commit_session(conn, record).await? {
-                    inserted += 1;
-                }
+            ));
+        }
+        new_watermark = new_watermark.max(target.max_updated_at);
+    }
+    ScannedCommitAttributionPlan {
+        expected_watermark: plan.expected_watermark,
+        new_watermark,
+        records,
+        coverage,
+    }
+}
+
+/// Publishes one scanned plan under an exact watermark compare-and-set.
+///
+/// Production callers pass a newly-opened write transaction here only after
+/// [`scan_commit_attribution_plan`] has returned.
+pub async fn publish_commit_attribution_plan(
+    conn: &(impl Executor + ?Sized),
+    scanned: ScannedCommitAttributionPlan,
+) -> Result<CommitAttributionPublication, GitCorrelationError> {
+    let current = read_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY)
+        .await?
+        .unwrap_or(0);
+    if current != scanned.expected_watermark {
+        return Ok(CommitAttributionPublication::Stale);
+    }
+    let mut inserted = 0;
+    for record in &scanned.records {
+        if upsert_commit_session(conn, record).await? {
+            inserted += 1;
+        }
+    }
+    if scanned.new_watermark > current {
+        write_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY, scanned.new_watermark).await?;
+    }
+    Ok(CommitAttributionPublication::Published {
+        inserted,
+        coverage: scanned.coverage,
+    })
+}
+
+/// Publishes candidate rows in short idempotent chunks, then advances the
+/// watermark in a final CAS transaction. A crash between chunks leaves valid
+/// rows but no advanced watermark, so restart safely resumes and converges.
+pub async fn publish_commit_attribution_plan_to_store<S: GitCorrelationSessionStore>(
+    store: &S,
+    scanned: ScannedCommitAttributionPlan,
+) -> Result<CommitAttributionStorePublication, GitCorrelationError> {
+    let ScannedCommitAttributionPlan {
+        expected_watermark,
+        new_watermark,
+        records,
+        coverage,
+    } = scanned;
+    let mut inserted = 0usize;
+    let mut max_writer_hold_micros = 0u64;
+    for chunk in records.chunks(ATTRIBUTION_PUBLICATION_CHUNK) {
+        let transaction = store.open_write_transaction().await?;
+        let writer_started = std::time::Instant::now();
+        let current = read_meta_value(&transaction, COMMIT_SWEEP_WATERMARK_KEY)
+            .await?
+            .unwrap_or(0);
+        if current != expected_watermark {
+            GitCorrelationWriteTxn::commit(transaction).await?;
+            max_writer_hold_micros = max_writer_hold_micros.max(elapsed_micros(writer_started));
+            return Ok(CommitAttributionStorePublication {
+                outcome: CommitAttributionPublication::Stale,
+                max_writer_hold_micros,
+            });
+        }
+        for record in chunk {
+            if upsert_commit_session(&transaction, record).await? {
+                inserted += 1;
             }
         }
-        // Advance on write time, not event time, so the watermark reflects how
-        // far ingestion has progressed rather than how recent the commits are.
-        if !watermark_blocked {
-            new_watermark = new_watermark.max(target.max_updated_at);
+        GitCorrelationWriteTxn::commit(transaction).await?;
+        max_writer_hold_micros = max_writer_hold_micros.max(elapsed_micros(writer_started));
+    }
+
+    let transaction = store.open_write_transaction().await?;
+    let writer_started = std::time::Instant::now();
+    let current = read_meta_value(&transaction, COMMIT_SWEEP_WATERMARK_KEY)
+        .await?
+        .unwrap_or(0);
+    let outcome = if current != expected_watermark {
+        CommitAttributionPublication::Stale
+    } else {
+        if new_watermark > current {
+            write_meta_value(&transaction, COMMIT_SWEEP_WATERMARK_KEY, new_watermark).await?;
         }
-    }
-    if new_watermark > watermark {
-        write_meta_value(conn, COMMIT_SWEEP_WATERMARK_KEY, new_watermark).await?;
-    }
-    Ok(inserted)
+        CommitAttributionPublication::Published { inserted, coverage }
+    };
+    GitCorrelationWriteTxn::commit(transaction).await?;
+    max_writer_hold_micros = max_writer_hold_micros.max(elapsed_micros(writer_started));
+    Ok(CommitAttributionStorePublication {
+        outcome,
+        max_writer_hold_micros,
+    })
+}
+
+fn elapsed_micros(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }

@@ -30,6 +30,23 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+
+async fn run_test_commit_attribution_sweep<F>(
+    conn: &(impl tracedecay_runtime_core::db::engine::Executor + ?Sized),
+    gap_secs: i64,
+    scan: F,
+) -> Result<usize, git_correlation::GitCorrelationError>
+where
+    F: FnMut(&git_correlation::SpanScanTarget) -> git_correlation::TargetScan,
+{
+    let plan = git_correlation::prepare_commit_attribution_sweep(conn).await?;
+    let scanned = git_correlation::scan_commit_attribution_plan(&plan, gap_secs, scan);
+    match git_correlation::publish_commit_attribution_plan(conn, scanned).await? {
+        git_correlation::CommitAttributionPublication::Published { inserted, .. } => Ok(inserted),
+        git_correlation::CommitAttributionPublication::Stale => Ok(0),
+    }
+}
+
 #[tokio::test]
 async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
     let isolated_home = tempfile::tempdir().unwrap();
@@ -346,7 +363,7 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     }
 
     let gap = git_correlation::DEFAULT_SPAN_MERGE_GAP_SECS;
-    let inserted = git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+    let inserted = run_test_commit_attribution_sweep(conn, gap, |target| {
         super::project::git_scan_commits(target, gap)
     })
     .await
@@ -380,7 +397,7 @@ async fn live_session_commit_is_attributed_by_the_real_git_scan() {
     );
 
     // Replaying the sweep must not double-attribute.
-    let again = git_correlation::run_commit_attribution_sweep(conn, gap, |target| {
+    let again = run_test_commit_attribution_sweep(conn, gap, |target| {
         super::project::git_scan_commits(target, gap)
     })
     .await

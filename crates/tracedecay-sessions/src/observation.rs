@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -19,7 +19,10 @@ use tracedecay_store::{
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
 
-use crate::repository_provenance::RepositoryProvenanceAdmissionContext;
+use crate::repository_provenance::{
+    CapturedRepositoryProvenanceV1, PreparedRepositoryProvenanceV1,
+    RepositoryProvenanceAdmissionContext,
+};
 use tracedecay_runtime_core::privacy::{
     ObservationSanitizationOutcomeV1, ParsedObservationRecordV1, PrivacySanitizerError,
     RecordSanitizerV1, SanitizationFindingV1, SanitizedObservationRecordV1,
@@ -28,16 +31,22 @@ use tracedecay_runtime_core::privacy::{
 /// Cloneable, operation-local cancellation shared by application adapters.
 #[derive(Clone, Debug, Default)]
 pub struct ObservationCancellation {
-    cancelled: Arc<AtomicBool>,
+    token: tracedecay_runtime_core::cancellation::CancellationToken,
 }
 
 impl ObservationCancellation {
     pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::Release);
+        self.token.cancel();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Acquire)
+        self.token.is_cancelled()
+    }
+
+    /// Shared cooperative signal for bounded lower-level reads owned by this
+    /// observation operation.
+    pub fn shared_signal(&self) -> tracedecay_runtime_core::cancellation::CancellationToken {
+        self.token.clone()
     }
 }
 
@@ -49,6 +58,43 @@ pub enum CaptureObservationRequestError {
     OrderingDomainMismatch,
 }
 
+/// One frozen repository-evidence epoch shared by every message in an ingest
+/// batch. The first sanitized durable observation captures the snapshot;
+/// subsequent messages bind it without opening Git or decoding the index.
+#[derive(Clone)]
+pub struct RepositoryProvenanceBatchContext {
+    admission: RepositoryProvenanceAdmissionContext,
+    captured: Arc<OnceLock<CapturedRepositoryProvenanceV1>>,
+}
+
+impl RepositoryProvenanceBatchContext {
+    pub fn new(admission: RepositoryProvenanceAdmissionContext) -> Self {
+        Self {
+            admission,
+            captured: Arc::new(OnceLock::new()),
+        }
+    }
+
+    fn bind_after_sanitization(
+        &self,
+        observation: &tracedecay_domain::DurableObservationV1,
+        projection_generation: &ProjectionGenerationId,
+        ingested_at: UtcMicros,
+        authorization: tracedecay_domain::ResolutionAuthorizationV1,
+    ) -> PreparedRepositoryProvenanceV1 {
+        let captured = self
+            .captured
+            .get_or_init(|| self.admission.capture_snapshot(ingested_at));
+        self.admission.bind_after_sanitization(
+            captured,
+            observation,
+            projection_generation,
+            ingested_at,
+            authorization,
+        )
+    }
+}
+
 /// One validated, bounded provider record ready for the mandatory privacy boundary.
 pub struct CaptureObservationRequest {
     parsed_record: ParsedObservationRecordV1,
@@ -57,7 +103,7 @@ pub struct CaptureObservationRequest {
     resume_checkpoint: Option<(u64, u64)>,
     retention_class: RetentionClass,
     cancellation: ObservationCancellation,
-    repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    repository_provenance: Option<RepositoryProvenanceBatchContext>,
 }
 
 impl CaptureObservationRequest {
@@ -103,6 +149,15 @@ impl CaptureObservationRequest {
     pub fn with_repository_provenance(
         mut self,
         repository_provenance: Option<RepositoryProvenanceAdmissionContext>,
+    ) -> Self {
+        self.repository_provenance =
+            repository_provenance.map(RepositoryProvenanceBatchContext::new);
+        self
+    }
+
+    pub fn with_repository_provenance_batch(
+        mut self,
+        repository_provenance: Option<RepositoryProvenanceBatchContext>,
     ) -> Self {
         self.repository_provenance = repository_provenance;
         self
@@ -363,9 +418,9 @@ where
                         "observation-capture.v1",
                     )?;
                     let repository_provenance = repository_provenance.map_or_else(
-                        crate::repository_provenance::PreparedRepositoryProvenanceV1::unavailable,
+                        PreparedRepositoryProvenanceV1::unavailable,
                         |context| {
-                            context.capture_after_sanitization(
+                            context.bind_after_sanitization(
                                 &observation,
                                 &projection_generation,
                                 ingested_at,

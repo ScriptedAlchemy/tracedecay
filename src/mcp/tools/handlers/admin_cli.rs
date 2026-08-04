@@ -657,7 +657,7 @@ async fn sessions_git_backfill(
     let stats = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(session_db))
         .run_backfill(
             &analytics_events,
-            &SystemGit,
+            &SystemGit::default(),
             &BackfillOptions {
                 since,
                 limit_sessions,

@@ -4,6 +4,22 @@ use tracedecay_runtime_core::db::engine::TestConnection;
 
 use super::*;
 
+async fn run_commit_attribution_sweep<F>(
+    conn: &(impl Executor + ?Sized),
+    gap_secs: i64,
+    scan: F,
+) -> Result<usize, GitCorrelationError>
+where
+    F: FnMut(&SpanScanTarget) -> TargetScan,
+{
+    let plan = prepare_commit_attribution_sweep(conn).await?;
+    let scanned = scan_commit_attribution_plan(&plan, gap_secs, scan);
+    match publish_commit_attribution_plan(conn, scanned).await? {
+        CommitAttributionPublication::Published { inserted, .. } => Ok(inserted),
+        CommitAttributionPublication::Stale => Ok(0),
+    }
+}
+
 struct GitCorrelationTestDb {
     _directory: tempfile::TempDir,
     connection: TestConnection,
@@ -837,9 +853,11 @@ async fn sweep_holds_watermark_when_a_target_cannot_be_scanned() {
     .await
     .unwrap();
 
-    let inserted = run_commit_attribution_sweep(&conn, 600, |_| TargetScan::Unavailable)
-        .await
-        .unwrap();
+    let inserted = run_commit_attribution_sweep(&conn, 600, |_| {
+        TargetScan::Unavailable(GitScanFailure::WorktreeUnavailable)
+    })
+    .await
+    .unwrap();
     assert_eq!(inserted, 0);
     assert_eq!(
         read_meta_value(&conn, "commit_attribution_watermark")
@@ -869,6 +887,108 @@ async fn sweep_holds_watermark_when_a_target_cannot_be_scanned() {
             .unwrap()
             .is_some(),
         "a successful scan advances the watermark"
+    );
+}
+
+#[tokio::test]
+async fn attribution_publication_rejects_a_stale_read_plan_without_writes() {
+    let conn = test_conn().await;
+    record_span_observation(
+        &conn,
+        &span_with(
+            "claude",
+            "stale-plan",
+            Some("main"),
+            "/repo",
+            1_000,
+            SpanSource::Ingest,
+        ),
+        600,
+    )
+    .await
+    .unwrap();
+
+    let plan = prepare_commit_attribution_sweep(&conn).await.unwrap();
+    assert_eq!(plan.targets().len(), 1);
+    let scanned = scan_commit_attribution_plan(&plan, 600, |_| {
+        TargetScan::Scanned(vec![ScannedCommit {
+            sha: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            committed_at: 1_000,
+        }])
+    });
+
+    // Simulate another sweep winning after this plan's read snapshot closed.
+    write_meta_value(&conn, "commit_attribution_watermark", 9_999)
+        .await
+        .unwrap();
+    let outcome = publish_commit_attribution_plan(&conn, scanned)
+        .await
+        .unwrap();
+    assert_eq!(outcome, CommitAttributionPublication::Stale);
+    assert_eq!(
+        count_rows(&conn, "SELECT COUNT(*) FROM commit_sessions").await,
+        0,
+        "a stale plan must not publish candidate rows"
+    );
+    assert_eq!(
+        read_meta_value(&conn, "commit_attribution_watermark")
+            .await
+            .unwrap(),
+        Some(9_999),
+        "CAS publication must preserve the winning watermark"
+    );
+}
+
+#[tokio::test]
+async fn cancelled_attribution_scan_publishes_only_the_completed_prefix_for_resume() {
+    let conn = test_conn().await;
+    for (session_id, worktree, ts) in [
+        ("first", "/repo/first", 1_000),
+        ("second", "/repo/second", 2_000),
+    ] {
+        record_span_observation(
+            &conn,
+            &span_with(
+                "claude",
+                session_id,
+                Some("main"),
+                worktree,
+                ts,
+                SpanSource::Ingest,
+            ),
+            600,
+        )
+        .await
+        .unwrap();
+    }
+
+    let plan = prepare_commit_attribution_sweep(&conn).await.unwrap();
+    let scanned = scan_commit_attribution_plan(&plan, 600, |target| {
+        if target.worktree == "/repo/first" {
+            TargetScan::Scanned(vec![ScannedCommit {
+                sha: "1111111111111111111111111111111111111111".to_string(),
+                committed_at: 1_000,
+            }])
+        } else {
+            TargetScan::Unavailable(GitScanFailure::Cancelled)
+        }
+    });
+    let outcome = publish_commit_attribution_plan(&conn, scanned)
+        .await
+        .unwrap();
+    let CommitAttributionPublication::Published { inserted, coverage } = outcome else {
+        panic!("the completed prefix should publish");
+    };
+    assert_eq!(inserted, 1);
+    assert_eq!(coverage, CommitAttributionCoverage::Partial);
+
+    let resumed = prepare_commit_attribution_sweep(&conn).await.unwrap();
+    assert!(
+        resumed
+            .targets()
+            .iter()
+            .any(|target| target.worktree == "/repo/second"),
+        "the cancelled target must remain behind the watermark for restart"
     );
 }
 
@@ -1136,6 +1256,27 @@ fn parse_commit_log_skips_malformed_and_caps() {
         ]
     );
     assert_eq!(parse_commit_log(log, 1).len(), 1);
+}
+
+#[test]
+fn bounded_git_log_rejects_partial_malformed_evidence() {
+    let error = parse_bounded_git_log(
+        "1111111111111111111111111111111111111111 100\nmalformed\n",
+        10,
+    )
+    .expect_err("one malformed row makes the Git result incomplete");
+    assert_eq!(error, GitScanFailure::InvalidOutput);
+}
+
+#[test]
+fn bounded_git_log_rejects_the_command_side_sentinel_row() {
+    let error = parse_bounded_git_log(
+        "1111111111111111111111111111111111111111 100\n\
+         2222222222222222222222222222222222222222 200\n",
+        1,
+    )
+    .expect_err("max + 1 rows proves command-side truncation");
+    assert_eq!(error, GitScanFailure::OutputLimitExceeded);
 }
 
 #[test]
@@ -1797,6 +1938,19 @@ fn activity_sort_key_prefers_message_then_end_then_start() {
     assert_eq!(row(Some(1), Some(2), None).activity_sort_key(), Some(2));
     assert_eq!(row(Some(1), None, None).activity_sort_key(), Some(1));
     assert_eq!(row(None, None, None).activity_sort_key(), None);
+}
+
+#[test]
+fn system_git_preserves_preflight_cancellation_as_typed_partial_evidence() {
+    let cancelled = tracedecay_runtime_core::cancellation::CancellationToken::new();
+    cancelled.cancel();
+    let git = SystemGit::with_bounds(tracedecay_runtime_core::git::GitCommandBounds {
+        cancel: Some(cancelled),
+        ..tracedecay_runtime_core::git::GitCommandBounds::default()
+    });
+    let root = tempfile::tempdir().unwrap();
+
+    assert_eq!(git.reflog(root.path()), Err(GitScanFailure::Cancelled));
 }
 
 #[tokio::test]

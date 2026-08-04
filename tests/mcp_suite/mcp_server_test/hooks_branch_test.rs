@@ -779,7 +779,7 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
     let sha = git_capture(&worktree, &["rev-parse", "HEAD"]);
 
     db.run_incremental_git_backfill_for_test(
-        &tracedecay::sessions::git_correlation::SystemGit,
+        &tracedecay::sessions::git_correlation::SystemGit::default(),
         tracedecay::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
     )
     .await
