@@ -25,6 +25,7 @@ use tracedecay_query::temporal::ports::{
 use tracedecay_runtime_core::db::engine;
 use tracedecay_sessions::lcm::contracts::validate_payload_ref;
 use tracedecay_sessions::runtime::lcm::payload::read_verified_payload_content;
+use tracedecay_sessions::runtime::lcm::{LcmStorageKind, raw};
 
 use super::operations::CanonicalPublicationManifest;
 use super::sql::TemporalSqlRead;
@@ -696,53 +697,29 @@ async fn resolve_occurrence(
             content_hash,
         })));
     }
-    let mut raw_rows = conn
-        .query(
-            "SELECT storage_kind, CAST(COALESCE(content, '') AS TEXT), content_hash,
-                    CAST(COALESCE(payload_ref, '') AS TEXT)
-             FROM lcm_raw_messages
-             WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
-             ORDER BY store_id
-             LIMIT 2",
-            params![provider, session_id.as_str(), message_id.as_str()],
-        )
-        .await
-        .map_err(|_| ())?;
-    let raw_payload = match raw_rows.next().await.map_err(|_| ())? {
-        Some(row) => {
-            let storage_kind: String = row.get(0).map_err(|_| ())?;
-            let content: String = row.get(1).map_err(|_| ())?;
-            let content_hash: String = row.get(2).map_err(|_| ())?;
-            let payload_ref: String = row.get(3).map_err(|_| ())?;
-            if raw_rows.next().await.map_err(|_| ())?.is_some() {
-                return Ok(Some(HydrationResolution::Unavailable(
-                    HydrationStateV1::RetainedButUnavailable,
-                )));
+    let raw_payload =
+        raw::load_raw_message_by_identity(conn, provider, session_id.as_str(), message_id.as_str())
+            .await
+            .map_err(|_| ())?;
+    if let Some(raw_payload) = raw_payload {
+        match raw_payload.storage_kind {
+            LcmStorageKind::Inline => {
+                let content = Zeroizing::new(raw_payload.content.into_bytes());
+                return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+                    byte_count: content.len(),
+                    source: PayloadSource::Occurrence { content },
+                    content_hash: raw_payload.content_hash,
+                })));
             }
-            Some((storage_kind, content, content_hash, payload_ref))
-        }
-        None => None,
-    };
-    if let Some((storage_kind, content, content_hash, payload_ref)) = raw_payload {
-        match storage_kind.as_str() {
-            "inline" => {
-                let content = Zeroizing::new(content.into_bytes());
-                if content_hash_matches(&content_hash, content.as_slice()) {
-                    return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
-                        byte_count: content.len(),
-                        source: PayloadSource::Occurrence { content },
-                        content_hash,
-                    })));
-                }
-            }
-            "external" if !payload_ref.is_empty() => {
+            LcmStorageKind::External if raw_payload.payload_ref.is_some() => {
+                let payload_ref = raw_payload.payload_ref.as_deref().ok_or(())?;
                 let resolution = resolve_external_manifest(
                     conn,
                     provider,
                     &session_id,
-                    &message_id,
-                    &payload_ref,
-                    &content_hash,
+                    message_id.as_str(),
+                    payload_ref,
+                    &raw_payload.content_hash,
                 )
                 .await?;
                 if matches!(resolution, HydrationResolution::Available(_)) {
@@ -1884,6 +1861,14 @@ mod tests {
     }
 
     fn observation_for_session(ordinal: u64, session_id: &str) -> DurableObservationV1 {
+        observation_for_session_with_text(ordinal, session_id, &format!("payload-{ordinal}"))
+    }
+
+    fn observation_for_session_with_text(
+        ordinal: u64,
+        session_id: &str,
+        text: &str,
+    ) -> DurableObservationV1 {
         let session_id = SessionId::new(session_id).expect("session");
         let provider = ProviderId::new("provider-1").expect("provider");
         let source =
@@ -1901,7 +1886,7 @@ mod tests {
             relations,
             vec![CanonicalObservationFactV1::Message {
                 role: CanonicalMessageRoleV1::Assistant,
-                content: json!({"text": format!("payload-{ordinal}")}),
+                content: json!({"text": text}),
                 model: None,
                 timestamp: Some(ordinal as i64),
             }],
@@ -2260,6 +2245,73 @@ mod tests {
             ),
             "{authorization:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn tampered_raw_fallback_is_typed_unavailable_without_canary_leakage() {
+        let dir = tempdir().expect("temporary directory");
+        let runtime = HostAdmissionTestRuntimeV1::profile(dir.path())
+            .await
+            .expect("registered profile runtime");
+        let observation = observation_for_session_with_text(1, "session-1", "");
+        let (observation, anchor) = Box::pin(persist_observation(&runtime, observation, 1)).await;
+        let provider = observation.source().provider().as_str();
+        runtime
+            .seed_session_occurrence_for_test(
+                provider,
+                "session-1",
+                &observation,
+                &anchor,
+                "message-1",
+                "ranked-metadata-canary",
+            )
+            .await;
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        Executor::execute(
+            &database
+                .writer_connection()
+                .expect("registered profile writer"),
+            "INSERT INTO lcm_raw_messages (
+                provider, message_id, session_id, role, ordinal, timestamp,
+                content, content_hash, storage_kind, payload_ref,
+                snippet_text, index_text, legacy_source, legacy_truncated
+             ) VALUES (
+                ?1, 'message-1', 'session-1', 'assistant', 1, 1,
+                'raw-content-canary', 'invalid-content-hash', 'inline', NULL,
+                'raw-content-canary', 'raw-content-canary', 0, 0
+             )",
+            [provider],
+        )
+        .await
+        .expect("tampered raw fallback");
+
+        let snapshot = authorized_snapshot(&anchor);
+        let read = runtime.hydration_read_for_test().await;
+        let adapter = read.adapter();
+        let authorization = adapter.authorize(&snapshot, anchor.anchor_id()).await;
+        assert!(
+            matches!(
+                authorization,
+                Ok(HydrationAuthorization::Denied(ref denial))
+                    if denial.state() == HydrationStateV1::RetainedButUnavailable
+            ),
+            "{authorization:?}"
+        );
+
+        let mut output = Vec::new();
+        assert_eq!(
+            adapter
+                .read_after_recheck(&snapshot, anchor.anchor_id(), 1024, 64, &mut |chunk| {
+                    output.extend_from_slice(chunk);
+                    Ok(())
+                })
+                .await,
+            Err(HydrationError::Unavailable)
+        );
+        assert!(output.is_empty());
+        assert!(!String::from_utf8_lossy(&output).contains("canary"));
     }
 
     #[tokio::test]

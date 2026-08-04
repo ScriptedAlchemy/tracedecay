@@ -10,7 +10,8 @@ use crate::runtime::SessionMessageRecord;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_runtime_core::privacy::{
     LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, PrivacyDetectorV1,
-    bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, verify_sanitized_json_payload,
+    bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, sanitize_provider_metadata_json,
+    verify_sanitized_json_payload,
 };
 
 use super::{LcmError, LcmPayloadRef, LcmRawMessage, LcmStorageKind, payload, security};
@@ -27,11 +28,12 @@ pub const RAW_MESSAGE_METADATA_SELECT_COLUMNS: &str =
 pub fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
     let storage_kind_text: String = row.get(9)?;
     let content: Option<String> = row.get(7)?;
+    let content_hash: String = row.get(8)?;
     let snippet_text: String = row.get(11)?;
     let storage_kind = LcmStorageKind::from_db(&storage_kind_text)
         .ok_or_else(|| LcmError::Db(format!("invalid storage_kind: {storage_kind_text}")))?;
     let content = match storage_kind {
-        LcmStorageKind::Inline => content.unwrap_or_default(),
+        LcmStorageKind::Inline => content.ok_or(LcmError::PayloadIntegrityMismatch)?,
         LcmStorageKind::External => content.unwrap_or(snippet_text),
     };
     let message = LcmRawMessage {
@@ -43,7 +45,7 @@ pub fn raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
         ordinal: row.get(5)?,
         timestamp: row.get(6)?,
         content,
-        content_hash: row.get(8)?,
+        content_hash,
         storage_kind,
         payload_ref: row.get(10)?,
         legacy_source: row.get::<i64>(12)? != 0,
@@ -91,6 +93,46 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
     Ok(())
 }
 
+pub fn verified_raw_message_from_row(row: &Row) -> Result<LcmRawMessage, LcmError> {
+    let inline_content: Option<String> = row.get(7)?;
+    let message = raw_message_from_row(row)?;
+    if message.storage_kind == LcmStorageKind::Inline {
+        let inline_content = inline_content.ok_or(LcmError::PayloadIntegrityMismatch)?;
+        if projected_content_hash(&inline_content) != message.content_hash {
+            return Err(LcmError::PayloadIntegrityMismatch);
+        }
+    }
+    Ok(message)
+}
+
+pub async fn load_raw_message_by_identity(
+    conn: &(impl QueryExecutor + ?Sized),
+    provider: &str,
+    session_id: &str,
+    message_id: &str,
+) -> Result<Option<LcmRawMessage>, LcmError> {
+    let sql = format!(
+        "SELECT {RAW_MESSAGE_SELECT_COLUMNS}
+         FROM lcm_raw_messages
+         WHERE provider = ?1 AND session_id = ?2 AND message_id = ?3
+         ORDER BY store_id
+         LIMIT 2"
+    );
+    let mut rows = conn
+        .query(&sql, params![provider, session_id, message_id])
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(None);
+    };
+    let message = verified_raw_message_from_row(&row)?;
+    if rows.next().await?.is_some() {
+        return Err(LcmError::Db(
+            "duplicate raw messages for exact provider/session/message identity".to_string(),
+        ));
+    }
+    Ok(Some(message))
+}
+
 pub async fn load_raw_message_by_store_id(
     conn: &(impl QueryExecutor + ?Sized),
     store_id: i64,
@@ -105,7 +147,7 @@ pub async fn load_raw_message_by_store_id(
         .next()
         .await?
         .ok_or(LcmError::SummarySourceNotOwnedBySession)?;
-    raw_message_from_row(&row)
+    verified_raw_message_from_row(&row)
 }
 
 pub struct RawMessageUpsert {
@@ -641,14 +683,20 @@ fn safe_placeholder_metadata(value: &str) -> String {
     }
 }
 
+const MAX_PROVIDER_METADATA_BYTES: usize = 1_048_576;
+
 fn protected_metadata_json(
     original: Option<&str>,
     prepared: &PreparedMessage,
 ) -> Result<Option<String>, LcmError> {
-    let mut metadata = original
-        .and_then(|text| serde_json::from_str::<JsonValue>(text).ok())
-        .filter(JsonValue::is_object)
-        .unwrap_or_else(|| JsonValue::Object(Map::new()));
+    let mut metadata =
+        sanitize_provider_metadata_json(original.unwrap_or("{}"), MAX_PROVIDER_METADATA_BYTES)
+            .map_err(|err| LcmError::Db(format!("LCM metadata sanitization failed: {err}")))?;
+    if !metadata.is_object() {
+        return Err(LcmError::Db(
+            "LCM metadata sanitization failed: metadata must be a JSON object".to_owned(),
+        ));
+    }
     add_sanitization_metadata(&mut metadata, prepared)?;
     Ok(Some(metadata.to_string()))
 }

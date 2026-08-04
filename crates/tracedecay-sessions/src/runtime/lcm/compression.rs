@@ -2260,7 +2260,7 @@ async fn load_raw_messages_for_session(
         .await?;
     let mut messages = Vec::new();
     while let Some(row) = rows.next().await? {
-        messages.push(raw::raw_message_from_row(&row)?);
+        messages.push(raw::verified_raw_message_from_row(&row)?);
     }
     Ok(messages)
 }

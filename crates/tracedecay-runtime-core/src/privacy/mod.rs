@@ -6,6 +6,7 @@
 
 mod detect;
 pub mod detector_kernel;
+mod lcm;
 mod sanitize;
 mod structural_id;
 mod structured;
@@ -35,6 +36,9 @@ pub use detect::{
     SanitizedPayloadVerificationError, bind_sanitized_lcm_payload_text, sanitize_code_source_bytes,
     sanitize_lcm_payload_text, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
     serialize_verified_json_payload, verify_sanitized_json_payload,
+};
+pub use lcm::{
+    LcmSensitiveRedactionPolicyV1, LcmSensitiveRedactionV1, redact_lcm_sensitive_payload,
 };
 pub use sanitize::{
     ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
