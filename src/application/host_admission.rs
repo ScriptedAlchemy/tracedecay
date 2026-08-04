@@ -15,6 +15,9 @@ use tracedecay_store::StoreShardScopeV1;
 
 #[path = "host_admission/accounting_test_support.rs"]
 mod accounting_test_support;
+#[cfg(test)]
+#[path = "host_admission/hint_outcome_test_support.rs"]
+mod hint_outcome_test_support;
 #[path = "host_admission/integration_test_support.rs"]
 mod integration_test_support;
 #[path = "host_admission/lcm_api_test_support.rs"]
@@ -734,25 +737,6 @@ impl HostAdmissionTestRuntimeV1 {
         context.transcript_source_home = Some(transcript_source_home);
         context.host_admission_test_runtime = Some(self);
         Ok(context)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn correlate_hint_outcomes_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        project_id: &str,
-        now: i64,
-    ) -> crate::hooks::hint_outcomes::HintOutcomeStats {
-        let Ok(session_database) = self.session_database_for_test(scope) else {
-            return crate::hooks::hint_outcomes::HintOutcomeStats::default();
-        };
-        crate::hooks::hint_outcomes::correlate_hint_outcomes(
-            self.profile_database.as_ref(),
-            session_database,
-            project_id,
-            now,
-        )
-        .await
     }
 
     #[cfg(test)]
