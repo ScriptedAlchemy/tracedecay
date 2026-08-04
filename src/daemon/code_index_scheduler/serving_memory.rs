@@ -7,9 +7,10 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use tracedecay_code_index::graph_projection::CodeGraphEvidenceReader;
 use tracedecay_domain::{ComponentRevision, ExactAdmissionRuleRevision, ScoreDomainId};
 use tracedecay_query::retrieval::exact::{CentralExactAdmissionAuthorityV1, ExactLane};
-use tracedecay_query::retrieval::graph::{CodeGraphEvidenceAdapterV1, GraphLane};
+use tracedecay_query::retrieval::graph::GraphLane;
 use tracedecay_query::retrieval::lexical::{
     CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1, CodeLexicalProjectionMetadataV1,
     LexicalLane, code_lexical_ngram_resident_upper_bound_v1,
@@ -202,7 +203,7 @@ pub(super) struct ProductionCodeIndexQueryOwners {
     exact_lexical: Arc<ServingLaneCell<ResidentReady<ExactLexicalOwnersV1>>>,
     exact: Arc<ServingLaneCell<()>>,
     lexical: Arc<ServingLaneCell<()>>,
-    graph: Arc<ServingLaneCell<ResidentReady<GraphLane<CodeGraphEvidenceAdapterV1>>>>,
+    graph: Arc<ServingLaneCell<ResidentReady<GraphLane<CodeGraphEvidenceReader>>>>,
     #[cfg(test)]
     faulted_lanes: Arc<AtomicU8>,
 }
@@ -279,9 +280,7 @@ impl ProductionCodeIndexQueryOwners {
         Ok(())
     }
 
-    pub(super) fn graph(
-        &self,
-    ) -> Result<&GraphLane<CodeGraphEvidenceAdapterV1>, RetrievalPortError> {
+    pub(super) fn graph(&self) -> Result<&GraphLane<CodeGraphEvidenceReader>, RetrievalPortError> {
         self.graph.get("graph").map(|ready| &ready.value)
     }
 
@@ -413,7 +412,7 @@ impl ProductionCodeIndexQueryOwners {
 
     fn build_graph_owner(
         &self,
-    ) -> Result<ResidentReady<GraphLane<CodeGraphEvidenceAdapterV1>>, RetrievalPortError> {
+    ) -> Result<ResidentReady<GraphLane<CodeGraphEvidenceReader>>, RetrievalPortError> {
         #[cfg(test)]
         self.lane_checkpoint(ServingLane::Graph)?;
         self.control.checkpoint()?;
@@ -438,12 +437,12 @@ impl ProductionCodeIndexQueryOwners {
             ComponentRevision::new("policy.daemon.v1")
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
         )?;
-        let value = GraphLane::new(CodeGraphEvidenceAdapterV1::new_shared(
+        let value = GraphLane::new(CodeGraphEvidenceReader::new(
             self.generation.manifest().generation_id.clone(),
             Some(self.generation.snapshot().repository.clone()),
             freshness,
-            self.generation.shared_edges(),
-            self.generation.chunks().shared_chunks(),
+            self.generation.edges(),
+            self.generation.chunks().chunks(),
         )?);
         self.control.checkpoint()?;
         Ok(ResidentReady {

@@ -1510,10 +1510,6 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
     published(scheduler.reconcile_now().expect("publish"));
     let latest = scheduler.latest_complete().expect("latest generation");
-    let canonical_chunks = latest.generation.chunks().shared_chunks();
-    let canonical_edges = latest.generation.shared_edges();
-    let prior_chunk_owners = Arc::strong_count(&canonical_chunks);
-    let prior_edge_owners = Arc::strong_count(&canonical_edges);
     latest
         .warm_serving_caches()
         .expect("warm independent serving lanes");
@@ -1528,16 +1524,6 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
             && std::mem::size_of_val(lexical) > 0
             && std::mem::size_of_val(graph) > 0,
         "exact/lexical/graph production owners must be concrete lane values"
-    );
-    assert_eq!(
-        Arc::strong_count(&canonical_chunks),
-        prior_chunk_owners + 3,
-        "exact, lexical, and graph owners must share the canonical chunk allocation"
-    );
-    assert_eq!(
-        Arc::strong_count(&canonical_edges),
-        prior_edge_owners + 1,
-        "graph owners must share the canonical edge allocation"
     );
     let same_generation = scheduler.latest_complete().expect("same latest generation");
     assert!(

@@ -1,19 +1,22 @@
-//! S5 restart and drain acceptance through public runtime authorities.
+//! Reader restart and drain acceptance through public runtime authorities.
 
 use std::time::Duration;
 
 use tracedecay_rusqlite_runtime::reader::{ReaderAcquireError, ReaderPool};
 use tracedecay_store::{AdmissionConfigV1, UnavailableReasonV1};
 
-#[path = "../../../tests/storage_runtime_rusqlite_suite/cutover_support.rs"]
-mod cutover_support;
+#[path = "../../../tests/storage_runtime_rusqlite_suite/runtime_test_support.rs"]
+mod runtime_test_support;
 
-use cutover_support::{CountExecutor, Probe, TestDatabase, fixture, read_request, reader_locator};
+use runtime_test_support::{
+    CountExecutor, Probe, ReaderRuntimeFixture, TestDatabase, read_request, reader_locator,
+    reader_runtime_fixture,
+};
 
 #[test]
 fn drain_rejects_new_general_work_but_finishes_inflight_and_keeps_health_reserved() {
-    let fixture = fixture().s5;
-    let database = TestDatabase::new("s5-bounded-drain.sqlite3");
+    let fixture = reader_runtime_fixture();
+    let database = TestDatabase::new("reader-bounded-drain.sqlite3");
     database
         .connect()
         .execute_batch(
@@ -65,7 +68,7 @@ fn drain_rejects_new_general_work_but_finishes_inflight_and_keeps_health_reserve
     assert_eq!(pool.snapshot().leased_health, 0);
 }
 
-fn reader_budget(fixture: &cutover_support::S5Fixture) -> tracedecay_store::ReaderBudgetV1 {
+fn reader_budget(fixture: &ReaderRuntimeFixture) -> tracedecay_store::ReaderBudgetV1 {
     let mut budget = AdmissionConfigV1::default().readers;
     budget.min_per_hot_shard = fixture.reader_budget.min_per_hot_shard;
     budget.max_per_hot_shard = fixture.reader_budget.max_per_hot_shard;

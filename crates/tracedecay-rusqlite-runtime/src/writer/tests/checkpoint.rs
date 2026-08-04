@@ -126,7 +126,7 @@ fn checkpoint_authority_loss_is_typed_and_never_published() {
 }
 
 #[test]
-fn hard_checkpoint_pressure_emits_s5_general_admission_block() {
+fn hard_checkpoint_pressure_blocks_general_admission() {
     let sample = WalSample {
         frames: 64,
         bytes: 256 * 1024 * 1024,

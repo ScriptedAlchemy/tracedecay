@@ -6,11 +6,8 @@
 //! root keeps a `daemon::store_runtime` shim so every historical path resolves,
 //! and still owns `session_registry`, which could not follow (see `SEAMS.md`).
 //!
-//! Production call sites still land behind these modules during S8 cutover, so
-//! the registry surfaces remain intentionally constructed from tests and the
-//! lifecycle publisher until every live open is routed here.
-
-#![allow(dead_code)] // S8 lands before all daemon call sites route through this registry.
+//! The lifecycle publisher and registry are the canonical runtime authority for
+//! shard attachment, maintenance, and retrieval.
 
 mod graph_metadata;
 pub mod profile_paths;

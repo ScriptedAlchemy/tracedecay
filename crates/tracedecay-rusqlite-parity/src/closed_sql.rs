@@ -1,7 +1,7 @@
 //! Exhaustive physical SQL mapping for the protocol's semantic command vocabulary.
 
 use rusqlite::types::Value;
-use tracedecay_sqlite_parity_protocol::{GraphTable, SessionStoreCursor, SessionStoreTable};
+use tracedecay_sqlite_parity_protocol::{SessionStoreCursor, SessionStoreTable};
 
 pub(crate) const SET_QUERY_ONLY: &str = "PRAGMA query_only = ON";
 pub(crate) const QUERY_ONLY: &str = "PRAGMA query_only";
@@ -25,12 +25,6 @@ pub(crate) const TABLE_EXISTS: &str = "
     SELECT EXISTS(
         SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
     )";
-pub(crate) const NODES_FTS_MATCH: &str = "
-    SELECT rowid, rank, snippet(nodes_fts, 0, '<mark>', '</mark>', '…', 24)
-    FROM nodes_fts
-    WHERE nodes_fts MATCH ?1
-    ORDER BY rank, rowid
-    LIMIT ?2";
 
 #[derive(Clone, Copy)]
 pub(crate) struct TableSpec {
@@ -38,15 +32,6 @@ pub(crate) struct TableSpec {
     pub(crate) count_sql: &'static str,
     pub(crate) table_info_sql: Option<&'static str>,
     pub(crate) foreign_key_sql: Option<&'static str>,
-}
-
-const fn graph_table(identifier: &'static str, count_sql: &'static str) -> TableSpec {
-    TableSpec {
-        identifier,
-        count_sql,
-        table_info_sql: None,
-        foreign_key_sql: None,
-    }
 }
 
 const fn session_table(
@@ -60,20 +45,6 @@ const fn session_table(
         count_sql,
         table_info_sql: Some(table_info_sql),
         foreign_key_sql: Some(foreign_key_sql),
-    }
-}
-
-pub(crate) fn graph_table_spec(table: GraphTable) -> TableSpec {
-    match table {
-        GraphTable::Nodes => graph_table("nodes", "SELECT COUNT(*) FROM nodes"),
-        GraphTable::Edges => graph_table("edges", "SELECT COUNT(*) FROM edges"),
-        GraphTable::Files => graph_table("files", "SELECT COUNT(*) FROM files"),
-        GraphTable::UnresolvedRefs => {
-            graph_table("unresolved_refs", "SELECT COUNT(*) FROM unresolved_refs")
-        }
-        GraphTable::Vectors => graph_table("vectors", "SELECT COUNT(*) FROM vectors"),
-        GraphTable::Metadata => graph_table("metadata", "SELECT COUNT(*) FROM metadata"),
-        GraphTable::NodesFts => graph_table("nodes_fts", "SELECT COUNT(*) FROM nodes_fts"),
     }
 }
 
