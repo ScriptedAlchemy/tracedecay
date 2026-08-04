@@ -13,7 +13,7 @@ Diagnose runtime and persistent-storage failures. Separate symptoms from the fir
 
 1. Resolve the active repository with `tracedecay_active_project`, then inspect `tracedecay_storage_status` and `tracedecay_status`.
 2. Use `tracedecay_project_list`, `tracedecay_project_search`, and `tracedecay_project_context` to distinguish aliases, moves, worktrees, symlinks, and duplicate stores.
-3. Inspect daemon and host health with read-only status or doctor commands. Correlate database, WAL, lock, migration, filesystem, and process evidence before naming a cause.
+3. Inspect daemon and host health with read-only status evidence. Correlate database, WAL, lock, migration, filesystem, and process evidence before naming a cause.
 4. Trace relevant code only after runtime evidence identifies the failing boundary.
 
 MCP is optional. If a TraceDecay MCP tool is unavailable, ask the parent to
