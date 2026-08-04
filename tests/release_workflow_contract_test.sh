@@ -44,12 +44,12 @@ if root_release.get("package-name") != "tracedecay":
     raise SystemExit("root release package must remain named tracedecay")
 
 extra_files = {
-    (entry.get("path"), entry.get("jsonpath"))
+    (entry.get("type"), entry.get("path"), entry.get("jsonpath"))
     for entry in root_release.get("extra-files", [])
 }
 required_extra_files = {
-    ("Cargo.toml", "$.package.version"),
-    ("Cargo.lock", "$.package[?(@.name == 'tracedecay')].version"),
+    ("toml", "Cargo.toml", "$.package.version"),
+    ("generic", "Cargo.lock", None),
 }
 if extra_files != required_extra_files:
     raise SystemExit("release automation must update only the root Cargo versions")
@@ -67,6 +67,11 @@ if release_manifest.get(".") != version:
 if not any(binary.get("name") == "tracedecay" for binary in root_manifest.get("bin", [])):
     raise SystemExit("root binary must remain named tracedecay")
 
+lock_text = Path(lock_path).read_text(encoding="utf-8")
+if lock_text.count("x-release-please-version") != 1:
+    raise SystemExit("Cargo.lock must carry exactly one root release marker")
+if 'version = "' + version + '" # x-release-please-version' not in lock_text:
+    raise SystemExit("Cargo.lock root package version must carry the release marker")
 with open(lock_path, "rb") as handle:
     lockfile = tomllib.load(handle)
 root_locks = [
