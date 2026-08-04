@@ -107,7 +107,9 @@ fn prepare_evidence_for_publication<T>(
         RetrievalPortOutcome::Cancelled(evidence) => (OperationTermination::Cancelled, evidence),
         RetrievalPortOutcome::TimedOut(evidence) => (OperationTermination::TimedOut, evidence),
         RetrievalPortOutcome::Failed(evidence) => (OperationTermination::Failed, evidence),
-        RetrievalPortOutcome::Unavailable(evidence) => (OperationTermination::Failed, evidence),
+        RetrievalPortOutcome::Unavailable(evidence) => {
+            (OperationTermination::Unavailable, evidence)
+        }
     };
     let mut requires_recheck = false;
     let terminal_override = match termination {

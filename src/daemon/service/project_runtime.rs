@@ -16,9 +16,10 @@ use crate::application::feedback::concrete::Pr12FeedbackRuntime;
 use crate::application::primitives::Pr12PrimitiveProjectRuntime;
 
 use super::invocation::{
-    DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner, Pr13HookOrchestrationPortV1,
-    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
+    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
+    RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
+    UnavailableFeedbackCycleRuntimeV1,
 };
 
 mod reaper;
@@ -107,6 +108,7 @@ impl<const SLOT: u8> Drop for RecordingComponent<SLOT> {
 pub(crate) struct ProjectRuntime {
     callable_code: Option<RegisteredCallableCodeRuntime>,
     feedback: Option<RegisteredFeedbackRuntime>,
+    advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     feedback_cycle: Option<Arc<Pr12FeedbackCycleRuntime>>,
     feedback_cycle_input: Option<Arc<SwitchableFeedbackCycleRuntimeV1>>,
     primitive: Option<Pr12PrimitiveProjectRuntime>,
@@ -133,6 +135,7 @@ impl ProjectRuntime {
     fn has_components(&self) -> bool {
         self.callable_code.is_some()
             || self.feedback.is_some()
+            || self.advisory_cycle.is_some()
             || self.feedback_cycle.is_some()
             || self.feedback_cycle_input.is_some()
             || self.primitive.is_some()
@@ -188,6 +191,7 @@ macro_rules! project_runtime_components {
 project_runtime_components!(
     RegisteredCallableCodeRuntime => callable_code,
     RegisteredFeedbackRuntime => feedback,
+    DaemonAdvisoryCycleInvocationOwner => advisory_cycle,
     Arc<Pr12FeedbackCycleRuntime> => feedback_cycle,
     Arc<SwitchableFeedbackCycleRuntimeV1> => feedback_cycle_input,
     Pr12PrimitiveProjectRuntime => primitive,
@@ -341,6 +345,7 @@ impl ProjectRuntimePublication {
                 }
                 move_component!(callable_code);
                 move_component!(feedback);
+                move_component!(advisory_cycle);
                 move_component!(feedback_cycle);
                 move_component!(feedback_cycle_input);
                 move_component!(primitive);
@@ -382,6 +387,7 @@ impl ProjectRuntimePublication {
 pub(super) struct ProjectRequestRuntimesV1 {
     pub(super) feedback: Option<Arc<Pr12FeedbackRuntime>>,
     pub(super) feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    pub(super) advisory_cycle: Option<DaemonAdvisoryCycleInvocationOwner>,
     pub(super) configuration: Option<RegisteredConfigurationRuntime>,
     pub(super) work: Option<RegisteredWorkRuntime>,
     pub(super) lsp_owner: Option<DaemonLspInvocationOwner>,
@@ -878,6 +884,7 @@ impl ProjectRuntimeRegistryV1 {
         ProjectRequestRuntimesV1 {
             feedback: feedback.map(RegisteredFeedbackRuntime::runtime),
             feedback_owner: feedback.map(RegisteredFeedbackRuntime::invocation_owner),
+            advisory_cycle: runtime.and_then(|runtime| runtime.advisory_cycle.clone()),
             configuration: runtime.and_then(|runtime| runtime.configuration.clone()),
             work: runtime.and_then(|runtime| runtime.work.clone()),
             lsp_owner: Self::component_with_canonical_fallback::<DaemonLspInvocationOwner>(

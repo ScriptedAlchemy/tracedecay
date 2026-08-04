@@ -43,6 +43,7 @@ impl DaemonInvocationService {
             )
             .await;
         let feedback_runtime = runtimes.feedback;
+        let advisory_cycle = runtimes.advisory_cycle;
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
@@ -222,8 +223,21 @@ impl DaemonInvocationService {
                 )
                 .await
             }
-            DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
-                execute_feedback_advisory_cycle(request_id).await
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback_advisory_cycle(
+                    request_id,
+                    advisory_cycle,
+                    document_uri,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
             }
             DaemonInvocationPayload::FeedbackImpact {
                 request_handle,

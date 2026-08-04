@@ -186,17 +186,6 @@ impl CodeIndexSearchCoverageV1 {
         }
     }
 
-    /// The generation-bound lanes are gone, but the retained graph store can
-    /// still answer lexically. Recall is partial and says so.
-    pub const fn retained_lexical_only(reason: &'static str) -> Self {
-        Self {
-            exact: CodeIndexLaneStatusV1::Unavailable { reason },
-            lexical: CodeIndexLaneStatusV1::Complete,
-            graph: CodeIndexLaneStatusV1::Complete,
-            semantic: CodeIndexLaneStatusV1::Unavailable { reason },
-        }
-    }
-
     /// No lane can serve this request.
     pub const fn unavailable(reason: &'static str) -> Self {
         Self {
@@ -333,24 +322,6 @@ mod tests {
             CodeIndexLaneStatusV1::Unavailable {
                 reason: "semantic_indexing",
             }
-        );
-
-        let retained =
-            CodeIndexSearchCoverageV1::retained_lexical_only(lane_reason::GENERATION_REBUILDING);
-        assert!(retained.any_servable());
-        assert!(retained.is_degraded());
-        assert_eq!(retained.lexical, CodeIndexLaneStatusV1::Complete);
-        assert_eq!(
-            retained.exact,
-            CodeIndexLaneStatusV1::Unavailable {
-                reason: lane_reason::GENERATION_REBUILDING,
-            }
-        );
-        assert!(
-            retained
-                .degraded_or_fail(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
-                .is_ok(),
-            "a servable lexical lane must never collapse into a query failure"
         );
     }
 
