@@ -83,31 +83,6 @@ pub mod sessions {
     pub use tracedecay_sessions::runtime::{git_correlation, hermes, lcm, workflow_index};
 }
 
-pub mod agents {
-    pub mod hermes {
-        use std::path::Path;
-
-        pub fn read_config_pinned_project_root(config_path: &Path) -> Option<String> {
-            tracedecay_sessions::host_ports::hermes_profile_pin::resolve(config_path)
-        }
-    }
-}
-
-/// Host admission for migration composition.
-///
-/// This is the same facade the composition root uses
-/// (`tracedecay::application::host_admission` re-exports it verbatim). The
-/// legacy Hermes `state.db` import drives real observation capture and cursor
-/// advance through it, so this must stay the production implementation rather
-/// than a locally-defined stand-in.
-pub mod application {
-    pub mod host_admission {
-        pub use tracedecay_usecases::host_admission::{
-            HostAdmissionAuthorities, HostAdmissionFacade,
-        };
-    }
-}
-
 pub mod tracedecay_root {}
 
 pub mod storage_adapters {
