@@ -34,9 +34,8 @@ pub(crate) use v2::protected_session_id_for_native as hook_v2_protected_session_
 pub(crate) use v2::publish_daemon_bindings as publish_hook_v2_bindings;
 
 pub use claude::{
-    claude_session_context_for_event, evaluate_hook_decision, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
-    hook_stop,
+    evaluate_hook_decision, hook_claude_post_tool_use, hook_claude_session_start,
+    hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit, hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
@@ -46,12 +45,10 @@ pub use codex::{
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
-    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_after_file_edit_rel_paths,
-    cursor_post_tool_use_decision, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, evaluate_cursor_after_file_edit, evaluate_cursor_post_tool_use,
-    evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
-    hook_cursor_before_submit_prompt, hook_cursor_post_tool_use, hook_cursor_pre_compact,
-    hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
+    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_should_run_sync, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
+    hook_cursor_after_shell, hook_cursor_before_submit_prompt, hook_cursor_post_tool_use,
+    hook_cursor_pre_compact, hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
@@ -59,7 +56,6 @@ pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
 };
-pub use post_tool_use::claude_post_tool_use_matcher;
 pub use steering::{
     CURSOR_PLUGIN_SKILLS, HookWorkspaceStatus, build_codex_session_context,
     build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,

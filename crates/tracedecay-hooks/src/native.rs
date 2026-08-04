@@ -125,7 +125,8 @@ impl DecodedNativeHookEventV1 {
 
 /// Opaque material that a binding-aware host adapter may attach after native
 /// decoding. It never accepts a provider's raw ID, source, path, or payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeEnvelopeMaterialV1 {
     pub event_id: [u8; 16],
     pub protected_session_id: [u8; 32],
@@ -134,6 +135,27 @@ pub struct NativeEnvelopeMaterialV1 {
     pub effect_receipt_id: Option<[u8; 16]>,
     pub file_id: Option<[u8; 16]>,
     pub changed_range_count: u8,
+}
+
+/// Content-free native material submitted by a projectless host hook.
+///
+/// The hook has no project route, so it cannot read a project binding or
+/// decide a fallback action. The daemon reconstructs the profile-scoped V2
+/// envelope from its authenticated profile identity before accepting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileScopedNativeHookAdmissionV1 {
+    pub decoded: DecodedNativeHookEventV1,
+    pub material: NativeEnvelopeMaterialV1,
+}
+
+impl ProfileScopedNativeHookAdmissionV1 {
+    pub fn into_envelope(
+        self,
+        binding: &HookScopeBindingV1,
+    ) -> Result<HookEventEnvelopeV2, NativeHookDecodeError> {
+        self.decoded.into_envelope(binding, self.material)
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

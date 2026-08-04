@@ -35,8 +35,8 @@ pub use core_events::{
 pub use native::{
     DecodedNativeHookEventV1, DecodedOpenCodeLspEventV1, NativeEnvelopeMaterialV1,
     NativeHookDecodeError, NativeHookSignalV1, OpenCodePluginSurfaceV1,
-    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_lsp_event,
-    decode_opencode_plugin_event,
+    ProfileScopedNativeHookAdmissionV1, decode_bound_native_hook_event, decode_native_hook_event,
+    decode_opencode_lsp_event, decode_opencode_plugin_event,
 };
 pub use runtime::{
     AsyncHookAdmissionPortV1, AsyncHookFeedbackDeliveryPortV1, HOOK_SYNCHRONOUS_BUDGET_MICROS,
