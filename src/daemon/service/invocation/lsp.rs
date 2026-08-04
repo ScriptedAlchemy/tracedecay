@@ -244,7 +244,11 @@ impl DaemonInvocationService {
         &self,
         active_project_root: &Path,
         request: MultiRootScopeSetCasRequestV1,
-        mut roots: Vec<(PathBuf, ResolvedScope)>,
+        mut roots: Vec<(
+            PathBuf,
+            ResolvedScope,
+            tracedecay_application::RegisteredRootLocatorV1,
+        )>,
         observed_at: UtcMicros,
     ) -> Option<(ResolvedScope, MultiRootScopeSetCasResultV1)> {
         request.validate().ok()?;
@@ -281,9 +285,9 @@ impl DaemonInvocationService {
         let use_case =
             UseCaseId::new(crate::daemon::project_open_owners::LSP_WORKSPACE_USE_CASE_ID_V1)
                 .ok()?;
-        let mut contexts = Vec::with_capacity(roots.len());
+        let mut admissions = Vec::with_capacity(roots.len());
         let mut storages = vec![active_storage.clone()];
-        for (ordinal, (project_root, scope)) in roots.iter().enumerate() {
+        for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
             let grant = owner.scope_grant?;
             if grant.scope != *scope {
@@ -292,23 +296,24 @@ impl DaemonInvocationService {
             if let Some(storage) = owner.scope_set_storage {
                 storages.push(storage);
             }
-            contexts.push(
-                RequestContext::new(
-                    grant.issuer.clone(),
-                    scope.clone(),
-                    grant,
-                    RequestId::new(format!("request.multi-root.cas.{ordinal}")).ok()?,
-                    Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000)))
-                        .ok()?,
-                    CancellationContext::active(format!("cancel.multi-root.cas.{ordinal}")).ok()?,
-                )
-                .ok()?,
+            let context = RequestContext::new(
+                grant.issuer.clone(),
+                scope.clone(),
+                grant,
+                RequestId::new(format!("request.multi-root.cas.{ordinal}")).ok()?,
+                Deadline::new(UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000))).ok()?,
+                CancellationContext::active(format!("cancel.multi-root.cas.{ordinal}")).ok()?,
+            )
+            .ok()?;
+            admissions.push(
+                tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
+                    .ok()?,
             );
         }
-        let next = AuthorizedScopeSetAuthority::authorize(
+        let next = AuthorizedScopeSetAuthority::authorize_registered(
             request.scope_set_id,
             next_revision,
-            contexts,
+            admissions,
             &capability,
             &use_case,
             observed_at,

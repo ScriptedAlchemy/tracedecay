@@ -43,89 +43,57 @@ pub(super) fn retained_project_graph_resolver(
                     ),
                 )
             })?;
-            let registered_root = authority::canonical_identity_path(&request.registered_root)
+            let requested_common_dir = request
+                .requested_git_common_dir
+                .as_ref()
+                .map(|path| authority::canonical_identity_path(path))
+                .transpose()
                 .map_err(|error| {
                     TraceDecayError::project_route(
                         "project_route_unavailable",
                         true,
                         format!(
-                            "registered project identity is unavailable for {}: {error}",
-                            request.registered_root.display()
-                        ),
-                    )
-                })?;
-            let Some(owner) = request.owner.as_ref() else {
-                return sole_mounted_graph_matching(&graphs, |graph| {
-                    authority::canonical_identity_path(graph.project_root()).ok()
-                        == Some(requested_root.clone())
-                })
-                .map_err(|()| {
-                    TraceDecayError::project_route(
-                        "project_route_ambiguous",
-                        false,
-                        format!(
-                            "multiple mounted graphs claim workspace {}",
+                            "workspace repository identity is unavailable for {}: {error}",
                             request.requested_worktree_root.display()
                         ),
                     )
-                });
-            };
-            let project_id = owner.project.project_id.as_str();
-            let candidates = graphs
-                .into_iter()
-                .filter(|graph| {
-                    graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                        && request
-                            .requested_git_common_dir
-                            .as_ref()
-                            .is_none_or(|requested| {
-                                let requested = authority::canonical_identity_path(requested).ok();
-                                let mounted = crate::worktree::git_common_dir(graph.project_root())
-                                    .and_then(|path| {
-                                        authority::canonical_identity_path(&path).ok()
-                                    });
-                                mounted.is_none() || mounted == requested
-                            })
-                })
-                .collect::<Vec<_>>();
-            let branch_matches = |graph: &crate::tracedecay::TraceDecay| {
-                request.requested_branch.as_deref().is_some_and(|branch| {
-                    graph.serving_branch() == Some(branch) || graph.active_branch() == Some(branch)
-                })
-            };
-            let root_matches = |graph: &crate::tracedecay::TraceDecay, root: &Path| {
+                })?;
+            let selected = sole_mounted_graph_matching(&graphs, |graph| {
                 authority::canonical_identity_path(graph.project_root()).ok()
-                    == Some(root.to_path_buf())
-            };
-            for selected in [
-                sole_mounted_graph_matching(&candidates, |graph| {
-                    root_matches(graph, &requested_root) && branch_matches(graph)
-                }),
-                sole_mounted_graph_matching(&candidates, branch_matches),
-                sole_mounted_graph_matching(&candidates, |graph| {
-                    root_matches(graph, &requested_root)
-                }),
-                sole_mounted_graph_matching(&candidates, |graph| {
-                    root_matches(graph, &registered_root)
-                }),
-                sole_mounted_graph_matching(&candidates, |_| true),
-            ] {
-                match selected {
-                    Ok(Some(graph)) => return Ok(Some(graph)),
-                    Ok(None) => {}
-                    Err(()) => {
-                        return Err(TraceDecayError::project_route(
-                            "project_route_ambiguous",
-                            false,
-                            format!(
-                                "multiple mounted graphs claim registered project '{}'",
-                                owner.project.project_id
-                            ),
-                        ));
-                    }
-                }
-            }
-            Ok(None)
+                    == Some(requested_root.clone())
+                    && request.owner.as_ref().is_none_or(|owner| {
+                        graph.store_layout().identity.project_id.as_deref()
+                            == Some(owner.project.project_id.as_str())
+                    })
+                    && requested_common_dir.as_ref().is_none_or(|requested| {
+                        crate::worktree::git_common_dir(graph.project_root())
+                            .and_then(|path| authority::canonical_identity_path(&path).ok())
+                            .as_ref()
+                            == Some(requested)
+                    })
+            })
+            .map_err(|()| {
+                TraceDecayError::project_route(
+                    "project_route_ambiguous",
+                    false,
+                    format!(
+                        "multiple mounted graphs claim workspace {}",
+                        request.requested_worktree_root.display()
+                    ),
+                )
+            })?;
+            selected
+                .ok_or_else(|| {
+                    TraceDecayError::project_route(
+                        "project_route_unavailable",
+                        true,
+                        format!(
+                            "registered project graph is not mounted for workspace {}",
+                            request.requested_worktree_root.display()
+                        ),
+                    )
+                })
+                .map(Some)
         })
     })
 }

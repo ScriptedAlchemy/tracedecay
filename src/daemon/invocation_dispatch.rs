@@ -130,13 +130,22 @@ pub(super) async fn resolve_multi_root_projects(
     service: &service::invocation::DaemonInvocationService,
     selectors: &[tracedecay_application::RegisteredRootSelectorV1],
 ) -> std::result::Result<
-    Vec<(PathBuf, tracedecay_application::ResolvedScope)>,
+    Vec<(
+        PathBuf,
+        tracedecay_application::ResolvedScope,
+        tracedecay_application::RegisteredRootLocatorV1,
+    )>,
     service::invocation::DaemonInvocationProblem,
 > {
     let database = store_administration
         .registered_profile_database()
         .await
         .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+    let profile_id = store_administration
+        .profile_identity()
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
+        .profile_id()
+        .clone();
     let mut roots = Vec::with_capacity(selectors.len());
     for selector in selectors {
         let context = database
@@ -146,6 +155,16 @@ pub(super) async fn resolve_multi_root_projects(
             .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
         if context.project.project_id != selector.project_id.as_str() {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        }
+        let mut stores = context
+            .stores
+            .iter()
+            .filter(|store| store.store.project_id == selector.project_id.as_str());
+        let Some(store) = stores.next() else {
+            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+        };
+        if stores.next().is_some() {
+            return Err(service::invocation::DaemonInvocationProblem::Unavailable);
         }
         let registered_root = PathBuf::from(context.project.canonical_root);
         if !registered_root.is_absolute()
@@ -171,7 +190,14 @@ pub(super) async fn resolve_multi_root_projects(
         if !service.lsp_owner_matches_scope(&root, &scope).await {
             return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
         }
-        roots.push((root, scope));
+        let locator = tracedecay_application::RegisteredRootLocatorV1::new(
+            selector.project_id.clone(),
+            profile_id.clone(),
+            store.store.store_id.clone(),
+            root.clone(),
+        )
+        .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        roots.push((root, scope, locator));
     }
     roots.sort_by(|left, right| left.1.scope_digest.cmp(&right.1.scope_digest));
     if roots

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::{Map, Value, json};
 use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalModeV1};
@@ -20,10 +20,7 @@ use crate::application::session::{
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::WorkflowScopeFilter;
 use crate::mcp::tools::ToolResult;
-use crate::mcp::tools::handlers::project_registry::{
-    ProjectRegistryListingCommand, ProjectRegistryListingOutcome, ProjectRegistryListingScope,
-    ProjectRegistryReadPort, list_registered_projects,
-};
+use crate::mcp::tools::handlers::project_registry::ProjectRegistryReadPort;
 use crate::mcp::tools::handlers::support::{argument_error, tool_json_with_md};
 use crate::sessions::git_correlation::GitScopeFilter;
 use crate::sessions::{
@@ -307,18 +304,26 @@ fn apply_typed_error(payload: &mut Value, status: &str, code: &str, message: &st
 }
 
 fn apply_unavailable(payload: &mut Value, unavailable: SessionRetrievalUnavailable) -> Result<()> {
-    apply_typed_error(
-        payload,
-        "unavailable",
-        "session_retrieval_service_unavailable",
-        "the authorized session retrieval service is unavailable",
-    )?;
+    let (code, message, retryable) = unavailable.routing_failure.as_ref().map_or_else(
+        || {
+            (
+                "session_retrieval_service_unavailable",
+                "the authorized session retrieval service is unavailable",
+                unavailable.reason.is_retryable(),
+            )
+        },
+        |failure| {
+            (
+                failure.code.as_str(),
+                failure.message.as_str(),
+                failure.retryable,
+            )
+        },
+    );
+    apply_typed_error(payload, "unavailable", code, message)?;
     let error = error_object_mut(payload)?;
     error.insert("reason".to_string(), json!(unavailable.reason.as_str()));
-    error.insert(
-        "retryable".to_string(),
-        json!(unavailable.reason.is_retryable()),
-    );
+    error.insert("retryable".to_string(), json!(retryable));
     if let Some(worker) = unavailable.worker {
         payload_object_mut(payload)?
             .insert("service_status".to_string(), serde_json::to_value(worker)?);
@@ -489,16 +494,32 @@ fn retrieval_command(
     store_scope: SessionRetrievalStoreScope,
     project_selector: Option<SessionRetrievalProjectSelector>,
 ) -> Result<SessionRetrievalCommand> {
+    retrieval_command_with_paging(
+        request,
+        store_scope,
+        project_selector,
+        request.cursor,
+        request.limit,
+    )
+}
+
+fn retrieval_command_with_paging(
+    request: &MessageSearchRequest<'_>,
+    store_scope: SessionRetrievalStoreScope,
+    project_selector: Option<SessionRetrievalProjectSelector>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<SessionRetrievalCommand> {
     let query = SessionTemporalQuery::new(
         SessionId::new("session.message-search.root").map_err(|error| TraceDecayError::Config {
             message: error.to_string(),
         })?,
         request.requested_provider.map(str::to_string),
         request.query,
-        request.cursor.map(str::to_string),
+        cursor.map(str::to_string),
         TemporalModeV1::Current,
         RetrievalGrainV1::LogicalMessage,
-        request.limit,
+        limit,
         DiversityLimits::default(),
         ContextBudget {
             max_bytes: 64 * 1024,
@@ -533,133 +554,9 @@ fn retrieval_command(
     )
 }
 
-const MAX_ALL_REGISTERED_PROJECTS: usize = 25;
-
-fn unavailable_all_registered_payload(
-    request: &MessageSearchRequest<'_>,
-    code: &str,
-    message: &str,
-) -> Result<Value> {
-    let mut payload = base_message_search_payload(request)?;
-    apply_typed_error(&mut payload, "unavailable", code, message)?;
-    let map = payload_object_mut(&mut payload)?;
-    map.insert("project_scope".to_string(), json!("all_registered"));
-    map.insert("searched_project_count".to_string(), json!(0));
-    map.insert("skipped_project_count".to_string(), json!(0));
-    map.insert("catch_up_skipped_project_count".to_string(), json!(0));
-    Ok(payload)
-}
-
-async fn all_registered_message_search(
-    project_root: Option<&Path>,
-    request: &MessageSearchRequest<'_>,
-    store_scope: SessionRetrievalStoreScope,
-    service: Option<&dyn SessionRetrievalServicePort>,
-    registry: Option<&dyn ProjectRegistryReadPort>,
-) -> Result<Value> {
-    let Some(registry) = registry else {
-        return unavailable_all_registered_payload(
-            request,
-            "project_registry_unavailable",
-            "no project registry authority is mounted for this profile",
-        );
-    };
-    let Some(service) = service else {
-        return unavailable_all_registered_payload(
-            request,
-            "session_retrieval_service_not_configured",
-            "no session retrieval service is configured for this profile",
-        );
-    };
-    let listing = list_registered_projects(
-        Some(registry),
-        ProjectRegistryListingCommand {
-            active_project_root: project_root.map_or_else(|| PathBuf::from("."), Path::to_path_buf),
-            scope: ProjectRegistryListingScope::All,
-            limit: MAX_ALL_REGISTERED_PROJECTS,
-        },
-    )
-    .await?;
-    let ProjectRegistryListingOutcome::Listing(listing) = listing else {
-        return unavailable_all_registered_payload(
-            request,
-            "project_registry_unavailable",
-            "no project registry authority is mounted for this profile",
-        );
-    };
-
-    let mut merged = base_message_search_payload(request)?;
-    let mut results = Vec::new();
-    let mut searched = 0_usize;
-    let mut skipped = 0_usize;
-    let mut projects = Vec::with_capacity(listing.projects.len());
-    for project in &listing.projects {
-        let command = retrieval_command(
-            request,
-            store_scope,
-            Some(SessionRetrievalProjectSelector {
-                project_id: Some(project.project_id.clone()),
-                project_path: None,
-            }),
-        )?;
-        let outcome = service.execute(command).await;
-        let searchable = matches!(
-            outcome,
-            SessionRetrievalServiceOutcome::Complete { .. }
-                | SessionRetrievalServiceOutcome::CompleteZero { .. }
-                | SessionRetrievalServiceOutcome::Partial { .. }
-                | SessionRetrievalServiceOutcome::Stale { .. }
-        );
-        let payload = render_service_outcome(request, outcome)?;
-        if searchable {
-            searched = searched.saturating_add(1);
-            if let Some(page) = payload.get("results").and_then(Value::as_array) {
-                for result in page {
-                    let mut result = result.clone();
-                    if let Some(map) = result.as_object_mut() {
-                        map.insert("project_id".to_string(), json!(project.project_id));
-                        map.insert("project_root".to_string(), json!(project.display_root));
-                    }
-                    results.push(result);
-                }
-            }
-        } else {
-            skipped = skipped.saturating_add(1);
-        }
-        projects.push(json!({
-            "project_id": project.project_id,
-            "project_root": project.display_root,
-            "status": payload.get("status").cloned().unwrap_or(Value::Null),
-            "outcome": payload.get("outcome").cloned().unwrap_or(Value::Null),
-            "count": payload.get("count").cloned().unwrap_or(json!(0)),
-            "error": payload.get("error").cloned().unwrap_or(Value::Null),
-        }));
-    }
-    let result_truncated = results.len() > request.limit;
-    results.truncate(request.limit);
-    let map = payload_object_mut(&mut merged)?;
-    map.insert("project_scope".to_string(), json!("all_registered"));
-    map.insert(
-        "outcome".to_string(),
-        json!(if results.is_empty() {
-            "complete_zero"
-        } else {
-            "complete"
-        }),
-    );
-    map.insert("count".to_string(), json!(results.len()));
-    map.insert("results".to_string(), Value::Array(results));
-    map.insert("searched_project_count".to_string(), json!(searched));
-    map.insert("skipped_project_count".to_string(), json!(skipped));
-    map.insert("catch_up_skipped_project_count".to_string(), json!(0));
-    map.insert("projects".to_string(), Value::Array(projects));
-    map.insert(
-        "truncated".to_string(),
-        json!(listing.truncated || result_truncated),
-    );
-    Ok(merged)
-}
-
+#[path = "all_registered.rs"]
+mod all_registered;
+use all_registered::all_registered_message_search;
 fn markdown_object<'a>(value: &'a Value, name: &str) -> Result<&'a Map<String, Value>> {
     value.as_object().ok_or_else(|| TraceDecayError::Config {
         message: format!("message search markdown requires {name} to be an object"),
