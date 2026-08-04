@@ -49,10 +49,9 @@ extra_files = {
 }
 required_extra_files = {
     ("toml", "Cargo.toml", "$.package.version"),
-    ("generic", "Cargo.lock", None),
 }
 if extra_files != required_extra_files:
-    raise SystemExit("release automation must update only the root Cargo versions")
+    raise SystemExit("release automation must update only the root Cargo manifest")
 
 with open(root_path, "rb") as handle:
     root_manifest = tomllib.load(handle)
@@ -68,10 +67,8 @@ if not any(binary.get("name") == "tracedecay" for binary in root_manifest.get("b
     raise SystemExit("root binary must remain named tracedecay")
 
 lock_text = Path(lock_path).read_text(encoding="utf-8")
-if lock_text.count("x-release-please-version") != 1:
-    raise SystemExit("Cargo.lock must carry exactly one root release marker")
-if 'version = "' + version + '" # x-release-please-version' not in lock_text:
-    raise SystemExit("Cargo.lock root package version must carry the release marker")
+if "x-release-please-version" in lock_text:
+    raise SystemExit("Cargo.lock must not use markers that Cargo strips")
 with open(lock_path, "rb") as handle:
     lockfile = tomllib.load(handle)
 root_locks = [
@@ -110,6 +107,10 @@ for required in [
     "googleapis/release-please-action@v5",
     "token: ${{ secrets.RELEASE_PLZ_TOKEN }}",
     "target-branch: master",
+    "steps.release.outputs.prs_created == 'true'",
+    "fromJSON(steps.release.outputs.pr).headBranchName",
+    "cargo metadata --format-version 1 --no-deps",
+    'git push origin "HEAD:$RELEASE_PR_BRANCH"',
     "Check GitHub release version drift",
 ]:
     if required not in release_please:

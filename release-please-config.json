@@ -12,10 +12,6 @@
           "type": "toml",
           "path": "Cargo.toml",
           "jsonpath": "$.package.version"
-        },
-        {
-          "type": "generic",
-          "path": "Cargo.lock"
         }
       ]
     }
