@@ -37,6 +37,13 @@ impl<'a, E> GlobalDbLcmSummaryPublication<'a, E> {
             relation_projection: Mutex::new(relation_projection),
         }
     }
+
+    pub(crate) fn relation_projection(&self) -> Result<SessionRelationProjection, LcmError> {
+        self.relation_projection
+            .lock()
+            .map(|projection| projection.clone())
+            .map_err(|_| LcmError::Db("session relation publication lock poisoned".to_owned()))
+    }
 }
 
 impl<E> LcmSummaryPublicationPort for GlobalDbLcmSummaryPublication<'_, E>

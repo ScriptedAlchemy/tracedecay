@@ -94,7 +94,7 @@ pub async fn persist_session_temporal_projection_batch_in_transaction(
         persist_occurrence(conn, batch, occurrence).await?;
     }
     for copy in batch.copies() {
-        persist_copy(conn, batch, copy).await?;
+        validate_copy(conn, batch, copy).await?;
     }
     for assertion in batch.assertions() {
         persist_assertion(conn, batch, assertion).await?;
@@ -682,7 +682,7 @@ pub(super) async fn require_exact_occurrence(
     Ok(())
 }
 
-pub(super) async fn persist_copy(
+pub(super) async fn validate_copy(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,
     copy: &LogicalCopyRecordV1,

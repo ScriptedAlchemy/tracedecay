@@ -104,7 +104,7 @@ impl RegisteredGlobalDb {
         super::relation_receipts::apply_relation_projection(self, &projection, cancellation).await
     }
 
-    pub async fn recover_active_session_relation_projections(
+    pub async fn recover_pending_session_relation_projections(
         &self,
         limit: usize,
         cancellation: Arc<dyn GraphCancellation>,
@@ -120,9 +120,12 @@ impl RegisteredGlobalDb {
             .read_snapshot()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let (scope, _) = self
+            .session_relation_store()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let mut rows = snapshot
             .query(
-                "SELECT session_id
+                "SELECT session_id, generation, scope_kind, scope_id
                  FROM session_relation_receipts
                  WHERE state = 'pending'
                  ORDER BY created_at, session_id, generation
@@ -133,28 +136,69 @@ impl RegisteredGlobalDb {
             )
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
-        let mut sessions = Vec::new();
+        let mut pending = Vec::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
         {
             require_not_cancelled(&cancellation)?;
-            sessions.push(
-                SessionId::new(
-                    row.get::<String>(0)
+            let session_id = SessionId::new(
+                row.get::<String>(0)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let generation = SessionProjectionGenerationV1::new(
+                u64::try_from(
+                    row.get::<i64>(1)
                         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
                 )
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
-            );
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let scope_kind: String = row
+                .get(2)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let scope_id: String = row
+                .get(3)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let expected_kind = match scope {
+                SessionRelationScope::Project { .. } => "project",
+                SessionRelationScope::Profile { .. } => "profile",
+            };
+            if scope_kind != expected_kind || scope_id != scope.identity() {
+                return Err(storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "pending relation receipt does not belong to the mounted session scope",
+                ));
+            }
+            pending.push((session_id, generation));
         }
         drop(rows);
         drop(snapshot);
-        for session_id in &sessions {
-            self.apply_active_session_relation_projection(session_id, Arc::clone(&cancellation))
-                .await?;
+        for (session_id, generation) in &pending {
+            let snapshot = self
+                .read_snapshot()
+                .await
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            let projection = reconstruct_session_relation_projection(
+                &snapshot,
+                scope,
+                session_id,
+                *generation,
+                DEFAULT_MAX_ENTITIES,
+                DEFAULT_MAX_RELATIONS,
+                Arc::clone(&cancellation),
+            )
+            .await?;
+            super::relation_receipts::apply_relation_projection(
+                self,
+                &projection,
+                Arc::clone(&cancellation),
+            )
+            .await?;
         }
-        Ok(sessions.len())
+        Ok(pending.len())
     }
 
     async fn active_relation_generation(

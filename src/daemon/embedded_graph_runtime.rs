@@ -122,3 +122,39 @@ impl EmbeddedGraphRuntimeRegistry {
         Ok(database)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+    use tracedecay_domain::{ProjectId, UserProfileId};
+
+    use super::*;
+
+    #[test]
+    fn project_and_profile_mounts_require_distinct_exact_store_roots() {
+        let temporary = TempDir::new().expect("temporary mount root");
+        let project_root = temporary.path().join("project-sessions");
+        let profile_root = temporary.path().join("profile-sessions");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        std::fs::create_dir_all(&profile_root).expect("profile root");
+        let project_scope = SessionRelationScope::project(
+            ProjectId::new("project.mount-isolation").expect("project id"),
+        );
+        let profile_scope = SessionRelationScope::profile(
+            UserProfileId::new("profile.mount-isolation").expect("profile id"),
+        );
+        let registry = EmbeddedGraphRuntimeRegistry::default();
+
+        let project = registry
+            .resolve_scope(&project_scope, &project_root)
+            .expect("project mount");
+        assert!(matches!(
+            registry.resolve_scope(&profile_scope, &project_root),
+            Err(EmbeddedGraphRuntimeError::IdentityConflict)
+        ));
+        let profile = registry
+            .resolve_scope(&profile_scope, &profile_root)
+            .expect("profile mount");
+        assert!(!Arc::ptr_eq(&project, &profile));
+    }
+}

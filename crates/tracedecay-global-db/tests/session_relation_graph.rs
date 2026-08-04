@@ -1,13 +1,17 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId, ThreadId};
+use tempfile::TempDir;
+use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId, ThreadId, UserProfileId};
 use tracedecay_global_db::session_temporal::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationProjection,
     SessionRelationScope, SummaryRelationNode, SummarySourceRef, SummarySourceVisitKind,
     ThreadHierarchyRelation, WorkflowAgentMembership,
 };
-use tracedecay_graph_db::GraphCancellation;
+use tracedecay_graph_db::{
+    GraphCancellation, GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
+    GraphFormatVersion,
+};
 
 #[derive(Debug)]
 struct TestCancellation(AtomicBool);
@@ -222,4 +226,114 @@ fn session_context_reads_parent_and_workflow_membership_from_graph() {
             .collect::<Vec<_>>(),
         vec!["implement", "review"]
     );
+}
+
+#[test]
+fn project_and_profile_scopes_do_not_alias_identical_session_generations() {
+    let store = SessionRelationGraphStore::memory().expect("graph");
+    let project = projection(1);
+    let mut profile = project.clone();
+    profile.scope = SessionRelationScope::profile(id::<UserProfileId>("profile.session-relations"));
+    profile.summaries = vec![SummaryRelationNode {
+        summary_id: "summary.root".to_owned(),
+        sources: vec![SummarySourceRef::Anchor {
+            anchor_id: id::<RetrievalAnchorId>("anchor.profile"),
+        }],
+        predecessor_summary_id: None,
+    }];
+    store.replace(&project).expect("project publication");
+    store.replace(&profile).expect("profile publication");
+
+    let profile_visits = store
+        .summary_sources(
+            &profile.scope,
+            &profile.session_id,
+            1,
+            "summary.root",
+            1,
+            Arc::new(TestCancellation(AtomicBool::new(false))),
+        )
+        .expect("profile traversal");
+    assert!(matches!(
+        profile_visits.as_slice(),
+        [visit]
+            if matches!(
+                &visit.source,
+                SummarySourceVisitKind::Anchor { anchor_id }
+                    if anchor_id.as_str() == "anchor.profile"
+            )
+    ));
+
+    let project_visits = store
+        .summary_sources(
+            &project.scope,
+            &project.session_id,
+            1,
+            "summary.root",
+            3,
+            Arc::new(TestCancellation(AtomicBool::new(false))),
+        )
+        .expect("project traversal");
+    assert!(project_visits.iter().any(|visit| {
+        matches!(
+            &visit.source,
+            SummarySourceVisitKind::Anchor { anchor_id }
+                if anchor_id.as_str() == "anchor.root"
+        )
+    }));
+    assert!(project_visits.iter().all(|visit| {
+        !matches!(
+            &visit.source,
+            SummarySourceVisitKind::Anchor { anchor_id }
+                if anchor_id.as_str() == "anchor.profile"
+        )
+    }));
+}
+
+#[test]
+fn profile_relation_projection_survives_a_persistent_graph_restart() {
+    let temporary = TempDir::new().expect("temporary graph root");
+    let graph_path = temporary.path().join("profile-session-relations.grafeo");
+    let mut relation_projection = projection(7);
+    relation_projection.scope =
+        SessionRelationScope::profile(id::<UserProfileId>("profile.restart"));
+
+    {
+        let database = GraphDb::open(GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(graph_path.clone()),
+            expected_format: GraphFormatVersion::new(2).expect("format"),
+            durability: GraphDurability::Sync,
+            cancellation: Arc::new(TestCancellation(AtomicBool::new(false))),
+        })
+        .expect("open persistent graph");
+        SessionRelationGraphStore::new(Arc::new(database))
+            .replace(&relation_projection)
+            .expect("publish profile projection");
+    }
+
+    let reopened = GraphDb::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(graph_path),
+        expected_format: GraphFormatVersion::new(2).expect("format"),
+        durability: GraphDurability::Sync,
+        cancellation: Arc::new(TestCancellation(AtomicBool::new(false))),
+    })
+    .expect("reopen persistent graph");
+    let visits = SessionRelationGraphStore::new(Arc::new(reopened))
+        .summary_sources(
+            &relation_projection.scope,
+            &relation_projection.session_id,
+            7,
+            "summary.root",
+            3,
+            Arc::new(TestCancellation(AtomicBool::new(false))),
+        )
+        .expect("restart traversal");
+    assert_eq!(visits.len(), 3);
+    assert!(visits.iter().any(|visit| {
+        matches!(
+            &visit.source,
+            SummarySourceVisitKind::Anchor { anchor_id }
+                if anchor_id.as_str() == "anchor.root"
+        )
+    }));
 }
