@@ -231,6 +231,13 @@ async fn serve_broker_socket_client(
     } else {
         None
     };
+    if let Some(cancellation) =
+        crate::daemon_contract::parse_daemon_invocation_cancellation_request(&first_request_line)
+    {
+        crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+        drop(setup_activity);
+        return Ok(());
+    }
     let Some(setup_activity) = serve_core_doctor_runtime_request(
         &mut transport,
         &handshake,
@@ -621,6 +628,13 @@ pub(super) async fn serve_windows_broker_client_with_class_and_invocation(
     } else {
         None
     };
+    if let Some(cancellation) =
+        crate::daemon_contract::parse_daemon_invocation_cancellation_request(&first_request_line)
+    {
+        crate::daemon::request_cancellation::cancel(cancellation.target_request_id());
+        drop(setup_activity);
+        return Ok(());
+    }
     let Some(setup_activity) = serve_core_doctor_runtime_request(
         &mut transport,
         &handshake,

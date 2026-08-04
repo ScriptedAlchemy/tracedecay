@@ -636,6 +636,7 @@ impl DaemonInvocationClient {
         let remaining = deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
             stage: CancellationStage::BeforeAdmission,
         })?;
+        let target_request_id = request.request_id.clone();
         let client = self.clone();
         tokio::spawn(async move {
             let stage = match policy {
@@ -657,8 +658,20 @@ impl DaemonInvocationClient {
                 tokio::pin!(cancellation_wait);
                 tokio::select! {
                     result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
-                    () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled { stage }),
+                    () = &mut cancellation_wait => {
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(250),
+                            client.cancel_invocation(&target_request_id),
+                        )
+                        .await;
+                        Err(DaemonInvocationError::Cancelled { stage })
+                    },
                     () = tokio::time::sleep(remaining) => {
+                        let _ = tokio::time::timeout(
+                            Duration::from_millis(250),
+                            client.cancel_invocation(&target_request_id),
+                        )
+                        .await;
                         Err(DaemonInvocationError::TimedOut { stage })
                     }
                 }
@@ -676,6 +689,21 @@ impl DaemonInvocationClient {
         })
         .await
         .map_err(|_| DaemonInvocationError::Unavailable)?
+    }
+
+    async fn cancel_invocation(&self, target_request_id: &str) -> crate::errors::Result<()> {
+        let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
+        let (_reader, mut writer) = stream.into_split();
+        crate::daemon::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
+            .await?;
+        let request =
+            crate::daemon_contract::DaemonInvocationCancellationRequest::new(target_request_id);
+        writer
+            .write_all(serde_json::to_string(&request)?.as_bytes())
+            .await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+        Ok(())
     }
 }
 
@@ -912,9 +940,7 @@ pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
 }
 
 pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
-    while !cancellation.is_cancelled() {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    cancellation.cancelled().await;
 }
 
 /// Typed client for one daemon-owned LSP session. Every method maps to a

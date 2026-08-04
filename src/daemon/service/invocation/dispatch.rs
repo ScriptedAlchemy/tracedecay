@@ -29,6 +29,14 @@ impl DaemonInvocationService {
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
         let request_id = request.request_id.clone();
+        let Some(cancellation_lease) = crate::daemon::request_cancellation::register(&request_id)
+        else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::InvalidRequest,
+            );
+        };
+        let request_cancellation = cancellation_lease.token();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
         // Every per-project component this request may need, taken in one pass
@@ -107,6 +115,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
+                    request_cancellation,
                 )
                 .await
             }
