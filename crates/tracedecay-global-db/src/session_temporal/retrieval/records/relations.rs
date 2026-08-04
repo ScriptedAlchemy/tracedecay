@@ -326,6 +326,8 @@ fn map_relation_error(
         | SessionRelationError::NotFound
         | SessionRelationError::Unavailable
         | SessionRelationError::Conflict
+        | SessionRelationError::ResetRequired
+        | SessionRelationError::DurabilityUncertain
         | SessionRelationError::Corrupt
         | SessionRelationError::Storage(_) => read_error(RECORD_OPERATION, error),
     }

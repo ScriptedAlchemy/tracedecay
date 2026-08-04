@@ -191,6 +191,10 @@ pub enum SessionRelationError {
     Unavailable,
     #[error("session relation generation conflicts with an existing publication")]
     Conflict,
+    #[error("session relation graph requires reset")]
+    ResetRequired,
+    #[error("session relation graph durability is uncertain")]
+    DurabilityUncertain,
     #[error("session relation graph is corrupt")]
     Corrupt,
     #[error("session relation store failed: {0}")]
@@ -909,11 +913,32 @@ fn map_graph_error(error: GraphDbError) -> SessionRelationError {
         GraphDbError::BudgetExhausted => SessionRelationError::BudgetExhausted,
         GraphDbError::Conflict => SessionRelationError::Conflict,
         GraphDbError::InvalidRequest { .. } => SessionRelationError::Invalid,
-        GraphDbError::Corrupt { .. }
-        | GraphDbError::ResetRequired { .. }
-        | GraphDbError::DurabilityUncertain { .. } => SessionRelationError::Corrupt,
+        GraphDbError::ResetRequired { .. } => SessionRelationError::ResetRequired,
+        GraphDbError::DurabilityUncertain { .. } => SessionRelationError::DurabilityUncertain,
+        GraphDbError::Corrupt { .. } => SessionRelationError::Corrupt,
         GraphDbError::Unavailable { .. } | GraphDbError::Closed => {
             SessionRelationError::Unavailable
         }
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn reset_and_uncertain_durability_remain_distinct() {
+        assert_eq!(
+            map_graph_error(GraphDbError::ResetRequired {
+                message: "reset".to_owned(),
+            }),
+            SessionRelationError::ResetRequired
+        );
+        assert_eq!(
+            map_graph_error(GraphDbError::DurabilityUncertain {
+                message: "uncertain".to_owned(),
+            }),
+            SessionRelationError::DurabilityUncertain
+        );
     }
 }
