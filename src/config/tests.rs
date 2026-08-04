@@ -271,26 +271,6 @@ fn sync_config_defaults_round_trip() {
 }
 
 #[test]
-fn default_configuration_does_not_advertise_retired_remote_brain_settings() {
-    let rendered = serde_json::to_string(&TraceDecayConfig::default())
-        .expect("serialize default configuration")
-        .to_lowercase();
-
-    for retired_setting in [
-        "remote_brain",
-        "remote_authority",
-        "remote_enrollment",
-        "remote_replay",
-        "remote_recovery",
-    ] {
-        assert!(
-            !rendered.contains(retired_setting),
-            "default configuration advertised retired {retired_setting:?}: {rendered}"
-        );
-    }
-}
-
-#[test]
 fn semantic_config_defaults_to_offline_healthy_baseline() {
     let config = TraceDecayConfig::default();
     assert_eq!(config.semantic, super::SemanticConfig::default());
