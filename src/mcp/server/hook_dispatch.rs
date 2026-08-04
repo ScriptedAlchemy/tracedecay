@@ -2,6 +2,7 @@
 //! and hook-event plan execution.
 
 use super::*;
+use crate::application::host_admission::HostAdmissionStatus;
 
 /// When a settled branch write is allowed to refresh the file token map.
 ///
@@ -169,20 +170,7 @@ impl McpServer {
         plan: HookEventPlan,
     ) -> HostAdmissionOutcome {
         match plan {
-            HookEventPlan::SyncFiles(rel_paths) => {
-                match cg.sync_if_stale_silent(&rel_paths).await {
-                    Ok(()) => {
-                        self.refresh_file_token_map().await;
-                        HostAdmissionOutcome::replay_completed(true, false)
-                    }
-                    Err(TraceDecayError::SyncLock { .. }) => {
-                        HostAdmissionOutcome::retained_backpressured("daemon_backpressure")
-                    }
-                    Err(_) => {
-                        HostAdmissionOutcome::retained_unavailable("canonical_admission_failed")
-                    }
-                }
-            }
+            HookEventPlan::SyncFiles(rel_paths) => self.enqueue_hook_paths(root, rel_paths).await,
             HookEventPlan::AddBranch(branch) => {
                 // Project-root plans must revalidate live root + current branch
                 // immediately before effect — same strictness as AddBranchAt.
@@ -236,8 +224,8 @@ impl McpServer {
                 )
                 .await
             }
-            HookEventPlan::DebouncedIncrementalSync(agent) => {
-                self.run_hook_incremental_sync(cg, agent).await
+            HookEventPlan::DebouncedIncrementalSync(_) => {
+                HostAdmissionOutcome::replay_completed(false, true)
             }
             HookEventPlan::RecordTerminalReceipt { route, receipt } => {
                 match crate::automation::host_receipts::record(
@@ -287,7 +275,158 @@ impl McpServer {
                     }
                 }
             }
+            HookEventPlan::CursorEvent(event) => {
+                self.run_queued_cursor_event(cg, root, event).await
+            }
             HookEventPlan::Noop => HostAdmissionOutcome::replay_completed(false, true),
+        }
+    }
+
+    async fn run_queued_cursor_event(
+        &self,
+        cg: Arc<TraceDecay>,
+        root: &Path,
+        event: crate::mcp::tools::handlers::hook_runtime::CursorQueuedEventV1,
+    ) -> HostAdmissionOutcome {
+        let capture = match event.event_name.as_str() {
+            "beforeSubmitPrompt" => match cg.reset_local_counter().await {
+                Ok(()) => HostAdmissionOutcome::replay_completed(true, false),
+                Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+            },
+            "preCompact" => self.run_queued_cursor_compaction(&cg, root, &event).await,
+            "sessionStart" | "sessionEnd" | "stop" => {
+                self.run_queued_cursor_capture(&cg, root, &event).await
+            }
+            _ => HostAdmissionOutcome::replay_completed(false, true),
+        };
+        if !matches!(
+            capture.status,
+            HostAdmissionStatus::Committed | HostAdmissionStatus::ExactDuplicate
+        ) {
+            return capture;
+        }
+
+        if event.event_name != "afterFileEdit" || event.rel_paths.is_empty() {
+            return capture;
+        }
+        self.enqueue_hook_paths(root, event.rel_paths).await
+    }
+
+    fn queued_cursor_event_json(
+        root: &Path,
+        event: &crate::mcp::tools::handlers::hook_runtime::CursorQueuedEventV1,
+    ) -> std::result::Result<String, ()> {
+        let mut payload = event.event.clone();
+        let Some(payload) = payload.as_object_mut() else {
+            return Err(());
+        };
+        payload.insert(
+            "cwd".to_owned(),
+            Value::String(root.to_string_lossy().into_owned()),
+        );
+        serde_json::to_string(&payload).map_err(|_| ())
+    }
+
+    async fn run_queued_cursor_capture(
+        &self,
+        cg: &Arc<TraceDecay>,
+        root: &Path,
+        event: &crate::mcp::tools::handlers::hook_runtime::CursorQueuedEventV1,
+    ) -> HostAdmissionOutcome {
+        let Ok(event_json) = Self::queued_cursor_event_json(root, event) else {
+            return HostAdmissionOutcome::degraded("durable_payload_malformed");
+        };
+        let args = serde_json::json!({
+            "action": "ingest_transcript",
+            "provider": "cursor",
+            "user_scope": false,
+            "event_json": event_json,
+            "max_new_bytes": crate::hooks::CURSOR_CATCH_UP_INGEST_MAX_BYTES,
+        });
+        let authorities = crate::mcp::tools::SessionAuthorities::new(
+            self.session_db.as_ref(),
+            self.user_session_db.as_ref(),
+        )
+        .with_profile_identity(self.profile_identity.as_ref())
+        .with_registered_databases(
+            self.registered_session_db.as_ref(),
+            self.registered_user_session_db.as_ref(),
+        );
+        match crate::mcp::tools::handlers::hook_runtime::ingest_transcript(
+            Some(cg.as_ref()),
+            &args,
+            self.profile_root.as_deref(),
+            self.global_db.as_deref(),
+            authorities,
+        )
+        .await
+        {
+            Ok(result) if result.get("completed").and_then(Value::as_bool) == Some(false) => {
+                HostAdmissionOutcome::retained_backpressured("ingest_pass_backpressured")
+            }
+            Ok(result) => HostAdmissionOutcome::replay_completed(
+                result
+                    .get("messages_upserted")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count > 0),
+                true,
+            ),
+            Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+        }
+    }
+
+    async fn run_queued_cursor_compaction(
+        &self,
+        cg: &Arc<TraceDecay>,
+        root: &Path,
+        event: &crate::mcp::tools::handlers::hook_runtime::CursorQueuedEventV1,
+    ) -> HostAdmissionOutcome {
+        let Ok(event_json) = Self::queued_cursor_event_json(root, event) else {
+            return HostAdmissionOutcome::degraded("durable_payload_malformed");
+        };
+        let args = serde_json::json!({
+            "action": "cursor_compact",
+            "event_json": event_json,
+        });
+        let authorities = crate::mcp::tools::SessionAuthorities::new(
+            self.session_db.as_ref(),
+            self.user_session_db.as_ref(),
+        )
+        .with_profile_identity(self.profile_identity.as_ref())
+        .with_registered_databases(
+            self.registered_session_db.as_ref(),
+            self.registered_user_session_db.as_ref(),
+        );
+        match crate::mcp::tools::handlers::hook_runtime::cursor_compact(
+            cg.as_ref(),
+            &args,
+            authorities,
+        )
+        .await
+        {
+            Ok(result) => HostAdmissionOutcome::replay_completed(
+                result
+                    .get("summary_nodes_created")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|count| count > 0),
+                true,
+            ),
+            Err(_) => HostAdmissionOutcome::retained_unavailable("canonical_admission_failed"),
+        }
+    }
+
+    async fn enqueue_hook_paths(
+        &self,
+        root: &Path,
+        rel_paths: Vec<String>,
+    ) -> HostAdmissionOutcome {
+        let Some(sink) = &self.code_index_hook_sink else {
+            return HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable");
+        };
+        if sink(root.to_path_buf(), rel_paths).await {
+            HostAdmissionOutcome::replay_completed(true, false)
+        } else {
+            HostAdmissionOutcome::retained_unavailable("code_index_scheduler_unavailable")
         }
     }
 

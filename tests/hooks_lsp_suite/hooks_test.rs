@@ -6,9 +6,9 @@ use tracedecay::hooks::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
     codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
     codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, cursor_staleness_hint, evaluate_codex_subagent_start,
-    evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start, evaluate_hook_decision,
-    evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths, record_codex_subagent_start,
+    cursor_staleness_hint, evaluate_codex_subagent_start, evaluate_cursor_post_tool_use,
+    evaluate_cursor_subagent_start, evaluate_hook_decision, evaluate_kiro_pre_tool_use,
+    kiro_post_tool_use_rel_paths, record_codex_subagent_start,
 };
 use tracedecay::storage::{
     EnrollmentMarker, StorageMode, resolve_layout_for_current_profile, write_enrollment_marker,
@@ -478,7 +478,7 @@ fn test_cursor_post_tool_use_hints_for_list_dir() {
 }
 
 #[test]
-fn test_cursor_post_tool_use_dedupes_hints_per_session() {
+fn test_cursor_post_tool_use_formats_hints_without_hook_local_dedupe() {
     let dir = tempfile::tempdir().unwrap();
     let _env_lock = lock_global_db_env();
     let project_root = dir.path().canonicalize().unwrap();
@@ -502,8 +502,8 @@ fn test_cursor_post_tool_use_dedupes_hints_per_session() {
     let first = tracedecay::hooks::cursor_post_tool_use_decision(&grep_event);
     assert!(first.is_some(), "first hint in a session must be emitted");
     assert!(
-        tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_none(),
-        "an identical hint must be deduped within the session"
+        tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_some(),
+        "the pure compatibility helper no longer opens a local dedupe store"
     );
 
     // A different category in the same session still gets one hint.
@@ -529,13 +529,13 @@ fn test_cursor_post_tool_use_dedupes_hints_per_session() {
     );
 
     assert!(
-        layout.data_root.join("tool_hints_seen.json").exists(),
-        "dedupe state must be persisted under the profile project shard"
+        !layout.data_root.join("tool_hints_seen.json").exists(),
+        "the host hook must not persist dedupe state before daemon admission"
     );
 }
 
 #[test]
-fn test_cursor_post_tool_use_records_hint_analytics_for_emitted_duplicate_and_missing_session() {
+fn test_cursor_post_tool_use_has_no_hook_local_analytics_side_effect() {
     let dir = tempfile::tempdir().unwrap();
     let _env_lock = lock_global_db_env();
     let project_root = dir.path().canonicalize().unwrap();
@@ -557,7 +557,7 @@ fn test_cursor_post_tool_use_records_hint_analytics_for_emitted_duplicate_and_mi
     );
 
     assert!(tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_some());
-    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_none());
+    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&grep_event).is_some());
 
     let missing_session_event = format!(
         r#"{{
@@ -579,27 +579,14 @@ fn test_cursor_post_tool_use_records_hint_analytics_for_emitted_duplicate_and_mi
     assert!(v.get("hookSpecificOutput").is_none());
     assert!(v.get("permission").is_none());
 
-    let events = read_hook_analytics_events(&layout.data_root);
-    assert!(analytics_contains(
-        &events,
-        "hint_candidate",
-        Some("search")
-    ));
-    assert!(analytics_contains(&events, "hint_emitted", Some("search")));
-    assert!(analytics_contains(
-        &events,
-        "suppressed_duplicate",
-        Some("search")
-    ));
-    assert!(analytics_contains(
-        &events,
-        "missing_session",
-        Some("file_read")
-    ));
+    assert!(
+        !layout.data_root.join("hook_analytics.jsonl").exists(),
+        "analytics belongs to daemon replay, not a host hook helper"
+    );
 }
 
 #[test]
-fn test_cursor_post_tool_use_decision_silent_without_index() {
+fn test_cursor_post_tool_use_decision_is_pure_without_an_index() {
     let dir = tempfile::tempdir().unwrap();
     let root = serde_json::to_string(dir.path().to_str().unwrap()).unwrap();
     let event = format!(
@@ -611,14 +598,11 @@ fn test_cursor_post_tool_use_decision_silent_without_index() {
             "workspace_roots": [{root}]
         }}"#
     );
-    assert!(
-        tracedecay::hooks::cursor_post_tool_use_decision(&event).is_none(),
-        "hints must not fire in workspaces without a tracedecay index"
-    );
+    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&event).is_some());
 }
 
 #[test]
-fn test_cursor_post_tool_use_records_uninitialized_suppression() {
+fn test_cursor_post_tool_use_does_not_materialize_uninitialized_state() {
     let dir = tempfile::tempdir().unwrap();
     let _env_lock = lock_global_db_env();
     let project_root = dir.path().canonicalize().unwrap();
@@ -641,22 +625,15 @@ fn test_cursor_post_tool_use_records_uninitialized_suppression() {
         }}"#
     );
 
-    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&event).is_none());
+    assert!(tracedecay::hooks::cursor_post_tool_use_decision(&event).is_some());
 
     // The checkout is deliberately never enrolled, so the hook must not mint a
     // store shard for it; its analytics belong to the profile-wide file.
     assert!(!tracedecay::storage::has_enrollment_marker(&project_root));
-    let events = read_hook_analytics_events(&profile_root);
-    assert!(analytics_contains(
-        &events,
-        "hint_candidate",
-        Some("search")
-    ));
-    assert!(analytics_contains(
-        &events,
-        "suppressed_uninitialized",
-        Some("search")
-    ));
+    assert!(
+        !profile_root.join("hook_analytics.jsonl").exists(),
+        "uninitialized host work must be admitted by the daemon before side effects"
+    );
 }
 
 #[test]
@@ -693,7 +670,7 @@ fn test_cursor_project_root_uses_workspace_roots() {
 }
 
 #[test]
-fn test_cursor_project_root_uses_file_path_parent() {
+fn test_cursor_project_root_does_not_discover_a_root_from_file_paths() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
     std::fs::create_dir_all(dir.path().join(".tracedecay")).unwrap();
@@ -708,10 +685,7 @@ fn test_cursor_project_root_uses_file_path_parent() {
         serde_json::to_string(file.to_str().unwrap()).unwrap()
     );
 
-    assert_eq!(
-        cursor_project_root_from_event(&input),
-        Some(dir.path().to_path_buf())
-    );
+    assert_eq!(cursor_project_root_from_event(&input), None);
 }
 
 #[test]
@@ -815,14 +789,6 @@ fn test_kiro_post_tool_use_rel_paths_skips_paths_outside_root() {
     );
 
     assert!(kiro_post_tool_use_rel_paths(&input, &root).is_empty());
-}
-
-#[test]
-fn test_cursor_should_run_sync_respects_debounce_window() {
-    assert!(cursor_should_run_sync(1_000, None, 3));
-    assert!(cursor_should_run_sync(1_000, Some(996), 3));
-    assert!(!cursor_should_run_sync(1_000, Some(998), 3));
-    assert!(!cursor_should_run_sync(1_000, Some(1_000), 3));
 }
 
 #[test]

@@ -44,6 +44,28 @@ fn codex_plugin_hooks_fills_empty_seed_and_preserves_strict_schema() {
 }
 
 #[test]
+fn codex_plugin_hooks_keep_lifecycle_work_within_the_fast_deadline() {
+    let raw = codex_embedded_plugin_files()
+        .into_iter()
+        .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
+        .expect("codex bundle ships hooks/hooks.json");
+    let rendered = codex_plugin_hooks(raw, TEST_BIN).unwrap();
+    let hooks: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+
+    for (event, groups) in hooks["hooks"].as_object().unwrap() {
+        for group in groups.as_array().unwrap() {
+            for handler in group["hooks"].as_array().unwrap() {
+                assert_eq!(
+                    handler["timeout"].as_u64(),
+                    Some(5),
+                    "Codex {event} must leave time for daemon-owned deferred work"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn native_memories_injection_detection_covers_config_shapes() {
     let parse = |raw: &str| toml::from_str::<toml::Value>(raw).unwrap();
     // Feature on (bool form), use_memories defaulting to true.

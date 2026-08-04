@@ -47,8 +47,7 @@ const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
 const KIRO_PRE_TOOL_HOOK: &str = "hook-kiro-pre-tool-use";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
 const KIRO_POST_TOOL_HOOK: &str = "hook-kiro-post-tool-use";
-const KIRO_SHORT_HOOK_TIMEOUT_MS: u64 = 5_000;
-const KIRO_SYNC_HOOK_TIMEOUT_MS: u64 = 30_000;
+const KIRO_FAST_HOOK_TIMEOUT_MS: u64 = 5_000;
 
 /// A hook the managed Kiro agent registers.
 struct KiroManagedHook {
@@ -78,25 +77,25 @@ const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[
         event: "userPromptSubmit",
         matcher: None,
         subcommand: KIRO_PROMPT_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+        timeout_ms: KIRO_FAST_HOOK_TIMEOUT_MS,
     },
     KiroManagedHook {
         event: "preToolUse",
         matcher: Some("delegate"),
         subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+        timeout_ms: KIRO_FAST_HOOK_TIMEOUT_MS,
     },
     KiroManagedHook {
         event: "preToolUse",
         matcher: Some("subagent"),
         subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+        timeout_ms: KIRO_FAST_HOOK_TIMEOUT_MS,
     },
     KiroManagedHook {
         event: "postToolUse",
         matcher: Some("fs_write"),
         subcommand: KIRO_POST_TOOL_HOOK,
-        timeout_ms: KIRO_SYNC_HOOK_TIMEOUT_MS,
+        timeout_ms: KIRO_FAST_HOOK_TIMEOUT_MS,
     },
 ];
 
@@ -1279,5 +1278,26 @@ fn doctor_check_default_agent(dc: &mut DoctorCounters, home: &Path) {
         None => dc.warn(
             "Kiro default agent is not set; tracedecay hooks run only when the tracedecay agent is selected",
         ),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_agent_keeps_lifecycle_hooks_within_the_fast_deadline() {
+        let hooks = managed_agent_hooks("/usr/local/bin/tracedecay");
+
+        for (event, entries) in hooks.as_object().unwrap() {
+            for entry in entries.as_array().unwrap() {
+                assert_eq!(
+                    entry["timeout_ms"].as_u64(),
+                    Some(5_000),
+                    "Kiro {event} must leave time for daemon-owned deferred work"
+                );
+            }
+        }
     }
 }

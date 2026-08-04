@@ -916,6 +916,8 @@ struct CodexManagedHook {
     matcher: Option<&'static str>,
 }
 
+const CODEX_FAST_HOOK_TIMEOUT_SECS: u64 = 5;
+
 /// Every Codex lifecycle hook, in registration order. The single source of
 /// truth for install ([`codex_plugin_hooks`]), uninstall ([`uninstall_hooks`]),
 /// and doctor checks ([`doctor_check_hooks`]).
@@ -923,37 +925,37 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
     CodexManagedHook {
         event: "SessionStart",
         subcommand: "hook-codex-session-start",
-        timeout_secs: 5,
+        timeout_secs: CODEX_FAST_HOOK_TIMEOUT_SECS,
         matcher: None,
     },
     CodexManagedHook {
         event: "UserPromptSubmit",
         subcommand: "hook-codex-user-prompt-submit",
-        timeout_secs: 5,
+        timeout_secs: CODEX_FAST_HOOK_TIMEOUT_SECS,
         matcher: None,
     },
     CodexManagedHook {
         event: "SubagentStart",
         subcommand: "hook-codex-subagent-start",
-        timeout_secs: 5,
+        timeout_secs: CODEX_FAST_HOOK_TIMEOUT_SECS,
         matcher: None,
     },
     CodexManagedHook {
         event: "PostToolUse",
         subcommand: "hook-codex-post-tool-use",
-        timeout_secs: 60,
+        timeout_secs: CODEX_FAST_HOOK_TIMEOUT_SECS,
         matcher: Some("Bash|apply_patch"),
     },
     CodexManagedHook {
         event: "PostCompact",
         subcommand: "hook-codex-post-compact",
-        timeout_secs: 120,
+        timeout_secs: CODEX_FAST_HOOK_TIMEOUT_SECS,
         matcher: Some("auto|manual"),
     },
     CodexManagedHook {
         event: "Stop",
         subcommand: "hook-codex-stop",
-        timeout_secs: 5,
+        timeout_secs: CODEX_FAST_HOOK_TIMEOUT_SECS,
         matcher: None,
     },
 ];

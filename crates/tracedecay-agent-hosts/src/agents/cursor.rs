@@ -1345,6 +1345,26 @@ mod tests {
     }
 
     #[test]
+    fn rendered_plugin_keeps_lifecycle_hooks_within_the_fast_deadline() {
+        let hooks = rendered_plugin_files("/usr/local/bin/tracedecay")
+            .unwrap()
+            .into_iter()
+            .find_map(|(relative, contents)| (relative == "hooks/hooks.json").then_some(contents))
+            .expect("Cursor bundle renders lifecycle hooks");
+        let hooks: serde_json::Value = serde_json::from_str(&hooks).unwrap();
+
+        for (event, entries) in hooks["hooks"].as_object().unwrap() {
+            for entry in entries.as_array().unwrap() {
+                assert_eq!(
+                    entry["timeout"].as_u64(),
+                    Some(5),
+                    "Cursor {event} must leave time for daemon-owned deferred work"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn write_embedded_plugin_writes_core_and_bundle_files() {
         let tmp = TempDir::new().unwrap();
         let install_dir = tmp.path().join("tracedecay");

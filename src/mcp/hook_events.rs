@@ -8,6 +8,8 @@ use std::path::{Component, Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::mcp::tools::handlers::hook_runtime::CursorQueuedEventV1;
+
 /// Shared with hook emitters so the receiver accepts the same agent keys.
 pub(crate) use crate::daemon::HookAgent;
 
@@ -159,6 +161,9 @@ pub(crate) enum HookEventPlan {
         route: Option<crate::daemon::HookRouteMetadata>,
         transcript_watermark: String,
     },
+    /// A privacy-filtered Cursor event accepted by the daemon. Its effects run
+    /// only from durable admission replay, never on the host-hook deadline.
+    CursorEvent(CursorQueuedEventV1),
     Noop,
 }
 
@@ -191,13 +196,17 @@ enum DurableHookEventPlan {
         route: Option<crate::daemon::HookRouteMetadata>,
         transcript_watermark: String,
     },
+    CursorEvent {
+        event: CursorQueuedEventV1,
+    },
     Noop,
 }
 
 /// Durable spool envelope version. Bump when the plan inventory or field policy
 /// changes in a non-compatible way; keep decode arms for prior versions when
 /// retained spool records must still replay.
-const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
+const DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 2;
+const LEGACY_DURABLE_HOOK_EVENT_ENVELOPE_VERSION: u16 = 1;
 
 /// Lookup identifiers needed outside receipt-state equality (session and
 /// watermark) stay bounded. Session ids are run through
@@ -404,6 +413,14 @@ fn durable_plan_from_runtime(plan: &HookEventPlan) -> Result<DurableHookEventPla
             ))?
             .ok_or(())?,
         },
+        HookEventPlan::CursorEvent(event) => DurableHookEventPlan::CursorEvent {
+            event: {
+                if !crate::mcp::tools::handlers::hook_runtime::cursor_event::validate_queued_cursor_event(event) {
+                    return Err(());
+                }
+                event.clone()
+            },
+        },
         HookEventPlan::Noop => DurableHookEventPlan::Noop,
     })
 }
@@ -465,6 +482,15 @@ fn runtime_plan_from_durable(
             .map_err(|()| DurableHookEventDecodeError::Malformed)?
             .ok_or(DurableHookEventDecodeError::Malformed)?,
         }),
+        DurableHookEventPlan::CursorEvent { event } => {
+            if crate::mcp::tools::handlers::hook_runtime::cursor_event::validate_queued_cursor_event(
+                &event,
+            ) {
+                Ok(HookEventPlan::CursorEvent(event))
+            } else {
+                Err(DurableHookEventDecodeError::Malformed)
+            }
+        }
         DurableHookEventPlan::Noop => Ok(HookEventPlan::Noop),
     }
 }
@@ -483,7 +509,10 @@ pub(crate) fn decode_durable_hook_event_plan(
 ) -> Result<HookEventPlan, DurableHookEventDecodeError> {
     let header = serde_json::from_slice::<DurableHookEventEnvelopeHeader>(payload)
         .map_err(|_| DurableHookEventDecodeError::Malformed)?;
-    if header.version != DURABLE_HOOK_EVENT_ENVELOPE_VERSION {
+    if !matches!(
+        header.version,
+        LEGACY_DURABLE_HOOK_EVENT_ENVELOPE_VERSION | DURABLE_HOOK_EVENT_ENVELOPE_VERSION
+    ) {
         return Err(DurableHookEventDecodeError::UnsupportedVersion);
     }
     let durable = serde_json::from_slice::<DurableHookEventEnvelope>(payload)
@@ -1314,7 +1343,7 @@ mod tests {
             let encoded = encode_durable_hook_event_plan(&plan).unwrap();
             assert_eq!(
                 serde_json::from_slice::<serde_json::Value>(&encoded).unwrap()["version"],
-                1
+                DURABLE_HOOK_EVENT_ENVELOPE_VERSION
             );
             assert_eq!(decode_durable_hook_event_plan(&encoded).unwrap(), plan);
         }
@@ -1360,7 +1389,7 @@ mod tests {
     fn durable_plan_rejects_unsupported_version_before_plan_shape() {
         assert_eq!(
             decode_durable_hook_event_plan(
-                br#"{"version":2,"plan":{"kind":"future_host_event","opaque":"ignored"}}"#,
+                br#"{"version":3,"plan":{"kind":"future_host_event","opaque":"ignored"}}"#,
             ),
             Err(DurableHookEventDecodeError::UnsupportedVersion)
         );

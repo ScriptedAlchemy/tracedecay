@@ -14,6 +14,7 @@ use super::support::tool_json;
 
 mod admission;
 mod context_scout;
+pub(crate) mod cursor_event;
 mod envelope;
 mod errors;
 mod hermes;
@@ -27,8 +28,10 @@ mod test_support;
 pub(crate) use admission::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
 };
+pub(crate) use cursor_event::CursorQueuedEventV1;
 pub(crate) use errors::structured_hook_error_data;
 pub(crate) use hermes::replay_projectless_hermes_host_admission;
+pub(crate) use ingest::{cursor_compact, ingest_transcript};
 
 use admission::hook_v2_admit;
 use context_scout::{
@@ -37,7 +40,7 @@ use context_scout::{
 };
 use errors::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
-use ingest::{accounting_receipt, codex_compact, cursor_compact, ingest_transcript};
+use ingest::{accounting_receipt, codex_compact};
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -71,6 +74,10 @@ pub async fn handle_hook_runtime(
         "hook_v2_status" => hook_v2_status(cg, &args).await?,
         "opencode_lsp_updated" => {
             opencode_lsp_updated(cg, &args, required_project_db(session_authorities)?).await?
+        }
+        "cursor_event" => {
+            cursor_event::admit_cursor_event(cg, &args, session_authorities.host_admission_broker)
+                .await?
         }
         action if ContextScoutReadSurfaceV1::from_action(action).is_some() => {
             hook_v2_scout_read(cg, &args, action).await?

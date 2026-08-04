@@ -14,6 +14,10 @@ pub struct SessionAuthorities<'a> {
         Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     pub(crate) project_registered: Option<&'a Arc<RegisteredGlobalDb>>,
     pub(crate) profile_registered: Option<&'a Arc<RegisteredGlobalDb>>,
+    /// Daemon-owned durable admission spool for host-originated work. Hooks
+    /// borrow it from the server; they never open or replay a spool locally.
+    pub(crate) host_admission_broker:
+        Option<&'a crate::application::host_admission::SharedHostAdmissionBroker>,
     project_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
     profile_refresh: Option<&'a dyn session::SessionRefreshServicePort>,
     pub(super) project_retrieval:
@@ -33,6 +37,7 @@ impl<'a> SessionAuthorities<'a> {
             profile_identity: None,
             project_registered: None,
             profile_registered: None,
+            host_admission_broker: None,
             project_refresh: None,
             profile_refresh: None,
             project_retrieval: None,
@@ -57,6 +62,16 @@ impl<'a> SessionAuthorities<'a> {
         >,
     ) -> Self {
         self.profile_identity = profile_identity;
+        self
+    }
+
+    pub(crate) const fn with_host_admission_broker(
+        mut self,
+        host_admission_broker: Option<
+            &'a crate::application::host_admission::SharedHostAdmissionBroker,
+        >,
+    ) -> Self {
+        self.host_admission_broker = host_admission_broker;
         self
     }
 

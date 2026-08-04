@@ -35,6 +35,15 @@ struct ToolTokenAccounting {
     net_saved_tokens: u64,
 }
 
+/// Cursor hooks use this action only for durable admission. It must bypass
+/// normal tool freshness, response decoration, and accounting paths: those
+/// paths can inspect graph state or wake legacy convergence before the host
+/// receives its admission receipt.
+fn is_fast_cursor_admission(tool_name: &str, arguments: &Value) -> bool {
+    tool_name == "tracedecay_hook_runtime"
+        && arguments.get("action").and_then(Value::as_str) == Some("cursor_event")
+}
+
 pub(super) fn invocation_target_for_route(
     route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
 ) -> tracedecay_application::InvocationTarget {
@@ -55,6 +64,27 @@ pub(super) fn accounting_project_root<'a>(
             Some(Path::new(&owner.project.canonical_root))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod fast_cursor_admission_tests {
+    use super::*;
+
+    #[test]
+    fn cursor_admission_is_the_only_fast_hook_runtime_action() {
+        assert!(is_fast_cursor_admission(
+            "tracedecay_hook_runtime",
+            &serde_json::json!({ "action": "cursor_event" }),
+        ));
+        assert!(!is_fast_cursor_admission(
+            "tracedecay_hook_runtime",
+            &serde_json::json!({ "action": "ingest_transcript" }),
+        ));
+        assert!(!is_fast_cursor_admission(
+            "tracedecay_status",
+            &serde_json::json!({ "action": "cursor_event" }),
+        ));
     }
 }
 
@@ -947,6 +977,7 @@ impl McpServer {
                     self.user_session_db.as_ref(),
                 )
                 .with_profile_identity(self.profile_identity.as_ref())
+                .with_host_admission_broker(self.host_admission_broker.as_ref())
                 .with_registered_databases(
                     self.registered_session_db.as_ref(),
                     self.registered_user_session_db.as_ref(),
@@ -1084,6 +1115,7 @@ impl McpServer {
         let project_reader_preselected = routed.selected_project.is_some();
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
+        let fast_cursor_admission = is_fast_cursor_admission(tool_name, &routed.arguments);
 
         if let Err(error) = dispatch_control
             .run_value(
@@ -1093,7 +1125,7 @@ impl McpServer {
                     &cg,
                     &live_branch,
                     project_reader_preselected,
-                    publish_activity,
+                    publish_activity && !fast_cursor_admission,
                 ),
             )
             .await
@@ -1609,6 +1641,9 @@ impl McpServer {
                     return tool_error_response(id, &tool_name, &error);
                 };
                 Self::attach_tool_timing(&mut result, elapsed_us);
+                if is_fast_cursor_admission(&tool_name, &analytics_arguments) {
+                    return JsonRpcResponse::success(id, result.value);
+                }
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
                     selected_owner.as_ref(),

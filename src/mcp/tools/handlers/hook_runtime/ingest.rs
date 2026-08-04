@@ -207,7 +207,7 @@ pub(super) async fn codex_compact(
     }))
 }
 
-pub(super) async fn cursor_compact(
+pub(crate) async fn cursor_compact(
     cg: &TraceDecay,
     args: &Value,
     session_authorities: SessionAuthorities<'_>,
@@ -362,7 +362,7 @@ pub(super) async fn accounting_receipt(
     }))
 }
 
-pub(super) async fn ingest_transcript(
+pub(crate) async fn ingest_transcript(
     cg: Option<&TraceDecay>,
     args: &Value,
     profile_root: Option<&Path>,
