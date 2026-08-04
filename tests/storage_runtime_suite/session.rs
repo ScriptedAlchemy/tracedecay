@@ -1152,19 +1152,6 @@ fn probe_with_rusqlite_helper(copied: &CopiedStore, label: &str) -> HelperProbe 
     );
     assert_eq!(full_check["findings"], json!(["ok"]));
 
-    // `metadata` is the only currently allowlisted non-FTS row-count target
-    // shared by this protocol revision. Semantic session rows are captured
-    // through registered typed read ports before the snapshot boundary rather
-    // than falling back to SQL here.
-    let allowlisted_count = helper_command(
-        copied,
-        label,
-        "allowlisted-count",
-        json!({ "type": "row_parity", "table": "metadata" }),
-    );
-    assert_eq!(allowlisted_count["table"].as_str(), Some("metadata"));
-    assert!(allowlisted_count["row_count"].is_null() || allowlisted_count["row_count"].is_u64());
-
     let session_store = SESSION_TABLES
         .iter()
         .map(|spec| {

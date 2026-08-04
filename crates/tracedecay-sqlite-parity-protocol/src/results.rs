@@ -2,10 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    GraphFtsTable, GraphTable, IntegrityCheck, SessionStoreCount, SessionStorePage,
-    SessionStoreSchema,
-};
+use crate::{IntegrityCheck, SessionStoreCount, SessionStorePage, SessionStoreSchema};
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -16,8 +13,6 @@ pub enum Output {
     PageSize { bytes: u32 },
     JournalMode(JournalModeMetadata),
     Integrity(IntegrityReport),
-    RowParity(RowParity),
-    FtsParity(FtsParity),
     SessionStoreCount(SessionStoreCount),
     SessionStoreSchema(SessionStoreSchema),
     SessionStorePage(SessionStorePage),
@@ -101,26 +96,4 @@ pub enum JournalModeNormalization {
 pub struct IntegrityReport {
     pub check: IntegrityCheck,
     pub findings: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct RowParity {
-    pub table: GraphTable,
-    pub row_count: Option<u64>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FtsParity {
-    pub table: GraphFtsTable,
-    pub matches: Vec<FtsMatch>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct FtsMatch {
-    pub rowid: i64,
-    pub rank: f64,
-    pub snippet: String,
 }

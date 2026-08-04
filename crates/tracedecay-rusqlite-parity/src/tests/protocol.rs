@@ -25,9 +25,8 @@ fn protocol_rejects_versions_options_sql_and_profile_paths() {
         }
     ));
     for invalid_command in [
-        serde_json::json!({ "type": "sql", "sql": "DELETE FROM nodes" }),
+        serde_json::json!({ "type": "sql", "sql": "DELETE FROM observations" }),
         serde_json::json!({ "type": "metadata", "writable": true }),
-        serde_json::json!({ "type": "row_parity", "table": "nodes; DELETE FROM nodes" }),
     ] {
         let invalid = request_value(&fixture.path, "invalid", invalid_command);
         assert!(matches!(
