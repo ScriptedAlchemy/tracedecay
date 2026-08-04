@@ -14,13 +14,19 @@ pub(crate) async fn run(invocation: WorkflowInvocationArgs) -> tracedecay::error
         tracedecay::workflow_cli::invoke_workflow_cli(project_root.clone(), operation, body)
             .await?;
     if invocation.json {
-        print!("{}", crate::cli::output::json::json_line(&outcome)?);
+        print!("{}", workflow_json_line(&outcome)?);
     } else {
         println!("Workflow {}", operation.as_str().replace('_', " "));
         println!("Project: {}", project_root.display());
         println!("{}", serde_json::to_string_pretty(&outcome)?);
     }
     Ok(())
+}
+
+fn workflow_json_line(outcome: &Value) -> serde_json::Result<String> {
+    let mut line = serde_json::to_string(outcome)?;
+    line.push('\n');
+    Ok(line)
 }
 
 fn read_request(path: &std::path::Path) -> tracedecay::errors::Result<Value> {
@@ -37,4 +43,22 @@ fn read_request(path: &std::path::Path) -> tracedecay::errors::Result<Value> {
             path.display()
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::workflow_json_line;
+
+    #[test]
+    fn workflow_json_line_is_compact_canonical_json() {
+        let outcome = serde_json::json!({
+            "status": "complete",
+            "details": { "count": 2 }
+        });
+
+        assert_eq!(
+            workflow_json_line(&outcome).expect("workflow JSON line"),
+            "{\"details\":{\"count\":2},\"status\":\"complete\"}\n"
+        );
+    }
 }
