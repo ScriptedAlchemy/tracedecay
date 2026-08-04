@@ -207,7 +207,7 @@ async fn test_changelog_no_git() {
 }
 
 #[tokio::test]
-async fn run_affected_tests_reports_git_failure_without_changed_paths() {
+async fn run_affected_tests_requires_manifest_scoped_changed_paths() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let result = handle_tool_call(
         &cg,
@@ -220,11 +220,11 @@ async fn run_affected_tests_reports_git_failure_without_changed_paths() {
     .unwrap();
     let text = extract_text(&result.value);
     let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["error"]["kind"].as_str(), Some("git"));
-    assert_eq!(output["error"]["operation"].as_str(), Some("diff"));
+    assert_eq!(output["error"]["kind"].as_str(), Some("invalid_request"));
+    assert_eq!(output["error"]["operation"].as_str(), Some("changed_paths"));
     assert!(
         output["note"].is_null(),
-        "git failure must not be reported as a no-change note: {output}"
+        "missing scope input must not be reported as a no-change note: {output}"
     );
 }
 

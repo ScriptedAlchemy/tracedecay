@@ -904,7 +904,7 @@
           ]
         },
         "staleness_state": {
-          "description": "Staleness-ladder state label (e.g. `fresh`, `stale`, `reresolving`).",
+          "description": "Staleness-ladder state from the last scheduler execution. `fresh` means\nthe scheduler most recently observed a fresh source; the status read\ndoes not probe the worktree to revalidate that observation.",
           "type": [
             "string",
             "null"
@@ -10018,100 +10018,10 @@
       ]
     },
     "StoreGrowthDimensionV1": {
-      "description": "The per-store growth dimension. Growth is only ever reported over the window\nthe server actually observed, and that window is named in `coverage`.",
+      "description": "The per-store growth dimension. A status read observes present size but\ncannot create the execution-owned history required for a growth claim.",
       "oneOf": [
         {
-          "description": "The first watermark of this daemon lifetime: a real measurement with no\nearlier point to compare against. Not \"zero growth\".",
-          "properties": {
-            "coverage": {
-              "type": "string"
-            },
-            "measured_at": {
-              "format": "int64",
-              "type": "integer"
-            },
-            "reason": {
-              "type": "string"
-            },
-            "state": {
-              "const": "baseline",
-              "type": "string"
-            },
-            "total_bytes": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "state",
-            "coverage",
-            "measured_at",
-            "total_bytes",
-            "reason"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Growth observed across at least two watermarks in the window.",
-          "properties": {
-            "coverage": {
-              "type": "string"
-            },
-            "current_total_bytes": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "first_measured_at": {
-              "format": "int64",
-              "type": "integer"
-            },
-            "first_total_bytes": {
-              "format": "uint64",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "growth_bytes": {
-              "description": "Signed delta over the window; a shrinking store reports a negative\nnumber rather than saturating to zero.",
-              "format": "int64",
-              "type": "integer"
-            },
-            "last_measured_at": {
-              "format": "int64",
-              "type": "integer"
-            },
-            "sample_count": {
-              "format": "uint",
-              "minimum": 0,
-              "type": "integer"
-            },
-            "samples": {
-              "items": {
-                "$ref": "#/$defs/StoreSizeWatermarkV1"
-              },
-              "type": "array"
-            },
-            "state": {
-              "const": "observed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state",
-            "coverage",
-            "first_measured_at",
-            "last_measured_at",
-            "sample_count",
-            "first_total_bytes",
-            "current_total_bytes",
-            "growth_bytes",
-            "samples"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "No watermark could be recorded because the size read failed.",
+          "description": "No execution-owned watermark is available. This is distinct from a\nzero-sized or unchanged store.",
           "properties": {
             "reason": {
               "type": "string"
@@ -10223,32 +10133,6 @@
       ],
       "type": "object"
     },
-    "StoreSizeWatermarkV1": {
-      "description": "One recorded store-size watermark.",
-      "properties": {
-        "free_bytes": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "measured_at": {
-          "description": "Wall-clock microseconds at which the size was measured.",
-          "format": "int64",
-          "type": "integer"
-        },
-        "total_bytes": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "measured_at",
-        "total_bytes",
-        "free_bytes"
-      ],
-      "type": "object"
-    },
     "StoreTelemetryEntryV1": {
       "description": "One store's telemetry entry. One entry per distinct store **file**, not per\ndashboard role.",
       "properties": {
@@ -10298,7 +10182,7 @@
         },
         "table_growth": {
           "$ref": "#/$defs/TableGrowthDimensionV1",
-          "description": "Per-table payload growth from the `SQLite` `dbstat` watermarks retained by\nthe production telemetry port."
+          "description": "Per-table payload growth is unsupported until an execution-owned sampler\npublishes bounded observations. Status reads never create baselines."
         },
         "total_bytes": {
           "format": "uint64",

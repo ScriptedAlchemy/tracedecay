@@ -397,8 +397,11 @@ mod tests {
     ) {
         let authority =
             DatabaseAuthority::for_runtime(&path, "mount exact-close code runtime").unwrap();
+        let profile_path = path.with_file_name("profile.db");
+        rusqlite::Connection::open(&profile_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { profile_path: path }),
+            Arc::new(FixtureResolver { profile_path }),
             Arc::new(LifecycleShardRuntimePublisher),
         );
         let incarnation = StoreIncarnationV1::new(1).unwrap();
@@ -744,8 +747,11 @@ mod tests {
         rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
         let authority = DatabaseAuthority::for_runtime(&path, "mount failing exact-close").unwrap();
+        let profile_path = path.with_file_name("profile.db");
+        rusqlite::Connection::open(&profile_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
         let registry = StoreRuntimeRegistry::with_config(
-            Arc::new(FixtureResolver { profile_path: path }),
+            Arc::new(FixtureResolver { profile_path }),
             Arc::new(FailingPublisher),
             StoreRuntimeRegistryConfig::default(),
         )

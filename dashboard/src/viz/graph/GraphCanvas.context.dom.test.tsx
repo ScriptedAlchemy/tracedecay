@@ -166,7 +166,8 @@ describe('GraphCanvas WebGL context loss', () => {
     // is pointed at the same equivalent the no-context path names.
     const stated = screen.getByText(/lost its WebGL context/i);
     expect(stated.textContent).toMatch(/no longer being drawn/i);
-    expect(stated.textContent).toMatch(/symbol list carries the same relations/i);
+    expect(stated.textContent).toMatch(/read the field description below/i);
+    expect(document.querySelector('[role="status"][aria-live="polite"]')).not.toBeNull();
     expect(screen.queryByText(/no graph neighborhood to draw/i)).toBeNull();
     expect(document.querySelector('[data-state="unavailable"]')).not.toBeNull();
     // Nothing is drawn in its place: no canvas region, so no blank field that

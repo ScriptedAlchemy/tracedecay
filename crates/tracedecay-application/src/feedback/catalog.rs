@@ -340,6 +340,7 @@ fn capability(
             TerminalState::Cancelled,
             TerminalState::TimedOut,
             TerminalState::Failed,
+            TerminalState::Unavailable,
             TerminalState::Partial,
         ])?,
         availability: if callable {

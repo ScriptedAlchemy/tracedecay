@@ -27,12 +27,19 @@ pub struct StoreRuntimeOpenRequest {
     pub(super) profile_authority: Option<ProfileAuthorityPin>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
     pub(super) mode: StoreRuntimeOpenMode,
+    pub(super) access: StoreRuntimeAccessMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreRuntimeOpenMode {
     Existing,
     Initialize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StoreRuntimeAccessMode {
+    ReadOnly,
+    ReadWrite,
 }
 
 impl StoreRuntimeOpenRequest {
@@ -47,6 +54,7 @@ impl StoreRuntimeOpenRequest {
             profile_authority,
             database_authority: Some(database_authority),
             mode: StoreRuntimeOpenMode::Existing,
+            access: StoreRuntimeAccessMode::ReadWrite,
         }
     }
 
@@ -61,6 +69,21 @@ impl StoreRuntimeOpenRequest {
             profile_authority,
             database_authority: Some(database_authority),
             mode: StoreRuntimeOpenMode::Initialize,
+            access: StoreRuntimeAccessMode::ReadWrite,
+        }
+    }
+
+    pub fn new_read_only(
+        shard_id: StoreShardIdV1,
+        incarnation: StoreIncarnationV1,
+        profile_authority: Option<ProfileAuthorityPin>,
+    ) -> Self {
+        Self {
+            key: StoreRuntimeKey::new(shard_id, incarnation),
+            profile_authority,
+            database_authority: None,
+            mode: StoreRuntimeOpenMode::Existing,
+            access: StoreRuntimeAccessMode::ReadOnly,
         }
     }
 
@@ -75,6 +98,7 @@ impl StoreRuntimeOpenRequest {
             profile_authority,
             database_authority: None,
             mode: StoreRuntimeOpenMode::Existing,
+            access: StoreRuntimeAccessMode::ReadWrite,
         }
     }
 
