@@ -3,7 +3,6 @@ use super::*;
 
 use notify::event::EventAttributes;
 use std::process::Command;
-use tokio::sync::oneshot;
 
 #[test]
 fn debris_retention_enables_maintenance_without_orphan_gc() {
@@ -180,97 +179,42 @@ fn dirty_set_coalesces_and_takes_once() {
     let mut set = DirtySet::default();
     assert!(set.is_clean());
     set.dirty = true;
-    set.branches.insert("feat/a".to_string());
-    set.branches.insert("feat/a".to_string()); // dedup
-    set.branches.insert("feat/b".to_string());
     assert!(!set.is_clean());
 
-    let plan = set.take();
-    assert!(plan.dirty);
-    assert_eq!(plan.branches.len(), 2);
+    assert!(set.take());
     assert!(set.is_clean());
-    let empty = set.take();
-    assert!(empty.is_empty());
+    assert!(!set.take());
 }
 
 #[test]
-fn ref_event_marks_branch_and_delete_marks_gc() {
-    let state = Arc::new(WatchState {
-        project_root: PathBuf::from("/tmp/x"),
-        dirty: Mutex::new(DirtySet::default()),
-        reconciliation_pending: AtomicBool::new(false),
-        wake: Notify::new(),
-        maintenance: MaintenanceCoordinator::default(),
-        health: ProjectHealth::default(),
-        task: Mutex::new(None),
-        entered_debounce: Notify::new(),
-        drained_plans: AtomicU64::new(0),
-        plan_drained: Notify::new(),
-    });
+fn metadata_event_marks_repository_dirty() {
+    let state = Arc::new(WatchState::new(
+        PathBuf::from("/repo/.git"),
+        PathBuf::from("/repo"),
+        PathBuf::from("/repo/.git"),
+        MaintenanceCoordinator::default(),
+    ));
     let create = notify::Event {
         kind: EventKind::Create(notify::event::CreateKind::File),
         paths: vec![PathBuf::from("/repo/.git/refs/heads/feat/x")],
         attrs: EventAttributes::default(),
     };
     classify_and_mark(&state, &create);
-    let remove = notify::Event {
-        kind: EventKind::Remove(notify::event::RemoveKind::Folder),
-        paths: vec![PathBuf::from("/repo/.git/worktrees/wt1")],
-        attrs: EventAttributes::default(),
-    };
-    classify_and_mark(&state, &remove);
 
     let dirty = state.dirty.blocking_lock();
     assert!(dirty.dirty);
-    assert!(dirty.branches.contains("feat/x"));
-    assert!(dirty.gc_eligible);
     assert!(!dirty.reconcile_metadata);
     assert!(!state.reconciliation_pending.load(Ordering::Acquire));
 }
 
-#[test]
-fn ref_lock_sidecar_does_not_become_a_branch() {
-    let state = Arc::new(WatchState {
-        project_root: PathBuf::from("/repo"),
-        dirty: Mutex::new(DirtySet::default()),
-        reconciliation_pending: AtomicBool::new(false),
-        wake: Notify::new(),
-        maintenance: MaintenanceCoordinator::default(),
-        health: ProjectHealth::default(),
-        task: Mutex::new(None),
-        entered_debounce: Notify::new(),
-        drained_plans: AtomicU64::new(0),
-        plan_drained: Notify::new(),
-    });
-    let event = notify::Event {
-        kind: EventKind::Create(notify::event::CreateKind::File),
-        paths: vec![PathBuf::from("/repo/.git/refs/heads/codex/topic.lock")],
-        attrs: EventAttributes::new(),
-    };
-
-    classify_and_mark(&state, &event);
-
-    let dirty = state
-        .dirty
-        .try_lock()
-        .expect("dirty set should be unlocked");
-    assert!(dirty.branches.is_empty(), "git lock sidecars are not refs");
-}
-
 #[tokio::test]
 async fn contended_event_requests_a_bounded_reconciliation() {
-    let state = Arc::new(WatchState {
-        project_root: PathBuf::from("/repo"),
-        dirty: Mutex::new(DirtySet::default()),
-        reconciliation_pending: AtomicBool::new(false),
-        wake: Notify::new(),
-        maintenance: MaintenanceCoordinator::default(),
-        health: ProjectHealth::default(),
-        task: Mutex::new(None),
-        entered_debounce: Notify::new(),
-        drained_plans: AtomicU64::new(0),
-        plan_drained: Notify::new(),
-    });
+    let state = Arc::new(WatchState::new(
+        PathBuf::from("/repo/.git"),
+        PathBuf::from("/repo"),
+        PathBuf::from("/repo/.git"),
+        MaintenanceCoordinator::default(),
+    ));
     let event = notify::Event {
         kind: EventKind::Modify(notify::event::ModifyKind::Data(
             notify::event::DataChange::Content,
@@ -298,108 +242,25 @@ async fn contended_event_requests_a_bounded_reconciliation() {
 }
 
 #[test]
-fn linked_worktree_inventory_ignores_non_directories() {
-    let common = tempfile::tempdir().unwrap();
-    let worktrees = common.path().join("worktrees");
-    std::fs::create_dir_all(worktrees.join("wt-a")).unwrap();
-    std::fs::create_dir_all(worktrees.join("nested")).unwrap();
-    std::fs::write(worktrees.join("not-a-worktree"), b"ignored").unwrap();
-
-    let names = store_maintenance::linked_worktree_names(common.path());
-
-    assert_eq!(names.len(), 2);
-    assert!(names.contains("wt-a"));
-    assert!(names.contains("nested"));
-}
-
-#[test]
 fn heartbeat_staleness() {
     let fresh = ProjectHealthSnapshot {
         last_heartbeat: now_secs(),
-        last_sync: 0,
+        last_freshness_request: 0,
         degraded: false,
     };
     assert!(!fresh.heartbeat_stale());
     let never = ProjectHealthSnapshot {
         last_heartbeat: 0,
-        last_sync: 0,
+        last_freshness_request: 0,
         degraded: false,
     };
     assert!(never.heartbeat_stale());
     let old = ProjectHealthSnapshot {
         last_heartbeat: now_secs().saturating_sub(HEARTBEAT_STALE_SECS + 10),
-        last_sync: 0,
+        last_freshness_request: 0,
         degraded: false,
     };
     assert!(old.heartbeat_stale());
-}
-
-/// The shared coordinator must not start a second store-writing lifetime while
-/// the first one is held. Paused Tokio time plus Notify/oneshot handshakes make
-/// this a scheduling-state assertion rather than a wall-clock sleep.
-#[tokio::test(start_paused = true)]
-async fn writer_administration_blocks_until_the_gate_is_released() {
-    let administration = StoreAdministration::default();
-    let holder_entered = Arc::new(Notify::new());
-    let release = Arc::new(Notify::new());
-
-    let holder = {
-        let administration = administration.clone();
-        let holder_entered = Arc::clone(&holder_entered);
-        let release = Arc::clone(&release);
-        tokio::spawn(async move {
-            administration
-                .with_writer(move || async move {
-                    holder_entered.notify_one();
-                    release.notified().await;
-                })
-                .await;
-        })
-    };
-    tokio::time::timeout(Duration::from_secs(1), holder_entered.notified())
-        .await
-        .expect("holder must acquire the writer gate");
-
-    let (waiter_ready_tx, waiter_ready_rx) = oneshot::channel();
-    let waiter_entered = Arc::new(Notify::new());
-    let waiter = {
-        let administration = administration.clone();
-        let waiter_entered = Arc::clone(&waiter_entered);
-        tokio::spawn(async move {
-            waiter_ready_tx
-                .send(())
-                .expect("waiter readiness receiver must remain alive");
-            administration
-                .with_writer(move || async move {
-                    waiter_entered.notify_one();
-                })
-                .await;
-        })
-    };
-    waiter_ready_rx
-        .await
-        .expect("waiter task must reach the gate");
-    tokio::task::yield_now().await;
-
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), waiter_entered.notified())
-            .await
-            .is_err(),
-        "a second writer must remain blocked while the first writer holds the gate"
-    );
-
-    release.notify_one();
-    tokio::time::timeout(Duration::from_secs(1), waiter_entered.notified())
-        .await
-        .expect("releasing the gate must admit the waiting writer");
-    tokio::time::timeout(Duration::from_secs(1), holder)
-        .await
-        .expect("holder task must finish")
-        .expect("holder task must not panic");
-    tokio::time::timeout(Duration::from_secs(1), waiter)
-        .await
-        .expect("waiter task must finish")
-        .expect("waiter task must not panic");
 }
 
 // ---- Real `GitWatcher` tests (drive the public API + the real debounce
@@ -426,7 +287,6 @@ fn fast_watch_config() -> SyncConfig {
     config.watch_max_delay_ms = 200;
     config.watch_max_projects = 32;
     config.backstop_interval_mins = 0; // no backstop noise in these tests
-    config.max_concurrent_syncs = 2;
     config
 }
 
@@ -470,18 +330,45 @@ fn git(dir: &Path, args: &[&str]) {
 /// a cheap no-op).
 fn temp_repo() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
+    seed_repo(dir.path());
+    dir
+}
+
+fn seed_repo(root: &Path) {
+    std::fs::create_dir_all(root).expect("create repository root");
     git(root, &["init", "-b", "main"]);
     std::fs::write(root.join("a.txt"), "hello\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "init"]);
-    dir
+}
+
+fn add_linked_worktree(primary: &Path, linked: &Path) {
+    git(
+        primary,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().expect("linked worktree path is UTF-8"),
+        ],
+    );
+}
+
+fn linked_worktree_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let container = tempfile::tempdir().expect("linked-worktree fixture");
+    let primary = container.path().join("primary");
+    let linked = container.path().join("linked");
+    seed_repo(&primary);
+    add_linked_worktree(&primary, &linked);
+    (container, primary, linked)
 }
 
 async fn ready_registered_state(watcher: &GitWatcher, repo: &Path) -> Arc<WatchState> {
-    let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let common = crate::worktree::git_common_dir(repo).expect("repository common directory");
     let projects = watcher.inner.projects.lock().await;
-    Arc::clone(projects.get(&canonical).expect("project registered"))
+    Arc::clone(projects.get(&common).expect("repository registered"))
 }
 
 /// True for the specific `notify` error that means "the OS/sandbox is out of
@@ -516,11 +403,20 @@ fn currently_watch_limited(repo: &Path) -> bool {
     let Some(common) = crate::worktree::git_common_dir(repo) else {
         return false;
     };
+    let Some(git_dir) = worktree_git_dir(repo) else {
+        return false;
+    };
+    let state = WatchState::new(
+        common,
+        repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf()),
+        git_dir,
+        MaintenanceCoordinator::default(),
+    );
     let Ok(mut probe) = notify::recommended_watcher(|_res: notify::Result<notify::Event>| {})
     else {
         return false;
     };
-    matches!(install_watches(&mut probe, &common), Err(e) if is_watch_limit_error(&e))
+    matches!(install_watches(&mut probe, &state), Err(e) if is_watch_limit_error(&e))
 }
 
 /// Registers `repo` with `watcher` and waits for its watch task to reach
@@ -623,6 +519,155 @@ async fn ensure_watching_registers_dedups_and_caps() {
 }
 
 #[tokio::test]
+async fn linked_worktrees_share_one_repository_watcher() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let unrelated = temp_repo();
+
+    let mut config = fast_watch_config();
+    config.watch_max_projects = 1;
+    let watcher = GitWatcher::new(config);
+    watcher.ensure_watching(&primary).await;
+    watcher.ensure_watching(&linked).await;
+    watcher.ensure_watching(unrelated.path()).await;
+
+    let projects = watcher.inner.projects.lock().await;
+    assert_eq!(
+        projects.len(),
+        1,
+        "linked roots share one slot and an unrelated repository is capped"
+    );
+    let common = crate::worktree::git_common_dir(&primary).expect("common directory");
+    let state = projects.get(&common).expect("repository watcher");
+    assert!(state.contains_worktree(&primary.canonicalize().unwrap()));
+    assert!(state.contains_worktree(&linked.canonicalize().unwrap()));
+    drop(projects);
+    watcher.shutdown().await;
+}
+
+#[test]
+fn linked_worktree_operation_marker_holds_repository_debounce() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let common = crate::worktree::git_common_dir(&primary).expect("git common dir");
+    let primary_git_dir = worktree_git_dir(&primary).expect("primary git dir");
+    let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
+    let state = WatchState::new(
+        common,
+        primary.canonicalize().unwrap(),
+        primary_git_dir,
+        MaintenanceCoordinator::default(),
+    );
+    let marker = linked_git_dir.join("rebase-merge");
+    std::fs::create_dir(&marker).expect("create linked-worktree operation marker");
+
+    assert!(
+        operation_in_flight(&state),
+        "even an unmounted linked-worktree operation must hold the shared debounce"
+    );
+
+    std::fs::remove_dir(&marker).expect("remove linked-worktree operation marker");
+    assert!(!operation_in_flight(&state));
+}
+
+#[tokio::test(start_paused = true)]
+async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
+    let (_container, primary, linked) = linked_worktree_fixture();
+    let watcher = GitWatcher::new(fast_watch_config());
+    let max_delay_ms = watcher.inner.config.watch_max_delay_ms;
+    let Some(state) = ensure_watching_or_skip(&watcher, &primary).await else {
+        return;
+    };
+    watcher.ensure_watching(&linked).await;
+    let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
+    let marker = linked_git_dir.join("CHERRY_PICK_HEAD");
+    std::fs::write(&marker, b"operation").expect("create operation marker");
+
+    let event = notify::Event {
+        kind: EventKind::Create(notify::event::CreateKind::File),
+        paths: vec![marker.clone()],
+        attrs: EventAttributes::default(),
+    };
+    classify_and_mark(&state, &event);
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(max_delay_ms + 1)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(
+        state.drained_plans.load(Ordering::Relaxed),
+        0,
+        "a linked-worktree operation must hold past the ordinary hard deadline"
+    );
+
+    std::fs::remove_file(&marker).expect("clear operation marker");
+    classify_and_mark(
+        &state,
+        &notify::Event {
+            kind: EventKind::Remove(notify::event::RemoveKind::File),
+            paths: vec![marker],
+            attrs: EventAttributes::default(),
+        },
+    );
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::timeout(TEST_READY_TIMEOUT, state.plan_drained.notified())
+        .await
+        .expect("clearing the linked-worktree marker must release the debounce");
+    assert_eq!(state.drained_plans.load(Ordering::Relaxed), 1);
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn metadata_frontier_routes_to_the_mounted_canonical_scheduler() {
+    let repo = temp_repo();
+    let store = tempfile::tempdir().expect("code-index store");
+    let schedulers = super::super::code_index_scheduler::CodeIndexSchedulerRegistryV1::new(2);
+    schedulers
+        .mount_worktree(
+            tracedecay_domain::ProjectId::new("project.git-watcher-test")
+                .expect("valid project identity"),
+            repo.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount canonical scheduler");
+
+    let watcher = GitWatcher::new_with_scheduler(
+        fast_watch_config(),
+        MaintenanceCoordinator::default(),
+        schedulers.clone(),
+    );
+    let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
+        schedulers.shutdown().await;
+        return;
+    };
+    classify_and_mark(
+        &state,
+        &notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            paths: vec![state.common_dir.join("HEAD")],
+            attrs: EventAttributes::default(),
+        },
+    );
+    tokio::time::timeout(TEST_READY_TIMEOUT, async {
+        while state.health.snapshot().last_freshness_request == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("debounce must route the metadata frontier");
+
+    assert_ne!(
+        state.health.snapshot().last_freshness_request,
+        0,
+        "the mounted scheduler must accept the exact watcher frontier"
+    );
+    watcher.shutdown().await;
+    schedulers.shutdown().await;
+}
+
+#[tokio::test]
 async fn disabled_watcher_never_registers() {
     let repo = temp_repo();
     let mut config = fast_watch_config();
@@ -634,7 +679,7 @@ async fn disabled_watcher_never_registers() {
 }
 
 #[tokio::test]
-async fn shutdown_cancels_and_joins_project_watcher_tasks() {
+async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
     let repo = temp_repo();
     let watcher = GitWatcher::new(fast_watch_config());
     let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
@@ -649,8 +694,8 @@ async fn shutdown_cancels_and_joins_project_watcher_tasks() {
 
 /// The safety-critical property that justifies this metadata watcher over the
 /// removed #80 working-tree watcher: a plain source-file edit (no git
-/// operation) must NOT trigger any watcher sync. We drive the REAL watcher
-/// task and assert `last_sync` never advances.
+/// operation) must NOT trigger any scheduler freshness request. We drive the
+/// real watcher task and assert `last_freshness_request` never advances.
 ///
 /// This test proves a NEGATIVE about a REAL inotify event (a working-tree
 /// write that must not be delivered/acted on), so it deliberately runs on the
@@ -661,12 +706,13 @@ async fn shutdown_cancels_and_joins_project_watcher_tasks() {
 ///      PROVABLY installed before the edit — closing the old false-pass
 ///      window where a 200ms sleep elapsed before inotify was armed (a real
 ///      regression could then slip through unseen).
-///   2. After the edit we poll `last_sync` across a window several times the
+///   2. After the edit we poll the accepted-request timestamp across a window
+///      several times the
 ///      debounce+max-delay budget and fail on the FIRST advance. A scheduler
 ///      stall only lengthens the safe window — it can never produce a false
 ///      negative — so no magic epsilon is needed.
 #[tokio::test]
-async fn source_file_edit_triggers_no_sync() {
+async fn source_file_edit_triggers_no_freshness_request() {
     let repo = temp_repo();
     let config = fast_watch_config();
     let debounce_ms = config.watch_debounce_ms;
@@ -676,7 +722,7 @@ async fn source_file_edit_triggers_no_sync() {
         return;
     };
 
-    let baseline = state.health.snapshot().last_sync;
+    let baseline = state.health.snapshot().last_freshness_request;
 
     std::fs::write(repo.path().join("a.txt"), "changed by editor\n").unwrap();
     std::fs::write(repo.path().join("b.txt"), "brand new file\n").unwrap();
@@ -684,8 +730,8 @@ async fn source_file_edit_triggers_no_sync() {
     // Poll across a window MUCH larger than debounce + max-delay, failing
     // fast on the FIRST sign of a spurious reaction. We assert TWO things at
     // every tick, so the test is non-vacuous even against an unindexed repo
-    // (where a sync would no-op and never move `last_sync`):
-    //   * `last_sync` never advances — no sync ran, AND
+    // (where an unmounted scheduler would reject a request):
+    //   * the accepted-request timestamp never advances, AND
     //   * the dirty set never becomes marked — no working-tree event ever
     //     reached `classify_and_mark`. The dirty mark is the ROOT observable:
     //     if a regression recursively watched the working tree, the edit
@@ -696,9 +742,9 @@ async fn source_file_edit_triggers_no_sync() {
     let deadline = std::time::Instant::now() + window;
     while std::time::Instant::now() < deadline {
         assert_eq!(
-            state.health.snapshot().last_sync,
+            state.health.snapshot().last_freshness_request,
             baseline,
-            "a working-tree source edit must not advance last_sync (metadata-only watcher)"
+            "a source edit must not request metadata-driven freshness"
         );
         assert!(
             state.dirty.lock().await.is_clean(),
@@ -710,9 +756,9 @@ async fn source_file_edit_triggers_no_sync() {
 
     // Final check after the full observation window.
     assert_eq!(
-        state.health.snapshot().last_sync,
+        state.health.snapshot().last_freshness_request,
         baseline,
-        "a working-tree source edit must not advance last_sync (metadata-only watcher)"
+        "a source edit must not request metadata-driven freshness"
     );
     assert!(
         state.dirty.lock().await.is_clean(),
@@ -720,7 +766,7 @@ async fn source_file_edit_triggers_no_sync() {
     );
 }
 
-/// The REAL debounce path (`project_task` → `debounce_loop`) coalesces a
+/// The real debounce path (`repository_task` → `debounce_loop`) coalesces a
 /// burst of metadata events into a single drained pass: after events stop,
 /// the dirty set is taken exactly once and returns to clean. This drives the
 /// live task (not a reimplemented helper) and injects events through the real
@@ -748,7 +794,7 @@ async fn debounce_loop_coalesces_and_drains_events() {
             kind: EventKind::Modify(notify::event::ModifyKind::Data(
                 notify::event::DataChange::Content,
             )),
-            paths: vec![state.project_root.join(format!(".git/refs/heads/feat/{i}"))],
+            paths: vec![state.common_dir.join(format!("refs/heads/feat/{i}"))],
             attrs: EventAttributes::default(),
         };
         classify_and_mark(&state, &event);
