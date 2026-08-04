@@ -66,7 +66,6 @@ impl Pr13AdvisoryProductionAuthoritiesV1 {
 
 #[derive(Clone)]
 pub struct Pr13AdvisoryProductionOpenV1 {
-    pub database: Database,
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub graph: Arc<TraceDecay>,
     pub code_index_identity:
@@ -83,11 +82,11 @@ pub struct Pr13AdvisoryProductionOpenV1 {
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum Pr13AdvisoryProductionOpenErrorV1 {
-    #[error("PR13 GitHub anchor/remap authority could not open for the exact project scope")]
+    #[error("GitHub anchor/remap authority could not open for the exact project scope")]
     GitHubAuthorityUnavailable,
-    #[error("PR13 proximity authority could not open for the exact project worktree")]
+    #[error("proximity authority could not open for the exact project worktree")]
     ProximityAuthorityUnavailable,
-    #[error("PR13 CI provider authorities could not open")]
+    #[error("CI provider authorities could not open")]
     CiAuthorityUnavailable,
 }
 
@@ -97,7 +96,6 @@ pub fn open_pr13_advisory_production_authorities(
     input: Pr13AdvisoryProductionOpenV1,
 ) -> Result<Pr13AdvisoryProductionAuthoritiesV1, Pr13AdvisoryProductionOpenErrorV1> {
     let Pr13AdvisoryProductionOpenV1 {
-        database,
         project_runtime_db,
         graph,
         code_index_identity,
@@ -110,6 +108,7 @@ pub fn open_pr13_advisory_production_authorities(
         hook_v2,
         legacy_hook,
     } = input;
+    let database: Database = graph.db().clone();
     let github = github_anchor_authorities_arc_v1(
         database,
         project_root.clone(),

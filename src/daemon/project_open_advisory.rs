@@ -13,7 +13,13 @@ use super::service::invocation::{
 use crate::errors::{Result, TraceDecayError};
 
 const POST_OPEN_ADVISORY_SETUP_BUDGET: Duration = Duration::from_secs(15);
-const POST_OPEN_ADVISORY_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
+const POST_OPEN_ADVISORY_RETIREMENT_GRACE: Duration = Duration::from_secs(15);
+const POST_OPEN_ADVISORY_DEADLINE_GRACE: Duration = Duration::from_millis(250);
+
+pub(super) struct PostOpenAdvisorySetupV1 {
+    pub(super) runtime: Arc<dyn AdvisoryHookOrchestrationPortV1>,
+    pub(super) publication: Option<super::service::project_runtime::AdvisoryRuntimePublicationV1>,
+}
 
 /// Starts at most one bounded setup for a retained deferred gateway.
 ///
@@ -26,7 +32,7 @@ pub(super) async fn schedule_bounded_post_open_advisory_setup<F, Fut>(
 ) -> bool
 where
     F: FnOnce(crate::application::context::CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>> + Send + 'static,
+    Fut: Future<Output = Result<PostOpenAdvisorySetupV1>> + Send + 'static,
 {
     schedule_bounded_post_open_advisory_setup_with_budget(
         deferred,
@@ -43,7 +49,7 @@ async fn schedule_bounded_post_open_advisory_setup_with_budget<F, Fut>(
 ) -> bool
 where
     F: FnOnce(crate::application::context::CancellationToken) -> Fut + Send + 'static,
-    Fut: Future<Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>> + Send + 'static,
+    Fut: Future<Output = Result<PostOpenAdvisorySetupV1>> + Send + 'static,
 {
     if !deferred.claim_setup() {
         return false;
@@ -58,9 +64,8 @@ where
             | AdvisoryRuntimeReadinessV1::Ready { started_at, .. }
             | AdvisoryRuntimeReadinessV1::Unavailable { started_at, .. } => started_at,
         };
-        tokio::pin!(setup);
         enum SetupOutcome {
-            Ready(Arc<dyn AdvisoryHookOrchestrationPortV1>),
+            Ready(PostOpenAdvisorySetupV1),
             Cancelled,
             DeadlineExceeded,
             Failed(TraceDecayError),
@@ -78,19 +83,19 @@ where
             },
             () = cancellation.cancelled() => {
                 work_cancellation.cancel();
-                join_cancelled_setup(&mut setup_task).await;
+                join_cancelled_setup(&mut setup_task, POST_OPEN_ADVISORY_RETIREMENT_GRACE).await;
                 SetupOutcome::Cancelled
             },
             () = tokio::time::sleep(budget) => {
                 work_cancellation.cancel();
-                join_cancelled_setup(&mut setup_task).await;
+                join_cancelled_setup(&mut setup_task, POST_OPEN_ADVISORY_DEADLINE_GRACE).await;
                 SetupOutcome::DeadlineExceeded
             }
         };
         let finished_at = now_micros();
         match outcome {
-            SetupOutcome::Ready(runtime) => {
-                if deferred.mark_ready(runtime, finished_at) {
+            SetupOutcome::Ready(setup) => {
+                if deferred.mark_ready(setup.runtime, finished_at) {
                     tracing::info!(
                         event = "advisory_runtime_setup",
                         state = "ready",
@@ -98,6 +103,9 @@ where
                         finished_at_micros = finished_at.0,
                     );
                 } else {
+                    if let Some(publication) = setup.publication {
+                        publication.rollback().await;
+                    }
                     tracing::info!(
                         event = "advisory_runtime_setup",
                         state = "unavailable",
@@ -159,12 +167,10 @@ where
 }
 
 async fn join_cancelled_setup(
-    task: &mut tokio::task::JoinHandle<Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>>,
+    task: &mut tokio::task::JoinHandle<Result<PostOpenAdvisorySetupV1>>,
+    grace: Duration,
 ) {
-    if tokio::time::timeout(POST_OPEN_ADVISORY_CANCELLATION_GRACE, &mut *task)
-        .await
-        .is_err()
-    {
+    if tokio::time::timeout(grace, &mut *task).await.is_err() {
         task.abort();
         let _ = task.await;
     }
@@ -208,20 +214,8 @@ mod tests {
 
     #[tokio::test]
     async fn retained_owner_cancellation_drops_post_open_setup() {
-        struct PendingSetup(Arc<AtomicBool>);
-
-        impl Future for PendingSetup {
-            type Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>;
-
-            fn poll(
-                self: std::pin::Pin<&mut Self>,
-                _context: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Self::Output> {
-                std::task::Poll::Pending
-            }
-        }
-
-        impl Drop for PendingSetup {
+        struct PendingSetupGuard(Arc<AtomicBool>);
+        impl Drop for PendingSetupGuard {
             fn drop(&mut self) {
                 self.0.store(true, Ordering::Release);
             }
@@ -229,10 +223,17 @@ mod tests {
 
         let deferred = DeferredAdvisoryHookOrchestratorV1::new(now_micros());
         let setup_dropped = Arc::new(AtomicBool::new(false));
+        let observed_setup_drop = Arc::clone(&setup_dropped);
         assert!(
             schedule_bounded_post_open_advisory_setup_with_budget(
                 Arc::clone(&deferred),
-                |_| PendingSetup(Arc::clone(&setup_dropped)),
+                move |cancellation| async move {
+                    let _guard = PendingSetupGuard(observed_setup_drop);
+                    cancellation.cancelled().await;
+                    Err(TraceDecayError::Config {
+                        message: "cancelled test setup".to_owned(),
+                    })
+                },
                 Duration::from_secs(10),
             )
             .await
@@ -285,7 +286,12 @@ mod tests {
         assert!(
             schedule_bounded_post_open_advisory_setup_with_budget(
                 Arc::clone(&deferred),
-                |_| async { Ok(Arc::new(Ready) as Arc<dyn AdvisoryHookOrchestrationPortV1>) },
+                |_| async {
+                    Ok(PostOpenAdvisorySetupV1 {
+                        runtime: Arc::new(Ready),
+                        publication: None,
+                    })
+                },
                 Duration::from_secs(1),
             )
             .await

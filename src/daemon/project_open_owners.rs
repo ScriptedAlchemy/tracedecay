@@ -49,9 +49,9 @@ use super::{
     AdvisoryHookOrchestrationTriggerV1, BoundedAdvisoryHookOrchestratorV1,
     DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
     DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
-    DaemonAdvisoryRuntimeRegistrationError, DaemonContextScoutRuntimeRegistrationError,
-    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationState,
-    DaemonPrimitiveRuntimeRegistrationError, advisory_cycle_invocation_result,
+    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
+    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
+    advisory_cycle_invocation_result,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -1740,7 +1740,7 @@ async fn register_production_advisory_owner(
     root_uri: String,
     indexed_files: Vec<String>,
     setup_cancellation: CancellationToken,
-) -> Result<Arc<dyn AdvisoryHookOrchestrationPortV1>> {
+) -> Result<crate::daemon::project_open_advisory::PostOpenAdvisorySetupV1> {
     if setup_cancellation.is_cancelled() {
         return Err(TraceDecayError::Config {
             message: "advisory runtime setup was cancelled".to_owned(),
@@ -1834,7 +1834,6 @@ async fn register_production_advisory_owner(
     let scout_claim_graph = Arc::clone(&graph);
     let lifecycle_session_db = Arc::clone(&project_runtime_db);
     let production = Pr13AdvisoryProductionOpenV1 {
-        database,
         project_runtime_db,
         graph,
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
@@ -1875,6 +1874,8 @@ async fn register_production_advisory_owner(
     let published_registration = Arc::clone(&registration);
     let published_cycle = Arc::clone(&advisory_cycle);
     let published_project_id = feedback_scope_for_work.project_id.clone();
+    let published_worktree_id = feedback_scope_for_work.worktree_id.clone();
+    let work_feedback_scope = feedback_scope_for_work.clone();
     let work_root = project_root.to_path_buf();
     let work_scout_configuration = scout_configuration.clone();
     let work = move |request: AdvisoryHookOrchestrationRequestV1,
@@ -1887,7 +1888,7 @@ async fn register_production_advisory_owner(
         let feedback_runtime = Arc::clone(&feedback_runtime);
         let github_pull_request_id = github_pull_request_id.clone();
         let ci_discovery_config = ci_discovery_config.clone();
-        let feedback_scope = feedback_scope_for_work.clone();
+        let feedback_scope = work_feedback_scope.clone();
         let project_root = work_root.clone();
         let root_uri = root_uri.clone();
         let indexed_files = indexed_files.clone();
@@ -1927,7 +1928,7 @@ async fn register_production_advisory_owner(
             hook_project_id,
             hook_worktree_id,
             published_project_id.clone(),
-            feedback_scope_for_work.worktree_id.clone(),
+            published_worktree_id,
             &lifecycle_session_db,
         );
     let lifecycle_registered_here = match lifecycle_registration {
@@ -1971,7 +1972,7 @@ async fn register_production_advisory_owner(
         _registration: published_registration,
         _discovery: discovery_registration,
     });
-    if let Err(error) = invocation
+    let publication = match invocation
         .advisory_runtime_registrar()
         .publish(
             project_root,
@@ -1982,12 +1983,20 @@ async fn register_production_advisory_owner(
         )
         .await
     {
-        return Err(TraceDecayError::Config {
-            message: format!("advisory runtime publication failed: {error}"),
-        });
-    }
+        Ok(publication) => publication,
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("advisory runtime publication failed: {error}"),
+            });
+        }
+    };
     let orchestrator: Arc<dyn AdvisoryHookOrchestrationPortV1> = orchestrator;
-    Ok(orchestrator)
+    Ok(
+        crate::daemon::project_open_advisory::PostOpenAdvisorySetupV1 {
+            runtime: orchestrator,
+            publication: Some(publication),
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2503,11 +2512,13 @@ where
         result = &mut task => result.ok(),
         () = cancellation.cancelled() => {
             control.cancel();
-            task.await.ok()
+            let _ = task.await;
+            None
         }
         () = tokio::time::sleep(Duration::from_secs(15)) => {
             control.cancel();
-            task.await.ok()
+            let _ = task.await;
+            None
         }
     }
 }
@@ -3381,7 +3392,8 @@ mod tests {
 
             let discovery = discover_github_pull_request_after_authorization(
                 || async { lifecycle },
-                move || {
+                CancellationToken::new(),
+                move |_| {
                     calls_for_discovery.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     GitHubExactCommitDiscoveryOutcomeV1::Unavailable
                 },
@@ -3391,6 +3403,35 @@ mod tests {
             assert!(discovery.is_none());
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn cancelled_github_discovery_joins_its_bounded_blocking_owner() {
+        let cancellation = CancellationToken::new();
+        let cancellation_for_task = cancellation.clone();
+        let (started, started_receiver) = tokio::sync::oneshot::channel();
+        let finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed_finished = Arc::clone(&finished);
+        let discovery = tokio::spawn(async move {
+            discover_github_pull_request_after_authorization(
+                || async { GitHubProviderLifecycleV1::Ready },
+                cancellation_for_task,
+                move |_| {
+                    let _ = started.send(());
+                    std::thread::sleep(Duration::from_millis(50));
+                    observed_finished.store(true, std::sync::atomic::Ordering::Release);
+                    GitHubExactCommitDiscoveryOutcomeV1::Unavailable
+                },
+            )
+            .await
+        });
+        started_receiver.await.expect("blocking discovery started");
+        cancellation.cancel();
+        assert!(discovery.await.expect("discovery owner joined").is_none());
+        assert!(
+            finished.load(std::sync::atomic::Ordering::Acquire),
+            "cancellation must retain and join the bounded blocking task"
+        );
     }
 
     #[tokio::test]

@@ -174,15 +174,27 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
                 }
                 return AdvisoryHookOrchestrationAdmissionV1::Enqueued;
             }
-            let permit = if let Some(incumbent) = in_flight.addresses.get(&address) {
-                incumbent.cancellation.cancel();
-                None
-            } else {
-                let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                    return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+            let (permit, mut completions) =
+                if let Some(incumbent) = in_flight.addresses.get(&address) {
+                    if incumbent.completions.len() + usize::from(completion.is_some())
+                        > MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS
+                    {
+                        return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+                    }
+                    let Some(incumbent) = in_flight.addresses.remove(&address) else {
+                        return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+                    };
+                    incumbent.cancellation.cancel();
+                    (None, incumbent.completions)
+                } else {
+                    let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                        return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+                    };
+                    (Some(permit), Vec::new())
                 };
-                Some(permit)
-            };
+            if let Some(completion) = completion {
+                completions.push(completion);
+            }
             in_flight.next_generation = in_flight.next_generation.wrapping_add(1).max(1);
             let generation = in_flight.next_generation;
             let work_cancellation = crate::application::context::CancellationToken::new();
@@ -192,7 +204,7 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
                     event,
                     generation,
                     cancellation: work_cancellation.clone(),
-                    completions: completion.into_iter().collect(),
+                    completions,
                 },
             );
             (permit, generation, work_cancellation)
@@ -251,11 +263,7 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
                         completion();
                     }
                 }
-                Some(_) => {}
-                None => tracing::error!(
-                    event = "advisory_hook_orchestration_completion_missing",
-                    "daemon-owned advisory work finished without its in-flight admission"
-                ),
+                Some(_) | None => {}
             }
             drop(permit);
         });
@@ -511,7 +519,8 @@ impl DeferredAdvisoryHookOrchestratorV1 {
                 };
             }
         }
-        if let Some(task) = self.setup_task.lock().await.take() {
+        let setup_task = { self.setup_task.lock().await.take() };
+        if let Some(task) = setup_task {
             let _ = task.await;
         }
     }
@@ -720,12 +729,12 @@ impl SwitchableFeedbackCycleRuntimeV1 {
     pub(in crate::daemon::service) fn replace(
         &self,
         current: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), LspRuntimeFailure> {
-        *self
+    ) -> Result<Arc<dyn FeedbackCycleRuntimePort>, LspRuntimeFailure> {
+        let mut guard = self
             .current
             .write()
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"))? = current;
-        Ok(())
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-router"))?;
+        Ok(std::mem::replace(&mut *guard, current))
     }
 }
 
@@ -838,6 +847,7 @@ pub(super) struct AuthorizedDaemonLspWorkspace {
 }
 
 impl DaemonLspInvocationOwner {
+    #[cfg(test)]
     pub(crate) fn new(factory: Arc<DaemonLspSessionFactory>) -> Self {
         Self {
             factory,

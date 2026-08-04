@@ -525,30 +525,6 @@ impl DaemonFeedbackRuntimeRegistrar {
             .map_err(DaemonFeedbackRuntimeRegistrationError::from)?;
         Ok(runtime)
     }
-
-    pub(crate) async fn install_advisory_cycle_input(
-        &self,
-        project_root: &Path,
-        input: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .replace_feedback_cycle_input_atomically(project_root, input)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
-    }
-
-    pub(crate) async fn install_advisory_cycle_invocation(
-        &self,
-        project_root: &Path,
-        owner: DaemonAdvisoryCycleInvocationOwner,
-    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
-        self.service
-            .project_runtimes
-            .register(project_root.to_path_buf(), owner)
-            .await
-            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
-    }
 }
 
 impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {
@@ -986,15 +962,15 @@ impl DaemonLspOwnerRegistrar {
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
-    #[error("a PR13 advisory runtime is already mounted for this project")]
+    #[error("an advisory runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,
-    #[error("the shared PR12 feedback readers must be registered before PR13")]
+    #[error("shared feedback readers must be registered before the advisory runtime")]
     MissingFeedbackRuntime,
-    #[error("the PR13 Hook orchestration registry is unavailable")]
+    #[error("the advisory Hook orchestration registry is unavailable")]
     HookOrchestrationUnavailable,
-    #[error("the PR13 production authorities could not be opened")]
+    #[error("the advisory production authorities could not be opened")]
     Production(#[from] Pr13AdvisoryProductionOpenErrorV1),
     #[error(transparent)]
     Startup(#[from] Pr13AdvisoryDaemonStartupErrorV1),
@@ -1092,7 +1068,10 @@ impl DaemonAdvisoryRuntimeRegistrar {
         advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
         feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
         cancellation: &crate::application::context::CancellationToken,
-    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+    ) -> Result<
+        super::super::project_runtime::AdvisoryRuntimePublicationV1,
+        DaemonAdvisoryRuntimeRegistrationError,
+    > {
         self.service
             .project_runtimes
             .publish_advisory_atomically(

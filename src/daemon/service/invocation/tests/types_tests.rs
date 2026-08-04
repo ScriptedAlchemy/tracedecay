@@ -122,7 +122,7 @@ fn advisory_hook_orchestration_admits_only_saved_edit_stop_and_explicit() {
 async fn advisory_hook_orchestration_backpressures_without_waiting() {
     let release = Arc::new(tokio::sync::Notify::new());
     let work_release = Arc::clone(&release);
-    let work = move |_| {
+    let work = move |_, _| {
         let release = Arc::clone(&work_release);
         async move { release.notified().await }
     };
@@ -137,7 +137,7 @@ async fn advisory_hook_orchestration_backpressures_without_waiting() {
             changed_range_count: 1,
         }),
         &hook_binding(),
-        Some(hook_lifecycle()),
+        None,
         1,
         false,
     )
@@ -186,7 +186,7 @@ async fn advisory_hook_orchestration_runs_feedback_work_without_scout_lifecycle(
     let work_ran_synchronously = Arc::clone(&ran_synchronously);
     let ran = Arc::new(tokio::sync::Notify::new());
     let work_ran = Arc::clone(&ran);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_, _| {
         let ran = Arc::clone(&work_ran);
         let ran_synchronously = Arc::clone(&work_ran_synchronously);
         async move {
@@ -232,7 +232,7 @@ async fn advisory_hook_orchestration_coalesces_duplicate_work_and_completes_ever
     let work_release = Arc::clone(&release);
     let work_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_work_calls = Arc::clone(&work_calls);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_, _| {
         let release = Arc::clone(&work_release);
         let work_calls = Arc::clone(&observed_work_calls);
         async move {
@@ -291,10 +291,106 @@ async fn advisory_hook_orchestration_coalesces_duplicate_work_and_completes_ever
 }
 
 #[tokio::test]
+async fn advisory_hook_orchestration_supersedes_same_address_without_replay_delay() {
+    struct WorkGuard {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Drop for WorkGuard {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let first_started = Arc::new(tokio::sync::Notify::new());
+    let observed_first_started = Arc::clone(&first_started);
+    let first_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_first_drop = Arc::clone(&first_dropped);
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |request, cancellation| {
+        let first_started = Arc::clone(&observed_first_started);
+        let first_dropped = Arc::clone(&observed_first_drop);
+        async move {
+            if request.hook.envelope().event_id == [1; 16] {
+                let _guard = WorkGuard {
+                    dropped: first_dropped,
+                };
+                first_started.notify_one();
+                cancellation.cancelled().await;
+            }
+        }
+    })
+    .unwrap();
+    let first_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_first_completions = Arc::clone(&first_completions);
+    let mut first = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    first.completion = Some(Arc::new(move || {
+        observed_first_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }));
+    assert_eq!(
+        runtime.admit(first),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    first_started.notified().await;
+
+    let second_completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_second_completions = Arc::clone(&second_completions);
+    let second_completed = Arc::new(tokio::sync::Notify::new());
+    let observed_second_completed = Arc::clone(&second_completed);
+    let mut second_envelope = hook_envelope(HookEventV2::SessionBoundary {
+        boundary: HookBoundaryV1::TurnComplete,
+    });
+    second_envelope.event_id = [2; 16];
+    let mut second = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        second_envelope,
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .unwrap();
+    second.completion = Some(Arc::new(move || {
+        observed_second_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        observed_second_completed.notify_one();
+    }));
+    assert_eq!(
+        runtime.admit(second),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued,
+        "a newer edit/stop event at the same address must replace queued work"
+    );
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        second_completed.notified(),
+    )
+    .await
+    .expect("superseding event runs as soon as the cancelled worker releases capacity");
+    assert!(first_dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(
+        first_completions.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "the successful successor acknowledges coalesced obsolete work"
+    );
+    assert_eq!(
+        second_completions.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test]
 async fn advisory_hook_orchestration_bounds_coalesced_completion_waiters() {
     let release = Arc::new(tokio::sync::Notify::new());
     let work_release = Arc::clone(&release);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_, _| {
         let release = Arc::clone(&work_release);
         async move {
             release.notified().await;
@@ -363,7 +459,7 @@ async fn dropping_advisory_hook_orchestrator_cancels_daemon_owned_work_without_f
 
     let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_work_drop = Arc::clone(&work_dropped);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| PendingWork {
+    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_, _| PendingWork {
         dropped: Arc::clone(&observed_work_drop),
     })
     .unwrap();
@@ -435,7 +531,7 @@ async fn deferred_advisory_owner_reports_stable_warming_ready_and_unavailable_st
 
     let worker_ran = Arc::new(tokio::sync::Notify::new());
     let observed_worker = Arc::clone(&worker_ran);
-    let ready = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
+    let ready = BoundedAdvisoryHookOrchestratorV1::new(1, move |_, _| {
         let worker_ran = Arc::clone(&observed_worker);
         async move { worker_ran.notify_one() }
     })

@@ -13,6 +13,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
@@ -237,10 +238,9 @@ pub(crate) use types::{
 // from `service::project_runtime`. Re-export at the same absolute reach the
 // definitions themselves now declare via `pub(in crate::daemon::service)`.
 pub(crate) use registrars::{
-    DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
-    DaemonConfigurationRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar,
-    DaemonFeedbackRuntimeRegistrationError, DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar,
-    DoctorConfigurationOutcomeV1,
+    DaemonAdvisoryRuntimeRegistrar, DaemonConfigurationRuntimeRegistrar,
+    DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
+    DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar, DoctorConfigurationOutcomeV1,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredAdvisoryHookOrchestrationRuntimeV1, RegisteredCallableCodeRuntime,

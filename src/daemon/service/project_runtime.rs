@@ -406,9 +406,38 @@ pub(crate) enum ProjectRuntimeRegistryError {
     Closed,
 }
 
+#[derive(Debug)]
 pub(crate) enum FeedbackCyclePublicationError {
     Registry(ProjectRuntimeRegistryError),
     RouterUnavailable,
+}
+
+pub(crate) struct AdvisoryRuntimePublicationV1 {
+    registry: ProjectRuntimeRegistryV1,
+    project_root: PathBuf,
+    advisory: Arc<dyn Any + Send + Sync>,
+    previous_feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
+}
+
+impl AdvisoryRuntimePublicationV1 {
+    pub(crate) async fn rollback(self) {
+        let mut runtimes = self.registry.lock_runtimes();
+        let Some(runtime) = runtimes.get_mut(&self.project_root) else {
+            return;
+        };
+        if !runtime
+            .advisory
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &self.advisory))
+        {
+            return;
+        }
+        if let Some(router) = &runtime.feedback_cycle_input {
+            let _ = router.replace(self.previous_feedback_input);
+        }
+        runtime.advisory.take();
+        runtime.advisory_cycle.take();
+    }
 }
 
 impl From<ProjectRuntimeRegistryError> for FeedbackCyclePublicationError {
@@ -732,6 +761,7 @@ impl ProjectRuntimeRegistryV1 {
                     if let Some(router) = &incumbent.feedback_cycle_input {
                         router
                             .replace(production_input)
+                            .map(|_| ())
                             .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
                     } else {
                         incumbent.feedback_cycle_input = Some(Arc::new(
@@ -740,39 +770,6 @@ impl ProjectRuntimeRegistryV1 {
                     }
                     incumbent.feedback_cycle = Some(runtime);
                     return Ok(());
-                }
-            }
-            if reservation_changed.changed().await.is_err() {
-                return Err(ProjectRuntimeRegistryError::Closed.into());
-            }
-        }
-    }
-
-    pub(crate) async fn replace_feedback_cycle_input_atomically(
-        &self,
-        project_root: &Path,
-        input: Arc<dyn FeedbackCycleRuntimePort>,
-    ) -> Result<(), FeedbackCyclePublicationError> {
-        loop {
-            let mut reservation_changed = self.reservation_changed.subscribe();
-            {
-                let mut runtimes = self.lock_runtimes();
-                if self.closed.load(Ordering::Acquire) {
-                    return Err(ProjectRuntimeRegistryError::Closed.into());
-                }
-                let Some(incumbent) = runtimes.get_mut(project_root) else {
-                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
-                };
-                if !incumbent
-                    .reservations
-                    .contains(&TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>())
-                {
-                    return incumbent
-                        .feedback_cycle_input
-                        .as_ref()
-                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?
-                        .replace(input)
-                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable);
                 }
             }
             if reservation_changed.changed().await.is_err() {
@@ -792,7 +789,7 @@ impl ProjectRuntimeRegistryV1 {
         advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
         feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
         cancellation: &crate::application::context::CancellationToken,
-    ) -> Result<(), FeedbackCyclePublicationError> {
+    ) -> Result<AdvisoryRuntimePublicationV1, FeedbackCyclePublicationError> {
         loop {
             let mut reservation_changed = self.reservation_changed.subscribe();
             {
@@ -815,19 +812,31 @@ impl ProjectRuntimeRegistryV1 {
                     if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
                         return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
                     }
-                    runtime
+                    let previous_feedback_input = runtime
                         .feedback_cycle_input
                         .as_ref()
                         .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?
                         .replace(feedback_input)
                         .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
-                    runtime.advisory = Some(advisory);
+                    runtime.advisory = Some(Arc::clone(&advisory));
                     runtime.advisory_cycle = Some(advisory_cycle);
-                    return Ok(());
+                    return Ok(AdvisoryRuntimePublicationV1 {
+                        registry: self.clone(),
+                        project_root: project_root.to_path_buf(),
+                        advisory,
+                        previous_feedback_input,
+                    });
                 }
             }
-            if reservation_changed.changed().await.is_err() {
-                return Err(ProjectRuntimeRegistryError::Closed.into());
+            tokio::select! {
+                changed = reservation_changed.changed() => {
+                    if changed.is_err() {
+                        return Err(ProjectRuntimeRegistryError::Closed.into());
+                    }
+                }
+                () = cancellation.cancelled() => {
+                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
+                }
             }
         }
     }
