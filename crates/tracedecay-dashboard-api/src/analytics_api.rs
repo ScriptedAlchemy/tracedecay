@@ -164,6 +164,10 @@ async fn durable_analytics_rows_for_state(state: &DashboardState) -> Option<Vec<
         }
     }
 
+    let project_id = std::fs::canonicalize(&state.project_root)
+        .unwrap_or_else(|_| state.project_root.clone())
+        .to_string_lossy()
+        .to_string();
     let rows = query_rows(
         state.lcm_conn.as_ref()?,
         "SELECT provider, timestamp, event_kind, hook_name, tool_name,
@@ -177,7 +181,7 @@ async fn durable_analytics_rows_for_state(state: &DashboardState) -> Option<Vec<
              LIMIT 10000
          )
          ORDER BY timestamp, id",
-        libsql::params![state.project_root.display().to_string()],
+        libsql::params![project_id],
     )
     .await
     .ok()?;
