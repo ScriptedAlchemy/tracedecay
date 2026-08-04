@@ -765,7 +765,21 @@ pub(super) const TABLES: &[Table] = &[
             column("created_at", "INTEGER", true, None, 0),
             column("applied_at", "INTEGER", false, None, 0),
         ],
-        []
+        [
+            foreign_key(
+                "session_id",
+                "session_temporal_generations",
+                "session_id",
+                "CASCADE"
+            ),
+            foreign_key_sequence(
+                "generation",
+                "session_temporal_generations",
+                "generation",
+                "CASCADE",
+                1
+            ),
+        ]
     ),
     table!(
         "session_summary_sources",
