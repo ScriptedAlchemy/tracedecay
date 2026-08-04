@@ -20,9 +20,8 @@ use super::{
     CodeIndexCadenceReadModelV1, CodeIndexCadenceTelemetryV1, CodeIndexCadenceTriggerV1,
     CodeIndexEventToReadyReceiptV1, CodeIndexNoopEvidenceV1, CodeIndexPublishEvidenceV1,
     CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1, GitStateMayHaveChanged,
-    LatestCompleteCodeIndexV1, PendingHintsV1, SharedCodeIndexBytePoolV1,
-    newly_eligible_percentile, now_micros,
+    DaemonCodeIndexControlV1, GenerationDecodeAdmissionV1, LatestCompleteCodeIndexV1,
+    PendingHintsV1, SharedCodeIndexBytePoolV1, newly_eligible_percentile, now_micros,
 };
 
 const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
@@ -1023,13 +1022,14 @@ impl CodeIndexSchedulerRegistryV1 {
         self.mounted.lock().await.contains_key(&project_root)
     }
 
-    /// Route a watcher frontier without blocking the watcher thread on the
-    /// async registry map. Structural identity is checked before the event can
-    /// enter the scheduler's coalescing slot.
+    /// Route a watcher wake without blocking the watcher thread on the async
+    /// registry map. Structural identity is checked before the wake can enter
+    /// the scheduler's coalescing slot. The scheduler derives the exact git
+    /// frontier through its canonical gix reconciliation.
     pub(in crate::daemon) fn request_for_root(
         &self,
         project_root: &Path,
-        event: GitStateMayHaveChanged,
+        identity: super::identity::IndexingIdentityV1,
     ) -> GitStateChangeRequestV1 {
         let Ok(project_root) = project_root.canonicalize() else {
             return GitStateChangeRequestV1::Unmounted;
@@ -1040,8 +1040,8 @@ impl CodeIndexSchedulerRegistryV1 {
         let Some(worktree) = mounted.get(&project_root) else {
             return GitStateChangeRequestV1::Unmounted;
         };
-        if worktree.repository_id != *event.identity.repository_id()
-            || worktree.worktree_id != *event.identity.worktree_id()
+        if worktree.repository_id != *identity.repository_id()
+            || worktree.worktree_id != *identity.worktree_id()
         {
             return GitStateChangeRequestV1::IdentityMismatch;
         }
@@ -1049,7 +1049,7 @@ impl CodeIndexSchedulerRegistryV1 {
             .hints
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .git_state(event);
+            .overflow();
         DaemonCodeIndexControlV1::advance(&worktree.epoch);
         Self::note_wake(
             &worktree.pending_wake_micros,

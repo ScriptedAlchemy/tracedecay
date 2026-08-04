@@ -67,12 +67,20 @@ impl WatchState {
     /// A new git directory changes the exact set of marker paths watched by
     /// the repository task, so the task is told to rebuild its small metadata
     /// watch set. Re-registering an existing root is a no-op.
-    pub(super) fn register_worktree(&self, project_root: PathBuf, git_dir: PathBuf) -> bool {
+    pub(super) fn register_worktree(
+        &self,
+        project_root: PathBuf,
+        git_dir: PathBuf,
+        max_worktrees: usize,
+    ) -> bool {
         let mut worktrees = self
             .worktrees
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if worktrees.get(&project_root) == Some(&git_dir) {
+            return false;
+        }
+        if worktrees.len() >= max_worktrees {
             return false;
         }
         worktrees.insert(project_root, git_dir);
@@ -102,17 +110,27 @@ impl WatchState {
     /// Git directories whose operation markers can transiently move shared
     /// repository refs. This includes linked worktrees not yet mounted by the
     /// daemon: their operation still affects every registered root.
-    pub(super) fn operation_git_dirs(&self) -> Vec<PathBuf> {
+    pub(super) fn operation_git_dirs(&self, max_worktrees: usize) -> Option<Vec<PathBuf>> {
         let mut git_dirs = self.git_dirs().into_iter().collect::<BTreeSet<_>>();
-        if let Ok(entries) = std::fs::read_dir(self.common_dir.join("worktrees")) {
-            git_dirs.extend(
-                entries
-                    .filter_map(Result::ok)
-                    .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-                    .map(|entry| entry.path()),
-            );
+        if git_dirs.len() > max_worktrees {
+            return None;
         }
-        git_dirs.into_iter().collect()
+        match std::fs::read_dir(self.common_dir.join("worktrees")) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.ok()?;
+                    if entry.file_type().ok()?.is_dir() {
+                        git_dirs.insert(entry.path());
+                        if git_dirs.len() > max_worktrees {
+                            return None;
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return None,
+        }
+        Some(git_dirs.into_iter().collect())
     }
 
     pub(super) fn prune_missing_worktrees(&self) {

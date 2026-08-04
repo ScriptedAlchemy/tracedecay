@@ -317,10 +317,6 @@ impl MaintenanceCoordinator {
                                     compaction,
                                 )
                                 .await;
-                                succeeded &= super::store_maintenance::run_branch_compaction(
-                                    graph, compaction,
-                                )
-                                .await;
                             }
                         }
                     }

@@ -862,7 +862,6 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
 struct PendingHintsV1 {
     paths: BTreeSet<PathBuf>,
     overflow: bool,
-    git_state: Option<GitStateMayHaveChanged>,
 }
 
 impl PendingHintsV1 {
@@ -880,40 +879,8 @@ impl PendingHintsV1 {
         self.overflow = true;
     }
 
-    fn git_state(&mut self, event: GitStateMayHaveChanged) {
-        let replace = self.git_state.as_ref().is_none_or(|pending| {
-            event.identity.authorizes_reuse_of(&pending.identity)
-                && event.watcher_epoch > pending.watcher_epoch
-        });
-        if replace {
-            self.git_state = Some(event);
-        }
-    }
-
     fn take(&mut self) -> Self {
         std::mem::take(self)
-    }
-}
-
-/// A single-owner git watcher observed that one mounted worktree may have
-/// changed. The structural indexing identity prevents a delayed event from
-/// crossing worktrees; `watcher_epoch` is the monotonic frontier to stamp after
-/// one successful authoritative reconciliation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::daemon) struct GitStateMayHaveChanged {
-    identity: identity::IndexingIdentityV1,
-    watcher_epoch: u64,
-}
-
-impl GitStateMayHaveChanged {
-    pub(in crate::daemon) fn new(
-        identity: identity::IndexingIdentityV1,
-        watcher_epoch: u64,
-    ) -> Self {
-        Self {
-            identity,
-            watcher_epoch,
-        }
     }
 }
 
@@ -1442,15 +1409,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
-        DaemonCodeIndexControlV1::advance(&self.epoch);
-        self.wake.notify_one();
-    }
-
-    pub(in crate::daemon) fn notify_git_state(&self, event: GitStateMayHaveChanged) {
-        self.hints
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .git_state(event);
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
@@ -2294,22 +2252,22 @@ impl RestoreFreshnessWitnessV1 {
     }
 }
 
+mod activation;
 #[cfg(test)]
 mod activation_tests;
+mod cadence;
+mod classification;
+pub(crate) mod identity;
 #[cfg(test)]
 mod memory_tests;
 #[cfg(test)]
 mod overlay_ephemerality_tests;
-#[cfg(test)]
-mod tests;
-mod activation;
-mod cadence;
-mod classification;
-pub(crate) mod identity;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod registry;
 pub(crate) mod semantic_query_runtime;
+#[cfg(test)]
+mod tests;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
