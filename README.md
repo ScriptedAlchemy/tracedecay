@@ -24,8 +24,9 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 - 70+ MCP tools for discovery, call graphs, impact analysis, code health, test mapping, PR context, and anchored edits.
 - 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
 - Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
-- Local SQLite storage through the `rusqlite` runtime. Your code and project memory stay on your machine.
-- On-demand freshness checks, optional per-branch databases, and linked git worktree support.
+- Local storage. Final V2 keeps graph/vector data in embedded Grafeo through
+  `tracedecay-graph-db` and keeps relational records in SQLite.
+- On-demand freshness checks and linked git worktree support.
 - Local dashboard for code graph, memory, LCM sessions, savings, and cost analytics.
 
 ## Install
@@ -47,6 +48,13 @@ cargo install tracedecay --no-default-features
 ```
 
 Prebuilt Linux, macOS, and Windows archives are available on the [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
+
+## Final V2 storage model
+
+`tracedecay-graph-db` is the sole Grafeo dependency boundary. Final V2 accepts
+only its exact persisted shape: an incompatible store returns `ResetRequired`
+and requires explicit reset or recreation, never conversion. See [the V2
+operating model](docs/V2-OPERATING-MODEL.md).
 
 ## Quick Start
 
@@ -126,7 +134,8 @@ TraceDecay does not run a filesystem watcher. MCP calls check for stale indexed 
 
 Linked git worktrees share the same project enrollment through the repository common directory. Initialize once from any checkout; do not copy `.tracedecay/` into worktrees.
 
-Optional branch databases:
+Optional branch tracking keeps code/index snapshots isolated without making
+durable facts or session history branch-owned:
 
 ```bash
 tracedecay branch add
@@ -135,7 +144,9 @@ tracedecay branch remove <name>
 tracedecay branch gc
 ```
 
-See [docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for full branch behavior and recovery.
+Facts, sessions, messages, and LCM data remain project-wide. See
+[docs/BRANCHING-USER-GUIDE.md](docs/BRANCHING-USER-GUIDE.md) for branch
+behavior and recovery.
 
 ## Dashboard
 
@@ -145,7 +156,10 @@ tracedecay dashboard --port 8080
 tracedecay dashboard --port 0 --open
 ```
 
-The dashboard includes graph exploration, project memory, LCM session search, token savings, and cost views. See [docs/dashboard.md](docs/dashboard.md) and [docs/graph-explorer.md](docs/graph-explorer.md).
+The dashboard includes graph exploration, project memory, LCM session search,
+token savings, and cost views. Its delivered capabilities are reported by the
+running server. See [docs/dashboard.md](docs/dashboard.md) and
+[docs/graph-explorer.md](docs/graph-explorer.md).
 
 ## Privacy
 
@@ -199,6 +213,7 @@ cargo clippy --workspace --all-targets
 ## Docs
 
 - [User guide](docs/USER-GUIDE.md)
+- [V2 operating model](docs/V2-OPERATING-MODEL.md)
 - [Comparable tools](docs/COMPARABLE-TOOLS.md)
 - [Dashboard](docs/dashboard.md)
 - [Branching](docs/BRANCHING-USER-GUIDE.md)

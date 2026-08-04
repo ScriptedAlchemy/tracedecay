@@ -24,7 +24,12 @@ When a vulnerability is found, the fix is shipped as a new release — there are
 
 ### What tracedecay stores
 
-tracedecay builds a **local** code graph stored in the active project store. Repo-local projects use `.tracedecay/tracedecay.db`; legacy `.tracedecay/` data directories are still honored. Profile-backed projects keep graph data in a private user profile shard such as `~/.tracedecay/projects/<project_id>/`, while the repository may contain only an enrollment marker plus project config. The database contains:
+tracedecay keeps code intelligence data local to the resolved project store.
+The final V2 graph/vector authority is embedded Grafeo through
+`tracedecay-graph-db`; SQLite retains relational and content-bearing records.
+Use runtime status rather than a fixed filename to identify a live store. An
+incompatible final-V2 store must be explicitly reset or recreated, never
+converted in place. The local data can contain:
 
 - Symbol names, signatures, and docstrings
 - File paths, sizes, and content hashes
@@ -35,7 +40,11 @@ tracedecay builds a **local** code graph stored in the active project store. Rep
 
 Aside from the `read_cache`, the graph itself does **not** persist raw source code — it stores structural metadata only. The active project store is local-only — there is no cloud sync, remote database, or server-side storage.
 
-The user-level `~/.tracedecay/global.db` tracks indexed projects, aggregate tracedecayd counts, and cost accounting data parsed from Claude Code session transcripts. Cursor transcript search is stored in the active project's session store (`.tracedecay/sessions.db` for repo-local projects), which contains ingested Cursor user/assistant message text plus transcript paths and metadata for that project. Both stores remain local-only and are not synced to a remote service.
+Profile-level registry and accounting records, plus project-scoped host-session
+content, remain local-only and are never synced to a remote service. Project
+facts, sessions, messages, and LCM data are shared across that project's
+branches and linked worktrees; historical host-source ingestion is bounded by
+its declared source and cursor.
 
 ### Network access
 
@@ -101,9 +110,17 @@ The MCP server exposes **more than 70 tools** (one fewer when the optional `ast-
 
 ### Support bundles and storage diagnostics
 
-Storage status, doctor, quota, and support-bundle output must report the active project and store class (`project_local`, `profile_sharded`, global/accounting, or legacy) without exposing sensitive payloads by default. A redacted support bundle may include manifests, schema versions, aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
+Storage status, doctor, quota, and support-bundle output must report the active project and store class without exposing sensitive payloads by default. A redacted support bundle may include manifests, format versions, aggregate counts, lock/dirty/quota state, and error codes; it must exclude source code, rendered `read_cache` bodies, transcript text, memory fact content, payload bodies, and response-handle bodies.
 
-Also redact credential-bearing git remotes, database overrides such as `TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle identifiers that could retrieve plaintext, and error strings that embed local paths or secrets. Full paths or payload excerpts require an explicit opt-in flag and sensitive labeling. See [docs/PROFILE-STORAGE-SUPPORT.md](docs/PROFILE-STORAGE-SUPPORT.md) for the support-bundle and fixture contract.
+Also redact credential-bearing git remotes, database overrides such as
+`TRACEDECAY_GLOBAL_DB`, private adapter config paths, response-handle
+identifiers that could retrieve plaintext, and error strings that embed local
+paths or secrets. Full paths or payload excerpts require an explicit opt-in
+flag and sensitive labeling. See
+[the profile-storage support contract](docs/PROFILE-STORAGE-SUPPORT.md) for
+bundle and fixture details, and [the V2 operating
+model](docs/V2-OPERATING-MODEL.md) for final storage authority and reset
+behavior.
 
 **Test execution:**
 
@@ -149,7 +166,7 @@ The Windows-elevation `unsafe` documented in earlier versions was removed alongs
 
 ## Best Practices
 
-- Add `.tracedecay/` (and, for projects indexed before the rename, `.tracedecay/`) to your `.gitignore` to avoid committing local store markers or repo-local databases.
+- Add `.tracedecay/` to your `.gitignore` to avoid committing local store markers or repo-local databases.
 - If your project contains sensitive code, be aware that the database stores symbol names and signatures, and the `read_cache` table can hold rendered source text from `tracedecay_read` responses. Keeping repo-local store directories ignored and treating profile-sharded stores as private user data keeps both out of version control.
 - Keep tracedecay updated (`tracedecay upgrade`) to receive security fixes.
 - Review the [CHANGELOG](CHANGELOG.md) before upgrading to understand what changed.
