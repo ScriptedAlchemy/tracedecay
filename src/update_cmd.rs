@@ -146,26 +146,7 @@ where
     // The managed daemon holds a shared lifecycle lease while serving its
     // databases. Stop it first, then acquire exclusive ownership before the
     // service unit is rewritten and restarted.
-    let previous_state = quiesce()?;
-    let _lifecycle_lease = match acquire() {
-        Ok(lease) => lease,
-        Err(acquire_error) => {
-            if matches!(
-                previous_state,
-                tracedecay::daemon::DaemonServiceState::RunningEnabled
-                    | tracedecay::daemon::DaemonServiceState::RunningDisabled
-            ) {
-                if let Err(restore_error) = restore(previous_state) {
-                    return Err(tracedecay::errors::TraceDecayError::Config {
-                        message: format!(
-                            "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
-                        ),
-                    });
-                }
-            }
-            return Err(acquire_error);
-        }
-    };
+    let (_previous_state, _lifecycle_lease) = begin_update_window_with(quiesce, acquire, restore)?;
     // `daemon restart` is an explicit request to bring the installed service
     // up, even when it was stopped before restart began.
     refresh(tracedecay::daemon::DaemonServiceState::RunningEnabled)
@@ -299,58 +280,158 @@ pub(crate) fn run_update_command(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("update")?;
-    let lease_token = lifecycle_lease
-        .token()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "update lifecycle lease did not provide an owner token".to_string(),
-        })?
-        .to_string();
-    let mut lifecycle_lease = Some(lifecycle_lease);
-    run_install_then_refresh(
-        RefreshPolicy::Always,
-        tracedecay::upgrade::run_upgrade,
-        move |binary| {
-            let held_lease =
-                prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "update lifecycle lease was already consumed".to_string(),
-                    }
-                })?);
-            let result = run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token);
-            drop(held_lease);
-            result
-        },
-    )
+    run_update_flow("update", RefreshPolicy::Always, no_heal, no_reinstall)
 }
 
 pub(crate) fn run_upgrade_command(
     no_heal: bool,
     no_reinstall: bool,
 ) -> tracedecay::errors::Result<()> {
-    let lifecycle_lease = tracedecay::lifecycle_lease::acquire_exclusive("upgrade")?;
-    let lease_token = lifecycle_lease
-        .token()
-        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-            message: "upgrade lifecycle lease did not provide an owner token".to_string(),
-        })?
-        .to_string();
-    let mut lifecycle_lease = Some(lifecycle_lease);
-    run_install_then_refresh(
+    run_update_flow(
+        "upgrade",
         RefreshPolicy::AfterInstall,
-        tracedecay::upgrade::run_upgrade,
-        move |binary| {
-            let held_lease =
-                prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
-                    tracedecay::errors::TraceDecayError::Config {
-                        message: "upgrade lifecycle lease was already consumed".to_string(),
-                    }
-                })?);
-            let result = run_post_update_subcommand(no_heal, no_reinstall, binary, &lease_token);
-            drop(held_lease);
-            result
-        },
+        no_heal,
+        no_reinstall,
     )
+}
+
+fn run_update_flow(
+    operation: &'static str,
+    policy: RefreshPolicy,
+    no_heal: bool,
+    no_reinstall: bool,
+) -> tracedecay::errors::Result<()> {
+    let (previous_daemon_state, lifecycle_lease) = begin_update_window(operation)?;
+    let lease_token = match lifecycle_lease.token() {
+        Some(token) => token.to_string(),
+        None => {
+            drop(lifecycle_lease);
+            return restore_after_update_window(
+                previous_daemon_state,
+                Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("{operation} lifecycle lease did not provide an owner token"),
+                }),
+            );
+        }
+    };
+    let mut lifecycle_lease = Some(lifecycle_lease);
+    let result = run_install_then_refresh(policy, tracedecay::upgrade::run_upgrade, |binary| {
+        let held_lease = prepare_post_update_lease(lifecycle_lease.take().ok_or_else(|| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: format!("{operation} lifecycle lease was already consumed"),
+            }
+        })?);
+        let execution = run_post_update_subcommand(
+            no_heal,
+            no_reinstall,
+            binary,
+            &lease_token,
+            previous_daemon_state,
+        );
+        drop(held_lease);
+        match execution {
+            PostUpdateExecution::NotLaunched(error) => {
+                restore_after_update_window(previous_daemon_state, Err(error))
+            }
+            PostUpdateExecution::Completed(result) => result,
+        }
+    });
+    finish_update_flow_with(
+        &mut lifecycle_lease,
+        previous_daemon_state,
+        result,
+        tracedecay::daemon::restore_quiesced_installed_service,
+    )
+}
+
+fn begin_update_window(
+    operation: &str,
+) -> tracedecay::errors::Result<(
+    tracedecay::daemon::DaemonServiceState,
+    tracedecay::lifecycle_lease::LifecycleLease,
+)> {
+    begin_update_window_with(
+        tracedecay::daemon::quiesce_installed_service_for_restart,
+        || {
+            tracedecay::lifecycle_lease::acquire_exclusive_with_timeout(
+                operation,
+                DAEMON_RESTART_LEASE_TIMEOUT,
+            )
+        },
+        tracedecay::daemon::restore_quiesced_installed_service,
+    )
+}
+
+fn begin_update_window_with<Lease, Quiesce, Acquire, Restore>(
+    quiesce: Quiesce,
+    acquire: Acquire,
+    restore: Restore,
+) -> tracedecay::errors::Result<(tracedecay::daemon::DaemonServiceState, Lease)>
+where
+    Quiesce: FnOnce() -> tracedecay::errors::Result<tracedecay::daemon::DaemonServiceState>,
+    Acquire: FnOnce() -> tracedecay::errors::Result<Lease>,
+    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay::errors::Result<()>,
+{
+    let previous_state = quiesce()?;
+    match acquire() {
+        Ok(lease) => Ok((previous_state, lease)),
+        Err(acquire_error) => match restore(previous_state) {
+            Ok(()) => Err(acquire_error),
+            Err(restore_error) => Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "{acquire_error}; additionally failed to restore the managed daemon service: {restore_error}"
+                ),
+            }),
+        },
+    }
+}
+
+fn restore_after_update_window(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+    result: tracedecay::errors::Result<()>,
+) -> tracedecay::errors::Result<()> {
+    restore_after_update_window_with(
+        previous_state,
+        result,
+        tracedecay::daemon::restore_quiesced_installed_service,
+    )
+}
+
+fn finish_update_flow_with<Lease, Restore>(
+    lifecycle_lease: &mut Option<Lease>,
+    previous_state: tracedecay::daemon::DaemonServiceState,
+    result: tracedecay::errors::Result<()>,
+    restore: Restore,
+) -> tracedecay::errors::Result<()>
+where
+    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay::errors::Result<()>,
+{
+    let Some(lease) = lifecycle_lease.take() else {
+        return result;
+    };
+    drop(lease);
+    restore_after_update_window_with(previous_state, result, restore)
+}
+
+fn restore_after_update_window_with<Restore>(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+    result: tracedecay::errors::Result<()>,
+    restore: Restore,
+) -> tracedecay::errors::Result<()>
+where
+    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay::errors::Result<()>,
+{
+    let restore_result = restore(previous_state);
+    match (result, restore_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(restore_error)) => Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!(
+                "{error}; additionally failed to restore the managed daemon service: {restore_error}"
+            ),
+        }),
+    }
 }
 
 pub(crate) fn run_dogfood_command() -> tracedecay::errors::Result<()> {
@@ -407,30 +488,53 @@ fn run_post_update_subcommand(
     no_reinstall: bool,
     installed: Option<&Path>,
     lifecycle_lease_token: &str,
-) -> tracedecay::errors::Result<()> {
-    let tracedecay_bin = post_update_binary(installed)?;
+    previous_daemon_state: tracedecay::daemon::DaemonServiceState,
+) -> PostUpdateExecution {
+    let tracedecay_bin = match post_update_binary(installed) {
+        Ok(binary) => binary,
+        Err(error) => return PostUpdateExecution::NotLaunched(error),
+    };
     let mut command = std::process::Command::new(&tracedecay_bin);
     command
         .arg("post-update")
         .arg("--lifecycle-lease-token")
-        .arg(lifecycle_lease_token);
+        .arg(lifecycle_lease_token)
+        .arg("--previous-daemon-state")
+        .arg(previous_daemon_state.to_string());
     if no_heal {
         command.arg("--no-heal");
     }
     if no_reinstall {
         command.arg("--no-reinstall");
     }
-    let status = command
-        .status()
-        .map_err(|e| tracedecay::errors::TraceDecayError::Config {
-            message: format!("failed to run post-update with '{tracedecay_bin}': {e}"),
-        })?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!("post-update failed with status: {status}"),
-    })
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            return PostUpdateExecution::NotLaunched(tracedecay::errors::TraceDecayError::Config {
+                message: format!("failed to run post-update with '{tracedecay_bin}': {error}"),
+            });
+        }
+    };
+    let result = child
+        .wait()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("failed to wait for post-update '{tracedecay_bin}': {error}"),
+        })
+        .and_then(|status| {
+            if status.success() {
+                Ok(())
+            } else {
+                Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("post-update failed with status: {status}"),
+                })
+            }
+        });
+    PostUpdateExecution::Completed(result)
+}
+
+enum PostUpdateExecution {
+    NotLaunched(tracedecay::errors::TraceDecayError),
+    Completed(tracedecay::errors::Result<()>),
 }
 
 /// The result of a tracked-agent reinstall pass. Version markers may only
@@ -523,15 +627,31 @@ pub(crate) async fn run_post_update_tasks(
     no_heal: bool,
     no_reinstall: bool,
     lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
+    previous_daemon_state: Option<tracedecay::daemon::DaemonServiceState>,
 ) -> tracedecay::errors::Result<()> {
     eprintln!("\nPreparing safe post-update maintenance.");
     eprintln!("  Waiting for TraceDecay writers to shut down cleanly — do not interrupt.");
-    let previous_daemon_state = tracedecay::daemon::quiesce_installed_service_under_lease()?;
+    let previous_daemon_state = resolve_previous_daemon_state(previous_daemon_state, || {
+        tracedecay::daemon::quiesce_installed_service_under_lease()
+    })?;
     eprintln!("\x1b[32m✔\x1b[0m TraceDecay writers stopped; exclusive maintenance window active.");
     let mutation_result = run_post_update_mutations(no_heal, no_reinstall, lifecycle_lease).await;
     let restart_result = refresh_daemon_service_after_update(previous_daemon_state);
     mutation_result?;
     restart_result
+}
+
+fn resolve_previous_daemon_state<Quiesce>(
+    inherited: Option<tracedecay::daemon::DaemonServiceState>,
+    quiesce: Quiesce,
+) -> tracedecay::errors::Result<tracedecay::daemon::DaemonServiceState>
+where
+    Quiesce: FnOnce() -> tracedecay::errors::Result<tracedecay::daemon::DaemonServiceState>,
+{
+    match inherited {
+        Some(state) => Ok(state),
+        None => quiesce(),
+    }
 }
 
 async fn run_post_update_mutations(
@@ -645,12 +765,125 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from, normalize_bin_path,
-        partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, restart_daemon_service_with, run_install_then_refresh,
+        RefreshPolicy, ReinstallOutcome, begin_update_window_with, current_tracedecay_exe_from,
+        finish_update_flow_with, normalize_bin_path, partition_reinstall_results,
+        post_update_binary, post_update_binary_from, prepare_post_update_lease,
+        resolve_previous_daemon_state, restart_daemon_service_with, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
+
+    #[test]
+    fn no_op_upgrade_restores_daemon_after_releasing_lease() {
+        struct Lease<'a>(&'a RefCell<Vec<&'static str>>);
+        impl Drop for Lease<'_> {
+            fn drop(&mut self) {
+                self.0.borrow_mut().push("drop lease");
+            }
+        }
+
+        let order = RefCell::new(Vec::new());
+        let mut lease = Some(Lease(&order));
+        finish_update_flow_with(
+            &mut lease,
+            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+            Ok(()),
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                order.borrow_mut().push("restore");
+                Ok(())
+            },
+        )
+        .expect("no-op upgrade restoration");
+
+        assert!(lease.is_none());
+        drop(lease);
+        assert_eq!(order.into_inner(), ["drop lease", "restore"]);
+    }
+
+    #[test]
+    fn launched_post_update_owns_daemon_restoration() {
+        let mut lease: Option<()> = None;
+        finish_update_flow_with(
+            &mut lease,
+            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+            Ok(()),
+            |_| panic!("post-update already owns daemon restoration"),
+        )
+        .expect("completed post-update");
+    }
+
+    #[test]
+    fn update_window_quiesces_daemon_before_acquiring_exclusive_lease() {
+        let order = RefCell::new(Vec::new());
+        let (previous_state, ()) = begin_update_window_with(
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+            },
+            || {
+                assert_eq!(order.borrow().as_slice(), ["quiesce"]);
+                order.borrow_mut().push("acquire");
+                Ok(())
+            },
+            |_| panic!("successful acquisition must not restore the daemon"),
+        )
+        .expect("update window");
+
+        assert_eq!(
+            previous_state,
+            tracedecay::daemon::DaemonServiceState::RunningEnabled
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire"]);
+    }
+
+    #[test]
+    fn update_window_restores_daemon_when_exclusive_lease_is_busy() {
+        let order = RefCell::new(Vec::new());
+        let result = begin_update_window_with(
+            || {
+                order.borrow_mut().push("quiesce");
+                Ok(tracedecay::daemon::DaemonServiceState::RunningEnabled)
+            },
+            || -> tracedecay::errors::Result<()> {
+                order.borrow_mut().push("acquire");
+                Err(config_err("lifecycle lease busy"))
+            },
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                order.borrow_mut().push("restore");
+                Ok(())
+            },
+        );
+
+        assert!(
+            result
+                .expect_err("busy lifecycle lease should fail")
+                .to_string()
+                .contains("lifecycle lease busy")
+        );
+        assert_eq!(order.into_inner(), ["quiesce", "acquire", "restore"]);
+    }
+
+    #[test]
+    fn inherited_daemon_state_skips_a_second_quiesce() {
+        let state = resolve_previous_daemon_state(
+            Some(tracedecay::daemon::DaemonServiceState::RunningDisabled),
+            || panic!("the parent already quiesced the daemon"),
+        )
+        .expect("inherited state");
+
+        assert_eq!(
+            state,
+            tracedecay::daemon::DaemonServiceState::RunningDisabled
+        );
+    }
 
     #[test]
     fn daemon_restart_quiesces_service_before_acquiring_exclusive_lease() {

@@ -341,6 +341,9 @@ pub enum Commands {
         /// Lifecycle lease token passed only by the parent updater.
         #[arg(long, hide = true)]
         lifecycle_lease_token: Option<String>,
+        /// Service state captured before the parent updater stopped the daemon.
+        #[arg(long, hide = true)]
+        previous_daemon_state: Option<tracedecay::daemon::DaemonServiceState>,
     },
     /// Show or switch the update channel (stable or beta)
     #[command(long_about = CHANNEL_LONG_ABOUT, after_help = CHANNEL_AFTER_HELP)]
