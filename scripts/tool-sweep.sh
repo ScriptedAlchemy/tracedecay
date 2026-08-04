@@ -595,6 +595,10 @@ done < <("$BIN" tool 2>/dev/null | grep -E '^  [a-z_]+ ' | awk '{print $1}')
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   echo "!! catalog missing entries for: ${MISSING[*]}"
   printf '%s\n' "${MISSING[@]}" > "$OUT/missing-catalog-entries.txt"
+  # A tool advertised by the running binary but absent from this journey has
+  # not been exercised. Retain the list for diagnosis, but make the sweep
+  # itself fail rather than reporting successful partial coverage.
+  fail=$((fail+1))
 fi
 
 while IFS='|' read -r tool class args; do
