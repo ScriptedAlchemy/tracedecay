@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
+use tracedecay_application::clock::now_micros;
 use tracedecay_application::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
     OperationReceipt, OperationTermination,
@@ -39,7 +40,7 @@ mod affected_test_failure;
 mod test_request;
 mod test_runner;
 
-use test_request::{MAX_TEST_TIMEOUT_SECS, RunAffectedArgs};
+use test_request::{MAX_TEST_TIMEOUT_SECS, RunAffectedArgs, TestProfile};
 use test_runner::{
     TestRunControl, TestRunFailure, TestRunOutput, cargo_test_args, parse_libtest_output,
     run_cargo_tests,
@@ -102,7 +103,7 @@ impl TestTarget {
 }
 
 fn validate_test_identity(identity: &str) -> std::result::Result<(), String> {
-    if identity.trim().is_empty() {
+    if identity.trim().is_empty() || identity.trim() != identity {
         return Err("test identity is empty".to_owned());
     }
     if identity.starts_with('-') {
@@ -110,6 +111,9 @@ fn validate_test_identity(identity: &str) -> std::result::Result<(), String> {
     }
     if identity.contains('\0') {
         return Err("test identity contains a NUL byte".to_owned());
+    }
+    if identity.chars().any(char::is_whitespace) {
+        return Err("test identity cannot contain whitespace".to_owned());
     }
     Ok(())
 }
@@ -551,7 +555,7 @@ async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     runner: Runner,
 ) -> Result<ToolResult>
 where
-    Runner: FnOnce(PathBuf, String, Vec<String>, Duration, TestRunControl) -> RunFuture,
+    Runner: FnOnce(PathBuf, TestProfile, Vec<String>, Duration, TestRunControl) -> RunFuture,
     RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
 {
     let run_args = match RunAffectedArgs::parse(&args) {
@@ -593,7 +597,7 @@ where
             ));
         }
     }
-    let started_at = test_run_now();
+    let started_at = now_micros();
     let effective_deadline = Deadline::new(UtcMicros(
         started_at.0.saturating_add(
             i64::try_from(run_args.timeout_secs)
@@ -641,58 +645,46 @@ where
                 &effective_deadline,
                 run_args.timeout_secs,
                 failure,
+                &test_names,
+                truncated,
+                &selected_targets,
             )
             .await;
         }
     };
 
     let results = parse_libtest_output(&output.stdout);
-    if output.exit_code != Some(0) {
-        let receipt = finish_test_run(
-            &emitter,
-            started_at,
-            &effective_deadline,
-            OperationTermination::Failed,
-            output.output_bytes,
-        )
-        .await?;
-        return Ok(managed_test_error_result(
-            &args,
-            "cargo",
-            "test",
-            "cargo test returned a nonzero exit status",
-            &emitter,
-            receipt,
-        ));
-    }
     if let Some(test_name) = missing_requested_test(&test_names, &results) {
-        let receipt = finish_test_run(
+        let any_requested_result = results
+            .iter()
+            .any(|(observed, _)| test_names.iter().any(|requested| requested == observed));
+        let failure = if !any_requested_result && output.exit_code != Some(0) {
+            TestRunFailure::Harness {
+                exit_code: output.exit_code,
+                output_bytes: output.output_bytes,
+                partial: Some(output),
+            }
+        } else {
+            TestRunFailure::NoMatch {
+                test_identity: test_name.to_owned(),
+                output_bytes: output.output_bytes,
+                partial: Some(output),
+            }
+        };
+        return affected_test_failure::terminal_failure(
             &emitter,
+            &args,
             started_at,
             &effective_deadline,
-            OperationTermination::Failed,
-            output.output_bytes,
+            run_args.timeout_secs,
+            failure,
+            &test_names,
+            truncated,
+            &selected_targets,
         )
-        .await?;
-        return Ok(managed_test_error_result(
-            &args,
-            "cargo",
-            "test",
-            &format!("cargo test did not report the requested test `{test_name}`"),
-            &emitter,
-            receipt,
-        ));
+        .await;
     }
-    for (test, passed) in &results {
-        emitter
-            .test_result(test.clone(), *passed)
-            .await
-            .map_err(test_run_event_error)?;
-    }
-    emitter
-        .progress(results.len() as u64, Some(test_names.len() as u64))
-        .await
-        .map_err(test_run_event_error)?;
+    emit_observed_test_results(&emitter, &results, test_names.len()).await?;
     let receipt = finish_test_run(
         &emitter,
         started_at,
@@ -859,6 +851,24 @@ fn current_head_commit_id(root: &Path) -> Option<CommitId> {
     CommitId::new(commit.id().to_hex().to_string()).ok()
 }
 
+async fn emit_observed_test_results(
+    emitter: &OperationEmitter,
+    results: &[(String, bool)],
+    requested_total: usize,
+) -> Result<()> {
+    for (test, passed) in results {
+        emitter
+            .test_result(test.clone(), *passed)
+            .await
+            .map_err(test_run_event_error)?;
+    }
+    emitter
+        .progress(results.len() as u64, Some(requested_total as u64))
+        .await
+        .map(|_| ())
+        .map_err(test_run_event_error)
+}
+
 async fn finish_test_run(
     emitter: &OperationEmitter,
     started_at: UtcMicros,
@@ -866,7 +876,7 @@ async fn finish_test_run(
     termination: OperationTermination,
     bytes_consumed: u64,
 ) -> Result<OperationReceipt> {
-    let ended_at = test_run_now();
+    let ended_at = now_micros();
     let elapsed_micros = ended_at.0.saturating_sub(started_at.0) as u64;
     let cancellation = matches!(
         termination,
@@ -893,18 +903,6 @@ async fn finish_test_run(
         .await
         .map_err(test_run_event_error)?;
     Ok(receipt)
-}
-
-fn test_run_now() -> UtcMicros {
-    UtcMicros(
-        i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_micros(),
-        )
-        .unwrap_or(i64::MAX),
-    )
 }
 
 fn test_run_event_error(error: OperationEventError) -> TraceDecayError {
@@ -1132,28 +1130,6 @@ fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Too
             "operation": operation,
             "message": message,
         }
-    });
-    generic_tool_result(None, args, &value, vec![])
-}
-
-fn managed_test_error_result(
-    args: &Value,
-    kind: &str,
-    operation: &str,
-    message: &str,
-    emitter: &OperationEmitter,
-    receipt: OperationReceipt,
-) -> ToolResult {
-    let value = json!({
-        "passed": 0,
-        "failed": 0,
-        "results": [],
-        "error": {
-            "kind": kind,
-            "operation": operation,
-            "message": message,
-        },
-        "terminal": managed_test_terminal(emitter, &receipt),
     });
     generic_tool_result(None, args, &value, vec![])
 }
