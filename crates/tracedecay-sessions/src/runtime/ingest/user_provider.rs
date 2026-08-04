@@ -6,7 +6,9 @@ use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::store_port::TranscriptIngestStore;
-use crate::runtime::{SessionProvider, claude_observation, cline_like, hermes, kiro, vibe};
+use crate::runtime::{
+    SessionProvider, claude_observation, cline_like, hermes, kimi, kiro, opencode, vibe,
+};
 
 use super::failure::{
     ProviderRunOutcome, classify_transcript_ingest_failure, claude_catch_up_failure,
@@ -56,6 +58,8 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
             SessionProvider::Hermes => self.run_hermes().await,
             SessionProvider::Claude => self.run_claude().await,
             SessionProvider::Kiro => self.run_kiro().await,
+            SessionProvider::Kimi => self.run_kimi().await,
+            SessionProvider::OpenCode => self.run_opencode().await,
             SessionProvider::Cline | SessionProvider::RooCode | SessionProvider::Kilo => {
                 self.run_cline_like().await
             }
@@ -187,6 +191,68 @@ impl<S: TranscriptIngestStore> UserProviderUnit<'_, S> {
                     "observation",
                     &error,
                     "user Kiro observation catch-up failed",
+                ),
+                self.max_new_bytes,
+            ),
+        }
+    }
+
+    async fn run_kimi(self) -> ProviderRunOutcome {
+        let Some(source) = kimi::KimiSource::new() else {
+            return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        };
+        let source = source.for_user_scope(self.roots.to_vec());
+        match kimi::capture_kimi_observations(
+            self.facade,
+            &source,
+            self.profile_root,
+            ObservationScopeV1::Profile,
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred,
+            ),
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "kimi",
+                    "observation",
+                    &error,
+                    "user Kimi observation catch-up failed",
+                ),
+                self.max_new_bytes,
+            ),
+        }
+    }
+
+    async fn run_opencode(self) -> ProviderRunOutcome {
+        let Some(source) = opencode::OpenCodeSource::new_for_user(self.roots.to_vec()) else {
+            return ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
+        };
+        match opencode::capture_opencode_observations(
+            self.facade,
+            &source,
+            ObservationScopeV1::Profile,
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                outcome.stats,
+                outcome.bytes_consumed,
+                outcome.deferred_by_byte_cap,
+            ),
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "opencode",
+                    "observation",
+                    &error,
+                    "user OpenCode observation catch-up failed",
                 ),
                 self.max_new_bytes,
             ),
