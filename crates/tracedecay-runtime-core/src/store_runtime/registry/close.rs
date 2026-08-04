@@ -381,9 +381,10 @@ mod tests {
                 key.incarnation(),
                 LocatorDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap(),
             );
-            let path = _database_authority
-                .map(|authority| authority.canonical_database_path().to_path_buf())
-                .unwrap_or_else(|| self.profile_path.clone());
+            let path = _database_authority.map_or_else(
+                || self.profile_path.clone(),
+                |authority| authority.canonical_database_path().to_path_buf(),
+            );
             Box::pin(async move { Ok(ResolvedStoreLocator::new(verified, path)) })
         }
     }
@@ -753,12 +754,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelling_exact_close_still_finishes_reserved_runtime() {
+    async fn cancelling_destructive_reservation_releases_and_reopens_runtime() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
-        let path = path.canonicalize().unwrap();
-        let opened_file_identity = crate::db::sqlite_generation_identity(&path).unwrap();
+        let profile_path = temporary.path().join("profile.db");
+        let code_path = temporary.path().join("code.db");
+        create_graph_fixture_database_v1(&profile_path).unwrap();
+        create_graph_fixture_database_v1(&code_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
+        let code_path = code_path.canonicalize().unwrap();
+        let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();
         let attachment = Arc::new(BlockingCloseAttachment {
             opened_file_identity,
             drained: AtomicBool::new(false),
@@ -767,10 +771,13 @@ mod tests {
             close_wake: Condvar::new(),
             closed: AtomicBool::new(false),
         });
-        let authority =
-            DatabaseAuthority::for_runtime(&path, "mount cancellation-safe exact-close").unwrap();
+        let authority = DatabaseAuthority::for_runtime(
+            &code_path,
+            "mount cancellation-safe destructive reservation",
+        )
+        .unwrap();
         let registry = StoreRuntimeRegistry::new(
-            Arc::new(FixtureResolver { profile_path: path }),
+            Arc::new(FixtureResolver { profile_path }),
             Arc::new(BlockingClosePublisher {
                 attachment: Arc::clone(&attachment),
             }),
@@ -797,7 +804,7 @@ mod tests {
             .open(StoreRuntimeOpenRequest::new_authorized(
                 code_shard(),
                 incarnation,
-                Some(pin),
+                Some(pin.clone()),
                 authority.clone(),
             ))
             .await
@@ -810,21 +817,24 @@ mod tests {
         let binding = code.binding().clone();
         drop(code);
 
-        let close_registry = registry.clone();
-        let close_binding = binding.clone();
-        let close =
-            tokio::spawn(
-                async move { close_registry.close_exact(&close_binding, &authority).await },
-            );
+        let target =
+            super::super::DestructiveMaintenanceTarget::new(temporary.path(), [code_path.clone()])
+                .unwrap();
+        let reservation_registry = registry.clone();
+        let reservation = tokio::spawn(async move {
+            reservation_registry
+                .begin_destructive_maintenance(target)
+                .await
+        });
         if tokio::time::timeout(Duration::from_secs(2), attachment.close_started.notified())
             .await
             .is_err()
         {
             attachment.release_close();
-            panic!("exact close did not enter the blocking physical close");
+            panic!("destructive close did not enter the blocking physical close");
         }
-        close.abort();
-        assert!(close.await.unwrap_err().is_cancelled());
+        reservation.abort();
+        assert!(matches!(reservation.await, Err(error) if error.is_cancelled()));
         assert!(matches!(
             registry.lookup(&binding),
             StoreRuntimeLookup::Evicting { .. }
@@ -842,6 +852,24 @@ mod tests {
         .await
         .unwrap();
         assert!(attachment.closed.load(Ordering::SeqCst));
+        assert!(registry.destructive_wait(&code_path).is_none());
+
+        let reopened = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("reopen after cancelled destructive reservation failed: {failure:?}")
+            }
+        };
+        assert_ne!(reopened.binding(), &binding);
+        drop(reopened);
         drop(profile);
     }
 
