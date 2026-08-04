@@ -14,14 +14,14 @@
 #
 # usage: scripts/require-exact-test.sh cargo test --test foo the_test -- --exact
 #
-# Set REQUIRE_EXACT_TEST_COUNT to a number other than 1, or to `nonzero` for a
+# Set REQUIRE_EXACT_TEST_COUNT to a positive integer, or to `nonzero` for a
 # single-target suite whose membership may evolve but must never become empty.
 set -uo pipefail
 
 readonly EXPECTED="${REQUIRE_EXACT_TEST_COUNT:-1}"
 
-if [[ $EXPECTED != nonzero && ! $EXPECTED =~ ^[0-9]+$ ]]; then
-    echo "require-exact-test: REQUIRE_EXACT_TEST_COUNT must be an integer or nonzero" >&2
+if [[ $EXPECTED != nonzero && ! $EXPECTED =~ ^[1-9][0-9]*$ ]]; then
+    echo "require-exact-test: REQUIRE_EXACT_TEST_COUNT must be a positive integer or nonzero" >&2
     exit 2
 fi
 
