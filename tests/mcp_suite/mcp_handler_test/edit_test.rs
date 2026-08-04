@@ -68,6 +68,15 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
     assert_eq!(first["success"], true);
     assert_eq!(first["replayed"], false);
+    assert_eq!(first["effect"]["effect_class"], "source_edit");
+    assert_eq!(
+        first["effect"]["idempotency_key"],
+        "mcp-test.source-edit.exact-retry"
+    );
+    assert_eq!(first["effect"]["receipt"]["outcome"], "completed");
+    assert_eq!(first["effect"]["receipt"]["effect_class"], "source_edit");
+    assert_eq!(first["effect"]["receipt"]["expected_state"], expected_state);
+    assert!(first["effect"]["receipt"]["committed_state"].is_string());
     assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
 
     let retry = handle_tool_call(&cg, "tracedecay_str_replace", apply_args, None, None)
@@ -76,6 +85,8 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let retry: Value = serde_json::from_str(extract_text(&retry.value)).unwrap();
     assert_eq!(retry["success"], true);
     assert_eq!(retry["replayed"], true);
+    assert_eq!(retry["effect"]["effect_id"], first["effect"]["effect_id"]);
+    assert_eq!(retry["effect"]["receipt"], first["effect"]["receipt"]);
     assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), applied);
 
     let stale_preview = handle_tool_call(
@@ -114,6 +125,13 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
     let stale_apply: Value = serde_json::from_str(extract_text(&stale_apply.value)).unwrap();
     assert_eq!(stale_apply["success"], false);
     assert_eq!(stale_apply["replayed"], false);
+    assert_eq!(stale_apply["effect"]["effect_class"], "source_edit");
+    assert_eq!(stale_apply["effect"]["receipt"]["outcome"], "failed");
+    assert_eq!(
+        stale_apply["effect"]["receipt"]["expected_state"],
+        stale_expected_state
+    );
+    assert!(stale_apply["effect"]["receipt"]["committed_state"].is_null());
     assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), concurrent);
 }
 

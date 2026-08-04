@@ -21,6 +21,8 @@ pub(crate) async fn handle_body(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let symbol =
         args.get("symbol")
@@ -40,6 +42,8 @@ pub(crate) async fn handle_body(
         limit,
         scope_prefix,
         dependency_hints::lazy_indexing_requested(&args),
+        deadline,
+        cancellation,
     )
     .await?;
 
@@ -135,6 +139,8 @@ async fn body_candidates(
     limit: usize,
     scope_prefix: Option<&str>,
     lazy_index_ignored_dependencies: bool,
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Vec<crate::types::SearchResult>> {
     // First try an exact-name lookup against the DB — this avoids the BM25
     // ranker's tendency to bury a definition under unrelated noise when the
@@ -148,6 +154,8 @@ async fn body_candidates(
             symbol,
             limit,
             scope_prefix,
+            deadline,
+            cancellation,
         )
         .await?;
         if !indexed.is_empty() {
