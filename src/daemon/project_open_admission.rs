@@ -9,11 +9,11 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
-#[cfg(test)]
 use super::store_shutdown::ShutdownTaskOutcome;
+use super::store_shutdown::ShutdownTaskReceipt;
 use super::store_shutdown::ShutdownTaskStatus;
-use super::store_shutdown::{ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
+use futures_util::stream::FuturesUnordered;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
@@ -381,33 +381,16 @@ impl ProjectOpenTasks {
         &self,
         deadline: tokio::time::Instant,
     ) -> ShutdownTaskReceipt {
-        self.cancel();
-        let entries = {
-            let mut registry = self.registry.lock().await;
-            std::mem::take(&mut registry.routes)
-        }
-        .into_values()
-        .collect::<Vec<_>>();
-        for entry in &entries {
-            entry.cancellation.cancel();
-        }
-        join_shutdown_tasks_until(
-            deadline,
-            entries.into_iter().enumerate().map(|(ordinal, entry)| {
-                let task_abort = entry.task.abort_handle();
-                (
-                    format!("project_open[{ordinal}]"),
-                    Some(task_abort),
-                    async move {
-                        match entry.task.await {
-                            Ok(()) => ShutdownTaskStatus::Clean,
-                            Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
-                        }
-                    },
-                )
-            }),
-        )
-        .await
+        let now = tokio::time::Instant::now();
+        let cooperative_deadline =
+            if deadline.saturating_duration_since(now) > DAEMON_TASK_ABORT_DEADLINE {
+                deadline
+                    .checked_sub(DAEMON_TASK_ABORT_DEADLINE)
+                    .unwrap_or(deadline)
+            } else {
+                now
+            };
+        self.shutdown_between(cooperative_deadline, deadline).await
     }
 
     #[cfg(test)]
@@ -416,51 +399,98 @@ impl ProjectOpenTasks {
         cooperative_deadline: Duration,
         post_abort_deadline: Duration,
     ) -> ShutdownTaskReceipt {
-        let mut entries = {
-            let mut registry = self.registry.lock().await;
-            std::mem::take(&mut registry.routes)
-        }
-        .into_values()
-        .collect::<Vec<_>>();
-        for entry in &entries {
+        let cooperative_deadline = tokio::time::Instant::now() + cooperative_deadline;
+        let post_abort_deadline = cooperative_deadline + post_abort_deadline;
+        self.shutdown_between(cooperative_deadline, post_abort_deadline)
+            .await
+    }
+
+    async fn shutdown_between(
+        &self,
+        cooperative_deadline: tokio::time::Instant,
+        post_abort_deadline: tokio::time::Instant,
+    ) -> ShutdownTaskReceipt {
+        self.cancel();
+        let mut registry = self.registry.lock().await;
+        for entry in registry.routes.values() {
             entry.cancellation.cancel();
         }
-        let cooperative_deadline = tokio::time::Instant::now() + cooperative_deadline;
-        let mut outcomes = Vec::with_capacity(entries.len());
-        for (ordinal, entry) in entries.iter_mut().enumerate() {
-            match tokio::time::timeout_at(cooperative_deadline, &mut entry.task).await {
-                Ok(Ok(())) => outcomes.push(ShutdownTaskOutcome {
-                    owner: format!("project_open[{ordinal}]"),
-                    status: ShutdownTaskStatus::Clean,
-                }),
-                Ok(Err(error)) => outcomes.push(ShutdownTaskOutcome {
-                    owner: format!("project_open[{ordinal}]"),
-                    status: ShutdownTaskStatus::Failed(error.to_string()),
-                }),
-                Err(_) => {
-                    entry.task.abort();
-                    outcomes.push(ShutdownTaskOutcome {
-                        owner: format!("project_open[{ordinal}]"),
-                        status: ShutdownTaskStatus::TimedOut,
+
+        let ordinals = registry
+            .routes
+            .keys()
+            .cloned()
+            .enumerate()
+            .map(|(ordinal, route)| (route, ordinal))
+            .collect::<HashMap<_, _>>();
+        let mut outcomes = vec![None; ordinals.len()];
+        let mut joined = vec![false; ordinals.len()];
+        let mut cooperative_joins = FuturesUnordered::new();
+        for (route, entry) in &mut registry.routes {
+            let ordinal = ordinals[route];
+            cooperative_joins.push(async move { (ordinal, (&mut entry.task).await) });
+        }
+        while !cooperative_joins.is_empty() {
+            match tokio::time::timeout_at(cooperative_deadline, cooperative_joins.next()).await {
+                Ok(Some((ordinal, result))) => {
+                    joined[ordinal] = true;
+                    outcomes[ordinal] = Some(match result {
+                        Ok(()) => ShutdownTaskStatus::Clean,
+                        Err(error) if error.is_cancelled() => ShutdownTaskStatus::Clean,
+                        Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
                     });
                 }
+                Ok(None) => break,
+                Err(_) => break,
             }
         }
+        drop(cooperative_joins);
+
+        for (route, entry) in &mut registry.routes {
+            let ordinal = ordinals[route];
+            if joined[ordinal] {
+                continue;
+            }
+            entry.task.abort();
+            outcomes[ordinal] = Some(ShutdownTaskStatus::TimedOut);
+        }
+
+        let mut abort_joins = FuturesUnordered::new();
+        for (route, entry) in &mut registry.routes {
+            let ordinal = ordinals[route];
+            if !joined[ordinal] {
+                abort_joins.push(async move { (ordinal, (&mut entry.task).await) });
+            }
+        }
+        while !abort_joins.is_empty() {
+            match tokio::time::timeout_at(post_abort_deadline, abort_joins.next()).await {
+                Ok(Some((ordinal, result))) => {
+                    joined[ordinal] = true;
+                    if let Err(error) = result
+                        && !error.is_cancelled()
+                    {
+                        outcomes[ordinal] = Some(ShutdownTaskStatus::Failed(error.to_string()));
+                    }
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+        drop(abort_joins);
+
+        registry.routes.retain(|route, _| !joined[ordinals[route]]);
+        let outcomes = outcomes
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, status)| ShutdownTaskOutcome {
+                owner: format!("project_open[{ordinal}]"),
+                status: status.unwrap_or(ShutdownTaskStatus::TimedOut),
+            })
+            .collect::<Vec<_>>();
         if outcomes
             .iter()
             .any(|outcome| outcome.status == ShutdownTaskStatus::TimedOut)
         {
-            let post_abort_deadline = tokio::time::Instant::now() + post_abort_deadline;
-            for (ordinal, entry) in entries.iter_mut().enumerate() {
-                if entry.task.is_finished() {
-                    continue;
-                }
-                if let Ok(Err(error)) =
-                    tokio::time::timeout_at(post_abort_deadline, &mut entry.task).await
-                {
-                    outcomes[ordinal].status = ShutdownTaskStatus::Failed(error.to_string());
-                }
-            }
             log_daemon_event(
                 "project_server_warmup",
                 &[("outcome", "shutdown_abort_timeout".to_string())],

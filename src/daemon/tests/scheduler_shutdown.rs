@@ -693,6 +693,7 @@ async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
 async fn scheduler_cancellation_remains_synchronous_under_registry_contention() {
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {
+        project_root: PathBuf::from("/projects/shutdown-registry-contention-test"),
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/shutdown-registry-contention-test"),
             global_db_path: PathBuf::from("/profiles/shutdown-registry-contention-test/global.db"),
@@ -771,6 +772,7 @@ async fn scheduler_cancellation_remains_synchronous_under_registry_contention() 
 async fn daemon_shutdown_receipt_preserves_panicked_retirement_reaper_task() {
     let engine = DaemonEngine::default();
     let key = ProjectServerKey {
+        project_root: PathBuf::from("/projects/panicked-retirement-owner-test"),
         owner: StoreOwnerKey {
             profile_root: PathBuf::from("/profiles/panicked-retirement-owner-test"),
             global_db_path: PathBuf::from("/profiles/panicked-retirement-owner-test/global.db"),

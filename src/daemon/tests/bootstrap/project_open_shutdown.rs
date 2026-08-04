@@ -62,7 +62,7 @@ async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
                 .expect("project open lifecycle activity");
             let published_cancellation = cancellation.clone();
             task_administration
-                .with_writer_until_cancelled(&cancellation, move || async move {
+                .with_writer(move || async move {
                     cancellation_tx
                         .send(published_cancellation)
                         .expect("publish project-open cancellation");
@@ -72,8 +72,7 @@ async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
                         .send(())
                         .expect("publish safe unit completion");
                 })
-                .await
-                .expect("safe unit acquired writer administration");
+                .await;
             cancellation.cancelled().await;
             Err(TraceDecayError::Config {
                 message: "project open cancelled after safe unit".to_string(),
@@ -226,7 +225,7 @@ async fn project_open_shutdown_until_reserves_time_to_join_aborted_tasks() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() {
+async fn project_open_shutdown_retains_synchronous_work_after_abort_deadline() {
     let tasks = ProjectOpenTasks::default();
     let route = project_open_test_route("shutdown-synchronous-backstop");
     let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -259,14 +258,32 @@ async fn project_open_shutdown_detaches_synchronous_work_after_abort_deadline() 
         ),
     )
     .await
-    .expect("shutdown must detach synchronous work after its abort deadline");
+    .expect("shutdown must report synchronous work after its abort deadline");
 
     assert!(
         !cooperative.is_clean(),
         "synchronous work must reach the backstop"
     );
-    assert_eq!(tasks.tracked_route_count().await, 0);
+    assert_eq!(
+        tasks.tracked_route_count().await,
+        1,
+        "timed-out work must remain owned for a later shutdown attempt"
+    );
     release.store(true, std::sync::atomic::Ordering::Release);
+    let retry = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        tasks.shutdown_with_deadline(
+            tokio::time::Duration::from_secs(1),
+            tokio::time::Duration::from_secs(1),
+        ),
+    )
+    .await
+    .expect("shutdown retry must join retained synchronous work");
+    assert!(
+        retry.is_clean(),
+        "completed retained work must join cleanly: {retry:?}"
+    );
+    assert_eq!(tasks.tracked_route_count().await, 0);
 }
 
 #[cfg(unix)]

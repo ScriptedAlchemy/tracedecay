@@ -144,7 +144,7 @@ fn hook_event_waits_for_registered_project_authority_publication() {
 }
 
 #[cfg(unix)]
-fn run_git(root: &std::path::Path, args: &[&str]) {
+pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
