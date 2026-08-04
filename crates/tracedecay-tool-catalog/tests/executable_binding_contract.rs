@@ -4,7 +4,8 @@ use schemars::JsonSchema;
 use tracedecay_tool_catalog::{
     BindingId, CodecBindingKey, ExecutableBindingAvailabilityV1, ExecutableBindingRegistryV1,
     ExecutableBindingV1, ExecutableUnavailableDispositionV1, ExecutionOwnerV1, OperationId,
-    RouteExposureV1, SchemaBodyAuthorityV1, ServiceId,
+    RouteExposureV1, SchemaBodyAuthorityV1, SdkExecutableBindingV1, SdkTransportBindingV1,
+    ServiceId, SurfaceOperationName,
 };
 
 use common::{capability_id, profile_id, read_manifest, schema, use_case_id};
@@ -92,7 +93,13 @@ fn executable_binding_wire_is_deterministic_and_keeps_stable_names() {
     assert_eq!(value["codec"]["binding_key"], "codec.source-read.json.v1");
     assert_eq!(value["exposure"]["visibility"], "public");
     assert_eq!(value["exposure"]["binding_id"], "binding.http.source-read");
+    assert_eq!(value["effect"], "read");
+    assert_eq!(value["idempotency"], "not_required");
     assert_eq!(value["cancellation"]["mode"], "cooperative");
+    assert_eq!(value["deadline"]["maximum_millis"], 1_000);
+    assert_eq!(value["deadline"]["behavior"], "return_operation_receipt");
+    assert_eq!(value["reconciliation"], "not_required");
+    assert_eq!(value["receipt"], "operation");
 }
 
 #[test]
@@ -207,4 +214,48 @@ fn executable_registry_rejects_duplicate_operation_ids() {
         }])
         .unwrap();
     assert!(registry.get(&operation_id).is_some());
+}
+
+#[test]
+fn sdk_binding_keeps_the_named_mcp_transport_without_inventing_an_http_route() {
+    let manifest = read_manifest(
+        capability_id("capability.source.read"),
+        use_case_id("use-case.source.read"),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
+        vec![BindingId::new("binding.mcp.source-read").unwrap()],
+        vec![profile_id("profile.default")],
+    );
+    let executable = ExecutableBindingV1::daemon_owned(
+        &manifest,
+        OperationId::new("operation.source.read").unwrap(),
+        ServiceId::new("service.source-read").unwrap(),
+        SchemaBodyAuthorityV1::for_type::<ReadRequest>(manifest.request_schema().clone()).unwrap(),
+        SchemaBodyAuthorityV1::for_type::<ReadResult>(manifest.result_schema().clone()).unwrap(),
+        CodecBindingKey::new("codec.source-read.json.v1").unwrap(),
+        RouteExposureV1::Internal,
+    )
+    .unwrap();
+
+    let binding = SdkExecutableBindingV1::new(
+        executable,
+        BindingId::new("binding.mcp.source-read").unwrap(),
+        SurfaceOperationName::new("source_read").unwrap(),
+        SdkTransportBindingV1::McpTool {
+            tool_name: "tracedecay_source_read".to_owned(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(binding.sdk_method().as_str(), "source_read");
+    assert_eq!(binding.binding_id().as_str(), "binding.mcp.source-read");
+    assert!(matches!(
+        binding.transport(),
+        SdkTransportBindingV1::McpTool { tool_name }
+            if tool_name == "tracedecay_source_read"
+    ));
+    assert!(matches!(
+        binding.executable().exposure(),
+        RouteExposureV1::Internal
+    ));
 }
