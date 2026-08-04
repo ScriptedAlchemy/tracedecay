@@ -410,6 +410,11 @@ async fn inventory_linked_snapshot_roots(state: &WatchState) -> std::collections
     let Some(common) = state.common_dir.as_deref() else {
         return std::collections::HashSet::new();
     };
+    if common.file_name().is_some_and(|name| name == ".git")
+        && let Some(primary_root) = common.parent()
+    {
+        state.register_snapshot_root(primary_root).await;
+    }
     let mut new_worktrees = std::collections::HashSet::new();
     for name in store_maintenance::linked_worktree_names(common) {
         if let Some((root, _branch)) = store_maintenance::resolve_worktree(common, &name)

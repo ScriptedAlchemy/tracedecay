@@ -590,6 +590,29 @@ async fn common_dir_collapses_aliases_but_retains_worktree_snapshots() {
 }
 
 #[tokio::test]
+async fn linked_worktree_registration_keeps_the_primary_snapshot_root() {
+    let repo = temp_repo();
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked_root = linked_parent.path().join("linked");
+    let linked = linked_root.to_string_lossy().into_owned();
+    git(
+        repo.path(),
+        &["worktree", "add", "-b", "feature/linked-first", &linked],
+    );
+
+    let watcher = GitWatcher::new(fast_watch_config());
+    watcher.ensure_watching(&linked_root).await;
+    let state = ready_registered_state(&watcher, &linked_root).await;
+
+    let roots = state.roots().await;
+    assert!(
+        roots.contains(&repo.path().to_path_buf()) && roots.contains(&linked_root),
+        "a common-directory watcher registered from a linked worktree must retain the primary root"
+    );
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
 async fn removed_worktree_snapshot_root_is_pruned() {
     let repo = temp_repo();
     let state = test_watch_state(repo.path());

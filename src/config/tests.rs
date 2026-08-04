@@ -263,7 +263,7 @@ fn sync_config_defaults_round_trip() {
     assert_eq!(config.sync, parsed.sync);
     assert_eq!(parsed.sync, super::SyncConfig::default());
     // Spot-check a few of the documented defaults.
-    assert!(parsed.sync.auto_watch);
+    assert!(!parsed.sync.auto_watch);
     assert_eq!(parsed.sync.watch_debounce_ms, 2000);
     assert_eq!(parsed.sync.full_sync_escalation_files, 500);
     assert_eq!(parsed.sync.max_concurrent_syncs, 2);
