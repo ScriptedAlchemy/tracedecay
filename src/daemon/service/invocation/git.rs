@@ -329,7 +329,7 @@ pub(super) async fn execute_git_read(
     }
 }
 
-fn git_read_output_limit_problem() -> ApplicationProblem {
+pub(super) fn git_read_output_limit_problem() -> ApplicationProblem {
     ApplicationProblem::Saturated {
         diagnostic: SafeDiagnostic {
             code: "git_read.output_limit_exceeded".to_owned(),
