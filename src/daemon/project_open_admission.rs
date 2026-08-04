@@ -49,22 +49,22 @@ pub(super) struct ProjectOpenGates {
     pub(super) gates: HashMap<ProjectRouteKey, std::sync::Weak<ProjectOpenGate>>,
     pub(super) tasks: ProjectOpenTasks,
 }
-#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
+#[cfg(unix)]
 pub(super) type MaintenanceTransitionGate = tokio::sync::Mutex<()>;
-#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
+#[cfg(unix)]
 pub(super) type MaintenanceTransitionGates =
     HashMap<MaintenanceTransitionKey, std::sync::Weak<MaintenanceTransitionGate>>;
 
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 pub(super) struct MaintenanceTransitionKey {
     pub(super) profile_root: PathBuf,
     pub(super) project_id: Option<String>,
     pub(super) scope_prefix: Option<String>,
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(not(unix), allow(dead_code))] // used by unix-only daemon serving paths
 pub(super) enum MaintenanceRekeyOutcome {
     Completed,
     Retiring,
