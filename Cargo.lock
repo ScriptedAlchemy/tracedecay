@@ -5685,6 +5685,7 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "toml",
  "tower",
  "tracedecay-agent-hosts",

@@ -342,6 +342,7 @@ cap-fs-ext = "4.0.2"
 lsp-types = "0.97.0"
 schemars = "1.2.1"
 futures-util = "0.3.33"
+tokio-util = { version = "0.7.19", features = ["codec"] }
 rmcp = { version = "3.0.1", default-features = false, features = ["server"] }
 
 [target.'cfg(not(windows))'.dependencies]

@@ -13,9 +13,9 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -250,6 +250,7 @@ pub(in crate::daemon::service) use types::{
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
+    lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
     authorized_lsp_workspaces: Arc<Mutex<BTreeMap<ManifestDigest, AuthorizedDaemonLspWorkspace>>>,
     context_scout_registries:
         Arc<Mutex<BTreeMap<ProjectId, Arc<ProjectContextScoutAddressRegistryV1>>>>,
@@ -274,6 +275,7 @@ impl DaemonInvocationService {
         Self {
             code_index_schedulers,
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
+            lsp_lease_tasks: Arc::new(LspLeaseTaskRegistry::default()),
             authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),
             context_scout_registries: Arc::new(Mutex::new(BTreeMap::new())),
             project_runtimes: ProjectRuntimeRegistryV1::default(),

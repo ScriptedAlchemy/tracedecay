@@ -925,7 +925,6 @@ pub struct DaemonLspSessionClient {
     scope_set_id: Option<tracedecay_domain::ScopeSetId>,
     scope_set_digest: Option<tracedecay_domain::ManifestDigest>,
     next_request: ConnectionLocalRequestSequence,
-    detached: bool,
 }
 
 impl DaemonLspSessionClient {
@@ -969,7 +968,6 @@ impl DaemonLspSessionClient {
             scope_set_id,
             scope_set_digest,
             next_request: ConnectionLocalRequestSequence::starting_at(2),
-            detached: false,
         })
     }
 
@@ -1121,10 +1119,7 @@ impl DaemonLspSessionClient {
             )
             .await?;
         match response.outcome {
-            crate::daemon_contract::DaemonInvocationOutcome::LspDetached => {
-                self.detached = true;
-                Ok(())
-            }
+            crate::daemon_contract::DaemonInvocationOutcome::LspDetached => Ok(()),
             outcome => Err(invocation_outcome_error(outcome)),
         }
     }
@@ -1150,48 +1145,6 @@ impl DaemonLspSessionClient {
         self.next_request
             .next_string("lsp.")
             .map_err(|_| InvocationError::Unavailable)
-    }
-}
-
-impl Drop for DaemonLspSessionClient {
-    fn drop(&mut self) {
-        if self.detached {
-            return;
-        }
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let invocation = self.invocation.clone();
-        let session = self.session.clone();
-        let Ok(request_id) = self.next_request_id() else {
-            return;
-        };
-        let Ok(deadline) = Deadline::new(UtcMicros(
-            invocation_now_micros().0.saturating_add(2_000_000),
-        )) else {
-            return;
-        };
-        let Ok(cancellation) =
-            CancellationSignal::active(format!("cancellation.{request_id}.detach"))
-        else {
-            return;
-        };
-        let cancellation_context = cancellation.context();
-        runtime.spawn(async move {
-            let _ = invocation
-                .invoke_controlled(
-                    crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
-                        request_id,
-                        session,
-                        deadline.clone(),
-                        cancellation_context,
-                    ),
-                    deadline,
-                    cancellation,
-                    InvocationCancellationPolicy::ReadOnly,
-                )
-                .await;
-        });
     }
 }
 

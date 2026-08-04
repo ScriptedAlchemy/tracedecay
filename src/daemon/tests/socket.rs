@@ -138,7 +138,7 @@ fn closed_feedback_list_request(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn dropping_lsp_client_sends_immediate_session_detach() {
+async fn dropping_lsp_client_closes_transport_without_spawning_detach() {
     let (listener, endpoint) = super::super::transport::BrokerListener::bind(
         &super::super::transport::default_loopback_endpoint(),
     )
@@ -180,16 +180,14 @@ async fn dropping_lsp_client_sends_immediate_session_detach() {
         writer.write_all(b"\n").await.expect("response newline");
         writer.flush().await.expect("flush response");
 
-        let detach: Value = serde_json::from_str(
-            &tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
-                .await
-                .expect("drop must not wait for TTL")
-                .expect("read detach")
-                .expect("detach request"),
-        )
-        .expect("detach json");
-        assert_eq!(detach["operation"], "lsp_detach");
-        assert_eq!(detach["session"]["session_id"], "lsp-drop-test");
+        let next = tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("client drop must close the transport")
+            .expect("read after client drop");
+        assert!(
+            next.is_none(),
+            "client Drop must not launch a detached LSP request: {next:?}"
+        );
     });
     let profile = TempDir::new().expect("profile");
     let invocation = lsp_test_invocation(endpoint, &profile, "client.drop-test");
@@ -238,7 +236,7 @@ async fn lsp_gateway_open_carries_control_and_returns_typed_deadline() {
         .expect("open json");
         assert_eq!(open["operation"], "lsp_open");
         assert_eq!(open["deadline"]["expires_at"], expected_deadline);
-        assert_eq!(open["cancellation"]["state"], "active");
+        assert_eq!(open["cancellation"]["state"]["state"], "active");
         lines.next_line().await.expect("client disconnect");
     });
     let profile = TempDir::new().expect("profile");
