@@ -329,12 +329,11 @@ fn run_update_flow(
             previous_daemon_state,
         );
         drop(held_lease);
-        match execution {
-            PostUpdateExecution::NotLaunched(error) => {
-                restore_after_update_window(previous_daemon_state, Err(error))
-            }
-            PostUpdateExecution::Completed(result) => result,
-        }
+        finish_post_update_execution_with(
+            previous_daemon_state,
+            execution,
+            tracedecay::daemon::restore_quiesced_installed_service,
+        )
     });
     finish_update_flow_with(
         &mut lifecycle_lease,
@@ -535,6 +534,22 @@ fn run_post_update_subcommand(
 enum PostUpdateExecution {
     NotLaunched(tracedecay::errors::TraceDecayError),
     Completed(tracedecay::errors::Result<()>),
+}
+
+fn finish_post_update_execution_with<Restore>(
+    previous_state: tracedecay::daemon::DaemonServiceState,
+    execution: PostUpdateExecution,
+    restore: Restore,
+) -> tracedecay::errors::Result<()>
+where
+    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay::errors::Result<()>,
+{
+    match execution {
+        PostUpdateExecution::Completed(Ok(())) => Ok(()),
+        PostUpdateExecution::NotLaunched(error) | PostUpdateExecution::Completed(Err(error)) => {
+            restore_after_update_window_with(previous_state, Err(error), restore)
+        }
+    }
 }
 
 /// The result of a tracked-agent reinstall pass. Version markers may only
@@ -761,14 +776,15 @@ fn reconcile_materialized_managed_skills_after_update() {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::{Path, PathBuf};
 
     use super::{
-        RefreshPolicy, ReinstallOutcome, begin_update_window_with, current_tracedecay_exe_from,
-        finish_update_flow_with, normalize_bin_path, partition_reinstall_results,
-        post_update_binary, post_update_binary_from, prepare_post_update_lease,
-        resolve_previous_daemon_state, restart_daemon_service_with, run_install_then_refresh,
+        PostUpdateExecution, RefreshPolicy, ReinstallOutcome, begin_update_window_with,
+        current_tracedecay_exe_from, finish_post_update_execution_with, finish_update_flow_with,
+        normalize_bin_path, partition_reinstall_results, post_update_binary,
+        post_update_binary_from, prepare_post_update_lease, resolve_previous_daemon_state,
+        restart_daemon_service_with, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -814,6 +830,36 @@ mod tests {
             |_| panic!("post-update already owns daemon restoration"),
         )
         .expect("completed post-update");
+    }
+
+    #[test]
+    fn failed_post_update_restores_daemon_from_parent() {
+        let restored = Cell::new(false);
+        let result = finish_post_update_execution_with(
+            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+            PostUpdateExecution::Completed(Err(config_err("post-update child failed"))),
+            |state| {
+                assert_eq!(
+                    state,
+                    tracedecay::daemon::DaemonServiceState::RunningEnabled
+                );
+                restored.set(true);
+                Ok(())
+            },
+        );
+
+        assert!(result.is_err());
+        assert!(restored.get());
+    }
+
+    #[test]
+    fn successful_post_update_remains_the_daemon_restorer() {
+        finish_post_update_execution_with(
+            tracedecay::daemon::DaemonServiceState::RunningEnabled,
+            PostUpdateExecution::Completed(Ok(())),
+            |_| panic!("successful post-update already restored the daemon"),
+        )
+        .expect("successful post-update");
     }
 
     #[test]
