@@ -32,6 +32,30 @@ pub struct GitHealthProjectionSnapshotV1 {
     pub commits_projected: usize,
     pub batches_completed: u64,
     pub file_churn: BTreeMap<String, usize>,
+    pub coverage: GitHealthProjectionCoverageV1,
+}
+
+/// Whether the bounded projection represents the whole requested Git window.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum GitHealthProjectionCoverageV1 {
+    Complete,
+    Partial {
+        reason: GitHealthProjectionPartialReasonV1,
+    },
+}
+
+/// Stable bound that stopped a projection before the whole window was covered.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitHealthProjectionPartialReasonV1 {
+    CommitLimit,
+    FrontierLimit,
+    UniquePathLimit,
+    ChangedPathLimit,
+    PathBytesLimit,
+    RelationLimit,
+    CommitPathLimit,
 }
 
 /// Stable reason a Git health projection cannot currently be used.

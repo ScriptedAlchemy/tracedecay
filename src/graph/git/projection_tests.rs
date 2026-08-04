@@ -3,12 +3,17 @@ use std::path::Path;
 
 use tempfile::TempDir;
 use tracedecay_application::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionSourceV1, ResolvedScope,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionCoverageV1, GitHealthProjectionSourceV1,
+    ResolvedScope,
 };
 use tracedecay_domain::ProjectId;
 use tracedecay_graph_db::GraphDbError;
 
-use super::{GitHealthProjectionError, GitHealthProjectionStoreV1, capture_source};
+use super::{
+    CommitRecordV1, GitHealthProjectionError, GitHealthProjectionStoreV1, MAX_DURABLE_FRONTIER,
+    MAX_UNIQUE_PATHS, MAX_WINDOW_COMMITS, ProjectionCountersV1, TokenCancellation, WorkingStateV1,
+    capture_source,
+};
 use crate::application::context::CancellationToken;
 
 const NOW_SECS: i64 = 2_000_000_000;
@@ -125,6 +130,7 @@ fn bounded_projection_preserves_exact_source_identity_and_does_not_rebuild_same_
     assert_eq!(snapshot.source.scope, scope);
     assert_eq!(snapshot.commits_projected, 13);
     assert_eq!(snapshot.file_churn.get("src.rs"), Some(&13));
+    assert_eq!(snapshot.coverage, GitHealthProjectionCoverageV1::Complete);
 
     let no_op = store
         .advance(root.path(), &scope, NOW_SECS, 3, &cancellation)
@@ -145,7 +151,38 @@ fn bounded_projection_preserves_exact_source_identity_and_does_not_rebuild_same_
 }
 
 #[test]
-fn cancelled_refresh_keeps_the_prior_complete_projection_readable() {
+fn same_head_advances_the_day_window_without_rewalking_history() {
+    let root = repository();
+    for ordinal in 0..5 {
+        commit_file(root.path(), ordinal, "daily.rs");
+    }
+    let scope = scope(root.path());
+    let store_dir = TempDir::new().expect("temporary projection store");
+    let cancellation = CancellationToken::new();
+    let store = GitHealthProjectionStoreV1::open(
+        &store_dir.path().join("project-graph.grafeo"),
+        &cancellation,
+    )
+    .expect("open projection");
+    finish_projection(&store, root.path(), &scope, 2, &cancellation);
+
+    let next_day = NOW_SECS + 24 * 60 * 60;
+    let progress = store
+        .advance(root.path(), &scope, next_day, 2, &cancellation)
+        .expect("advance day boundary");
+    assert_eq!(progress.commits_examined, 0);
+    assert!(progress.complete);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&scope) else {
+        panic!("same-head day-boundary advance must stay ready");
+    };
+    assert_eq!(snapshot.file_churn.get("daily.rs"), Some(&5));
+    assert_eq!(snapshot.source.window_end_epoch_secs, {
+        next_day - next_day.rem_euclid(24 * 60 * 60)
+    });
+}
+
+#[test]
+fn cancelled_refresh_never_promotes_partial_working_state_to_ready() {
     let root = repository();
     commit_file(root.path(), 0, "stable.rs");
     let scope = scope(root.path());
@@ -163,14 +200,12 @@ fn cancelled_refresh_keeps_the_prior_complete_projection_readable() {
         .advance(root.path(), &scope, NOW_SECS, 1, &active)
         .expect("start refresh");
     assert!(!refresh.complete);
-    let GitHealthProjectionAvailabilityV1::Refreshing {
-        snapshot: while_refreshing,
-        target,
+    let GitHealthProjectionAvailabilityV1::Warming {
+        target: Some(target),
     } = store.read(&scope)
     else {
-        panic!("incomplete refresh must retain the prior complete snapshot");
+        panic!("incomplete durable state must remain warming");
     };
-    assert_eq!(while_refreshing, before);
     assert_ne!(target.commit, before.source.commit);
 
     let cancelled = CancellationToken::new();
@@ -179,13 +214,10 @@ fn cancelled_refresh_keeps_the_prior_complete_projection_readable() {
         store.advance(root.path(), &scope, NOW_SECS, 8, &cancelled),
         Err(GitHealthProjectionError::Cancelled)
     ));
-    let GitHealthProjectionAvailabilityV1::Refreshing {
-        snapshot: after, ..
-    } = store.read(&scope)
-    else {
-        panic!("cancelled refresh must preserve prior readable state");
-    };
-    assert_eq!(after, before);
+    assert!(matches!(
+        store.read(&scope),
+        GitHealthProjectionAvailabilityV1::Warming { .. }
+    ));
 }
 
 #[test]
@@ -256,4 +288,109 @@ fn source_identity_changes_with_commit_tree_and_projection_generation() {
     assert_ne!(after.commit, before.commit);
     assert_ne!(after.tree, before.tree);
     assert_ne!(after.projection_generation, before.projection_generation);
+}
+
+#[test]
+fn non_fast_forward_scope_switch_replaces_obsolete_branch_entities() {
+    let root = repository();
+    commit_file(root.path(), 0, "base.rs");
+    commit_file(root.path(), 1, "old-only.rs");
+    let main_scope = scope(root.path());
+    let store_dir = TempDir::new().expect("temporary projection store");
+    let cancellation = CancellationToken::new();
+    let store = GitHealthProjectionStoreV1::open(
+        &store_dir.path().join("project-graph.grafeo"),
+        &cancellation,
+    )
+    .expect("open projection");
+    finish_projection(&store, root.path(), &main_scope, 4, &cancellation);
+
+    git(root.path(), &["switch", "--quiet", "-c", "other", "HEAD~1"]);
+    commit_file(root.path(), 2, "branch-only.rs");
+    let branch_scope = scope(root.path());
+    finish_projection(&store, root.path(), &branch_scope, 4, &cancellation);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&branch_scope) else {
+        panic!("replacement branch projection must become ready");
+    };
+    assert_eq!(snapshot.file_churn.get("base.rs"), Some(&1));
+    assert_eq!(snapshot.file_churn.get("branch-only.rs"), Some(&1));
+    assert_eq!(snapshot.file_churn.get("old-only.rs"), None);
+
+    let entities = store
+        .projection_entities(
+            &branch_scope,
+            std::sync::Arc::new(TokenCancellation(CancellationToken::new())),
+        )
+        .expect("bounded retained projection");
+    assert_eq!(entities.len(), 6);
+}
+
+#[test]
+fn total_commit_path_and_frontier_bounds_produce_typed_partial_coverage() {
+    let root = repository();
+    commit_file(root.path(), 0, "base.rs");
+    let scope = scope(root.path());
+    let target = capture_source(root.path(), &scope, NOW_SECS).expect("source");
+    let store_dir = TempDir::new().expect("temporary projection store");
+    let cancellation = CancellationToken::new();
+    let store = GitHealthProjectionStoreV1::open(
+        &store_dir.path().join("project-graph.grafeo"),
+        &cancellation,
+    )
+    .expect("open projection");
+    let record = CommitRecordV1 {
+        oid: target.commit.clone(),
+        tree: target.tree.clone(),
+        committed_at_epoch_secs: NOW_SECS,
+        parents: Vec::new(),
+        changed_files: vec!["new.rs".to_owned()],
+    };
+    let graph_cancellation = std::sync::Arc::new(TokenCancellation(cancellation.clone()));
+
+    let mut commits = WorkingStateV1 {
+        target: target.clone(),
+        pending: Default::default(),
+        counters: ProjectionCountersV1 {
+            commits_projected: MAX_WINDOW_COMMITS,
+            ..ProjectionCountersV1::default()
+        },
+        complete: false,
+    };
+    assert_eq!(
+        store
+            .admission_failure(
+                &scope,
+                &commits,
+                &record,
+                &Default::default(),
+                graph_cancellation.clone(),
+            )
+            .expect("commit bound"),
+        Some(tracedecay_application::GitHealthProjectionPartialReasonV1::CommitLimit)
+    );
+
+    commits.counters.commits_projected = 0;
+    commits.counters.unique_paths = MAX_UNIQUE_PATHS;
+    assert_eq!(
+        store
+            .admission_failure(
+                &scope,
+                &commits,
+                &record,
+                &Default::default(),
+                graph_cancellation,
+            )
+            .expect("path bound"),
+        Some(tracedecay_application::GitHealthProjectionPartialReasonV1::UniquePathLimit)
+    );
+
+    let parents = vec![target.commit; MAX_DURABLE_FRONTIER + 1];
+    commits.admit_parents(&parents);
+    assert_eq!(
+        commits.counters.coverage,
+        GitHealthProjectionCoverageV1::Partial {
+            reason: tracedecay_application::GitHealthProjectionPartialReasonV1::FrontierLimit,
+        }
+    );
+    assert!(commits.pending.is_empty());
 }

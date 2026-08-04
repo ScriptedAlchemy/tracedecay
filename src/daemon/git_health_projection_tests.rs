@@ -1,12 +1,11 @@
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
 use tracedecay_application::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadPortV1,
-    GitHealthProjectionReadServiceV1, GitHealthProjectionUnavailableReasonV1, ResolvedScope,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadServiceV1,
+    GitHealthProjectionUnavailableReasonV1, ResolvedScope,
 };
 use tracedecay_domain::{ProjectId, RefId};
 
@@ -60,12 +59,14 @@ async fn daemon_projection_is_read_through_the_scope_pinned_application_service(
     let scope = scope(repository.path());
     let store_dir = TempDir::new().expect("temporary projection store");
     let registry = GitHealthProjectionRegistryV1::new(1);
-    assert!(registry.mount(
-        repository.path(),
-        store_dir.path().join("git-health.grafeo"),
-        scope.clone(),
-    ));
-    let port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(registry.clone());
+    let port = registry
+        .mount(
+            repository.path(),
+            store_dir.path().join("project-graph.grafeo"),
+            scope.clone(),
+        )
+        .await
+        .expect("mount projection");
     let reader =
         GitHealthProjectionReadServiceV1::new(scope.clone(), port).expect("application reader");
 
@@ -83,39 +84,111 @@ async fn daemon_projection_is_read_through_the_scope_pinned_application_service(
     assert_eq!(snapshot.file_churn.get("history.rs"), Some(&2));
     assert_eq!(snapshot.commits_projected, 2);
 
+    commit(repository.path(), 2);
+    let GitHealthProjectionAvailabilityV1::Refreshing {
+        snapshot: drifted,
+        target,
+    } = reader.read()
+    else {
+        panic!("an immediate HEAD change must invalidate cached Ready");
+    };
+    assert_eq!(drifted, snapshot);
+    assert_ne!(target.commit, snapshot.source.commit);
+
     git(repository.path(), &["switch", "--quiet", "-c", "other"]);
-    let stale_snapshot = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            if let GitHealthProjectionAvailabilityV1::Stale {
-                snapshot,
-                reason: GitHealthProjectionUnavailableReasonV1::ScopeDrift,
-            } = reader.read()
-            {
-                break snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("ref drift should mark the prior snapshot stale");
+    let GitHealthProjectionAvailabilityV1::Stale {
+        snapshot: stale_snapshot,
+        reason: GitHealthProjectionUnavailableReasonV1::ScopeDrift,
+    } = reader.read()
+    else {
+        panic!("ref drift must synchronously mark cached history stale");
+    };
     assert_eq!(stale_snapshot, snapshot);
 
-    let drifted_scope = ResolvedScope::new(
+    let switched_scope = ResolvedScope::new(
         scope.project_id.clone(),
         scope.repository_id.clone(),
         scope.worktree_id.clone(),
         Some(RefId::new("refs/heads/other").expect("ref")),
     )
-    .expect("drifted scope");
-    let drifted_port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(registry.clone());
-    let drifted =
-        GitHealthProjectionReadServiceV1::new(drifted_scope, drifted_port).expect("reader");
+    .expect("switched scope");
+    let switched_port = registry
+        .mount(
+            repository.path(),
+            store_dir.path().join("project-graph.grafeo"),
+            switched_scope.clone(),
+        )
+        .await
+        .expect("replace branch owner");
+    assert_eq!(registry.owner_count(), 1);
+    let switched =
+        GitHealthProjectionReadServiceV1::new(switched_scope, switched_port).expect("reader");
     assert_eq!(
-        drifted.read(),
+        reader.read(),
         GitHealthProjectionAvailabilityV1::Unavailable {
-            reason: GitHealthProjectionUnavailableReasonV1::ScopeDrift,
+            reason: GitHealthProjectionUnavailableReasonV1::NotMounted,
         }
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                switched.read(),
+                GitHealthProjectionAvailabilityV1::Ready { .. }
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("normal branch switch should warm a replacement owner");
 
+    drop(switched);
+    tokio::task::yield_now().await;
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn retired_owner_releases_capacity_for_another_project() {
+    let first = TempDir::new().expect("first repository");
+    git(first.path(), &["init", "--quiet", "-b", "main"]);
+    commit(first.path(), 0);
+    let second = TempDir::new().expect("second repository");
+    git(second.path(), &["init", "--quiet", "-b", "main"]);
+    commit(second.path(), 0);
+    let stores = TempDir::new().expect("project graphs");
+    let registry = GitHealthProjectionRegistryV1::new(1);
+    let first_port = registry
+        .mount(
+            first.path(),
+            stores.path().join("first-project-graph.grafeo"),
+            scope(first.path()),
+        )
+        .await
+        .expect("first owner");
+    assert!(
+        registry
+            .mount(
+                second.path(),
+                stores.path().join("second-project-graph.grafeo"),
+                scope(second.path()),
+            )
+            .await
+            .is_err(),
+        "live owner must retain its capacity slot"
+    );
+
+    drop(first_port);
+    assert_eq!(registry.owner_count(), 0);
+    let second_port = registry
+        .mount(
+            second.path(),
+            stores.path().join("second-project-graph.grafeo"),
+            scope(second.path()),
+        )
+        .await
+        .expect("retired owner must release its slot");
+    assert_eq!(registry.owner_count(), 1);
+    drop(second_port);
     registry.shutdown().await;
 }

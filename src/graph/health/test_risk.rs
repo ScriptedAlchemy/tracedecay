@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 use tracedecay_application::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadServiceV1,
-    GitHealthProjectionSnapshotV1, GitHealthProjectionUnavailableReasonV1,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionCoverageV1,
+    GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1,
+    GitHealthProjectionUnavailableReasonV1,
 };
 
 use crate::errors::Result;
@@ -255,11 +256,11 @@ pub async fn analyze_test_risk(
         GitHealthProjectionReadServiceV1::read,
     );
     match &git_history {
-        GitHealthProjectionAvailabilityV1::Ready { snapshot }
-        | GitHealthProjectionAvailabilityV1::Refreshing { snapshot, .. } => {
+        GitHealthProjectionAvailabilityV1::Ready { snapshot } => {
             apply_churn(&mut risks, snapshot);
         }
-        GitHealthProjectionAvailabilityV1::Warming { .. }
+        GitHealthProjectionAvailabilityV1::Refreshing { .. }
+        | GitHealthProjectionAvailabilityV1::Warming { .. }
         | GitHealthProjectionAvailabilityV1::Stale { .. }
         | GitHealthProjectionAvailabilityV1::Unavailable { .. } => {}
     }
@@ -325,6 +326,9 @@ pub async fn analyze_test_risk(
 }
 
 fn apply_churn(risks: &mut [RiskEntry], snapshot: &GitHealthProjectionSnapshotV1) {
+    if snapshot.coverage != GitHealthProjectionCoverageV1::Complete {
+        return;
+    }
     for risk in risks {
         let churn = snapshot.file_churn.get(&risk.file).copied().unwrap_or(0);
         risk.churn = Some(churn);
@@ -396,5 +400,79 @@ fn classify_test_attribution(depth: Option<usize>) -> TestAttributionMethod {
         Some(1) => TestAttributionMethod::DirectUnit,
         Some(depth) if depth >= 2 => TestAttributionMethod::Closure,
         None | Some(_) => TestAttributionMethod::None,
+    }
+}
+
+#[cfg(test)]
+mod churn_tests {
+    use std::collections::BTreeMap;
+
+    use tracedecay_application::{
+        GitHealthProjectionCoverageV1, GitHealthProjectionPartialReasonV1,
+        GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1, ResolvedScope,
+    };
+    use tracedecay_domain::{GitOidV1, ManifestDigest, ProjectId, RefId, RepositoryId, WorktreeId};
+
+    use super::{RiskEntry, TestAttributionMethod, apply_churn};
+
+    fn risk(file: &str) -> RiskEntry {
+        RiskEntry {
+            id: "symbol".to_owned(),
+            name: "symbol".to_owned(),
+            file: file.to_owned(),
+            line: 1,
+            complexity: 1,
+            fan_in: 0,
+            attribution_method: TestAttributionMethod::None,
+            attribution_depth: None,
+            risk: 2.0,
+            churn: None,
+        }
+    }
+
+    fn snapshot(coverage: GitHealthProjectionCoverageV1) -> GitHealthProjectionSnapshotV1 {
+        GitHealthProjectionSnapshotV1 {
+            source: GitHealthProjectionSourceV1 {
+                scope: ResolvedScope::new(
+                    ProjectId::new("project.health").unwrap(),
+                    RepositoryId::new("repository.health").unwrap(),
+                    WorktreeId::new("worktree.health").unwrap(),
+                    Some(RefId::new("refs/heads/main").unwrap()),
+                )
+                .unwrap(),
+                commit: GitOidV1::new("a".repeat(40)).unwrap(),
+                tree: GitOidV1::new("b".repeat(40)).unwrap(),
+                projection_generation: ManifestDigest::new(format!("sha256:{}", "c".repeat(64)))
+                    .unwrap(),
+                window_start_epoch_secs: 0,
+                window_end_epoch_secs: 1,
+            },
+            commits_projected: 1,
+            batches_completed: 1,
+            file_churn: BTreeMap::from([("src/present.rs".to_owned(), 3)]),
+            coverage,
+        }
+    }
+
+    #[test]
+    fn missing_path_under_partial_coverage_never_becomes_zero() {
+        let mut risks = [risk("src/missing.rs")];
+        apply_churn(
+            &mut risks,
+            &snapshot(GitHealthProjectionCoverageV1::Partial {
+                reason: GitHealthProjectionPartialReasonV1::CommitLimit,
+            }),
+        );
+        assert_eq!(risks[0].churn, None);
+    }
+
+    #[test]
+    fn complete_coverage_can_report_an_exact_missing_path_as_zero() {
+        let mut risks = [risk("src/missing.rs")];
+        apply_churn(
+            &mut risks,
+            &snapshot(GitHealthProjectionCoverageV1::Complete),
+        );
+        assert_eq!(risks[0].churn, Some(0));
     }
 }

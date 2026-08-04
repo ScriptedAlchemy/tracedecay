@@ -10,7 +10,8 @@ mod transactions;
 
 pub use catalog::{git_index_catalog_contribution, git_index_handler_descriptors};
 pub use health_projection::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadPortV1,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionCoverageV1,
+    GitHealthProjectionPartialReasonV1, GitHealthProjectionReadPortV1,
     GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
     GitHealthProjectionUnavailableReasonV1,
 };

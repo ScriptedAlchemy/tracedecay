@@ -330,18 +330,18 @@ pub(super) async fn production_project_server(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project search scope is invalid: {error:?}"),
             })?;
-    let git_health_projection_store = code_index_scheduler::scoped_code_index_store_root(
-        &code_index_store_root,
-        canonical_project_path,
-    )
-    .join("git-health.grafeo");
-    invocation.git_health_projections.mount(
-        canonical_project_path,
-        git_health_projection_store,
-        code_search_scope.clone(),
-    );
-    let git_health_projection_port: Arc<dyn tracedecay_application::GitHealthProjectionReadPortV1> =
-        Arc::new(invocation.git_health_projections.clone());
+    let git_health_projection_store = cg.store_layout().data_root.join("project-graph.grafeo");
+    let git_health_projection_port = invocation
+        .git_health_projections
+        .mount(
+            canonical_project_path,
+            git_health_projection_store,
+            code_search_scope.clone(),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("Git health projection could not be mounted: {error}"),
+        })?;
     let git_health_projection_reader =
         tracedecay_application::GitHealthProjectionReadServiceV1::new(
             code_search_scope.clone(),

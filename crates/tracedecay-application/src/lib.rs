@@ -123,7 +123,8 @@ pub use feedback::{
 pub use git::NativeHistoricalBlobReaderV1;
 pub use git::{
     GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadPortV1,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionCoverageV1,
+    GitHealthProjectionPartialReasonV1, GitHealthProjectionReadPortV1,
     GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
     GitHealthProjectionUnavailableReasonV1, GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1,
     GitHistoricalBlobV1, GitHistoryRequest, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
