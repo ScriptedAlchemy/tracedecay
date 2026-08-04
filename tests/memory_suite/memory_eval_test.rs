@@ -275,9 +275,37 @@ impl Fixture {
         self._daemon = Some(common::spawn_tracedecay_daemon(&self.home_path));
     }
 
-    #[cfg(windows)]
     fn stop_daemon(&mut self) {
-        drop(self._daemon.take());
+        #[cfg(windows)]
+        let authority_address = {
+            let authority_path = self.home_path.join(".tracedecay/daemon-authority.json");
+            let record: Value =
+                serde_json::from_slice(&std::fs::read(&authority_path).unwrap_or_else(|e| {
+                    panic!("failed to read {}: {e}", authority_path.display())
+                }))
+                .unwrap_or_else(|e| panic!("failed to parse {}: {e}", authority_path.display()));
+            record["endpoint"]["address"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "daemon authority at {} has no loopback address",
+                        authority_path.display()
+                    )
+                })
+                .to_owned()
+        };
+        drop(self._daemon.take().expect("fixture daemon is not running"));
+        #[cfg(windows)]
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while std::net::TcpStream::connect(&authority_address).is_ok() {
+                assert!(
+                    Instant::now() < deadline,
+                    "fixture daemon endpoint remained connectable at {authority_address}"
+                );
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
     }
 
     fn db_path(&self) -> PathBuf {
@@ -367,12 +395,12 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("tokio runtime")
 }
 
-/// Runs a scalar SQL query against the fixture DB. The connection is opened
-/// fresh and dropped before any further binary invocation, so the test never
-/// holds a lock across subprocess writes.
-fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
+/// Runs a scalar SQL query while the fixture daemon is stopped. The direct
+/// connection is dropped before the daemon restarts.
+fn query_scalar(fixture: &mut Fixture, sql: &str) -> i64 {
+    fixture.stop_daemon();
     let db_path = fixture.db_path();
-    runtime().block_on(async move {
+    let result = runtime().block_on(async move {
         let db = libsql::Builder::new_local(&db_path)
             .build()
             .await
@@ -389,12 +417,15 @@ fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
             .unwrap_or_else(|| panic!("no rows for `{sql}`"));
         row.get::<i64>(0)
             .unwrap_or_else(|e| panic!("scalar for `{sql}`: {e}"))
-    })
+    });
+    fixture.start_daemon();
+    result
 }
 
-fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
+fn fact_ids_by_source(fixture: &mut Fixture) -> HashMap<String, HashSet<i64>> {
+    fixture.stop_daemon();
     let db_path = fixture.db_path();
-    runtime().block_on(async move {
+    let result = runtime().block_on(async move {
         let db = libsql::Builder::new_local(&db_path)
             .build()
             .await
@@ -411,7 +442,9 @@ fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
             map.entry(source).or_default().insert(fact_id);
         }
         map
-    })
+    });
+    fixture.start_daemon();
+    result
 }
 
 fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
@@ -685,7 +718,7 @@ fn format_search_results(results: &[SearchResultRow]) -> String {
 
 fn evaluate_assertions(
     scenario: &Scenario,
-    fixture: &Fixture,
+    fixture: &mut Fixture,
     phase: Phase,
     seeded_sources: &HashMap<String, HashSet<i64>>,
     dry_run_report: &Option<Value>,
@@ -825,7 +858,7 @@ fn run_scenario(id: &str) {
     // end-state. Scenarios with no well-behaved steps can assert their
     // baseline on the violation fixture before any violation writes.
     let mut fixture = build_fixture(&scenario.setup);
-    let mut seeded_sources = fact_ids_by_source(&fixture);
+    let mut seeded_sources = fact_ids_by_source(&mut fixture);
     let mut dry_run_report = None;
     #[cfg(windows)]
     let baseline_snapshot =
@@ -845,7 +878,7 @@ fn run_scenario(id: &str) {
     }
     let well_behaved_outcomes = evaluate_assertions(
         &scenario,
-        &fixture,
+        &mut fixture,
         Phase::WellBehaved,
         &seeded_sources,
         &dry_run_report,
@@ -874,7 +907,7 @@ fn run_scenario(id: &str) {
         {
             fixture = build_fixture(&scenario.setup);
         }
-        seeded_sources = fact_ids_by_source(&fixture);
+        seeded_sources = fact_ids_by_source(&mut fixture);
     }
     dry_run_report = None;
     let mut any_step_succeeded = false;
@@ -884,7 +917,7 @@ fn run_scenario(id: &str) {
     }
     let outcomes = evaluate_assertions(
         &scenario,
-        &fixture,
+        &mut fixture,
         Phase::Violation,
         &seeded_sources,
         &dry_run_report,
