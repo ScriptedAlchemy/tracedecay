@@ -5,9 +5,7 @@
 //! transactions that reached native admission.
 
 use std::collections::BTreeMap;
-use std::env;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 use serde::Serialize;
@@ -24,11 +22,11 @@ use tracedecay_domain::{
     RepositoryIndexStateV1, RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1,
     RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId, canonical_sha256,
 };
+use tracedecay_runtime_core::git::{GitCommandBounds, bounded_git_output};
 use tracedecay_store::GitIndexTransactionRecordV1;
 
 use crate::git_index_transactions::{
-    FixedGitIndexRunner, GIT_INDEX_ADAPTER_REVISION, NativeGitIndexError, NativeIndexLock,
-    ValidatedIndexPatch,
+    FixedGitIndexRunner, GIT_INDEX_ADAPTER_REVISION, NativeGitIndexError, ValidatedIndexPatch,
 };
 use crate::git_intelligence::NativeGitIntelligence;
 
@@ -48,9 +46,7 @@ pub(crate) struct MaterializedGitIndexPreview {
     pub(crate) patches: Vec<ValidatedIndexPatch>,
 }
 
-/// Repository-specific preview and snapshot authority. Implementations may use
-/// only the fixed PR11 native adapter to build patch material and capture
-/// state; no transport data or arbitrary Git input reaches this boundary.
+/// Repository-specific preview and snapshot authority.
 pub(crate) trait GitIndexPreviewAssembler {
     fn materialize(
         &self,
@@ -60,7 +56,6 @@ pub(crate) trait GitIndexPreviewAssembler {
     fn capture_current(
         &self,
         preview: &MaterializedGitIndexPreview,
-        lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError>;
 
     fn revalidate_patches(
@@ -82,8 +77,6 @@ pub(crate) trait GitIndexPreviewAssembler {
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError>;
 }
 
-/// Concrete PR11 assembler backed by the fixed query read-only authority and
-/// the isolated-index preview mechanics in [`FixedGitIndexRunner`].
 pub(crate) struct NativeGitIndexPreviewAssembler {
     repository_root: PathBuf,
     project_id: ProjectId,
@@ -99,9 +92,6 @@ impl NativeGitIndexPreviewAssembler {
         worktree_id: WorktreeId,
     ) -> Self {
         let repository_root = repository_root.into();
-        // Capture and daemon recapture must share one filesystem identity.
-        // Fall back only when the path cannot be resolved yet; existing roots
-        // (including symlink aliases) always canonicalize.
         let repository_root =
             super::canonicalize_repository_root(&repository_root).unwrap_or(repository_root);
         Self {
@@ -128,7 +118,6 @@ impl NativeGitIndexPreviewAssembler {
         &self,
         template: &RepositoryStateSnapshotV1,
         runner: &FixedGitIndexRunner,
-        lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
         if template.project_id != self.project_id
             || template.repository_id != self.repository_id
@@ -136,9 +125,6 @@ impl NativeGitIndexPreviewAssembler {
         {
             return Err(GitIndexTransactionPortError::StalePreview);
         }
-        // Failing to read status at all says nothing about whether the caller's
-        // snapshot still holds; it says we could not look. Calling that staleness
-        // sent callers to recapture and retry a read that fails identically.
         let status = self
             .read_authority()
             .status()
@@ -146,9 +132,7 @@ impl NativeGitIndexPreviewAssembler {
         let index_bytes = runner.index_bytes().map_err(map_native_error)?;
         let index_checksum = canonical_sha256(&index_bytes)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let index_tree = runner
-            .index_tree_under_lock(lock)
-            .map_err(map_native_error)?;
+        let index_tree = runner.index_tree().map_err(map_native_error)?;
 
         let tracked = status
             .entries
@@ -238,9 +222,6 @@ impl NativeGitIndexPreviewAssembler {
             Some(runner.sparse_digest().map_err(map_native_error)?),
             Some(runner.submodule_digest().map_err(map_native_error)?),
             Some(configuration_digest),
-            // Observation metadata belongs to the caller's read snapshot. All
-            // repository facts above are independently recaptured; retaining
-            // its timestamp permits exact byte-for-byte CAS equality.
             template.captured_at,
             status.coverage,
         )
@@ -259,9 +240,6 @@ impl NativeGitIndexPreviewAssembler {
                     })?,
             )
         })
-        // Constructing our own snapshot from state we just read, or failing to
-        // read the git version or refs digest, is this adapter failing rather
-        // than the repository moving under the caller.
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)
     }
 
@@ -269,12 +247,14 @@ impl NativeGitIndexPreviewAssembler {
         &self,
         request: &GitIndexPreviewRequestV1,
         snapshot_digest: &ManifestDigest,
+        runner: &FixedGitIndexRunner,
     ) -> Result<Vec<ValidatedIndexPatch>, GitIndexTransactionPortError> {
         self.materialize_selected_patches(
             request.binding.operation,
             request.preview_id.as_str(),
             &request.selected_hunks,
             snapshot_digest,
+            runner,
         )
     }
 
@@ -284,6 +264,7 @@ impl NativeGitIndexPreviewAssembler {
         preview_id: &str,
         selected_hunks: &[tracedecay_domain::HunkRefV1],
         snapshot_digest: &ManifestDigest,
+        runner: &FixedGitIndexRunner,
     ) -> Result<Vec<ValidatedIndexPatch>, GitIndexTransactionPortError> {
         let scope = match operation {
             GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
@@ -294,7 +275,7 @@ impl NativeGitIndexPreviewAssembler {
             .read_authority()
             .hunk_refs(&scope, preview_id, snapshot_digest)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let mut patches = Vec::with_capacity(selected_hunks.len());
+        let mut current_hunks = Vec::with_capacity(selected_hunks.len());
         for requested in selected_hunks {
             let requested_digest = requested
                 .compute_digest()
@@ -310,11 +291,13 @@ impl NativeGitIndexPreviewAssembler {
             if current != requested {
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
-            let bytes = extract_patch(&self.repository_root, &scope, requested)?;
-            patches.push(
-                ValidatedIndexPatch::new(requested.clone(), bytes).map_err(map_native_error)?,
-            );
+            current_hunks.push(current.clone());
         }
+        let mut patches = extract_patches(runner, &scope, &current_hunks)?
+            .into_iter()
+            .zip(current_hunks)
+            .map(|(bytes, hunk)| ValidatedIndexPatch::new(hunk, bytes).map_err(map_native_error))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut keyed = patches
             .into_iter()
             .map(|patch| {
@@ -330,10 +313,7 @@ impl NativeGitIndexPreviewAssembler {
     }
 }
 
-/// Project-owned assembler used by the daemon singleton before PR12 adds a
-/// transport binding. Repository and worktree identities come from the typed
-/// request scope or durable transaction record; the daemon contributes only
-/// the authoritative project identity and currently opened worktree root.
+/// Project-owned assembler used by the daemon singleton.
 pub(crate) struct DaemonProjectGitIndexPreviewAssembler {
     repository_root: PathBuf,
     project_id: ProjectId,
@@ -399,10 +379,8 @@ impl GitIndexPreviewAssembler for DaemonProjectGitIndexPreviewAssembler {
     fn capture_current(
         &self,
         preview: &MaterializedGitIndexPreview,
-        lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-        self.for_preview(&preview.preview)?
-            .capture_current(preview, lock)
+        self.for_preview(&preview.preview)?.capture_current(preview)
     }
 
     fn revalidate_patches(
@@ -448,20 +426,9 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
         let runner = self.runner()?;
         if unsupported_native_preflight(&runner)?.is_some() {
-            // Bare repositories, unsupported object formats, and an index
-            // owned by another process cannot be recaptured under our lock.
-            // Returning a preview here would falsely bless the caller's
-            // snapshot as current.
             return Err(GitIndexTransactionPortError::Unsupported);
         }
-        let lock = match runner.acquire_index_lock() {
-            Ok(lock) => lock,
-            Err(NativeGitIndexError::IndexLocked) => {
-                return Err(GitIndexTransactionPortError::Unsupported);
-            }
-            Err(error) => return Err(map_native_error(error)),
-        };
-        let current = self.capture_snapshot(&request.repository_snapshot, &runner, &lock)?;
+        let current = self.capture_snapshot(&request.repository_snapshot, &runner)?;
         if current != request.repository_snapshot {
             if let (
                 Ok(serde_json::Value::Object(recaptured)),
@@ -482,12 +449,8 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         if let Some(reason) = unsupported_commit_preflight(request, &runner)? {
-            drop(lock);
             return unsupported_materialized(request, runner, reason);
         }
-        // The snapshot already matched the caller's byte for byte above, so a
-        // digest we cannot compute over it is our own canonicalization
-        // failing, not the repository moving underneath the request.
         let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
             .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         let disposition = unsupported_hunk_selection(
@@ -502,7 +465,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             GitIndexPreviewDispositionV1::Unsupported,
         );
         let (selected_hunks, patches, candidate_index_tree) = if disposition.is_applicable() {
-            let patches = self.materialize_patches(request, &snapshot_digest)?;
+            let patches = self.materialize_patches(request, &snapshot_digest, &runner)?;
             let selected_hunks = patches
                 .iter()
                 .map(|patch| patch.hunk().clone())
@@ -510,12 +473,12 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             let candidate_index_tree = match request.binding.operation {
                 GitIndexTransactionOperationV1::StageHunks => Some(
                     runner
-                        .preview_candidate_tree_under_lock(&lock, &patches, false)
+                        .preview_candidate_tree(&patches, false)
                         .map_err(map_native_error)?,
                 ),
                 GitIndexTransactionOperationV1::UnstageHunks => Some(
                     runner
-                        .preview_candidate_tree_under_lock(&lock, &patches, true)
+                        .preview_candidate_tree(&patches, true)
                         .map_err(map_native_error)?,
                 ),
                 GitIndexTransactionOperationV1::CommitIndex => current.index.tree_id.clone(),
@@ -524,6 +487,11 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         } else {
             (Vec::new(), Vec::new(), None)
         };
+        let lock = runner.acquire_index_lock().map_err(map_native_error)?;
+        runner
+            .verify_index_under_lock(&lock, &current.index.checksum)
+            .map_err(map_native_error)?;
+        drop(lock);
         let expires_at = UtcMicros(request.observed_at.0.saturating_add(30_000_000));
         let preview = GitIndexPreviewV1::new_with_commit_intent(
             request.preview_id.clone(),
@@ -537,10 +505,6 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             request.observed_at,
             expires_at,
         )
-        // Every input here is either the caller's own request or state we just
-        // recaptured and matched, so a rejected construction — a commit intent
-        // the preview will not carry, most often — is a rejection of the
-        // request rather than evidence that it went stale.
         .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         Ok(MaterializedGitIndexPreview {
             preview,
@@ -554,9 +518,8 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
     fn capture_current(
         &self,
         preview: &MaterializedGitIndexPreview,
-        lock: &NativeIndexLock,
     ) -> Result<RepositoryStateSnapshotV1, GitIndexTransactionPortError> {
-        self.capture_snapshot(&preview.preview.repository_snapshot, &preview.runner, lock)
+        self.capture_snapshot(&preview.preview.repository_snapshot, &preview.runner)
     }
 
     fn revalidate_patches(
@@ -568,6 +531,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             preview.preview.preview_id.as_str(),
             &preview.preview.selected_hunks,
             &preview.preview.repository_snapshot_digest,
+            &preview.runner,
         )
     }
 
@@ -578,12 +542,17 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         request: &GitIndexApplyRequestV1,
         created_commit: Option<&tracedecay_domain::GitOidV1>,
     ) -> Result<NativeGitIndexApplyResult, GitIndexTransactionPortError> {
+        let current =
+            self.capture_snapshot(&preview.preview.repository_snapshot, &preview.runner)?;
         let lock = preview
             .runner
             .acquire_index_lock()
             .map_err(map_native_error)?;
-        let current =
-            self.capture_snapshot(&preview.preview.repository_snapshot, &preview.runner, &lock)?;
+        preview
+            .runner
+            .verify_index_under_lock(&lock, &current.index.checksum)
+            .map_err(map_native_error)?;
+        drop(lock);
         if !live_result_matches_preview(
             &self.repository_root,
             &preview.preview,
@@ -618,12 +587,16 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexRecoveryError> {
         let runner = FixedGitIndexRunner::new(&self.repository_root)
             .map_err(|_| GitIndexRecoveryError::Indeterminate)?;
+        let current = self
+            .capture_snapshot(&record.preview.repository_snapshot, &runner)
+            .map_err(|_| GitIndexRecoveryError::Indeterminate)?;
         let lock = runner
             .acquire_index_lock()
             .map_err(|_| GitIndexRecoveryError::Indeterminate)?;
-        let current = self
-            .capture_snapshot(&record.preview.repository_snapshot, &runner, &lock)
+        runner
+            .verify_index_under_lock(&lock, &current.index.checksum)
             .map_err(|_| GitIndexRecoveryError::Indeterminate)?;
+        drop(lock);
         let old = &record.preview.repository_snapshot;
         let phase = record.journal.phase;
         let (outcome, created_commit) = if &current == old
@@ -841,6 +814,30 @@ fn unsupported_hunk_selection(
     intelligence: &NativeGitIntelligence,
     operation: GitIndexTransactionOperationV1,
 ) -> Option<GitIndexUnsupportedStateV1> {
+    let (scope, unreadable) = match operation {
+        GitIndexTransactionOperationV1::StageHunks => (
+            GitDiffScopeV1::WorkingTree,
+            GitIndexUnsupportedStateV1::UnreadableWorkingTree,
+        ),
+        GitIndexTransactionOperationV1::UnstageHunks => (
+            GitDiffScopeV1::Staged,
+            GitIndexUnsupportedStateV1::UnreadableIndex,
+        ),
+        GitIndexTransactionOperationV1::CommitIndex => {
+            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
+        }
+    };
+    let Ok(diff) = intelligence.diff(&scope) else {
+        return Some(unreadable);
+    };
+    if !diff.coverage.is_complete() {
+        return Some(unreadable);
+    }
+    match runner.paths_have_filters(selected_hunks.iter().map(|hunk| hunk.path.as_str())) {
+        Ok(true) => return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine),
+        Ok(false) => {}
+        Err(_) => return Some(unreadable),
+    }
     for hunk in selected_hunks {
         if hunk.original_path.is_some() {
             return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
@@ -867,97 +864,28 @@ fn unsupported_hunk_selection(
         if modes.iter().flatten().any(|mode| mode.is_symlink()) {
             return Some(GitIndexUnsupportedStateV1::Symlink);
         }
-        if let Some(reason) = unsupported_path_state(runner, intelligence, operation, &hunk.path) {
-            return Some(reason);
+        let Some(file) = diff.files.iter().find(|file| file.path == hunk.path) else {
+            return Some(unreadable);
+        };
+        if file.original_path.is_some() {
+            return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
         }
-    }
-    None
-}
-
-fn unsupported_path_state(
-    runner: &FixedGitIndexRunner,
-    intelligence: &NativeGitIntelligence,
-    operation: GitIndexTransactionOperationV1,
-    path: &str,
-) -> Option<GitIndexUnsupportedStateV1> {
-    let unreadable = match operation {
-        GitIndexTransactionOperationV1::StageHunks => {
-            GitIndexUnsupportedStateV1::UnreadableWorkingTree
+        if file.binary {
+            return Some(GitIndexUnsupportedStateV1::BinaryHunk);
         }
-        GitIndexTransactionOperationV1::UnstageHunks => GitIndexUnsupportedStateV1::UnreadableIndex,
-        GitIndexTransactionOperationV1::CommitIndex => {
-            GitIndexUnsupportedStateV1::UnreadableWorkingTree
+        if file.submodule {
+            return Some(GitIndexUnsupportedStateV1::Submodule);
         }
-    };
-    let scope = match operation {
-        GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
-        GitIndexTransactionOperationV1::UnstageHunks => GitDiffScopeV1::Staged,
-        GitIndexTransactionOperationV1::CommitIndex => {
-            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
+        if [file.old_mode.as_ref(), file.new_mode.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(tracedecay_domain::GitFileModeV1::is_symlink)
+        {
+            return Some(GitIndexUnsupportedStateV1::Symlink);
         }
-    };
-    let Ok(diff) = intelligence.diff(&scope) else {
-        return Some(unreadable);
-    };
-    let Some(file) = diff.files.iter().find(|file| file.path == path) else {
-        return Some(unreadable);
-    };
-    if file.original_path.is_some() {
-        return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
-    }
-    if file.binary {
-        return Some(GitIndexUnsupportedStateV1::BinaryHunk);
-    }
-    if file.submodule {
-        return Some(GitIndexUnsupportedStateV1::Submodule);
-    }
-    if [file.old_mode.as_ref(), file.new_mode.as_ref()]
-        .into_iter()
-        .flatten()
-        .any(tracedecay_domain::GitFileModeV1::is_symlink)
-    {
-        return Some(GitIndexUnsupportedStateV1::Symlink);
-    }
-    if file.old_mode != file.new_mode && file.hunks.is_empty() {
-        return Some(GitIndexUnsupportedStateV1::FileModeOnly);
-    }
-    if !diff.coverage.is_complete() {
-        return Some(unreadable);
-    }
-    let mut command = read_git_command(runner.repository_root());
-    let Ok(output) = command
-        .args([
-            "check-attr",
-            "-z",
-            "filter",
-            "text",
-            "eol",
-            "working-tree-encoding",
-            "--",
-            path,
-        ])
-        .output()
-    else {
-        return Some(unreadable);
-    };
-    if !output.status.success() {
-        return Some(unreadable);
-    }
-    let fields = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty())
-        .collect::<Vec<_>>();
-    let mut records = fields.chunks_exact(3);
-    let has_filter = records.any(|record| {
-        let value = record[2];
-        value != b"unspecified" && value != b"unset" && value != b"false"
-    });
-    if !records.remainder().is_empty() {
-        return Some(unreadable);
-    }
-    if has_filter {
-        return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine);
+        if file.old_mode != file.new_mode && file.hunks.is_empty() {
+            return Some(GitIndexUnsupportedStateV1::FileModeOnly);
+        }
     }
     None
 }
@@ -968,32 +896,29 @@ struct PatchDigestMaterial<'a> {
     body: &'a [String],
 }
 
-fn extract_patch(
-    repository_root: &Path,
+fn extract_patches(
+    runner: &FixedGitIndexRunner,
     scope: &GitDiffScopeV1,
+    hunks: &[tracedecay_domain::HunkRefV1],
+) -> Result<Vec<Vec<u8>>, GitIndexTransactionPortError> {
+    let output = runner
+        .diff_patch(
+            matches!(scope, GitDiffScopeV1::Staged),
+            hunks.iter().map(|hunk| hunk.path.as_str()),
+        )
+        .map_err(map_native_error)?;
+    hunks
+        .iter()
+        .map(|hunk| extract_patch_from_output(&output, hunk))
+        .collect()
+}
+
+fn extract_patch_from_output(
+    output: &[u8],
     hunk: &tracedecay_domain::HunkRefV1,
 ) -> Result<Vec<u8>, GitIndexTransactionPortError> {
-    let mut command = read_git_command(repository_root);
-    command
-        .arg("diff")
-        .arg("--patch")
-        .arg("-M")
-        .arg("--no-color")
-        .arg("--no-ext-diff");
-    if matches!(scope, GitDiffScopeV1::Staged) {
-        command.arg("--cached");
-    }
-    command.arg("--").arg(&hunk.path);
-    let output = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-    if !output.status.success() {
-        return Err(GitIndexTransactionPortError::StalePreview);
-    }
-    let text = std::str::from_utf8(&output.stdout)
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+    let text =
+        std::str::from_utf8(output).map_err(|_| GitIndexTransactionPortError::StalePreview)?;
     let lines = text.lines().collect::<Vec<_>>();
     let mut old_marker = None;
     let mut new_marker = None;
@@ -1065,20 +990,6 @@ fn parse_hunk_range(value: &str) -> Option<(u32, u32)> {
     }
 }
 
-fn read_git_command(repository_root: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.current_dir(repository_root);
-    for (key, _) in env::vars_os() {
-        if key.to_string_lossy().starts_with("GIT_") {
-            command.env_remove(key);
-        }
-    }
-    command
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    command
-}
-
 fn commit_matches_preview(
     repository_root: &Path,
     old: &RepositoryStateSnapshotV1,
@@ -1131,10 +1042,6 @@ fn hunk_commit_matches_preview(
         && same_stable_native_evidence(current, old)
 }
 
-/// Verify the complete operation-specific terminal state before emitting a
-/// success receipt. Native publication proves which process crossed the
-/// boundary; this observation additionally refuses success if HEAD/ref or
-/// stable repository authority drifted before the terminal receipt.
 fn live_result_matches_preview(
     repository_root: &Path,
     preview: &GitIndexPreviewV1,
@@ -1224,12 +1131,11 @@ fn commit_intent_matches_preview(
     let Some(expected_digest) = preview.commit_intent_digest.as_ref() else {
         return false;
     };
-    let Ok(signature_output) = read_git_command(repository_root)
-        .args(["show", "-s", "--format=%G?", head.as_str()])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-    else {
+    let Ok(signature_output) = bounded_git_output(
+        repository_root,
+        &["show", "-s", "--format=%G?", head.as_str()],
+        &GitCommandBounds::default(),
+    ) else {
         return false;
     };
     let Ok(signature_status) = String::from_utf8(signature_output.stdout) else {
@@ -1238,17 +1144,17 @@ fn commit_intent_matches_preview(
     if !signature_output.status.success() || signature_status.trim() != "N" {
         return false;
     }
-    let output = read_git_command(repository_root)
-        .args([
+    let output = bounded_git_output(
+        repository_root,
+        &[
             "show",
             "-s",
             "--format=format:%an%x00%ae%x00%at%x00%cn%x00%ce%x00%ct%x00%B",
             head.as_str(),
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok();
+        ],
+        &GitCommandBounds::default(),
+    )
+    .ok();
     let Some(output) = output.filter(|output| output.status.success()) else {
         return false;
     };
@@ -1302,21 +1208,18 @@ fn commit_intent_matches_preview(
 }
 
 fn read_git_value(repository_root: &Path, expression: &str) -> Option<String> {
-    let output = read_git_command(repository_root)
-        .args(["rev-parse", "--verify", expression])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let output = bounded_git_output(
+        repository_root,
+        &["rev-parse", "--verify", expression],
+        &GitCommandBounds::default(),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
     Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
 }
 
-/// Fixed native implementation used by the daemon coordinator. It accepts
-/// only preview-bound material and rejects a cache miss after restart rather
-/// than reconstructing or guessing a patch.
 pub(crate) struct FixedDaemonGitIndexExecutor<A> {
     assembler: A,
     previews: Mutex<BTreeMap<GitIndexPreviewId, MaterializedGitIndexPreview>>,
@@ -1403,10 +1306,7 @@ where
         if materialized.preview != *preview {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         }
-        let Ok(mut index_lock) = materialized.runner.acquire_index_lock() else {
-            return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
-        };
-        let Ok(current) = self.assembler.capture_current(&materialized, &index_lock) else {
+        let Ok(current) = self.assembler.capture_current(&materialized) else {
             return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
         };
         let Ok(current_digest) = GitIndexPreviewV1::repository_snapshot_digest(&current) else {
@@ -1426,20 +1326,42 @@ where
 
         let created_commit = match preview.operation {
             GitIndexTransactionOperationV1::StageHunks => {
+                let prepared =
+                    match materialized
+                        .runner
+                        .prepare_hunks(preview, &current_patches, false)
+                    {
+                        Ok(prepared) => prepared,
+                        Err(error) => return Ok(classify_native_failure(&error)),
+                    };
+                let Ok(mut index_lock) = materialized.runner.acquire_index_lock() else {
+                    return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
+                };
                 if let Err(error) =
                     materialized
                         .runner
-                        .stage_hunks(&mut index_lock, preview, &current_patches)
+                        .publish_hunks(&mut index_lock, preview, prepared)
                 {
                     return Ok(classify_native_failure(&error));
                 }
                 None
             }
             GitIndexTransactionOperationV1::UnstageHunks => {
+                let prepared =
+                    match materialized
+                        .runner
+                        .prepare_hunks(preview, &current_patches, true)
+                    {
+                        Ok(prepared) => prepared,
+                        Err(error) => return Ok(classify_native_failure(&error)),
+                    };
+                let Ok(mut index_lock) = materialized.runner.acquire_index_lock() else {
+                    return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
+                };
                 if let Err(error) =
                     materialized
                         .runner
-                        .unstage_hunks(&mut index_lock, preview, &current_patches)
+                        .publish_hunks(&mut index_lock, preview, prepared)
                 {
                     return Ok(classify_native_failure(&error));
                 }
@@ -1449,16 +1371,19 @@ where
                 let Some(intent) = materialized.commit_intent.as_ref() else {
                     return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
                 };
-                match materialized
-                    .runner
-                    .commit_index(&index_lock, preview, intent)
-                {
+                let prepared = match materialized.runner.prepare_commit(preview, intent) {
+                    Ok(prepared) => prepared,
+                    Err(error) => return Ok(classify_native_failure(&error)),
+                };
+                let Ok(index_lock) = materialized.runner.acquire_index_lock() else {
+                    return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
+                };
+                match materialized.runner.publish_commit(&index_lock, prepared) {
                     Ok(commit) => Some(commit),
                     Err(error) => return Ok(classify_native_failure(&error)),
                 }
             }
         };
-        drop(index_lock);
         match self.assembler.finalize(
             &materialized,
             transaction_id,
@@ -1508,9 +1433,9 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
         // caller's snapshot moved. Reporting it as staleness told every caller
         // to recapture and retry a request that will fail identically, and it
         // made an adapter defect indistinguishable from ordinary contention.
-        NativeGitIndexError::MalformedOutput { .. } | NativeGitIndexError::Domain(_) => {
-            GitIndexTransactionPortError::NativeFailure
-        }
+        NativeGitIndexError::MalformedOutput { .. }
+        | NativeGitIndexError::Domain(_)
+        | NativeGitIndexError::Process(_) => GitIndexTransactionPortError::NativeFailure,
         NativeGitIndexError::RepositoryUnavailable(_)
         | NativeGitIndexError::GitFailed { .. }
         | NativeGitIndexError::Io(_)
@@ -1551,10 +1476,7 @@ pub(crate) fn capture_exact_snapshot_for_test(
         .read_authority()
         .status()
         .map_err(test_snapshot_error)?;
-    let lock = runner.acquire_index_lock().map_err(test_snapshot_error)?;
-    let tree = runner
-        .index_tree_under_lock(&lock)
-        .map_err(test_snapshot_error)?;
+    let tree = runner.index_tree().map_err(test_snapshot_error)?;
     let placeholder = RepositoryStateSnapshotV1::new(
         assembler.project_id.clone(),
         assembler.repository_id.clone(),
@@ -1585,7 +1507,7 @@ pub(crate) fn capture_exact_snapshot_for_test(
     )
     .map_err(test_snapshot_error)?;
     assembler
-        .capture_snapshot(&placeholder, &runner, &lock)
+        .capture_snapshot(&placeholder, &runner)
         .map_err(test_snapshot_error)
 }
 
@@ -1600,6 +1522,8 @@ fn test_snapshot_error(error: impl std::fmt::Display) -> crate::errors::TraceDec
 mod tests {
     use std::collections::BTreeSet;
     use std::fs;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
     use tracedecay_application::{
@@ -1667,8 +1591,7 @@ mod tests {
         runner: &FixedGitIndexRunner,
     ) -> RepositoryStateSnapshotV1 {
         let status = assembler.read_authority().status().expect("native status");
-        let lock = runner.acquire_index_lock().expect("snapshot index lock");
-        let tree = runner.index_tree_under_lock(&lock).expect("index tree");
+        let tree = runner.index_tree().expect("index tree");
         let placeholder = RepositoryStateSnapshotV1::new(
             assembler.project_id.clone(),
             assembler.repository_id.clone(),
@@ -1698,7 +1621,7 @@ mod tests {
         )
         .expect("placeholder snapshot");
         assembler
-            .capture_snapshot(&placeholder, runner, &lock)
+            .capture_snapshot(&placeholder, runner)
             .expect("exact native snapshot")
     }
 
@@ -1718,12 +1641,16 @@ mod tests {
             .expect("current hunk refs");
         assert_eq!(references.len(), 1, "fixture has one hunk");
         let patches = assembler
-            .materialize_selected_patches(operation, preview_id, &references, &snapshot_digest)
+            .materialize_selected_patches(
+                operation,
+                preview_id,
+                &references,
+                &snapshot_digest,
+                runner,
+            )
             .expect("materialized patches");
-        let lock = runner.acquire_index_lock().expect("preview index lock");
         let candidate = runner
-            .preview_candidate_tree_under_lock(
-                &lock,
+            .preview_candidate_tree(
                 &patches,
                 operation == GitIndexTransactionOperationV1::UnstageHunks,
             )
@@ -1960,8 +1887,14 @@ mod tests {
             Some(GitIndexUnsupportedStateV1::RenameOrCopy),
             "rename/copy hunks remain explicit read-only previews"
         );
-        let patch = extract_patch(directory.path(), &GitDiffScopeV1::WorkingTree, &hunk)
-            .expect("extract exact packet");
+        let patch = extract_patches(
+            &runner,
+            &GitDiffScopeV1::WorkingTree,
+            std::slice::from_ref(&hunk),
+        )
+        .expect("extract exact packet")
+        .pop()
+        .expect("one patch");
         let patch = ValidatedIndexPatch::new(hunk, patch).expect("validate exact packet");
         let old_tree = runner.write_tree().expect("old index tree");
         let candidate = runner
@@ -2253,11 +2186,9 @@ mod tests {
             .expect("publish candidate index");
         drop(lock);
 
-        let lock = runner.acquire_index_lock().expect("recovery snapshot lock");
         let current = assembler
-            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .capture_snapshot(&preview.repository_snapshot, &runner)
             .expect("recovery snapshot");
-        drop(lock);
         assert_eq!(current.index.tree_id, preview.candidate_index_tree);
         assert_eq!(current.head, preview.repository_snapshot.head);
         assert_eq!(current.refs_digest, preview.repository_snapshot.refs_digest);
@@ -2306,11 +2237,9 @@ mod tests {
             directory.path(),
             &["commit", "--quiet", "-m", "external ref drift"],
         );
-        let lock = runner.acquire_index_lock().expect("drift snapshot lock");
         let current = assembler
-            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .capture_snapshot(&preview.repository_snapshot, &runner)
             .expect("drift snapshot");
-        drop(lock);
         assert!(
             !live_result_matches_preview(directory.path(), &preview, &current, None),
             "a hunk mutation must not report success after HEAD/ref drift"
@@ -2424,6 +2353,85 @@ mod tests {
         assert_eq!(
             runner.index_bytes().expect("index under contention"),
             before
+        );
+    }
+
+    #[test]
+    fn hunk_freshness_process_count_is_independent_of_selected_file_count() {
+        let (directory, assembler, runner) = repository_fixture();
+        for file in 1..8 {
+            fs::write(
+                directory.path().join(format!("packet-{file}.txt")),
+                "before\n",
+            )
+            .expect("write base file");
+        }
+        git(directory.path(), &["add", "."]);
+        git(directory.path(), &["commit", "--quiet", "-m", "more files"]);
+        fs::write(directory.path().join("packet.txt"), "after\n").expect("change first file");
+        for file in 1..8 {
+            fs::write(
+                directory.path().join(format!("packet-{file}.txt")),
+                "after\n",
+            )
+            .expect("change worktree file");
+        }
+
+        let snapshot = exact_snapshot(&assembler, &runner);
+        let snapshot_digest =
+            GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
+        let hunks = assembler
+            .read_authority()
+            .hunk_refs(
+                &GitDiffScopeV1::WorkingTree,
+                "git-index-preview.batched-freshness",
+                &snapshot_digest,
+            )
+            .expect("current hunk refs");
+        assert_eq!(hunks.len(), 8, "fixture has one hunk per changed file");
+        let one = runner
+            .verify_hunks_for_test(&[&hunks[0]])
+            .expect("verify one hunk");
+        let all = hunks.iter().collect::<Vec<_>>();
+        let many = runner
+            .verify_hunks_for_test(&all)
+            .expect("verify all hunks");
+
+        assert_eq!(one, 3, "stage freshness is three batched Git reads");
+        assert_eq!(
+            many, one,
+            "freshness process count must not scale with hunk or file count"
+        );
+    }
+
+    #[test]
+    fn prepared_hunk_publish_holds_index_lock_below_twenty_five_milliseconds_p95() {
+        let mut samples = Vec::with_capacity(20);
+        for sample in 0..20 {
+            let (directory, assembler, runner) = repository_fixture();
+            fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
+            let (preview, patches) = hunk_preview(
+                &assembler,
+                &runner,
+                GitIndexTransactionOperationV1::StageHunks,
+                GitDiffScopeV1::WorkingTree,
+                &format!("git-index-preview.short-lock.{sample}"),
+            );
+            let prepared = runner
+                .prepare_hunks(&preview, &patches, false)
+                .expect("prepare outside index lock");
+            let mut lock = runner.acquire_index_lock().expect("publish lock");
+            let acquired_at = Instant::now();
+            runner
+                .publish_hunks(&mut lock, &preview, prepared)
+                .expect("publish prepared index");
+            samples.push(acquired_at.elapsed());
+        }
+        samples.sort_unstable();
+        let p95 = samples[18];
+        assert!(
+            p95 < Duration::from_millis(25),
+            "representative prepared publish p95 {p95:?} exceeded the 25 ms lock budget"
         );
     }
 
@@ -2593,11 +2601,9 @@ mod tests {
                 .expect("candidate tree")
                 .as_str()
         );
-        let lock = runner.acquire_index_lock().expect("commit snapshot lock");
         let committed = assembler
-            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .capture_snapshot(&preview.repository_snapshot, &runner)
             .expect("committed snapshot");
-        drop(lock);
         assert!(live_result_matches_preview(
             directory.path(),
             &preview,
@@ -2606,13 +2612,9 @@ mod tests {
         ));
 
         git(directory.path(), &["checkout", "-q", "-b", "same-tip"]);
-        let lock = runner
-            .acquire_index_lock()
-            .expect("branch drift snapshot lock");
         let branch_drift = assembler
-            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
+            .capture_snapshot(&preview.repository_snapshot, &runner)
             .expect("branch drift snapshot");
-        drop(lock);
         assert!(
             !live_result_matches_preview(directory.path(), &preview, &branch_drift, Some(&commit)),
             "the same commit on a different attached branch is not the previewed HEAD state"
@@ -2676,22 +2678,18 @@ mod tests {
             repository_id,
             worktree_id,
         );
-        let lock = runner.acquire_index_lock().expect("alias CAS lock");
         let recaptured = daemon_assembler
-            .capture_snapshot(&via_alias, &runner, &lock)
+            .capture_snapshot(&via_alias, &runner)
             .expect("daemon recapture through canonical root");
-        drop(lock);
         assert_eq!(
             recaptured, via_alias,
             "daemon recapture must match caller snapshot captured through a symlink alias"
         );
 
         fs::write(directory.path().join("packet.txt"), "drifted\n").expect("content drift");
-        let lock = runner.acquire_index_lock().expect("drift lock");
         let drifted = daemon_assembler
-            .capture_snapshot(&via_alias, &runner, &lock)
+            .capture_snapshot(&via_alias, &runner)
             .expect("drift recapture");
-        drop(lock);
         assert_ne!(
             drifted, via_alias,
             "exact CAS must still reject genuine content drift after alias canonicalization"
