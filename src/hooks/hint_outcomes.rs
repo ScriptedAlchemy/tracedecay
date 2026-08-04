@@ -41,8 +41,7 @@
 use std::collections::HashSet;
 
 use tracedecay_application::{
-    HintOutcomeCorrelationPortV1, HintOutcomeObservationV1, HintOutcomePortErrorV1,
-    HintOutcomeResolutionV1,
+    HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError, HintOutcomeResolution,
 };
 
 use super::tool_hints::expected_tools_for_key;
@@ -102,10 +101,10 @@ enum Resolution {
 /// failures remain typed so the daemon can surface the failed stage rather
 /// than fabricating an empty successful pass.
 pub(crate) async fn correlate_hint_outcomes(
-    port: &dyn HintOutcomeCorrelationPortV1,
+    port: &dyn HintOutcomeCorrelationPort,
     project_id: &str,
     now_secs: i64,
-) -> Result<HintOutcomeStats, HintOutcomePortErrorV1> {
+) -> Result<HintOutcomeStats, HintOutcomePortError> {
     let mut stats = HintOutcomeStats::default();
 
     // Hints that already carry an outcome: never re-resolve them.
@@ -152,14 +151,14 @@ pub(crate) async fn correlate_hint_outcomes(
                 let resolution = match resolution {
                     Resolution::Acted(tool) => {
                         stats.acted += 1;
-                        HintOutcomeResolutionV1::Acted { tool_name: tool }
+                        HintOutcomeResolution::Acted { tool_name: tool }
                     }
                     Resolution::Ignored => {
                         stats.ignored += 1;
-                        HintOutcomeResolutionV1::Ignored
+                        HintOutcomeResolution::Ignored
                     }
                 };
-                pending.push(HintOutcomeObservationV1 {
+                pending.push(HintOutcomeObservation {
                     emission,
                     observed_at_secs: now_secs,
                     resolution,

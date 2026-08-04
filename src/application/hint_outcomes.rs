@@ -2,8 +2,8 @@
 
 use serde_json::{Value, json};
 use tracedecay_application::{
-    HintEmissionV1, HintOutcomeCorrelationPortV1, HintOutcomeObservationV1, HintOutcomePortErrorV1,
-    HintOutcomePortFuture, HintOutcomePortOperationV1, HintOutcomeResolutionV1, HintToolActivityV1,
+    HintEmission, HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError,
+    HintOutcomePortFuture, HintOutcomePortOperation, HintOutcomeResolution, HintToolActivity,
 };
 
 use crate::global_db::{
@@ -27,7 +27,7 @@ impl<'a> RegisteredHintOutcomeCorrelationPort<'a> {
     }
 }
 
-impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
+impl HintOutcomeCorrelationPort for RegisteredHintOutcomeCorrelationPort<'_> {
     fn resolved_hint_ids<'a>(
         &'a self,
         project_id: &'a str,
@@ -50,10 +50,7 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
                         .collect()
                 })
                 .map_err(|error| {
-                    HintOutcomePortErrorV1::new(
-                        HintOutcomePortOperationV1::QueryResolvedHints,
-                        error,
-                    )
+                    HintOutcomePortError::new(HintOutcomePortOperation::QueryResolvedHints, error)
                 })
         })
     }
@@ -62,7 +59,7 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
         &'a self,
         project_id: &'a str,
         limit: u32,
-    ) -> HintOutcomePortFuture<'a, Vec<HintEmissionV1>> {
+    ) -> HintOutcomePortFuture<'a, Vec<HintEmission>> {
         Box::pin(async move {
             let events = self
                 .analytics
@@ -74,10 +71,7 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
                 })
                 .await
                 .map_err(|error| {
-                    HintOutcomePortErrorV1::new(
-                        HintOutcomePortOperationV1::QueryEmittedHints,
-                        error,
-                    )
+                    HintOutcomePortError::new(HintOutcomePortOperation::QueryEmittedHints, error)
                 })?;
             events
                 .into_iter()
@@ -85,7 +79,7 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
                     let session_id = required_event_field(event.session_id, "session_id")?;
                     let category = required_event_field(event.hint_category, "hint_category")?;
                     let hint_id = required_event_field(event.hint_id, "hint_id")?;
-                    Ok(HintEmissionV1 {
+                    Ok(HintEmission {
                         provider: event.provider,
                         project_id: event.project_id,
                         session_id,
@@ -104,17 +98,14 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
         session_id: &'a str,
         after_timestamp: i64,
         limit: u32,
-    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivityV1>> {
+    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivity>> {
         Box::pin(async move {
             let rows = self
                 .sessions
                 .session_messages_after(provider, session_id, after_timestamp, limit as usize)
                 .await
                 .map_err(|error| {
-                    HintOutcomePortErrorV1::new(
-                        HintOutcomePortOperationV1::QuerySessionActivity,
-                        error,
-                    )
+                    HintOutcomePortError::new(HintOutcomePortOperation::QuerySessionActivity, error)
                 })?;
             let mut activity = Vec::new();
             for row in rows {
@@ -128,7 +119,7 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
 
     fn append_outcomes<'a>(
         &'a self,
-        outcomes: &'a [HintOutcomeObservationV1],
+        outcomes: &'a [HintOutcomeObservation],
     ) -> HintOutcomePortFuture<'a, ()> {
         Box::pin(async move {
             let events = outcomes.iter().map(outcome_event).collect::<Vec<_>>();
@@ -137,7 +128,7 @@ impl HintOutcomeCorrelationPortV1 for RegisteredHintOutcomeCorrelationPort<'_> {
                 .await
                 .map(|_| ())
                 .map_err(|error| {
-                    HintOutcomePortErrorV1::new(HintOutcomePortOperationV1::AppendOutcomes, error)
+                    HintOutcomePortError::new(HintOutcomePortOperation::AppendOutcomes, error)
                 })
         })
     }
@@ -148,7 +139,7 @@ pub(crate) async fn correlate_registered_hint_outcomes(
     sessions: &RegisteredGlobalDb,
     project_id: &str,
     now_secs: i64,
-) -> Result<crate::hooks::hint_outcomes::HintOutcomeStats, HintOutcomePortErrorV1> {
+) -> Result<crate::hooks::hint_outcomes::HintOutcomeStats, HintOutcomePortError> {
     crate::hooks::hint_outcomes::correlate_hint_outcomes(
         &RegisteredHintOutcomeCorrelationPort::new(analytics, sessions),
         project_id,
@@ -173,10 +164,10 @@ pub(crate) async fn observe_registered_hint_outcomes(
 fn required_event_field(
     value: Option<String>,
     field: &'static str,
-) -> Result<String, HintOutcomePortErrorV1> {
+) -> Result<String, HintOutcomePortError> {
     value.filter(|value| !value.is_empty()).ok_or_else(|| {
-        HintOutcomePortErrorV1::new(
-            HintOutcomePortOperationV1::QueryEmittedHints,
+        HintOutcomePortError::new(
+            HintOutcomePortOperation::QueryEmittedHints,
             format!("hint_emitted row has no {field}"),
         )
     })
@@ -184,10 +175,10 @@ fn required_event_field(
 
 fn activity_from_row(
     row: SessionActivityRow,
-) -> Result<Option<HintToolActivityV1>, HintOutcomePortErrorV1> {
+) -> Result<Option<HintToolActivity>, HintOutcomePortError> {
     let timestamp = row.timestamp.ok_or_else(|| {
-        HintOutcomePortErrorV1::new(
-            HintOutcomePortOperationV1::QuerySessionActivity,
+        HintOutcomePortError::new(
+            HintOutcomePortOperation::QuerySessionActivity,
             "session activity row has no timestamp",
         )
     })?;
@@ -195,21 +186,21 @@ fn activity_from_row(
     if tool_names.is_empty() {
         return Ok(None);
     }
-    Ok(Some(HintToolActivityV1 {
+    Ok(Some(HintToolActivity {
         timestamp,
         tool_names,
     }))
 }
 
-fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortErrorV1> {
+fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutcomePortError> {
     let mut tools = Vec::new();
     if let Some(names) = &row.tool_names {
         tools.extend(crate::analytics::split_tool_names(names));
     }
     if let Some(metadata) = &row.metadata_json {
         let value = serde_json::from_str::<Value>(metadata).map_err(|error| {
-            HintOutcomePortErrorV1::new(
-                HintOutcomePortOperationV1::QuerySessionActivity,
+            HintOutcomePortError::new(
+                HintOutcomePortOperation::QuerySessionActivity,
                 format!("session activity metadata is invalid JSON: {error}"),
             )
         })?;
@@ -226,10 +217,10 @@ fn activity_tool_names(row: &SessionActivityRow) -> Result<Vec<String>, HintOutc
     Ok(tools)
 }
 
-fn outcome_event(outcome: &HintOutcomeObservationV1) -> AnalyticsEventInsert {
+fn outcome_event(outcome: &HintOutcomeObservation) -> AnalyticsEventInsert {
     let (disposition, tool_name) = match &outcome.resolution {
-        HintOutcomeResolutionV1::Acted { tool_name } => ("acted", Some(tool_name.clone())),
-        HintOutcomeResolutionV1::Ignored => ("ignored", None),
+        HintOutcomeResolution::Acted { tool_name } => ("acted", Some(tool_name.clone())),
+        HintOutcomeResolution::Ignored => ("ignored", None),
     };
     AnalyticsEventInsert {
         provider: outcome.emission.provider.clone(),
