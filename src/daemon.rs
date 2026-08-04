@@ -278,9 +278,11 @@ use project_open_handshake::{
 mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
-use project_open_orchestration::ensure_registered_project_route;
 #[cfg(not(unix))]
 use project_open_orchestration::shutdown_portable_project_open_tasks;
+use project_open_orchestration::{
+    durable_enrollment_resolves_existing_store, ensure_registered_project_route,
+};
 #[cfg(any(not(unix), test))]
 use project_open_orchestration::{
     portable_cached_project_open_failure, portable_cached_project_server,
@@ -298,10 +300,11 @@ use project_routing::portable_database_owner_reconciler;
 #[cfg(unix)]
 use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
-    bind_authenticated_profile_identity, project_open_cancellation_checkpoint,
-    project_open_cancellation_error, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_open_writer_busy_error, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error,
+    bind_authenticated_profile_identity, cached_or_bind_ready_project_server,
+    project_open_cancellation_checkpoint, project_open_cancellation_error, project_open_gate,
+    project_open_task_capacity_error, project_open_tasks, project_open_writer_busy_error,
+    project_route_for_handshake, project_server_capacity_error, project_warming_error,
+    resolved_project_server_key,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
