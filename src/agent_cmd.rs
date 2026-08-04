@@ -180,8 +180,17 @@ pub(crate) async fn migrate_legacy_hermes_data(home: &Path) -> tracedecay::error
 /// stores whose project evidence no longer resolves. Genuine read, integrity,
 /// or copy failures still block the reinstall; an explicit Hermes install
 /// continues to use the strict cutover above.
-async fn migrate_legacy_hermes_data_for_reinstall(home: &Path) -> tracedecay::errors::Result<()> {
-    let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
+async fn migrate_legacy_hermes_data_for_reinstall(
+    home: &Path,
+    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+) -> tracedecay::errors::Result<()> {
+    let report = match lifecycle {
+        Some(lifecycle) => {
+            tracedecay::migrate::hermes::migrate_legacy_hermes_stores_under_lease(home, lifecycle)
+                .await
+        }
+        None => tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await,
+    };
     finish_legacy_hermes_reinstall_migration(report)
 }
 
@@ -456,10 +465,28 @@ pub(crate) async fn reinstall_agent_integrations(
     home: &Path,
     tracedecay_bin: &str,
 ) -> Vec<(String, tracedecay::errors::Result<()>)> {
+    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, None).await
+}
+
+pub(crate) async fn reinstall_agent_integrations_under_lease(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+    lifecycle: &tracedecay::lifecycle_lease::LifecycleLease,
+) -> Vec<(String, tracedecay::errors::Result<()>)> {
+    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, Some(lifecycle)).await
+}
+
+async fn reinstall_agent_integrations_with_lease(
+    agent_ids: &[String],
+    home: &Path,
+    tracedecay_bin: &str,
+    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+) -> Vec<(String, tracedecay::errors::Result<()>)> {
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
     let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
-        migrate_legacy_hermes_data_for_reinstall(home)
+        migrate_legacy_hermes_data_for_reinstall(home, lifecycle)
             .await
             .err()
             .map(|error| error.to_string())

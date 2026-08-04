@@ -276,6 +276,38 @@ pub mod hermes {
         .await
     }
 
+    pub async fn migrate_legacy_hermes_stores_under_lease(
+        user_home: &Path,
+        lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    ) -> LegacyHermesMigrationReport {
+        let Ok(profile_root) = crate::storage::default_profile_root() else {
+            return LegacyHermesMigrationReport {
+                failed: vec![LegacyHermesMigrationIssue {
+                    source_db: user_home.join(".hermes/.tracedecay/sessions.db"),
+                    reason: "could not resolve the TraceDecay user-profile store".to_string(),
+                }],
+                ..LegacyHermesMigrationReport::default()
+            };
+        };
+        migrate_legacy_hermes_stores_to_under_lease(user_home, &profile_root, lifecycle).await
+    }
+
+    pub async fn migrate_legacy_hermes_stores_to_under_lease(
+        user_home: &Path,
+        tracedecay_profile_root: &Path,
+        lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    ) -> LegacyHermesMigrationReport {
+        tracedecay_migrate::hermes::migrate_legacy_hermes_stores_to_with_runtime_under_lease(
+            user_home,
+            tracedecay_profile_root,
+            lifecycle,
+            &RootRegistry,
+            &crate::agents::hermes::read_config_pinned_project_root,
+            &RootHermesStateImporter,
+        )
+        .await
+    }
+
     fn code_project(project: CodeProjectRecord) -> registry_adapter::CodeProjectRecord {
         registry_adapter::CodeProjectRecord {
             project_id: project.project_id,

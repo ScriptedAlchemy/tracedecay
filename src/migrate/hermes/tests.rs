@@ -257,6 +257,23 @@ async fn migrates_standard_profile_store_once() {
 }
 
 #[tokio::test]
+async fn post_update_migration_reuses_its_exclusive_profile_lease() {
+    let temp = tempfile::tempdir().unwrap();
+    let user_home = temp.path().join("home");
+    let profile_root = temp.path().join("tracedecay-profile");
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "post-update maintenance",
+    )
+    .unwrap();
+
+    let report =
+        migrate_legacy_hermes_stores_to_under_lease(&user_home, &profile_root, &lifecycle).await;
+
+    assert!(report.failed.is_empty(), "{report:?}");
+}
+
+#[tokio::test]
 async fn migration_marker_remerges_when_a_target_row_is_missing() {
     let temp = tempfile::tempdir().unwrap();
     let user_home = temp.path().join("home");
