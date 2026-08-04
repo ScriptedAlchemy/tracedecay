@@ -198,6 +198,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                   canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
                   activation={activationRef.current}
                   ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The stores and branches listed alongside are the accessible equivalent.`}
+                  fallbackDescription="the project holdings beside this field remain available as a text alternative"
                   encoding={{
                     body: 'symbol',
                     size: 'connectedness',
