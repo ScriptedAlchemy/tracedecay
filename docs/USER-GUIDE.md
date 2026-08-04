@@ -6,6 +6,11 @@ TraceDecay is a code intelligence tool that builds a semantic knowledge graph of
 
 Everything runs locally. Your code never leaves your machine.
 
+> **Final V2:** `tracedecay-graph-db` is the sole Grafeo boundary. Incompatible
+> persisted data returns `ResetRequired` and requires explicit reset or
+> recreation. Storage, scope, and lossless retrieval rules are in the [V2
+> operating model](V2-OPERATING-MODEL.md).
+
 ---
 
 ## Table of Contents
@@ -98,10 +103,10 @@ In short:
 - **`tracedecay init`** -- one-time setup. Creates the active project store and performs a full index. Errors if already initialized.
 - **`tracedecay sync`** -- ongoing updates. Requires an existing project store. Errors if the project was never initialized.
 
-Linked git worktrees do not need their own `tracedecay init`. Once the main
-repository has been initialized, TraceDecay resolves linked worktrees through
-the repository's shared git common directory and uses the existing branch
-database tracking to keep the checked-out branch isolated.
+Linked git worktrees do not need their own `tracedecay init`. TraceDecay
+resolves linked worktrees through the repository's shared git common directory.
+Branch tracking may isolate code/index snapshots, while final V2 keeps facts,
+sessions, messages, and LCM data project-wide across those worktrees.
 
 ### Incremental syncs
 
@@ -818,7 +823,9 @@ tracedecay sync --force
 
 ## Configuration Files
 
-TraceDecay stores data in three local store classes.
+TraceDecay resolves local stores by profile and project identity. Exact files
+are an implementation detail; use `tracedecay status` or `tracedecay doctor`
+for the live resolution.
 
 ### User memory store
 
@@ -831,23 +838,24 @@ user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 ### Active project store
 
-Repo-local projects create `.tracedecay/` inside each project you index. Profile-backed storage may instead keep the code project's graph/session artifacts in a private profile shard such as `~/.tracedecay/projects/<project_id>/`, with only a small enrollment marker in the repository. The active project store contains:
+The final V2 project store uses embedded Grafeo, through
+`tracedecay-graph-db`, for graph/vector data. SQLite holds relational records
+such as registry/configuration, journals, cursors, receipts, leases, raw
+content, redaction, and retention metadata. One datum has one authority;
+SQLite does not shadow the graph.
 
-- `tracedecay.db` — the SQLite database, served by the `rusqlite` runtime, with all symbols, edges, files, and vector embeddings
-- `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard artifacts when those features are used
-
-Project holographic memory remains sharded: project `memory_facts`, entities,
-feedback, and derived holographic banks live in that project's
-`tracedecay.db`. The user-level `global.db` tracks the project registry and
-cross-project usage; it is not a single fact table with a `project_id` tag.
-Tools select either the profile-level user store or a registered project store
-before reading or writing facts. Read-only tools can explicitly select another
-registered project, while project-scoped mutations write only to the active
-project.
+Project facts, sessions, messages, and LCM data are project-wide across
+branches and linked worktrees. Tools resolve the registered project before
+reading or writing facts. A read may select another registered project only
+when its interface supports that selection; project-scoped mutations stay in
+the active project.
 
 Add `.tracedecay` to your `.gitignore` so enrollment markers are not committed.
 
-Projects indexed before the TraceDecay rename should be migrated into the user-level profile store; runtime storage no longer falls back to `.tracedecay/`.
+V2 is a fresh-profile breaking cutover. A prior or otherwise incompatible
+persisted shape returns `ResetRequired` and must be explicitly reset or
+recreated. TraceDecay does not convert, read, backfill, or dual-write old
+persisted data; an operator backup is for inspection only.
 
 ### Cross-project reads
 
@@ -858,7 +866,12 @@ tracedecay status /path/to/project --json
 tracedecay memory status --path /path/to/project --json
 ```
 
-`tracedecay sessions search` searches previously ingested sessions for the active project. By default it searches all ingested transcript providers; pass `--provider <id>` only when intentionally constraining the search. Use `--project-id` or `--project-path` to search a registered project other than the current directory.
+`tracedecay sessions search` searches previously ingested sessions for the
+active project. Host-source ingestion is bounded by its source and cursor; it
+is not a conversion of a prior TraceDecay store. By default search uses all
+available ingested providers; pass `--provider <id>` only when intentionally
+constraining the source. Use `--project-id` or `--project-path` only where the
+command supports a registered-project selector.
 
 ### Per-user: `~/.tracedecay/`
 
@@ -866,7 +879,7 @@ Created in your home directory. Contains:
 
 - `config.toml` — user preferences (upload opt-in/out, cached version info, pending upload count)
 - `global.db` — cross-project database that tracks tokens saved across all your projects
-- `projects/<project_id>/` — profile-sharded code-project stores when profile storage is enabled
+- `projects/<project_id>/` — profile-scoped project records when profile storage is enabled
 
 The `config.toml` is plain TOML and fully transparent:
 
