@@ -9,10 +9,11 @@ use tracedecay_domain::{ProjectId, UserProfileId};
 use super::{AuthorizedScopeSetError, MultiRootQueryError};
 use crate::{RequestContext, ResolvedScope};
 
-/// Shared physical profile-store locator supplied by the profile authority.
+/// Profile identity and exact registered project-store identifier.
 ///
-/// The typed profile and store IDs select this locator. It never derives an
-/// identity from a path, CWD, active graph, or mutable project alias.
+/// Roots in a federated scope set share `profile_id`; each retains its own
+/// registered `store_id`. Neither field derives identity from a path, CWD,
+/// active graph, or mutable project alias.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(deny_unknown_fields)]
 pub struct SharedProfileStoreLocatorV1 {
@@ -37,7 +38,7 @@ impl SharedProfileStoreLocatorV1 {
         self.profile_id
             .validate()
             .map_err(|error| MultiRootQueryError::Invalid(error.to_string()))?;
-        validate_locator_text(&self.store_id, "profile store id")
+        validate_locator_text(&self.store_id, "registered project store id")
     }
 }
 

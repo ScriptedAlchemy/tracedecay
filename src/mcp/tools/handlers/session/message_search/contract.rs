@@ -476,10 +476,18 @@ pub(crate) struct SessionRetrievalWorkerStatusView {
     pub(crate) retry_class: Option<SessionRetrievalWorkerRetryClass>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SessionRetrievalUnavailable {
     pub(crate) reason: SessionRetrievalUnavailableReason,
     pub(crate) worker: Option<SessionRetrievalWorkerStatusView>,
+    pub(crate) routing_failure: Option<SessionRetrievalRoutingFailure>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SessionRetrievalRoutingFailure {
+    pub(crate) code: String,
+    pub(crate) message: String,
+    pub(crate) retryable: bool,
 }
 
 impl SessionRetrievalUnavailable {
@@ -487,6 +495,7 @@ impl SessionRetrievalUnavailable {
         Self {
             reason: SessionRetrievalUnavailableReason::ServiceNotConfigured,
             worker: None,
+            routing_failure: None,
         }
     }
 
@@ -494,6 +503,24 @@ impl SessionRetrievalUnavailable {
         Self {
             reason,
             worker: None,
+            routing_failure: None,
+        }
+    }
+
+    pub(crate) fn routing_failure(
+        reason: SessionRetrievalUnavailableReason,
+        code: impl Into<String>,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
+        Self {
+            reason,
+            worker: None,
+            routing_failure: Some(SessionRetrievalRoutingFailure {
+                code: code.into(),
+                message: message.into(),
+                retryable,
+            }),
         }
     }
 }

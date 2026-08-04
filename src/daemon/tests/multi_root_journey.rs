@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay_application::{
     CancellationContext, Deadline, MultiRootExecuteRequestV1, MultiRootOperationV1,
@@ -84,6 +84,30 @@ fn wire_round_trip(request: &DaemonInvocationRequest) -> DaemonInvocationRequest
         .expect("valid daemon invocation envelope")
 }
 
+async fn message_search(server: &crate::mcp::McpServer, arguments: Value) -> Value {
+    let request = crate::mcp::JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: "tools/call".to_string(),
+        params: Some(json!({
+            "name": "tracedecay_message_search",
+            "arguments": arguments,
+        })),
+    };
+    let response = server
+        .handle_request(&request)
+        .await
+        .expect("message-search response");
+    let result = response.result.expect("successful message-search response");
+    result["content"]
+        .as_array()
+        .expect("message-search content")
+        .iter()
+        .filter_map(|item| item["text"].as_str())
+        .find_map(|text| serde_json::from_str(text).ok())
+        .unwrap_or_else(|| panic!("message-search JSON content: {result}"))
+}
+
 #[cfg(unix)]
 #[test]
 fn authenticated_multi_root_journey_reaches_scope_set_storage() {
@@ -111,7 +135,20 @@ async fn run_authenticated_multi_root_journey() {
     let home = TempDir::new().expect("home");
     let profile_root = home.path().join("profile");
     let first = repository();
-    let second = repository();
+    let second = home.path().join("linked-worktree");
+    let third = repository();
+    let second_text = second.to_string_lossy().to_string();
+    git(
+        first.path(),
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "linked-worktree",
+            &second_text,
+        ],
+    );
     let first_handshake = DaemonHandshake {
         project_path: Some(first.path().to_path_buf()),
         allow_init: true,
@@ -119,7 +156,13 @@ async fn run_authenticated_multi_root_journey() {
         ..test_handshake_defaults()
     };
     let second_handshake = DaemonHandshake {
-        project_path: Some(second.path().to_path_buf()),
+        project_path: Some(second.clone()),
+        allow_init: true,
+        client_identity: first_handshake.client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let third_handshake = DaemonHandshake {
+        project_path: Some(third.path().to_path_buf()),
         allow_init: true,
         client_identity: first_handshake.client_identity.clone(),
         ..test_handshake_defaults()
@@ -178,14 +221,10 @@ async fn run_authenticated_multi_root_journey() {
         "an invalid multi-root payload must be rejected before project admission"
     );
 
-    let (first_key, _, _, _) = engine
+    let (first_key, _, first_server, _) = engine
         .open_project_server(&first_handshake)
         .await
         .expect("first owner");
-    let (second_key, _, _, _) = engine
-        .open_project_server(&second_handshake)
-        .await
-        .expect("second owner");
     let first_project = tracedecay_domain::ProjectId::new(
         first_key
             .owner
@@ -194,6 +233,39 @@ async fn run_authenticated_multi_root_journey() {
             .expect("first project id"),
     )
     .expect("first project");
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("registered profile database");
+    let owner = registry
+        .project_registry_context_by_id(first_project.as_str())
+        .await
+        .expect("registered project lookup")
+        .expect("first project context");
+    let fallback = super::super::graph_resolution::retained_project_graph_resolver(
+        engine.store_administration.clone(),
+    )(
+        crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
+            owner,
+            second.clone(),
+        ),
+    )
+    .await;
+    let Err(crate::errors::TraceDecayError::ProjectRoute {
+        reason_code,
+        retryable,
+        ..
+    }) = fallback
+    else {
+        panic!("an unmounted linked worktree must not fall back to its primary graph");
+    };
+    assert_eq!(reason_code, "project_route_unavailable");
+    assert!(retryable);
+    let (second_key, _, second_server, _) = engine
+        .open_project_server(&second_handshake)
+        .await
+        .expect("linked worktree owner");
     let second_project = tracedecay_domain::ProjectId::new(
         second_key
             .owner
@@ -202,10 +274,48 @@ async fn run_authenticated_multi_root_journey() {
             .expect("second project id"),
     )
     .expect("second project");
+    assert_eq!(first_project, second_project);
+    let selected_root = second.canonicalize().expect("linked canonical root");
+    let selected = message_search(
+        first_server.as_ref(),
+        json!({
+            "query": "linked worktree routing evidence",
+            "format": "json",
+            "project_path": selected_root,
+        }),
+    )
+    .await;
+    assert_eq!(
+        selected["selected_project_root"],
+        json!(selected_root),
+        "the active server must route a path selector to the exact mounted linked worktree: {selected}"
+    );
+    let linked = message_search(
+        second_server.as_ref(),
+        json!({
+            "query": "linked worktree routing evidence",
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(linked["selected_project_root"], json!(selected_root));
+    let (third_key, _, _, _) = engine
+        .open_project_server(&third_handshake)
+        .await
+        .expect("distinct project owner");
+    let third_project = tracedecay_domain::ProjectId::new(
+        third_key
+            .owner
+            .project_id
+            .clone()
+            .expect("third project id"),
+    )
+    .expect("third project");
+    assert_ne!(first_project, third_project);
     let first_uri = url::Url::from_file_path(first.path())
         .expect("first URI")
         .to_string();
-    let second_uri = url::Url::from_file_path(second.path())
+    let second_uri = url::Url::from_file_path(&second)
         .expect("second URI")
         .to_string();
     // A single folder that is not the active project is still refused: a lone
@@ -298,7 +408,7 @@ async fn run_authenticated_multi_root_journey() {
         lsp_scope_set_digest.is_some(),
         "federated initialize must report its scope set digest"
     );
-    for root in [first.path(), second.path()] {
+    for root in [first.path(), second.as_path()] {
         assert!(
             engine
                 .invocation
@@ -322,10 +432,10 @@ async fn run_authenticated_multi_root_journey() {
                 scope_set_id.clone(),
                 None,
                 vec![
-                    RegisteredRootSelectorV1::new(second_project.clone(), second.path())
-                        .expect("second registered root"),
-                    RegisteredRootSelectorV1::new(first_project.clone(), first.path())
-                        .expect("first registered root"),
+                    RegisteredRootSelectorV1::new(second_project.clone(), &second)
+                        .expect("linked registered root"),
+                    RegisteredRootSelectorV1::new(third_project, third.path())
+                        .expect("distinct registered root"),
                 ],
             )
             .expect("CAS request"),
@@ -353,7 +463,7 @@ async fn run_authenticated_multi_root_journey() {
     let stored = cas_result
         .scope_set
         .expect("applied CAS must return the scope set");
-    for root in [first.path(), second.path()] {
+    for root in [first.path(), second.as_path(), third.path()] {
         assert_eq!(
             engine
                 .invocation
@@ -365,6 +475,19 @@ async fn run_authenticated_multi_root_journey() {
             "an applied CAS must be durable in every participating store"
         );
     }
+    let mut stored_locators = stored
+        .roots()
+        .iter()
+        .map(|root| root.locator().map(|locator| locator.canonical_root.clone()))
+        .collect::<Option<Vec<_>>>()
+        .expect("CAS roots must retain exact registered locators");
+    stored_locators.sort();
+    let mut expected_locators = vec![
+        second.canonicalize().expect("linked canonical root"),
+        third.path().canonicalize().expect("third canonical root"),
+    ];
+    expected_locators.sort();
+    assert_eq!(stored_locators, expected_locators);
 
     // The read surface returns exactly what the CAS persisted.
     let observed_at = now();
@@ -467,4 +590,61 @@ async fn run_authenticated_multi_root_journey() {
     }
 
     engine.shutdown_all().await;
+
+    let restarted = test_daemon_engine_for_profile(&profile_root);
+    restarted
+        .open_project_server(&first_handshake)
+        .await
+        .expect("restarted primary owner");
+    restarted
+        .open_project_server(&second_handshake)
+        .await
+        .expect("restarted linked worktree owner");
+    restarted
+        .open_project_server(&third_handshake)
+        .await
+        .expect("restarted distinct project owner");
+    for root in [first.path(), second.as_path(), third.path()] {
+        assert_eq!(
+            restarted
+                .invocation
+                .service
+                .persisted_scope_set(root, &scope_set_id)
+                .await
+                .as_ref(),
+            Some(&stored),
+            "restart must retain each exact registered root locator"
+        );
+    }
+    let observed_at = now();
+    let (deadline, cancellation) = controls("restart-execute", observed_at);
+    let restarted_execute = execute_daemon_invocation(
+        &restarted,
+        &first_handshake,
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.restart-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id,
+                stored.revision(),
+                stored.digest().clone(),
+                MultiRootOperationV1::Query { request: json!({}) },
+                0,
+                None,
+            )
+            .expect("restart execute request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+    )
+    .await;
+    assert!(
+        matches!(
+            restarted_execute.outcome,
+            DaemonInvocationOutcome::MultiRootQueryPage { .. }
+        ),
+        "restart must execute the persisted linked-worktree locator: {:#?}",
+        restarted_execute.outcome
+    );
+    restarted.shutdown_all().await;
 }

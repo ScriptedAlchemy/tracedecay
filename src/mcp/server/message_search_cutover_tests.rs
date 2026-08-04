@@ -432,6 +432,27 @@ async fn registered_project_and_linked_worktree_select_their_exact_session_autho
     let (selected_graph, selected_runtime, selected_dir) =
         indexed_project_with_id(SELECTED_PROJECT_ID).await;
     let linked_owner = TempDir::new().expect("linked worktree owner");
+    let active_linked_root = linked_owner.path().join("active-linked");
+    let active_linked_root_arg = active_linked_root.to_string_lossy();
+    git(
+        active_dir.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            active_linked_root_arg.as_ref(),
+            "-b",
+            "feature/active-linked",
+        ],
+    );
+    active_runtime
+        .upsert_project_alias(&active_linked_root, ACTIVE_PROJECT_ID)
+        .await
+        .expect("registered active linked-worktree alias");
+    let active_linked_graph = active_runtime
+        .initialize_project_graph_for_test(&active_linked_root, TraceDecayOpenOptions::default())
+        .await
+        .expect("initialize active linked-worktree graph");
     let linked_root = linked_owner.path().join("selected-linked");
     let linked_root_arg = linked_root.to_string_lossy();
     git(
@@ -490,8 +511,10 @@ async fn registered_project_and_linked_worktree_select_their_exact_session_autho
 
     let selected_graph = Arc::new(selected_graph);
     let selected_linked_graph = Arc::new(selected_linked_graph);
+    let active_linked_graph = Arc::new(active_linked_graph);
     let selected_root = selected_dir.path().to_path_buf();
     let resolver_linked_root = linked_root.clone();
+    let resolver_active_linked_root = active_linked_root.clone();
     let requested_roots = Arc::new(Mutex::new(Vec::new()));
     let resolver_requested_roots = Arc::clone(&requested_roots);
     let resolver: RetainedProjectGraphResolver = Arc::new(move |request| {
@@ -512,6 +535,11 @@ async fn registered_project_and_linked_worktree_select_their_exact_session_autho
             {
                 Some(Arc::clone(&selected_linked_graph))
             }
+            Some(ACTIVE_PROJECT_ID)
+                if request.requested_worktree_root == resolver_active_linked_root =>
+            {
+                Some(Arc::clone(&active_linked_graph))
+            }
             _ => None,
         };
         Box::pin(async move { Ok(graph) }) as RetainedProjectGraphFuture
@@ -522,12 +550,22 @@ async fn registered_project_and_linked_worktree_select_their_exact_session_autho
     context.retained_project_graph_resolver = Some(resolver);
     let server = McpServer::new_with_context(context).await;
 
-    for (selector, expected_root) in [
+    for (selector, expected_root, expected_text) in [
         (
             json!({"project_id": SELECTED_PROJECT_ID}),
             selected_dir.path(),
+            "from selected",
         ),
-        (json!({"project_path": linked_root}), linked_root.as_path()),
+        (
+            json!({"project_path": linked_root}),
+            linked_root.as_path(),
+            "from selected",
+        ),
+        (
+            json!({"project_path": active_linked_root}),
+            active_linked_root.as_path(),
+            "from active",
+        ),
     ] {
         let mut arguments = selector;
         let arguments = arguments
@@ -541,8 +579,8 @@ async fn registered_project_and_linked_worktree_select_their_exact_session_autho
         assert!(
             payload["results"][0]["message"]["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("from selected")),
-            "selected project must read only its registered session authority: {payload}"
+                .is_some_and(|text| text.contains(expected_text)),
+            "project selection must read only its exact registered session authority: {payload}"
         );
         assert_eq!(
             payload["selected_project_root"],
@@ -554,8 +592,28 @@ async fn registered_project_and_linked_worktree_select_their_exact_session_autho
         *requested_roots
             .lock()
             .expect("recorded retained graph requests"),
-        vec![selected_dir.path().to_path_buf(), linked_root.clone()],
+        vec![
+            selected_dir.path().to_path_buf(),
+            linked_root.clone(),
+            active_linked_root.clone(),
+        ],
         "project-path selection must preserve its linked-worktree identity"
+    );
+
+    let inconsistent = message_search(
+        &server,
+        json!({
+            "query": "route identity evidence",
+            "project_id": ACTIVE_PROJECT_ID,
+            "project_path": selected_dir.path(),
+            "format": "json",
+        }),
+    )
+    .await;
+    assert_eq!(inconsistent["status"], "unavailable", "{inconsistent}");
+    assert_eq!(
+        inconsistent["error"]["code"], "project_selector_mismatch",
+        "{inconsistent}"
     );
 
     let all_registered = message_search(
@@ -626,6 +684,33 @@ async fn all_registered_reports_missing_registry_authority_as_typed_unavailable(
     assert_eq!(
         payload["error"]["code"], "project_registry_unavailable",
         "{payload}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn all_registered_all_root_failures_remain_typed_unavailable() {
+    let (server, _dir, _pin) =
+        server_with_project_refresh_wake(Some(SessionTemporalRefreshWake::unavailable())).await;
+    let payload = message_search(
+        &server,
+        json!({
+            "query": "route identity evidence",
+            "project_scope": "all_registered",
+            "catch_up": true,
+            "format": "json",
+        }),
+    )
+    .await;
+
+    assert_eq!(payload["status"], "unavailable", "{payload}");
+    assert_eq!(
+        payload["error"]["code"], "all_registered_search_unavailable",
+        "{payload}"
+    );
+    assert_eq!(
+        payload["projects"][0]["error"]["reason"],
+        "refresh_worker_missing"
     );
     server.shutdown().await;
 }

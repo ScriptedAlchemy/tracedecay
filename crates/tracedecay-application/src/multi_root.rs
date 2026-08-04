@@ -305,13 +305,18 @@ impl AuthorizedScopeSet {
         {
             return Err(AuthorizedScopeSetError::DuplicateRoot);
         }
-        let profile = roots[0].locator.as_ref().map(|locator| &locator.profile);
-        if roots
-            .iter()
-            .any(|root| root.locator.as_ref().map(|locator| &locator.profile) != profile)
-        {
+        let profile_id = roots[0]
+            .locator
+            .as_ref()
+            .map(|locator| &locator.profile.profile_id);
+        if roots.iter().any(|root| {
+            root.locator
+                .as_ref()
+                .map(|locator| &locator.profile.profile_id)
+                != profile_id
+        }) {
             return Err(AuthorizedScopeSetError::Invalid(
-                "authorized roots must either all be registered under one profile store locator or all be pre-resolved"
+                "authorized roots must either all be registered under one profile or all be pre-resolved"
                     .to_owned(),
             ));
         }

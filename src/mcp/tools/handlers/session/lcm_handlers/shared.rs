@@ -234,7 +234,7 @@ pub(super) fn lcm_typed_outcome(
         outcome => outcome,
     };
     let unavailable = match &outcome {
-        SessionRetrievalServiceOutcome::Unavailable(unavailable) => Some(*unavailable),
+        SessionRetrievalServiceOutcome::Unavailable(unavailable) => Some(unavailable.clone()),
         _ => None,
     };
     let cursor_manifest_limit = match &outcome {

@@ -32,6 +32,83 @@ pub(super) struct DaemonInvocationState {
         crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
 }
 
+enum AuthorizedMultiRootResolution {
+    Denied,
+    Unavailable(tracedecay_domain::ScopeUnavailableReasonV1),
+}
+
+async fn resolve_authorized_multi_root_root(
+    store_administration: &StoreAdministration,
+    database: &crate::global_db::RegisteredGlobalDb,
+    root: &tracedecay_application::AuthorizedRoot,
+) -> std::result::Result<PathBuf, AuthorizedMultiRootResolution> {
+    let scope = root.scope();
+    let locator = root
+        .locator()
+        .ok_or(AuthorizedMultiRootResolution::Unavailable(
+            tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+        ))?;
+    let profile_identity = store_administration.profile_identity().map_err(|_| {
+        AuthorizedMultiRootResolution::Unavailable(
+            tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+        )
+    })?;
+    if profile_identity.profile_id() != &locator.profile.profile_id {
+        return Err(AuthorizedMultiRootResolution::Unavailable(
+            tracedecay_domain::ScopeUnavailableReasonV1::AuthorityUnavailable,
+        ));
+    }
+    let registry_context = database
+        .project_registry_context_by_id(locator.project_id.as_str())
+        .await
+        .map_err(|_| {
+            AuthorizedMultiRootResolution::Unavailable(
+                tracedecay_domain::ScopeUnavailableReasonV1::StoreUnavailable,
+            )
+        })?
+        .ok_or(AuthorizedMultiRootResolution::Denied)?;
+    if registry_context.project.project_id != locator.project_id.as_str()
+        || !registry_context.stores.iter().any(|store| {
+            store.store.project_id == locator.project_id.as_str()
+                && store.store.store_id == locator.profile.store_id
+        })
+    {
+        return Err(AuthorizedMultiRootResolution::Denied);
+    }
+    let registered_root = PathBuf::from(registry_context.project.canonical_root);
+    if !registered_root.is_absolute()
+        || registered_root.canonicalize().ok().as_ref() != Some(&registered_root)
+    {
+        return Err(AuthorizedMultiRootResolution::Unavailable(
+            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+        ));
+    }
+    let exact_root = locator.canonical_root.clone();
+    if exact_root.canonicalize().ok().as_ref() != Some(&exact_root) {
+        return Err(AuthorizedMultiRootResolution::Unavailable(
+            tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+        ));
+    }
+    tracedecay_usecases::context::RegisteredScopeResolver::resolve(
+        &registered_root,
+        &exact_root,
+        &locator.project_id,
+    )
+    .map_err(|_| AuthorizedMultiRootResolution::Denied)?;
+    let exact_scope =
+        project_open_owners::resolved_scope_for_project(&exact_root, &locator.project_id).map_err(
+            |_| {
+                AuthorizedMultiRootResolution::Unavailable(
+                    tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
+                )
+            },
+        )?;
+    if &exact_scope != scope {
+        return Err(AuthorizedMultiRootResolution::Denied);
+    }
+    Ok(exact_root)
+}
+
 impl Default for DaemonInvocationState {
     fn default() -> Self {
         let code_index_schedulers =
@@ -298,16 +375,26 @@ impl DaemonInvocationState {
         let mut outcomes = BTreeMap::new();
         for (ordinal, root) in scope_set.roots().iter().enumerate() {
             let scope = root.scope();
-            let registry_context = match database
-                .project_registry_context_by_id(scope.project_id.as_str())
-                .await
+            let root = match resolve_authorized_multi_root_root(
+                store_administration,
+                database.as_ref(),
+                root,
+            )
+            .await
             {
-                Ok(context) => context,
-                Err(_) => {
-                    let Ok(generation) = unavailable_root_generation(
-                        scope,
-                        tracedecay_domain::ScopeUnavailableReasonV1::StoreUnavailable,
-                    ) else {
+                Ok(root) => root,
+                Err(AuthorizedMultiRootResolution::Denied) => {
+                    let Ok(generation) = denied_root_generation(scope) else {
+                        return DaemonInvocationResponse::problem(
+                            request_id,
+                            service::invocation::DaemonInvocationProblem::InvalidRequest,
+                        );
+                    };
+                    generations.push(generation);
+                    continue;
+                }
+                Err(AuthorizedMultiRootResolution::Unavailable(reason)) => {
+                    let Ok(generation) = unavailable_root_generation(scope, reason) else {
                         return DaemonInvocationResponse::problem(
                             request_id,
                             service::invocation::DaemonInvocationProblem::InvalidRequest,
@@ -317,30 +404,6 @@ impl DaemonInvocationState {
                     continue;
                 }
             };
-            let Some(registry_context) = registry_context else {
-                let Ok(generation) = denied_root_generation(scope) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        service::invocation::DaemonInvocationProblem::InvalidRequest,
-                    );
-                };
-                generations.push(generation);
-                continue;
-            };
-            let root = PathBuf::from(registry_context.project.canonical_root);
-            if !root.is_absolute() || root.canonicalize().ok().as_ref() != Some(&root) {
-                let Ok(generation) = unavailable_root_generation(
-                    scope,
-                    tracedecay_domain::ScopeUnavailableReasonV1::RootMissing,
-                ) else {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        service::invocation::DaemonInvocationProblem::InvalidRequest,
-                    );
-                };
-                generations.push(generation);
-                continue;
-            }
             let Some((context, _authority_digest)) = self
                 .service
                 .multi_root_query_context(&root, scope, ordinal, observed_at)

@@ -3,7 +3,7 @@
 //! describe/expand execution, and result filtering for the
 //! `SessionRetrievalServicePort` implementation.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,12 +73,18 @@ const MESSAGE_SEARCH_MAX_RESULTS: u64 = 1_024;
 const MESSAGE_SEARCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const MESSAGE_SEARCH_MAX_WORK_UNITS: u64 = 100_000;
 
+mod router;
+pub(crate) use router::{
+    DaemonProjectSessionRetrievalRouter, ProjectSessionRetrievalServiceInputs,
+    build_project_session_retrieval_service,
+};
+
 #[derive(Clone)]
 pub(crate) struct DaemonSessionRetrievalRoot {
     store_scope: SessionRetrievalStoreScope,
     identity: ResolvedSessionIdentity,
     project_id: Option<String>,
-    project_paths: HashSet<PathBuf>,
+    project_root: Option<PathBuf>,
     authorized_root: Option<String>,
     expected_runtime_shard: Option<StoreShardIdV1>,
 }
@@ -136,19 +142,11 @@ impl DaemonSessionRetrievalRoot {
                 BranchId::new(graph_scope_id).ok()?,
             ),
         );
-        let mut project_paths = context
-            .aliases
-            .iter()
-            .map(|alias| PathBuf::from(&alias.alias_path))
-            .collect::<HashSet<_>>();
-        project_paths.insert(PathBuf::from(&context.project.canonical_root));
-        project_paths.insert(PathBuf::from(&context.project.display_root));
-        project_paths.insert(worktree_root.clone());
         Some(Self {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id: Some(context.project.project_id),
-            project_paths,
+            project_root: Some(worktree_root.clone()),
             authorized_root: Some(worktree_root.display().to_string()),
             expected_runtime_shard: None,
         })
@@ -184,7 +182,7 @@ impl DaemonSessionRetrievalRoot {
             store_scope: SessionRetrievalStoreScope::Project,
             identity,
             project_id,
-            project_paths: HashSet::from([project_root.clone()]),
+            project_root: Some(project_root.clone()),
             authorized_root: Some(project_key_value),
             expected_runtime_shard: None,
         }
@@ -199,7 +197,7 @@ impl DaemonSessionRetrievalRoot {
                 SessionRootId::new("root.profile.primary").ok()?,
             ),
             project_id: None,
-            project_paths: HashSet::new(),
+            project_root: None,
             authorized_root: None,
             expected_runtime_shard: None,
         })
@@ -283,7 +281,7 @@ impl DaemonSessionRetrievalRoot {
             && selector
                 .project_path
                 .as_deref()
-                .is_none_or(|path| self.project_paths.contains(Path::new(path)))
+                .is_none_or(|path| self.project_root.as_deref() == Some(Path::new(path)))
     }
 }
 
@@ -386,137 +384,6 @@ pub(crate) struct DaemonSessionRetrievalService {
     refresh_status: Option<SessionTemporalRefreshWake>,
 }
 
-pub(crate) struct DaemonProjectSessionRetrievalRouter {
-    active: DaemonSessionRetrievalService,
-    registry: Arc<RegisteredGlobalDb>,
-    resolver: crate::mcp::server::RetainedProjectGraphResolver,
-    profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-    calls: Arc<AtomicU64>,
-}
-
-impl DaemonProjectSessionRetrievalRouter {
-    pub(crate) fn new(
-        active: DaemonSessionRetrievalService,
-        registry: Arc<RegisteredGlobalDb>,
-        resolver: crate::mcp::server::RetainedProjectGraphResolver,
-        profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
-        calls: Arc<AtomicU64>,
-    ) -> Self {
-        Self {
-            active,
-            registry,
-            resolver,
-            profile_identity,
-            calls,
-        }
-    }
-
-    async fn context_for_selector(
-        &self,
-        selector: &crate::mcp::tools::SessionRetrievalProjectSelector,
-    ) -> Option<(ProjectRegistryContext, PathBuf)> {
-        if let Some(project_id) = selector.project_id.as_deref() {
-            return self
-                .registry
-                .project_registry_context_by_id(project_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|context| {
-                    let requested_root = PathBuf::from(&context.project.canonical_root);
-                    (context, requested_root)
-                });
-        }
-        let project_path = Path::new(selector.project_path.as_deref()?);
-        let requested_root = crate::worktree::git_worktree_root(project_path)
-            .unwrap_or_else(|| project_path.to_path_buf());
-        if let Some(store) = self
-            .registry
-            .try_resolve_project_store_record_by_alias(project_path)
-            .await
-            .ok()
-            .flatten()
-        {
-            return self
-                .registry
-                .project_registry_context_by_id(&store.project_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|context| (context, requested_root.clone()));
-        }
-        if let Some(context) = self
-            .registry
-            .project_registry_context_by_alias(project_path)
-            .await
-            .ok()
-            .flatten()
-        {
-            return Some((context, requested_root));
-        }
-        let git_common_dir = crate::worktree::git_common_dir(project_path);
-        self.registry
-            .project_registry_context_by_identity(project_path, git_common_dir.as_deref())
-            .await
-            .ok()
-            .flatten()
-            .map(|context| (context, requested_root))
-    }
-
-    async fn service_for_context(
-        &self,
-        context: ProjectRegistryContext,
-        requested_root: PathBuf,
-    ) -> Option<DaemonSessionRetrievalService> {
-        let request = crate::mcp::server::RetainedProjectGraphRequest::for_registered_project(
-            context.clone(),
-            requested_root,
-        );
-        let graph = (self.resolver)(request).await.ok()??;
-        let root = DaemonSessionRetrievalRoot::from_project_context(
-            graph.as_ref(),
-            self.registry.as_ref(),
-            context,
-        )?
-        .with_project_runtime_shard(&self.profile_identity)?;
-        let project_id = ProjectId::new(root.project_id.as_deref()?).ok()?;
-        let database = graph
-            .store_runtime_registry()
-            .mounted_project_sessions(&project_id)
-            .await?;
-        DaemonSessionRetrievalService::new_registered(
-            Arc::clone(&database),
-            database,
-            root,
-            Arc::clone(&self.calls),
-            None,
-        )
-    }
-
-    async fn execute_command(
-        &self,
-        command: SessionRetrievalCommand,
-    ) -> SessionRetrievalServiceOutcome {
-        if self.active.root.owns(&command) {
-            return self.active.execute_command(command).await;
-        }
-        let Some(selector) = command.project_selector() else {
-            return SessionRetrievalServiceOutcome::WrongScope;
-        };
-        let Some((context, requested_root)) = self.context_for_selector(selector).await else {
-            return SessionRetrievalServiceOutcome::WrongScope;
-        };
-        let Some(service) = self.service_for_context(context, requested_root).await else {
-            return SessionRetrievalServiceOutcome::Unavailable(
-                SessionRetrievalUnavailable::without_worker(
-                    SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
-                ),
-            );
-        };
-        service.execute_command(command).await
-    }
-}
-
 impl DaemonSessionRetrievalService {
     pub(crate) fn new(
         database: Arc<RegisteredGlobalDb>,
@@ -579,6 +446,7 @@ impl DaemonSessionRetrievalService {
                 }
             },
             worker: Some(session_retrieval_worker_status(status)),
+            routing_failure: None,
         })
     }
 
@@ -1855,44 +1723,6 @@ mod tests {
         assert_eq!(
             root.expected_runtime_shard,
             Some(StoreShardIdV1::profile_sessions(brain_id, profile_id))
-        );
-    }
-
-    #[test]
-    fn registered_project_binding_uses_one_durable_profile_and_typed_project() {
-        let brain_id = typed::<tracedecay_domain::BrainId>("brain.session-retrieval");
-        let profile_id =
-            typed::<tracedecay_domain::UserProfileId>("profile.durable-session-retrieval");
-        let project_id = ProjectId::new("project.session-retrieval").expect("project identity");
-        let identity = ResolvedSessionIdentity::for_project(
-            ProfileId::new(MESSAGE_SEARCH_PROFILE_ID).expect("legacy profile"),
-            project_id.clone(),
-            SessionStoreId::new("store.project.test").expect("store identity"),
-            SessionRootId::new("root.project.test").expect("root identity"),
-            ResolvedGitRoute::new(
-                RepositoryId::new("repository.project.test").expect("repository identity"),
-                WorktreeId::new("/project/test").expect("worktree identity"),
-                BranchId::new("branch.project.test").expect("branch identity"),
-            ),
-        );
-        let root = DaemonSessionRetrievalRoot {
-            store_scope: SessionRetrievalStoreScope::Project,
-            identity,
-            project_id: Some(project_id.as_str().to_owned()),
-            project_paths: HashSet::new(),
-            authorized_root: None,
-            expected_runtime_shard: None,
-        }
-        .with_project_runtime_identity(brain_id.clone(), profile_id.clone())
-        .expect("durable project binding");
-
-        assert_eq!(root.identity.profile_id().as_str(), profile_id.as_str());
-        assert_eq!(root.identity.project_id(), Some(&project_id));
-        assert_eq!(
-            root.expected_runtime_shard,
-            Some(StoreShardIdV1::project_sessions(
-                brain_id, profile_id, project_id,
-            ))
         );
     }
 
