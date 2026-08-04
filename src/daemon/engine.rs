@@ -825,7 +825,13 @@ impl DaemonEngine {
             .await;
 
         self.maintenance_coordinator.shutdown().await;
-        self.git_watcher.shutdown().await;
+        let watcher_shutdown = self.git_watcher.shutdown().await;
+        if !watcher_shutdown.is_clean() {
+            log_daemon_event(
+                "git_watch_shutdown_incomplete",
+                &[("failures", watcher_shutdown.failures().len().to_string())],
+            );
+        }
         if let Some(handle) = self.pr_autotrack_task.lock().await.take() {
             handle.abort();
             let _ = handle.await;
