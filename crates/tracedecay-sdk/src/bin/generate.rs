@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use quote::ToTokens;
 use schemars::schema::RootSchema;
 use serde_json::Value;
-use tracedecay_api::HttpApplicationOperation;
 use tracedecay_application::sdk_executable_binding_registry;
 use tracedecay_tool_catalog::{
     EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
@@ -72,10 +71,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         &destination.join("operations.ts"),
         &render_operations(&operations, &unavailable)?,
     )?;
-    write(
-        &destination.join("server-operations.ts"),
-        &render_server_operations(),
-    )?;
+    let server_operations = destination.join("server-operations.ts");
+    if server_operations.exists() {
+        fs::remove_file(server_operations)?;
+    }
     write(&destination.join("index.ts"), &render_index())?;
     write(
         &root.join("crates/tracedecay-sdk/src/operations.rs"),
@@ -491,43 +490,12 @@ fn render_operations(
     Ok(out)
 }
 
-fn render_server_operations() -> String {
-    let mut out = String::from(HEADER);
-    out.push_str(
-        "export interface ServerOperationDescriptor<Name extends string = string> {\n\
-         \x20 readonly operation: Name;\n\
-         \x20 readonly route: string;\n\
-         \x20 readonly sdkAvailability: \"unavailable\";\n\
-         \x20 readonly disposition: \"schema_unavailable\";\n\
-         }\n\n\
-         export const SERVER_OPERATIONS = [\n",
-    );
-    for operation in HttpApplicationOperation::ALL {
-        if !operation.is_http_exposed() {
-            continue;
-        }
-        emit!(
-            out,
-            "  {{ operation: {}, route: {}, sdkAvailability: \"unavailable\", disposition: \"schema_unavailable\" }},",
-            quote(operation.as_str()),
-            quote(&format!("/application{}", operation.route_path()))
-        );
-    }
-    out.push_str(
-        "] as const satisfies readonly ServerOperationDescriptor[];\n\
-         export type ServerOperation = (typeof SERVER_OPERATIONS)[number];\n\
-         export type ServerOperationName = ServerOperation[\"operation\"];\n",
-    );
-    out
-}
-
 fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Error>> {
     let mut out = String::from(
         "//! Generated typed public operation descriptors. DO NOT EDIT.\n\n\
          use serde::Serialize;\n\
          use serde::de::DeserializeOwned;\n\
-         use tracedecay_api::HttpApplicationOperation;\n\
-         use tracedecay_tool_catalog::{EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract};\n\n\
+         use tracedecay_tool_catalog::{EffectClass, IdempotencyContract};\n\n\
          pub trait TypedOperation {\n\
          \x20   type Request: Serialize;\n\
          \x20   type Result: DeserializeOwned;\n\n\
@@ -583,21 +551,6 @@ fn render_rust_operations(operations: &[Operation]) -> Result<String, Box<dyn Er
             revision = operation.result_schema.revision,
         );
     }
-    out.push_str(
-        "#[derive(Clone, Debug, PartialEq, Eq)]\n\
-         pub struct BaseOperationCapability {\n\
-         \x20   pub operation: HttpApplicationOperation,\n\
-         \x20   pub route: String,\n\
-         \x20   pub disposition: ExecutableUnavailableDispositionV1,\n\
-         }\n\n\
-         pub fn base_operation_capabilities() -> impl Iterator<Item = BaseOperationCapability> {\n\
-         \x20   HttpApplicationOperation::ALL.iter().copied().filter(|operation| operation.is_http_exposed()).map(|operation| BaseOperationCapability {\n\
-         \x20       route: format!(\"/application{}\", operation.route_path()),\n\
-         \x20       operation,\n\
-         \x20       disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,\n\
-         \x20   })\n\
-         }\n",
-    );
     let syntax = syn::parse_file(&out)?;
     Ok(prettyplease::unparse(&syntax))
 }
@@ -711,7 +664,6 @@ fn render_index() -> String {
          export {{ TraceDecayAbortError, TraceDecayAuthenticationError, TraceDecayCancelledError, TraceDecayClient, TraceDecayConflictError, TraceDecayDeniedError, TraceDecayDisconnectedError, TraceDecayInvalidRequestError, TraceDecayMalformedResponseError, TraceDecayProblemError, TraceDecayProtocolError, TraceDecaySaturatedError, TraceDecayStaleError, TraceDecayTimedOutError, TraceDecayTransportError, TraceDecayUnavailableError, TraceDecayUnsupportedError, createClient }} from \"./client\";\n\
          export type {{ ClientOptions, OperationCancellation, OperationRequestOptions, OperationStreamEvent, OperationStreamOptions, OperationStreamResume, PageOptions }} from \"./client\";\n\
          export * from \"./operations\";\n\
-         export * from \"./server-operations\";\n\
          export * from \"./types\";\n"
     )
 }

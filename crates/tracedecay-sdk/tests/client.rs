@@ -6,9 +6,7 @@ use serde_json::{Value, json};
 use tracedecay_sdk::client::{
     CancellationStatus, Client, ClientError, ConnectionMode, StreamOptions, StreamResume,
 };
-use tracedecay_sdk::operations::{
-    TypedOperation, WorkCreate, WorkSnapshot, base_operation_capabilities,
-};
+use tracedecay_sdk::operations::{TypedOperation, WorkCreate, WorkSnapshot};
 
 fn request(stream: &mut TcpStream) -> String {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -224,35 +222,13 @@ fn cancellation_and_stream_resume_use_lifecycle_routes() {
 }
 
 #[test]
-fn typed_work_descriptors_close_the_public_operation_surface() {
+fn typed_work_descriptors_retain_canonical_contract_identity() {
     fn assert_typed_contract<Operation: TypedOperation>() {}
 
     assert_typed_contract::<WorkCreate>();
     assert_eq!(WorkCreate::OPERATION_ID, "operation.work.create");
-    let capabilities = base_operation_capabilities().collect::<Vec<_>>();
-    let exposed_count = tracedecay_sdk::api::HttpApplicationOperation::ALL
-        .into_iter()
-        .filter(|operation| operation.is_http_exposed())
-        .count();
-    assert_eq!(
-        capabilities.len(),
-        exposed_count,
-        "every base HTTP application operation must surface as a capability"
-    );
-    assert!(capabilities.iter().all(|capability| {
-        capability.operation.is_http_exposed()
-            && !matches!(
-                capability.operation,
-                tracedecay_sdk::api::HttpApplicationOperation::GitPreview
-                    | tracedecay_sdk::api::HttpApplicationOperation::GitApply
-            )
-            && !matches!(
-                capability.route.as_str(),
-                "/application/git/preview" | "/application/git/apply"
-            )
-    }));
-    assert!(capabilities.iter().all(|capability| capability.disposition
-        == tracedecay_sdk::operation::ExecutableUnavailableDispositionV1::SchemaUnavailable));
+    assert_eq!(WorkCreate::ROUTE, "/application/work/create");
+    assert_eq!(WorkCreate::BINDING_ID, "binding.http.work.create");
 }
 
 #[test]
