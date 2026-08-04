@@ -133,18 +133,6 @@ fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> V
     })
 }
 
-/// The lane reason to attribute a retained-store fallback to. The coverage
-/// marker carries the precise cause (a rebuilding generation is not the same
-/// failure as a revoked route); the outcome reason is the fallback.
-fn retained_fallback_reason(
-    unavailable: &crate::mcp::server::CodeIndexSearchUnavailableV1,
-) -> &'static str {
-    match unavailable.coverage.exact {
-        crate::mcp::server::CodeIndexLaneStatusV1::Unavailable { reason } => reason,
-        _ => unavailable.reason.as_str(),
-    }
-}
-
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
 }
@@ -234,108 +222,6 @@ fn rendered_context_tool_result(
     }
 }
 
-async fn legacy_search_fallback(
-    cg: &TraceDecay,
-    args: &Value,
-    query: &str,
-    limit: usize,
-    scope_prefix: Option<&str>,
-    semantic_reason: &'static str,
-) -> Result<ToolResult> {
-    let mut legacy_results =
-        filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
-            &result.node.file_path
-        });
-    let mut lazy_indexed_files = Vec::new();
-    if dependency_hints::lazy_indexing_requested(args)
-        && dependency_hints::should_check_ignored_dependency_hint(legacy_results.len(), limit)
-    {
-        lazy_indexed_files = dependency_hints::lazy_index_ignored_dependency_candidates(
-            cg,
-            query,
-            limit,
-            scope_prefix,
-        )
-        .await?;
-        if !lazy_indexed_files.is_empty() {
-            legacy_results =
-                filter_by_scope(cg.search(query, limit).await?, scope_prefix, |result| {
-                    &result.node.file_path
-                });
-        }
-    }
-    let coverage_hint = cg.index_coverage_hint(legacy_results.len());
-    let lazy_match_visible = legacy_results
-        .iter()
-        .any(|result| lazy_indexed_files.contains(&result.node.file_path));
-    let ignored_dependency_hint = if !lazy_match_visible
-        && dependency_hints::should_check_ignored_dependency_hint(legacy_results.len(), limit)
-    {
-        dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
-    } else {
-        None
-    };
-    let touched_files = unique_file_paths(
-        legacy_results
-            .iter()
-            .map(|result| result.node.file_path.as_str())
-            .chain(lazy_indexed_files.iter().map(String::as_str)),
-    );
-    let results = legacy_results
-        .into_iter()
-        .map(|result| {
-            let node_id = result.node.id;
-            json!({
-                "id": node_id.clone(),
-                "node_id": node_id,
-                "name": result.node.name,
-                "kind": result.node.kind.as_str(),
-                "file": result.node.file_path,
-                "line": user_line(result.node.start_line),
-                "signature": result.node.signature,
-                "score": result.score,
-            })
-        })
-        .collect::<Vec<_>>();
-    let mut output = json!({
-        "results": results,
-        "code_generation": Value::Null,
-        "query_fallback_digest": Value::Null,
-        "semantic": {
-            "mode": "fallback_allowed",
-            "status": "unavailable",
-            "reason": semantic_reason,
-        },
-        "status": "lexical_fallback",
-        // The generation-bound lanes are down, but the retained store still
-        // answers lexically. Say so explicitly rather than returning a short
-        // list that reads like a complete one.
-        "coverage": coverage_value(
-            &crate::mcp::server::CodeIndexSearchCoverageV1::retained_lexical_only(semantic_reason),
-        ),
-    });
-    if let Some(scope) = scope_prefix {
-        output["scope_prefix"] = json!(scope);
-        output["scope_prefix_applied"] = json!(true);
-    }
-    if !lazy_indexed_files.is_empty() {
-        output["lazy_indexed_ignored_dependency_files"] = json!(lazy_indexed_files);
-    }
-    if let Some(hint) = coverage_hint {
-        output["index_coverage_hint"] = json!(hint);
-    }
-    if let Some(hint) = ignored_dependency_hint {
-        output["ignored_dependency_hint"] = hint;
-    }
-    Ok(rendered_tool_result(
-        cg,
-        args,
-        &output,
-        touched_files,
-        || render_search_md(&output),
-    ))
-}
-
 /// Handles `tracedecay_search` tool calls.
 pub(super) async fn handle_search(
     cg: &TraceDecay,
@@ -366,19 +252,6 @@ pub(super) async fn handle_search(
     // the tool return nothing for the whole session (any serve launched from a
     // subdirectory sets a scope), so run the search and report below that the
     // scope was not honored rather than silently implying it was.
-    if search_executor.is_none()
-        && semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed
-    {
-        return legacy_search_fallback(
-            cg,
-            &args,
-            query,
-            limit,
-            scope_prefix,
-            "retained semantic search authority was not constructed",
-        )
-        .await;
-    }
     let outcome = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
@@ -443,21 +316,6 @@ pub(super) async fn handle_search(
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => {
             let reason = unavailable.reason.as_str();
-            // Progressive degradation: the generation-bound lanes are down,
-            // but the retained lexical/graph store is a ready lane, so serve
-            // it instead of failing the whole query. Strict-semantic callers
-            // asked for a lane that cannot degrade, so they still fail fast.
-            if semantic_mode == crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed {
-                return legacy_search_fallback(
-                    cg,
-                    &args,
-                    query,
-                    limit,
-                    scope_prefix,
-                    retained_fallback_reason(&unavailable),
-                )
-                .await;
-            }
             let output = json!({
                 "results": [],
                 "code_generation": unavailable.code_generation,
@@ -1975,32 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn degraded_coverage_is_visible_in_the_rendered_body() {
-        let output = json!({
-            "results": [],
-            "status": "lexical_fallback",
-            "coverage": coverage_value(
-                &crate::mcp::server::CodeIndexSearchCoverageV1::retained_lexical_only(
-                    crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-                ),
-            ),
-        });
-
-        let rendered = render_search_md(&output);
-        assert!(
-            rendered.contains("Partial recall"),
-            "a degraded page must say so: {rendered}"
-        );
-        assert!(
-            rendered.contains("generation_rebuilding"),
-            "the degraded page must name the cause: {rendered}"
-        );
-        assert_eq!(output["coverage"]["lexical"], json!("complete"));
-        assert_eq!(output["coverage"]["recall"], json!("partial"));
-    }
-
-    #[test]
-    fn a_rebuilding_generation_routes_to_the_retained_lane_with_its_own_reason() {
+    fn a_rebuilding_generation_remains_typed_unavailable() {
         let unavailable = crate::mcp::server::CodeIndexSearchUnavailableV1 {
             code_generation: None,
             reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
@@ -2012,10 +1845,12 @@ mod tests {
             ),
         };
 
+        assert!(!unavailable.coverage.any_servable());
         assert_eq!(
-            retained_fallback_reason(&unavailable),
-            crate::mcp::server::lane_reason::GENERATION_REBUILDING,
-            "the fallback must report the rebuild, not a generic search failure"
+            unavailable.coverage.exact,
+            crate::mcp::server::CodeIndexLaneStatusV1::Unavailable {
+                reason: crate::mcp::server::lane_reason::GENERATION_REBUILDING,
+            }
         );
     }
 

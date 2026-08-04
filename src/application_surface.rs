@@ -1774,6 +1774,7 @@ fn plan26_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(Plan26SseLifecy
                 OperationTermination::Failed | OperationTermination::EffectUnknown => {
                     Plan26SseLifecycleV1::Failed
                 }
+                OperationTermination::Unavailable => Plan26SseLifecycleV1::Unavailable,
                 OperationTermination::Partial => Plan26SseLifecycleV1::Partial,
             },
             0,

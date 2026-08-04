@@ -535,6 +535,18 @@ impl DaemonFeedbackRuntimeRegistrar {
             .await
             .map_err(DaemonFeedbackRuntimeRegistrationError::from)
     }
+
+    pub(crate) async fn install_advisory_cycle_invocation(
+        &self,
+        project_root: &Path,
+        owner: DaemonAdvisoryCycleInvocationOwner,
+    ) -> Result<(), DaemonFeedbackRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .register(project_root.to_path_buf(), owner)
+            .await
+            .map_err(DaemonFeedbackRuntimeRegistrationError::from)
+    }
 }
 
 impl crate::dashboard::feedback_api::FeedbackStatusRuntime for DaemonFeedbackRuntimeRegistrar {

@@ -279,6 +279,7 @@ fn capability(
                 TerminalState::Cancelled,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
+                TerminalState::Unavailable,
                 TerminalState::EffectUnknown,
                 TerminalState::Partial,
             ]
@@ -288,6 +289,7 @@ fn capability(
                 TerminalState::Cancelled,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
+                TerminalState::Unavailable,
                 TerminalState::Partial,
             ]
         })?,

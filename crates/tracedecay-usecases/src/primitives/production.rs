@@ -1520,11 +1520,11 @@ impl Pr12OperationalPrimitivePort for TraceDecayOperationalPrimitivePortV1 {
                 "is_fallback": branch.is_fallback,
             });
             let policy = PolicyDecisionRef::new(
-                "route.pr12-primitive.operational.v1",
+                "route.application.retrieval.operational",
                 1,
                 ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
                     .unwrap_or_else(|_| panic!("digest")),
-                ComponentVersion::new("pr12-operational.v1")
+                ComponentVersion::new("application-retrieval.operational")
                     .unwrap_or_else(|_| panic!("component")),
             )
             .map_err(|_| operational_problem(context, operation))?;
@@ -2096,7 +2096,7 @@ fn operational_problem(
         context.request_id().clone(),
         ApplicationProblem::unavailable(
             SafeDiagnostic::new(
-                "application.pr12-primitive.operational",
+                "application.retrieval.operational",
                 "The operational primitive authority could not complete.",
             )
             .unwrap_or_else(|_| panic!("static diagnostic")),

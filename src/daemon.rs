@@ -339,7 +339,9 @@ pub(crate) use crate::daemon_contract::{
 use bootstrap::drain_client_tasks;
 pub use bootstrap::run_foreground;
 pub(crate) use service::invocation::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrar,
+    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
+    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
+    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrar,
     DaemonAdvisoryRuntimeRegistrationError, DaemonConfigurationRuntimeRegistrar,
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonFeedbackRuntimeRegistrar, DaemonFeedbackRuntimeRegistrationError,
@@ -348,7 +350,7 @@ pub(crate) use service::invocation::{
     DaemonSemanticRuntimeRegistrationError, DaemonWorkRuntimeRegistrar,
     Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
-    daemon_operation_event_authority,
+    advisory_cycle_invocation_result, daemon_operation_event_authority,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,

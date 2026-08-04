@@ -20,7 +20,10 @@ use tracedecay_application::feedback::{
     FEEDBACK_LIST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
     GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1, ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{ApplicationContractError, ResolvedScope, now_micros};
+use tracedecay_application::{
+    ApplicationContractError, ApplicationProblem, RequestContext, ResolvedScope, SafeDiagnostic,
+    now_micros,
+};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
     SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
@@ -42,10 +45,12 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
+    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
+    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
+    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
     DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1,
+    Pr13HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -68,11 +73,11 @@ use crate::application::advisory::github_runtime::{
     resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
-    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
-    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
-    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, CiSourceAccessAuthorityV1,
+    GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1,
+    GitHubReadPermissionV1, GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1,
+    GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryHookLookupNoticeV1,
+    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
@@ -120,9 +125,15 @@ pub(super) const LSP_WORKSPACE_USE_CASE_ID_V1: &str = "use-case.application.lsp.
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
     registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
     lsp_input: Pr12FeedbackCycleLspInput,
+    root_uri: String,
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
+}
+
+struct ProjectOpenAdvisoryCycleExecution {
+    context: RequestContext,
+    outcome: AdvisoryCycleOutcome,
 }
 
 impl ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -130,10 +141,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
         &self,
         request: FeedbackCycleRequest,
         deadline: MonotonicDeadline,
-    ) -> std::result::Result<
-        crate::application::advisory::Pr13AdvisoryCycleOutcomeV1,
-        LspRuntimeFailure,
-    > {
+    ) -> std::result::Result<ProjectOpenAdvisoryCycleExecution, LspRuntimeFailure> {
         let registration = Arc::clone(&self.registration);
         let lsp_input = Arc::clone(&self.lsp_input);
         let feedback_scope = self.feedback_scope.clone();
@@ -175,7 +183,7 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
             )
             .await
             .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
-        let advisory = Pr13AdvisoryCycleRequestV1 {
+        let advisory = AdvisoryCycleRequest {
             feedback: invocation.request,
             github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
                 operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -192,18 +200,22 @@ impl ProjectOpenAdvisoryFeedbackCycleV1 {
                 expires_at,
             },
         };
-        registration
+        let outcome = registration
             .runtime()
             .run_once(
                 &invocation.context,
-                Pr13AdvisoryCycleControlV1 {
+                AdvisoryCycleControl {
                     operation,
                     deadline,
                 },
                 advisory,
             )
             .await
-            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))?;
+        Ok(ProjectOpenAdvisoryCycleExecution {
+            context: invocation.context,
+            outcome,
+        })
     }
 }
 
@@ -221,6 +233,49 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
                 )
                 .await?;
             Ok(())
+        })
+    }
+}
+
+impl DaemonAdvisoryCycleInvocationPort for ProjectOpenAdvisoryFeedbackCycleV1 {
+    fn invoke(
+        &self,
+        request: DaemonAdvisoryCycleInvocationRequest,
+    ) -> DaemonAdvisoryCycleInvocationFuture<'_> {
+        let owner = self.clone();
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(ApplicationProblem::cancelled_before_admission());
+            }
+            let remaining_micros = request.deadline.expires_at.0.saturating_sub(now_micros().0);
+            if remaining_micros <= 0 {
+                return Err(ApplicationProblem::timed_out_before_admission());
+            }
+            let execution = owner
+                .run_cycle(
+                    FeedbackCycleRequest {
+                        root_uri: owner.root_uri.clone(),
+                        document_uri: request.document_uri,
+                        trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
+                    },
+                    MonotonicDeadline::at(
+                        Instant::now() + Duration::from_micros(remaining_micros as u64),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    ApplicationProblem::unavailable(SafeDiagnostic {
+                        code: "feedback.advisory-cycle.execution".to_owned(),
+                        message: "The advisory feedback cycle could not execute".to_owned(),
+                    })
+                })?;
+            advisory_cycle_invocation_result(
+                &execution.context,
+                request.observed_at,
+                request.deadline,
+                request.cancellation,
+                execution.outcome,
+            )
         })
     }
 }
@@ -1817,6 +1872,7 @@ async fn register_production_advisory_owner(
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
         lsp_input: Arc::clone(&feedback_lsp_input),
+        root_uri: root_uri.clone(),
         feedback_scope: feedback_scope_for_work.clone(),
         github_pull_request_id: github_pull_request_id.clone(),
         ci_discovery_config: ci_discovery_config.clone(),
@@ -1827,6 +1883,19 @@ async fn register_production_advisory_owner(
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory LSP cycle registration failed: {error}"),
+        })?;
+    invocation
+        .feedback_runtime_registrar()
+        .install_advisory_cycle_invocation(
+            project_root,
+            DaemonAdvisoryCycleInvocationOwner::new(
+                feedback_scope_for_work.project_id.clone(),
+                advisory_cycle,
+            ),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open advisory cycle registration failed: {error}"),
         })?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
@@ -1967,7 +2036,7 @@ async fn run_production_pr13_hook_cycle(
         }
         None => crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
     };
-    let advisory = Pr13AdvisoryCycleRequestV1 {
+    let advisory = AdvisoryCycleRequest {
         feedback: invocation.request,
         github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
             operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
@@ -1994,7 +2063,7 @@ async fn run_production_pr13_hook_cycle(
     if registration
         .run_once(
             &invocation.context,
-            Pr13AdvisoryCycleControlV1 {
+            AdvisoryCycleControl {
                 operation,
                 deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             },

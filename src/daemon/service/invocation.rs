@@ -31,22 +31,22 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, AuthorizedScopeSet, AuthorizedScopeSetAuthority,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryService,
-    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness,
-    CoverageDomainState, Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId,
-    EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority, EvidenceCoverage,
-    EvidenceDomain, EvidenceIdentity, EvidencePacket, GitIndexApplyPortResultV1,
-    GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
-    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
-    GitIndexTransactionApplicationError, GitIndexTransactionPort, GitIndexTransactionPortError,
-    GitIndexTransactionService, IdempotencyKey, MultiRootScopeSetCasRequestV1,
-    MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1, Omission, OmissionReason,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
-    PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestAdmission,
-    RequestContext, RequestId, ResolvedScope, RetryDirective, SafeDiagnostic, TaskHandoffError,
-    TaskHandoffRedeemedV1, TaskHandoffToken, TemporalState, WorkExecutionError,
-    WorkProjectionApplicationError, WorkflowCoordinationError, WorkflowFanOutRuntimeError,
-    callable_code_operations,
+    CancellationContext, CancellationObservation, CancellationStage, CancellationState,
+    CapabilityGrantId, CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState,
+    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
+    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidenceIdentity,
+    EvidencePacket, GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
+    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
+    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
+    GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey,
+    MultiRootScopeSetCasRequestV1, MultiRootScopeSetCasResultV1, MultiRootScopeSetCasStatusV1,
+    Omission, OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
+    PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
+    ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffRedeemedV1, TaskHandoffToken,
+    TemporalState, WorkExecutionError, WorkProjectionApplicationError, WorkflowCoordinationError,
+    WorkflowFanOutRuntimeError, callable_code_operations,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
@@ -55,9 +55,10 @@ use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
-    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, ManifestDigest, ProjectId,
-    ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros, WorkAuthority, canonical_sha256,
+    AccessPolicyDigest, ActorId, ComponentVersion, FeedbackCycleTerminationV1, GitHeadStateV1,
+    GitIndexPreviewId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
+    ManifestDigest, ProjectId, ScopeSetId, ScopeSetRevision, UserProfileId, UtcMicros,
+    WorkAuthority, canonical_sha256,
 };
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
@@ -88,13 +89,14 @@ use crate::agents::context_scout_ports::{
 };
 use crate::application::ProjectSourceAccessSnapshot;
 use crate::application::advisory::{
-    CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1,
-    GitHubCanonicalReviewAnchorAuthorityV1, GitHubCurrentBranchRemapper,
-    Pr13AdvisoryDaemonStartupErrorV1, Pr13AdvisoryDaemonStartupRegistrationV1,
-    Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryProductionOpenErrorV1,
-    Pr13AdvisoryProductionOpenV1, Pr13AdvisoryProductionStartupRegistrationV1,
-    Pr13AdvisoryProviderAuthoritiesV1, Pr13AdvisoryRuntimeOpenV1,
-    open_pr13_advisory_production_authorities, register_pr13_advisory_daemon_startup,
+    AdvisoryCycleOutcome, CanonicalProximityEvidenceAuthorityV1, CiExactEvidenceAuthorityV1,
+    CiReadOnlyProviderArchiveV1, GitHubCanonicalReviewAnchorAuthorityV1,
+    GitHubCurrentBranchRemapper, Pr13AdvisoryDaemonStartupErrorV1,
+    Pr13AdvisoryDaemonStartupRegistrationV1, Pr13AdvisoryHookLookupNoticeV1,
+    Pr13AdvisoryProductionOpenErrorV1, Pr13AdvisoryProductionOpenV1,
+    Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
+    Pr13AdvisoryRuntimeOpenV1, open_pr13_advisory_production_authorities,
+    register_pr13_advisory_daemon_startup,
 };
 use crate::application::configuration::{
     AuthorizedActor, ConfigurationAuditQuery, ConfigurationControlStore, ConfigurationError,
@@ -211,7 +213,12 @@ use work::*;
 pub(crate) use configuration::{
     DaemonSemanticRuntimeRegistrar, DaemonSemanticRuntimeRegistrationError,
 };
-pub(crate) use feedback::{DaemonFeedbackInvocationOwner, daemon_operation_event_authority};
+pub(crate) use feedback::{
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonFeedbackInvocationOwner, advisory_cycle_invocation_result,
+    daemon_operation_event_authority,
+};
 pub(crate) use primitive::{
     DaemonContextScoutRuntimeRegistrar, DaemonContextScoutRuntimeRegistrationError,
     DaemonPrimitiveRuntimeRegistrar, DaemonPrimitiveRuntimeRegistrationError,

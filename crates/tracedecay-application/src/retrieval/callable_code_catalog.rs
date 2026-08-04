@@ -258,6 +258,7 @@ fn code_query_capability(
             TerminalState::Cancelled,
             TerminalState::TimedOut,
             TerminalState::Failed,
+            TerminalState::Unavailable,
             TerminalState::Partial,
         ])?,
         availability: AvailabilityContract::Available,
