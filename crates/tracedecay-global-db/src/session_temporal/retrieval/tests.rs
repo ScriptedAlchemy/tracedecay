@@ -16,7 +16,9 @@ use tracedecay_runtime_core::db::engine::{
 use tracedecay_temporal_query::candidates::CandidateChannel;
 use tracedecay_temporal_query::ports::{
     BindingDigest, KernelVersions, PageRequest, TemporalAuthorizedRoot, TemporalExecutionSnapshot,
-    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalWatermarks,
+    TemporalParticipantAuthorization, TemporalParticipantGeneration, TemporalParticipantManifest,
+    TemporalRecord, TemporalRetrievalScope, TemporalSnapshotRequest, TemporalSourceAccess,
+    TemporalWatermarks,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 use tracedecay_temporal_query::resolution::{SummarySourceState, ValidatedAuthorization};
@@ -156,6 +158,56 @@ fn root_snapshot_with_mode(
         ValidatedAuthorization::Authorized,
     )
     .expect("snapshot")
+}
+
+fn participant(
+    session_id: &str,
+    source_id: &str,
+    generation: u64,
+) -> TemporalParticipantGeneration {
+    TemporalParticipantGeneration::new(
+        SessionId::new(session_id).expect("participant session"),
+        source_id,
+        TemporalWatermarks {
+            generation,
+            source: generation,
+            projection: generation,
+            index: generation,
+            summary: generation,
+        },
+        generation,
+        &BindingDigest::new("configuration", digest('4')).expect("configuration"),
+        &BindingDigest::new("authorization", digest('2')).expect("authorization"),
+        TemporalParticipantAuthorization::Authorized,
+        TemporalSourceAccess::Available,
+    )
+    .expect("participant")
+}
+
+#[test]
+fn root_relation_reads_bind_each_frozen_participant_generation() {
+    let snapshot = root_snapshot_with_mode(99, None, TemporalModeV1::Forensic)
+        .with_participant_manifest(
+            TemporalParticipantManifest::new(vec![
+                participant("session-a", "claude", 2),
+                participant("session-b", "codex", 7),
+            ])
+            .expect("participant manifest"),
+        )
+        .expect("root snapshot");
+
+    assert_eq!(
+        participant_generation(&snapshot, &SessionId::new("session-a").unwrap(), "claude").unwrap(),
+        2
+    );
+    assert_eq!(
+        participant_generation(&snapshot, &SessionId::new("session-b").unwrap(), "codex").unwrap(),
+        7
+    );
+    assert!(
+        participant_generation(&snapshot, &SessionId::new("session-a").unwrap(), "codex").is_err(),
+        "a candidate must never inherit the root anchor generation"
+    );
 }
 
 fn record_request() -> PageRequest {

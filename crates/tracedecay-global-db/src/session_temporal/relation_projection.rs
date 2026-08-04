@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    AgentInstanceId, CanonicalObservationEnvelopeV1, CopyProofV1, DurableObservationV1, MessageId,
-    MessageOccurrenceIdV1, RetrievalAnchorId, SessionId, SessionProjectionGenerationV1,
-    TemporalValidityV1, UtcMicros,
+    AgentInstanceId, AnchorProvenanceRelationV2, CanonicalObservationEnvelopeV1, CopyProofV1,
+    DurableObservationV1, MessageId, MessageOccurrenceIdV1, RetrievalAnchorId,
+    RetrievalAnchorRecord, SessionId, SessionProjectionGenerationV1, TemporalValidityV1, UtcMicros,
 };
 use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
 use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
@@ -25,6 +25,8 @@ const DEFAULT_MAX_RELATIONS: usize = 100_000;
 
 struct CanonicalOccurrence {
     occurrence_id: MessageOccurrenceIdV1,
+    retrieval_anchor_id: RetrievalAnchorId,
+    copied_from_anchor_ids: Vec<RetrievalAnchorId>,
     message_id: Option<MessageId>,
     agent_id: Option<AgentInstanceId>,
     parent_message_id: Option<MessageId>,
@@ -394,11 +396,14 @@ async fn reconstruct_occurrences(
 ) -> SessionStoreResult<Vec<CanonicalOccurrence>> {
     let mut rows = conn
         .query(
-            "SELECT occurrence.occurrence_id, occurrence.message_id,
+            "SELECT occurrence.occurrence_id, occurrence.retrieval_anchor_id,
+                    anchor.anchor_json, occurrence.message_id,
                     occurrence.agent_id, occurrence.projection_output_ordinal,
                     occurrence.knowledge_at, occurrence.valid_time_json,
                     observation.observation_json
              FROM session_occurrences AS occurrence
+             JOIN retrieval_anchors AS anchor
+               ON anchor.anchor_id = occurrence.retrieval_anchor_id
              JOIN observations AS observation
                ON observation.observation_id = occurrence.source_observation_id
              WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
@@ -426,27 +431,43 @@ async fn reconstruct_occurrences(
             ));
         }
         let observation: DurableObservationV1 = serde_json::from_str(
-            &row.get::<String>(6)
+            &row.get::<String>(8)
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
         )
         .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         let envelope: CanonicalObservationEnvelopeV1 =
             serde_json::from_value(observation.payload().clone())
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let anchor: RetrievalAnchorRecord = serde_json::from_str(
+            &row.get::<String>(2)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        )
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
         occurrences.push(CanonicalOccurrence {
             occurrence_id: MessageOccurrenceIdV1::new(
                 row.get::<String>(0)
                     .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             )
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            retrieval_anchor_id: RetrievalAnchorId::new(
+                row.get::<String>(1)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            copied_from_anchor_ids: anchor
+                .source_anchors()
+                .iter()
+                .filter(|source| source.relation() == AnchorProvenanceRelationV2::CopiedFrom)
+                .map(|source| source.anchor_id().clone())
+                .collect(),
             message_id: row
-                .get::<Option<String>>(1)
+                .get::<Option<String>>(3)
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
                 .map(MessageId::new)
                 .transpose()
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             agent_id: row
-                .get::<Option<String>>(2)
+                .get::<Option<String>>(4)
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
                 .map(AgentInstanceId::new)
                 .transpose()
@@ -465,16 +486,16 @@ async fn reconstruct_occurrences(
                 .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             parent_session_id: envelope.relations().parent_session_id().cloned(),
             ordinal: u32::try_from(
-                row.get::<i64>(3)
+                row.get::<i64>(5)
                     .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             )
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             knowledge_at: UtcMicros(
-                row.get(4)
+                row.get(6)
                     .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             ),
             valid_time: serde_json::from_str(
-                &row.get::<String>(5)
+                &row.get::<String>(7)
                     .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
             )
             .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
@@ -505,7 +526,17 @@ fn occurrence_relations(
                 index
             },
         );
-    let mut copies = Vec::new();
+    let anchor_occurrences =
+        occurrences
+            .iter()
+            .fold(BTreeMap::<_, Vec<_>>::new(), |mut index, occurrence| {
+                index
+                    .entry(occurrence.retrieval_anchor_id.as_str())
+                    .or_default()
+                    .push(occurrence);
+                index
+            });
+    let mut copies = BTreeMap::new();
     let mut agents = BTreeMap::new();
     let mut parent_session_id = None;
     for occurrence in occurrences {
@@ -518,7 +549,7 @@ fn occurrence_relations(
                 .flatten()
                 .find(|candidate| candidate.occurrence_id != occurrence.occurrence_id)
         {
-            copies.push(LogicalCopyRelation {
+            let relation = LogicalCopyRelation {
                 occurrence_id: occurrence.occurrence_id.clone(),
                 copied_from_occurrence_id: source.occurrence_id.clone(),
                 proof: CopyProofV1::ParentMessageLinkage {
@@ -527,7 +558,42 @@ fn occurrence_relations(
                 },
                 knowledge_at: occurrence.knowledge_at,
                 valid_time: occurrence.valid_time,
-            });
+            };
+            copies.insert(
+                (
+                    relation.occurrence_id.as_str().to_owned(),
+                    relation.copied_from_occurrence_id.as_str().to_owned(),
+                ),
+                relation,
+            );
+        }
+        for source_anchor in &occurrence.copied_from_anchor_ids {
+            let Some(source) = anchor_occurrences
+                .get(source_anchor.as_str())
+                .into_iter()
+                .flatten()
+                .filter(|candidate| candidate.occurrence_id != occurrence.occurrence_id)
+                .max_by_key(|candidate| (candidate.knowledge_at, candidate.occurrence_id.as_str()))
+            else {
+                continue;
+            };
+            let relation = LogicalCopyRelation {
+                occurrence_id: occurrence.occurrence_id.clone(),
+                copied_from_occurrence_id: source.occurrence_id.clone(),
+                proof: CopyProofV1::ExplicitAnchorAssertion {
+                    source_occurrence_id: source.occurrence_id.clone(),
+                    assertion_anchor_id: source_anchor.clone(),
+                },
+                knowledge_at: occurrence.knowledge_at,
+                valid_time: occurrence.valid_time,
+            };
+            copies.insert(
+                (
+                    relation.occurrence_id.as_str().to_owned(),
+                    relation.copied_from_occurrence_id.as_str().to_owned(),
+                ),
+                relation,
+            );
         }
         if let (Some(parent), Some(child)) = (&occurrence.parent_agent_id, &occurrence.agent_id) {
             agents.insert(
@@ -552,7 +618,11 @@ fn occurrence_relations(
             }
         }
     }
-    Ok((copies, agents.into_values().collect(), parent_session_id))
+    Ok((
+        copies.into_values().collect(),
+        agents.into_values().collect(),
+        parent_session_id,
+    ))
 }
 
 async fn reconstruct_session_metadata(

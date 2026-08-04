@@ -22,6 +22,8 @@ pub(super) struct RecordQuery {
     pub(super) params: Vec<SqlValue>,
 }
 
+const MAX_RECORD_QUERY_PARAMETERS: usize = 24_000;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_record_query_with_relations(
     scope: &TemporalRetrievalScope,
@@ -155,6 +157,11 @@ pub(super) fn build_record_query_with_relations(
     params.push(SqlValue::Integer(
         i64::try_from(limit).map_err(|error| read_error(RECORD_OPERATION, error))?,
     ));
+    if params.len() > MAX_RECORD_QUERY_PARAMETERS {
+        return Err(TemporalPortError::BudgetExceeded {
+            resource: "record query parameters",
+        });
+    }
     let mode = RecordModeSql::new(snapshot.temporal_mode(), cutoff_param);
     let record_scope = RecordScopeSql::new(scope, scope_param, generation_param);
     let sql = format!(

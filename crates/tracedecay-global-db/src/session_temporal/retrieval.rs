@@ -44,6 +44,7 @@ pub const MIN_CURSOR_CAPACITY: usize = 96;
 pub const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
 const MAX_SESSION_CONTEXT_RELATIONS: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
+const MAX_RECORD_QUERY_CANDIDATES: usize = 8;
 
 fn temporal_relation_error(
     error: SessionRelationError,
@@ -147,6 +148,30 @@ fn observation_matches_filter(
         && filter
             .end_time
             .is_none_or(|end| timestamp.is_some_and(|value| value <= end)))
+}
+
+fn participant_generation(
+    snapshot: &TemporalExecutionSnapshot,
+    session_id: &SessionId,
+    source: &str,
+) -> Result<u64, TemporalPortError> {
+    if !snapshot.has_authoritative_participant_manifest() {
+        return Ok(snapshot.watermarks().generation);
+    }
+    snapshot
+        .participant_manifest()
+        .entries()
+        .iter()
+        .find(|participant| {
+            participant.session_id() == session_id && participant.source_id() == source
+        })
+        .map(tracedecay_temporal_query::ports::TemporalParticipantGeneration::generation)
+        .ok_or_else(|| {
+            read_message(
+                CANDIDATE_OPERATION,
+                "candidate is absent from the frozen participant manifest",
+            )
+        })
 }
 
 /// Borrowed read-only adapter over one authoritative database snapshot.
@@ -340,6 +365,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         })?;
         let session_id =
             SessionId::new(session_id).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let generation = participant_generation(snapshot, &session_id, provider)?;
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let context = authority
@@ -347,7 +373,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .session_context(
                 authority.scope,
                 &session_id,
-                snapshot.watermarks().generation,
+                generation,
                 MAX_SESSION_CONTEXT_RELATIONS,
                 execution_control_graph_cancellation(control),
             )
@@ -398,11 +424,22 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .session
             .as_deref()
             .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate session is missing"))?;
+        let source = candidate
+            .source
+            .as_deref()
+            .filter(|source| !source.is_empty())
+            .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate provider is missing"))?;
+        let typed_session_id =
+            SessionId::new(session_id).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let generation =
+            i64::try_from(participant_generation(snapshot, &typed_session_id, source)?)
+                .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
         let common_values = || {
             vec![
                 Value::Text(session_id.to_string()),
                 Value::Text(candidate.retriever_record_id.clone()),
                 Value::Text(candidate.anchor_id.to_string()),
+                Value::Integer(generation),
             ]
         };
         let (sql, values) = match candidate.channel {
@@ -423,6 +460,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                  WHERE evidence.session_id = ?1
                    AND evidence.evidence_id = ?2
                    AND evidence.retrieval_anchor_id = ?3
+                   AND evidence.generation = ?4
                  ORDER BY member.ordinal
                  LIMIT 257",
                 common_values(),
@@ -441,15 +479,12 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             | CandidateChannel::Lexical => (
                 "SELECT observation.observation_json, occurrence.role
                  FROM session_occurrences occurrence
-                 JOIN session_temporal_generations generation
-                   ON generation.session_id = occurrence.session_id
-                  AND generation.generation = occurrence.generation
-                  AND generation.state = 'active'
                  JOIN observations observation
                    ON observation.observation_id = occurrence.source_observation_id
                  WHERE occurrence.session_id = ?1
                    AND occurrence.occurrence_id = ?2
                    AND occurrence.retrieval_anchor_id = ?3
+                   AND occurrence.generation = ?4
                  LIMIT 2",
                 common_values(),
             ),
@@ -502,6 +537,12 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 read_message(CANDIDATE_OPERATION, "candidate session is missing")
             })?)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let source = candidate
+            .source
+            .as_deref()
+            .filter(|source| !source.is_empty())
+            .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate provider is missing"))?;
+        let generation = participant_generation(snapshot, &session_id, source)?;
         let control = snapshot.request().execution_control();
         control.checkpoint()?;
         let visits = authority
@@ -509,7 +550,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .summary_sources(
                 authority.scope,
                 &session_id,
-                snapshot.watermarks().generation,
+                generation,
                 &candidate.retriever_record_id,
                 MAX_SUMMARY_SOURCES_PER_RECORD,
                 execution_control_graph_cancellation(control),
@@ -528,8 +569,8 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         }
         let encoded_anchors = serde_json::to_string(&source_anchors)
             .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
-        let generation = i64::try_from(snapshot.watermarks().generation)
-            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let generation =
+            i64::try_from(generation).map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
         let mut rows = self
             .read
             .query(
@@ -994,7 +1035,10 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             return Ok(PageStatus::Complete);
         }
         let mut page_bytes = 0usize;
-        let window_size = bounds.items.saturating_add(1);
+        let window_size = bounds
+            .items
+            .saturating_add(1)
+            .min(MAX_RECORD_QUERY_CANDIDATES);
         let mut window_queries = 0usize;
         while cursor.candidate < candidates.len() {
             control.checkpoint()?;
