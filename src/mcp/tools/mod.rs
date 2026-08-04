@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 
 pub(crate) use binding::{
     mcp_dispatch_contract, tool_dispatches_registered_project_reader,
-    tool_supports_live_cancellation,
+    tool_dispatches_source_edit_effect, tool_supports_live_cancellation,
 };
 pub use definitions::{
     ToolRegistryMode, ast_grep_available, ast_grep_diagnostics_json, ast_grep_outline_available,
