@@ -2,6 +2,9 @@
 
 use super::*;
 
+const PR_CONTEXT_MAX_ANCESTRY_COMMITS: usize = 100_000;
+const PR_CONTEXT_MAX_CHANGED_FILES: usize = 20_000;
+
 /// Diff two git refs and return changed file paths with coarse status.
 pub(super) fn git_diff_file_changes(
     project_root: &std::path::Path,
@@ -51,6 +54,7 @@ pub(super) fn git_pr_comparison_controlled(
     let base_oid = base_commit.id.to_string();
     let head_oid = head_commit.id.to_string();
     check_git_pr_cancelled(cancelled)?;
+    ensure_pr_ancestry_bounded(&repo, base_commit.id, head_commit.id, cancelled)?;
     let merge_base = repo
         .merge_base(base_commit.id, head_commit.id)
         .map_err(|e| format!("cannot find merge base for '{base_ref}' and '{head_ref}': {e}"))?;
@@ -64,6 +68,30 @@ pub(super) fn git_pr_comparison_controlled(
         head_oid,
         merge_base,
     })
+}
+
+fn ensure_pr_ancestry_bounded(
+    repo: &gix::Repository,
+    base: gix::ObjectId,
+    head: gix::ObjectId,
+    cancelled: &(impl Fn() -> bool + ?Sized),
+) -> std::result::Result<(), String> {
+    for (label, tip) in [("base", base), ("head", head)] {
+        let walk = repo
+            .rev_walk([tip])
+            .all()
+            .map_err(|error| format!("cannot walk {label} ancestry: {error}"))?;
+        for (index, info) in walk.enumerate() {
+            check_git_pr_cancelled(cancelled)?;
+            info.map_err(|error| format!("cannot walk {label} ancestry: {error}"))?;
+            if index >= PR_CONTEXT_MAX_ANCESTRY_COMMITS {
+                return Err(format!(
+                    "git PR comparison {label} ancestry exceeds the {PR_CONTEXT_MAX_ANCESTRY_COMMITS}-commit limit"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_git_pr_cancelled(
@@ -101,12 +129,17 @@ fn git_diff_file_changes_controlled(
         .map_err(|e| format!("cannot peel '{to_ref}' to tree: {e}"))?;
 
     let mut changed = Vec::new();
+    let mut reached_limit = false;
     from_tree
         .changes()
         .map_err(|e| format!("diff init failed: {e}"))?
         .for_each_to_obtain_tree(&to_tree, |change| {
             use gix::object::tree::diff::Change;
             if cancelled() {
+                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
+            }
+            if changed.len() >= PR_CONTEXT_MAX_CHANGED_FILES {
+                reached_limit = true;
                 return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
             }
             match &change {
@@ -171,7 +204,11 @@ fn git_diff_file_changes_controlled(
         })
         .map_err(|e| format!("tree diff failed: {e}"))?;
     check_git_pr_cancelled(cancelled)?;
-    changed.retain(|change| !project_root.join(&change.path).is_dir());
+    if reached_limit {
+        return Err(format!(
+            "git PR comparison exceeds the {PR_CONTEXT_MAX_CHANGED_FILES}-file diff limit"
+        ));
+    }
     Ok(changed)
 }
 

@@ -28,7 +28,16 @@ pub(super) struct PrContextCursorBinding<'a> {
 #[derive(Serialize, Deserialize)]
 struct PrContextCursorKey<'a> {
     file_path: &'a str,
-    id: &'a str,
+    impact_nodes_admitted: usize,
+    impact_edges_admitted: usize,
+    impact_bytes_admitted: usize,
+}
+
+pub(super) struct PrContextCursorPosition {
+    pub page_key: NodesByFilesPageKey,
+    pub impact_nodes_admitted: usize,
+    pub impact_edges_admitted: usize,
+    pub impact_bytes_admitted: usize,
 }
 
 pub(super) async fn pr_context_cursor_authority(
@@ -112,13 +121,13 @@ pub(super) fn decode_pr_context_cursor(
     encoded: &str,
     snapshot: &TemporalExecutionSnapshot,
     authenticator: &GlobalDbCursorKeyProvider,
-) -> Result<NodesByFilesPageKey> {
+) -> Result<PrContextCursorPosition> {
     let sort_key = verify_cursor(encoded, snapshot, authenticator).map_err(|error| {
         TraceDecayError::Config {
             message: format!("invalid or stale PR context cursor: {error}"),
         }
     })?;
-    if sort_key.knowledge_at_micros != 0 {
+    if sort_key.knowledge_at_micros < 0 {
         return Err(TraceDecayError::Config {
             message: "invalid PR context cursor sort key".to_owned(),
         });
@@ -127,25 +136,35 @@ pub(super) fn decode_pr_context_cursor(
         serde_json::from_str(&sort_key.stable_id).map_err(|_| TraceDecayError::Config {
             message: "invalid PR context cursor key".to_owned(),
         })?;
-    Ok(NodesByFilesPageKey {
-        file_path: key.file_path.to_owned(),
-        start_line: u32::try_from(sort_key.normalized_score_micros).map_err(|_| {
-            TraceDecayError::Config {
-                message: "invalid PR context cursor line".to_owned(),
-            }
-        })?,
-        id: key.id.to_owned(),
+    Ok(PrContextCursorPosition {
+        page_key: NodesByFilesPageKey {
+            file_path: key.file_path.to_owned(),
+            start_line: u32::try_from(sort_key.normalized_score_micros).map_err(|_| {
+                TraceDecayError::Config {
+                    message: "invalid PR context cursor line".to_owned(),
+                }
+            })?,
+            rowid: sort_key.knowledge_at_micros,
+        },
+        impact_nodes_admitted: key.impact_nodes_admitted,
+        impact_edges_admitted: key.impact_edges_admitted,
+        impact_bytes_admitted: key.impact_bytes_admitted,
     })
 }
 
 pub(super) fn encode_pr_context_cursor(
     key: &NodesByFilesPageKey,
+    impact_nodes_admitted: usize,
+    impact_edges_admitted: usize,
+    impact_bytes_admitted: usize,
     snapshot: &TemporalExecutionSnapshot,
     authenticator: &GlobalDbCursorKeyProvider,
 ) -> Result<String> {
     let stable_id = serde_json::to_string(&PrContextCursorKey {
         file_path: &key.file_path,
-        id: &key.id,
+        impact_nodes_admitted,
+        impact_edges_admitted,
+        impact_bytes_admitted,
     })
     .map_err(|error| TraceDecayError::Config {
         message: format!("failed to encode PR context cursor key: {error}"),
@@ -154,7 +173,7 @@ pub(super) fn encode_pr_context_cursor(
         snapshot,
         &StableSortKey {
             normalized_score_micros: u64::from(key.start_line),
-            knowledge_at_micros: 0,
+            knowledge_at_micros: key.rowid,
             stable_id,
         },
         authenticator,

@@ -504,20 +504,27 @@ async fn pr_context_impact_snapshot(
     snapshot: &DatabaseEngineReadSnapshot,
     seed_nodes: &[Node],
     max_depth: usize,
+    prior_budget: PrContextImpactBudget,
     controls: &PrContextControls,
 ) -> Result<PrContextImpact> {
-    let mut impact = PrContextImpact::default();
+    let mut impact = PrContextImpact {
+        nodes_admitted: prior_budget.nodes_admitted,
+        edges_admitted: prior_budget.edges_admitted,
+        bytes_admitted: prior_budget.bytes_admitted,
+        ..PrContextImpact::default()
+    };
     let mut visited = HashSet::new();
     let mut frontier = Vec::new();
     for node in seed_nodes {
         let bytes = pr_context_node_bytes(node);
-        if impact.nodes.len() >= PR_CONTEXT_MAX_IMPACT_NODES
+        if impact.nodes_admitted >= PR_CONTEXT_MAX_IMPACT_NODES
             || impact.bytes_admitted.saturating_add(bytes) > PR_CONTEXT_MAX_IMPACT_BYTES
         {
             impact.partial = true;
             continue;
         }
         impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
+        impact.nodes_admitted = impact.nodes_admitted.saturating_add(1);
         visited.insert(node.id.clone());
         frontier.push(node.id.clone());
         impact.nodes.push(node.clone());
@@ -558,7 +565,7 @@ async fn pr_context_impact_snapshot(
         if next_ids.is_empty() {
             break;
         }
-        let remaining_nodes = PR_CONTEXT_MAX_IMPACT_NODES.saturating_sub(impact.nodes.len());
+        let remaining_nodes = PR_CONTEXT_MAX_IMPACT_NODES.saturating_sub(impact.nodes_admitted);
         if next_ids.len() > remaining_nodes {
             next_ids.truncate(remaining_nodes);
             impact.partial = true;
@@ -574,6 +581,7 @@ async fn pr_context_impact_snapshot(
                 continue;
             }
             impact.bytes_admitted = impact.bytes_admitted.saturating_add(bytes);
+            impact.nodes_admitted = impact.nodes_admitted.saturating_add(1);
             frontier.push(node.id.clone());
             impact.nodes.push(node);
         }
@@ -581,10 +589,18 @@ async fn pr_context_impact_snapshot(
     Ok(impact)
 }
 
+#[derive(Clone, Copy, Default)]
+struct PrContextImpactBudget {
+    nodes_admitted: usize,
+    edges_admitted: usize,
+    bytes_admitted: usize,
+}
+
 #[derive(Default)]
 struct PrContextImpact {
     nodes: Vec<Node>,
     incoming_calls: Vec<Edge>,
+    nodes_admitted: usize,
     edges_admitted: usize,
     edge_rows_read: usize,
     bytes_admitted: usize,
@@ -713,27 +729,38 @@ pub(crate) async fn handle_pr_context(
         }
         None => None,
     };
-    let after = match (encoded_cursor, cursor_authority.as_ref()) {
+    let cursor_position = match (encoded_cursor, cursor_authority.as_ref()) {
         (Some(cursor), Some((snapshot, authenticator))) => {
             Some(decode_pr_context_cursor(cursor, snapshot, authenticator)?)
         }
         _ => None,
     };
+    let prior_impact_budget =
+        cursor_position
+            .as_ref()
+            .map_or_else(PrContextImpactBudget::default, |position| {
+                PrContextImpactBudget {
+                    nodes_admitted: position.impact_nodes_admitted,
+                    edges_admitted: position.impact_edges_admitted,
+                    bytes_admitted: position.impact_bytes_admitted,
+                }
+            });
 
     let mut test_files_changed: Vec<String> = Vec::new();
     let mut impacted_modules: HashSet<String> = HashSet::new();
 
     // Pre-compute files with inline test modules.
     let stage_started = std::time::Instant::now();
-    let files_with_inline_tests = graph_snapshot.get_files_with_test_annotations().await?;
+    let mut files_with_inline_tests = graph_snapshot
+        .get_files_with_test_annotations_for_paths_controlled(&changed_files, || {
+            controls.checkpoint()
+        })
+        .await?;
     controls.checkpoint()?;
     stage_timings.insert(
         "test_annotations".to_owned(),
         json!(elapsed_micros(stage_started)),
     );
-    let has_tests = |path: &str| {
-        crate::tracedecay::is_test_file(path) || files_with_inline_tests.contains(path)
-    };
     let config_paths: Vec<String> = changes
         .iter()
         .filter(|change| classify_file_role(&change.path, &files_with_inline_tests) == "config")
@@ -744,10 +771,11 @@ pub(crate) async fn handle_pr_context(
         .filter(|change| change.status == "added")
         .map(|change| change.path.clone())
         .collect();
-    let config_path_set: HashSet<&str> = config_paths.iter().map(String::as_str).collect();
     let added_path_set: HashSet<&str> = added_paths.iter().map(String::as_str).collect();
     for change in &changes {
-        if has_tests(&change.path) {
+        if crate::tracedecay::is_test_file(&change.path)
+            || files_with_inline_tests.contains(&change.path)
+        {
             test_files_changed.push(change.path.clone());
         }
     }
@@ -756,9 +784,13 @@ pub(crate) async fn handle_pr_context(
 
     let stage_started = std::time::Instant::now();
     let symbol_page = graph_snapshot
-        .get_nodes_by_files_page_controlled(&changed_files, after.as_ref(), maximum_symbols, || {
-            controls.checkpoint()
-        })
+        .get_nodes_by_files_page_controlled(
+            &changed_files,
+            &config_paths,
+            cursor_position.as_ref().map(|position| &position.page_key),
+            maximum_symbols,
+            || controls.checkpoint(),
+        )
         .await?;
     controls.checkpoint()?;
     stage_timings.insert(
@@ -768,27 +800,30 @@ pub(crate) async fn handle_pr_context(
     let symbol_has_more = symbol_page.has_more;
     let symbol_rows_read = symbol_page.rows_read;
     let next_page_key = symbol_page.entries.last().map(|entry| NodesByFilesPageKey {
-        file_path: entry.node.file_path.clone(),
-        start_line: entry.node.start_line,
-        id: entry.node.id.clone(),
+        file_path: entry.file_path.clone(),
+        start_line: entry.start_line,
+        rowid: entry.rowid,
     });
     let mut added = Vec::new();
     let mut modified = Vec::new();
     let mut nodes = Vec::with_capacity(symbol_page.entries.len());
     for entry in symbol_page.entries {
         controls.checkpoint()?;
-        let node = entry.node;
-        let is_config = config_path_set.contains(node.file_path.as_str());
-        let symbol = if is_config {
+        let symbol = if entry.is_config_summary {
             json!({
-                "file": &node.file_path,
+                "file": &entry.file_path,
                 "kind": "config_summary",
-                "name": &node.name,
-                "line": node.start_line,
                 "config_keys": Value::Null,
                 "coverage": "bounded_representative",
             })
         } else {
+            let node = entry
+                .node
+                .as_ref()
+                .ok_or_else(|| TraceDecayError::Database {
+                    message: "source symbol page entry has no node".to_owned(),
+                    operation: "get_nodes_by_files_page".to_owned(),
+                })?;
             json!({
                 "name": &node.name,
                 "kind": node.kind.as_str(),
@@ -796,12 +831,12 @@ pub(crate) async fn handle_pr_context(
                 "line": node.start_line,
             })
         };
-        if added_path_set.contains(node.file_path.as_str()) {
+        if added_path_set.contains(entry.file_path.as_str()) {
             added.push(symbol);
         } else {
             modified.push(symbol);
         }
-        if !is_config {
+        if let Some(node) = entry.node {
             nodes.push(node);
         }
     }
@@ -812,8 +847,22 @@ pub(crate) async fn handle_pr_context(
     // Find transitively affected test files
     let stage_started = std::time::Instant::now();
     let mut affected_tests: HashSet<String> = HashSet::new();
-    let impact = pr_context_impact_snapshot(&graph_snapshot, &nodes, 2, &controls).await?;
+    let impact =
+        pr_context_impact_snapshot(&graph_snapshot, &nodes, 2, prior_impact_budget, &controls)
+            .await?;
     controls.checkpoint()?;
+    let impact_paths: Vec<String> = impact
+        .nodes
+        .iter()
+        .map(|node| node.file_path.clone())
+        .collect();
+    files_with_inline_tests.extend(
+        graph_snapshot
+            .get_files_with_test_annotations_for_paths_controlled(&impact_paths, || {
+                controls.checkpoint()
+            })
+            .await?,
+    );
     let impacted_by_id: HashMap<&str, &Node> = impact
         .nodes
         .iter()
@@ -833,7 +882,10 @@ pub(crate) async fn handle_pr_context(
         }
     }
     for impacted in &impact.nodes {
-        if !changed_paths.contains(impacted.file_path.as_str()) && has_tests(&impacted.file_path) {
+        if !changed_paths.contains(impacted.file_path.as_str())
+            && (crate::tracedecay::is_test_file(&impacted.file_path)
+                || files_with_inline_tests.contains(&impacted.file_path))
+        {
             affected_tests.insert(impacted.file_path.clone());
         }
     }
@@ -861,7 +913,14 @@ pub(crate) async fn handle_pr_context(
                 .ok_or_else(|| TraceDecayError::Config {
                     message: "PR context cursor authority is unavailable".to_owned(),
                 })?;
-        Some(encode_pr_context_cursor(key, snapshot, authenticator)?)
+        Some(encode_pr_context_cursor(
+            key,
+            impact.nodes_admitted,
+            impact.edges_admitted,
+            impact.bytes_admitted,
+            snapshot,
+            authenticator,
+        )?)
     };
     let output = json!({
         "base": base,
@@ -890,7 +949,8 @@ pub(crate) async fn handle_pr_context(
             "seed_symbols_analyzed": nodes.len(),
             "symbols_returned": returned_symbols,
             "symbols_complete": symbol_complete,
-            "impact_nodes_admitted": impact.nodes.len(),
+            "impact_nodes_admitted": impact.nodes_admitted,
+            "impact_nodes_returned": impact.nodes.len(),
             "impact_edges_admitted": impact.edges_admitted,
             "impact_edge_rows_read": impact.edge_rows_read,
             "impact_bytes_admitted": impact.bytes_admitted,

@@ -1,4 +1,6 @@
 // Rust guideline compliant 2025-10-17
+use std::collections::HashSet;
+
 use crate::db::engine::{Value, params, params_from_iter};
 
 use super::connection::{Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction};
@@ -27,14 +29,14 @@ pub(super) const NODES_BY_FILE_PAGE_SQL: &str = concat!(
 pub(super) const NODES_BY_FILES_SYMBOL_PAGE_SQL: &str = concat!(
     "SELECT ",
     node_select_columns!(),
-    " \
-     FROM nodes AS n \
+    ", n.rowid \
+     FROM nodes AS n INDEXED BY idx_nodes_file_path_start_line \
      WHERE n.file_path IN (SELECT value FROM json_each(?1)) \
        AND (?2 IS NULL \
             OR n.file_path > ?2 \
             OR (n.file_path = ?2 AND n.start_line > ?3) \
-            OR (n.file_path = ?2 AND n.start_line = ?3 AND n.id > ?4)) \
-     ORDER BY n.file_path, n.start_line, n.id \
+            OR (n.file_path = ?2 AND n.start_line = ?3 AND n.rowid > ?4)) \
+     ORDER BY n.file_path, n.start_line, n.rowid \
      LIMIT ?5"
 );
 
@@ -62,12 +64,16 @@ pub(super) const NODES_BY_KIND_PAGE_SQL: &str = concat!(
 pub struct NodesByFilesPageKey {
     pub file_path: String,
     pub start_line: u32,
-    pub id: String,
+    pub rowid: i64,
 }
 
 #[derive(Clone, Debug)]
 pub struct NodesByFilesPageEntry {
-    pub node: Node,
+    pub node: Option<Node>,
+    pub file_path: String,
+    pub start_line: u32,
+    pub rowid: i64,
+    pub is_config_summary: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -80,6 +86,7 @@ pub struct NodesByFilesPage {
 pub(super) async fn read_nodes_by_files_page_controlled<C, F>(
     conn: &C,
     file_paths: &[String],
+    config_paths: &[String],
     after: Option<&NodesByFilesPageKey>,
     limit: usize,
     mut checkpoint: F,
@@ -108,19 +115,55 @@ where
             message: "node page limit overflowed".to_owned(),
             operation: "get_nodes_by_files_page".to_owned(),
         })?;
-    let query_limit = i64::try_from(query_limit)
+    let query_limit_i64 = i64::try_from(query_limit)
         .ok()
         .filter(|limit| *limit > 0)
         .ok_or_else(|| TraceDecayError::Database {
             message: "node page limit must be positive".to_owned(),
             operation: "get_nodes_by_files_page".to_owned(),
         })?;
-    let (after_path, after_line, after_id) =
+    let config_path_set: HashSet<&str> = config_paths.iter().map(String::as_str).collect();
+    let source_paths: Vec<String> = file_paths
+        .iter()
+        .filter(|path| !config_path_set.contains(path.as_str()))
+        .cloned()
+        .collect();
+    let is_after = |file_path: &str, start_line: u32, rowid: i64| {
+        after.is_none_or(|key| {
+            (file_path, start_line, rowid) > (key.file_path.as_str(), key.start_line, key.rowid)
+        })
+    };
+    let mut sorted_config_paths = config_paths.to_vec();
+    sorted_config_paths.sort();
+    sorted_config_paths.dedup();
+    let mut entries: Vec<NodesByFilesPageEntry> = sorted_config_paths
+        .into_iter()
+        .filter(|path| is_after(path, 0, 0))
+        .take(query_limit)
+        .map(|path| NodesByFilesPageEntry {
+            node: None,
+            file_path: path,
+            start_line: 0,
+            rowid: 0,
+            is_config_summary: true,
+        })
+        .collect();
+    if source_paths.is_empty() {
+        let rows_read = entries.len();
+        let has_more = rows_read > admitted_limit;
+        entries.truncate(admitted_limit);
+        return Ok(NodesByFilesPage {
+            entries,
+            has_more,
+            rows_read,
+        });
+    }
+    let (after_path, after_line, after_rowid) =
         after.map_or((Value::Null, Value::Null, Value::Null), |key| {
             (
                 Value::Text(key.file_path.clone()),
                 Value::Integer(i64::from(key.start_line)),
-                Value::Text(key.id.clone()),
+                Value::Integer(key.rowid),
             )
         });
     checkpoint()?;
@@ -128,11 +171,11 @@ where
         .query(
             NODES_BY_FILES_SYMBOL_PAGE_SQL,
             params_from_iter([
-                Value::Text(encode(file_paths, "file paths")?),
+                Value::Text(encode(&source_paths, "file paths")?),
                 after_path,
                 after_line,
-                after_id,
-                Value::Integer(query_limit),
+                after_rowid,
+                Value::Integer(query_limit_i64),
             ]),
         )
         .await
@@ -140,7 +183,6 @@ where
             message: format!("failed to query bounded nodes by files: {error}"),
             operation: "get_nodes_by_files_page".to_owned(),
         })?;
-    let mut entries = Vec::new();
     while let Some(row) = rows
         .next()
         .await
@@ -152,14 +194,33 @@ where
         if !entries.is_empty() && entries.len() % CONTROLLED_NODE_PAGE_CHECKPOINT_ROWS == 0 {
             checkpoint()?;
         }
-        entries.push(NodesByFilesPageEntry {
-            node: row_to_node(&row).map_err(|error| TraceDecayError::Database {
-                message: format!("failed to map bounded node page: {error}"),
+        let node = row_to_node(&row).map_err(|error| TraceDecayError::Database {
+            message: format!("failed to map bounded node page: {error}"),
+            operation: "get_nodes_by_files_page".to_owned(),
+        })?;
+        let rowid = row
+            .get::<i64>(23)
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read bounded node cursor: {error}"),
                 operation: "get_nodes_by_files_page".to_owned(),
-            })?,
+            })?;
+        entries.push(NodesByFilesPageEntry {
+            file_path: node.file_path.clone(),
+            start_line: node.start_line,
+            node: Some(node),
+            rowid,
+            is_config_summary: false,
         });
     }
     checkpoint()?;
+    entries.sort_by(|left, right| {
+        (&left.file_path, left.start_line, left.rowid).cmp(&(
+            &right.file_path,
+            right.start_line,
+            right.rowid,
+        ))
+    });
+    entries.truncate(query_limit);
     let rows_read = entries.len();
     let has_more = rows_read > admitted_limit;
     entries.truncate(admitted_limit);
@@ -202,6 +263,7 @@ impl DatabaseEngineReadSnapshot {
     pub async fn get_nodes_by_files_page_controlled<F>(
         &self,
         file_paths: &[String],
+        config_paths: &[String],
         after: Option<&NodesByFilesPageKey>,
         limit: usize,
         checkpoint: F,
@@ -209,7 +271,15 @@ impl DatabaseEngineReadSnapshot {
     where
         F: FnMut() -> Result<()>,
     {
-        read_nodes_by_files_page_controlled(self, file_paths, after, limit, checkpoint).await
+        read_nodes_by_files_page_controlled(
+            self,
+            file_paths,
+            config_paths,
+            after,
+            limit,
+            checkpoint,
+        )
+        .await
     }
 
     pub async fn get_nodes_by_ids_controlled<F>(
@@ -634,6 +704,7 @@ impl Database {
     pub async fn get_nodes_by_files_page_controlled<F>(
         &self,
         file_paths: &[String],
+        config_paths: &[String],
         after: Option<&NodesByFilesPageKey>,
         limit: usize,
         checkpoint: F,
@@ -644,6 +715,7 @@ impl Database {
         read_nodes_by_files_page_controlled(
             &self.engine_conn(),
             file_paths,
+            config_paths,
             after,
             limit,
             checkpoint,

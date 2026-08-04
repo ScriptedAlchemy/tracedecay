@@ -3,7 +3,9 @@ use std::collections::HashSet;
 
 use super::connection::{Database, DatabaseEngineReadSnapshot, DatabaseWriteTransaction};
 use super::engine::{Value, params_from_iter};
-use super::sql::{build_qmark_placeholders, collect_rowid_pages};
+use super::sql::{
+    build_qmark_placeholders, collect_rowid_pages, collect_rowid_pages_with_controlled,
+};
 use crate::errors::{Result, TraceDecayError};
 
 /// One `rowid` keyset page of the file paths that hold a test-annotated
@@ -19,6 +21,18 @@ pub(super) const TEST_ANNOTATION_FILE_PAGE_SQL: &str = "SELECT t.file_path, t.ro
        AND t.kind IN ('function', 'method') \
        AND t.rowid > ?1 \
      ORDER BY t.rowid LIMIT ?2";
+
+pub(super) const TEST_ANNOTATION_CANDIDATE_FILE_PAGE_SQL: &str = "SELECT t.file_path, t.rowid \
+     FROM edges e \
+     JOIN nodes n ON e.source = n.id \
+     JOIN nodes t ON e.target = t.id \
+     WHERE n.kind = 'annotation_usage' \
+       AND n.name = 'test' \
+       AND e.kind = 'annotates' \
+       AND t.kind IN ('function', 'method') \
+       AND t.file_path IN (SELECT value FROM json_each(?1)) \
+       AND t.rowid > ?2 \
+     ORDER BY t.rowid LIMIT ?3";
 
 /// One `rowid` keyset page of the nodes whose docstring opts out of test
 /// coverage.
@@ -46,6 +60,35 @@ impl DatabaseEngineReadSnapshot {
             1,
             |row| row.get::<String>(0),
             "get_files_with_test_annotations",
+        )
+        .await?;
+        Ok(paths.into_iter().collect())
+    }
+
+    pub async fn get_files_with_test_annotations_for_paths_controlled<F>(
+        &self,
+        candidate_paths: &[String],
+        checkpoint: F,
+    ) -> Result<HashSet<String>>
+    where
+        F: FnMut() -> Result<()>,
+    {
+        if candidate_paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let encoded =
+            serde_json::to_string(candidate_paths).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to encode test-annotation candidate paths: {error}"),
+                operation: "get_files_with_test_annotations_for_paths".to_owned(),
+            })?;
+        let paths = collect_rowid_pages_with_controlled(
+            self,
+            TEST_ANNOTATION_CANDIDATE_FILE_PAGE_SQL,
+            &[Value::Text(encoded)],
+            1,
+            |row| row.get::<String>(0),
+            "get_files_with_test_annotations_for_paths",
+            checkpoint,
         )
         .await?;
         Ok(paths.into_iter().collect())

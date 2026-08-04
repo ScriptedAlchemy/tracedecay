@@ -25,7 +25,8 @@ use super::analytics::{
     CALL_EDGE_PREFIXED_PAGE_SQL, nodes_by_dir_page_sql,
 };
 use super::coverage::{
-    SKIP_TEST_COVERAGE_PAGE_SQL, TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
+    SKIP_TEST_COVERAGE_PAGE_SQL, TEST_ANNOTATION_CANDIDATE_FILE_PAGE_SQL,
+    TEST_ANNOTATION_FILE_PAGE_SQL, TEST_MARKER_PAGE_SQL,
 };
 use super::edges::{
     bulk_edges_by_endpoint_page_sql, read_edges_by_endpoint_controlled,
@@ -129,7 +130,8 @@ async fn seed_oversized_graph(directory: &TempDir) -> TestConnection {
          CREATE INDEX idx_edges_source ON edges(source);
          CREATE INDEX idx_edges_target ON edges(target);
          CREATE INDEX idx_nodes_kind ON nodes(kind);
-         CREATE INDEX idx_nodes_file_path ON nodes(file_path);",
+         CREATE INDEX idx_nodes_file_path ON nodes(file_path);
+         CREATE INDEX idx_nodes_file_path_start_line ON nodes(file_path, start_line);",
     )
     .await
     .expect("create oversized graph schema");
@@ -343,6 +345,33 @@ async fn test_annotation_files_page_past_the_runtime_query_limit() {
     // `HashSet` instead, and every path must still be present exactly once.
     let unique: std::collections::HashSet<&String> = paths.iter().collect();
     assert_eq!(unique.len(), paths.len());
+}
+
+#[tokio::test]
+async fn test_annotation_files_page_is_restricted_to_candidate_paths() {
+    let directory = TempDir::new().expect("candidate annotation tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let candidates = serde_json::to_string(&[
+        format!("{FUNCTION_DIR}m00007.rs"),
+        format!("{FUNCTION_DIR}m01234.rs"),
+    ])
+    .expect("candidate paths");
+    let paths = paged_ids(
+        &conn,
+        TEST_ANNOTATION_CANDIDATE_FILE_PAGE_SQL,
+        &[Value::Text(candidates)],
+        1,
+        "get_files_with_test_annotations_for_paths",
+    )
+    .await;
+
+    assert_eq!(
+        paths,
+        [
+            format!("{FUNCTION_DIR}m00007.rs"),
+            format!("{FUNCTION_DIR}m01234.rs"),
+        ]
+    );
 }
 
 /// `get_nodes_by_kind` issued one unbounded read of a whole node partition.
@@ -578,7 +607,7 @@ async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
         .map(|index| format!("{FUNCTION_DIR}m{index:05}.rs"))
         .collect();
     paths.push("src/hub.rs".to_owned());
-    let first = read_nodes_by_files_page_controlled(&counted, &paths, None, 100, || Ok(()))
+    let first = read_nodes_by_files_page_controlled(&counted, &paths, &[], None, 100, || Ok(()))
         .await
         .expect("first bounded node page");
     assert_eq!(first.entries.len(), 100);
@@ -586,14 +615,14 @@ async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
     assert_eq!(first.rows_read, 101);
     assert_eq!(counted.queries.load(Ordering::Relaxed), 1);
 
-    let last = &first.entries[99].node;
+    let last = &first.entries[99];
     let after = NodesByFilesPageKey {
         file_path: last.file_path.clone(),
         start_line: last.start_line,
-        id: last.id.clone(),
+        rowid: last.rowid,
     };
     let second =
-        read_nodes_by_files_page_controlled(&counted, &paths, Some(&after), 100, || Ok(()))
+        read_nodes_by_files_page_controlled(&counted, &paths, &[], Some(&after), 100, || Ok(()))
             .await
             .expect("second bounded node page");
     assert_eq!(second.entries.len(), 100);
@@ -603,15 +632,36 @@ async fn nodes_by_files_page_cost_is_bounded_for_thousands_of_matching_files() {
     let first_ids: std::collections::HashSet<&str> = first
         .entries
         .iter()
-        .map(|entry| entry.node.id.as_str())
+        .map(|entry| entry.node.as_ref().expect("source node").id.as_str())
         .collect();
     assert!(
-        second
-            .entries
-            .iter()
-            .all(|entry| !first_ids.contains(entry.node.id.as_str())),
+        second.entries.iter().all(|entry| {
+            !first_ids.contains(entry.node.as_ref().expect("source node").id.as_str())
+        }),
         "stable keyset pages must not repeat symbols",
     );
+}
+
+#[tokio::test]
+async fn nodes_by_files_page_includes_changed_config_without_indexed_nodes() {
+    let directory = TempDir::new().expect("config manifest tempdir");
+    let conn = seed_oversized_graph(&directory).await;
+    let counted = CountingConnection {
+        inner: &conn,
+        queries: AtomicUsize::new(0),
+    };
+    let paths = vec!["Cargo.toml".to_owned()];
+    let page = read_nodes_by_files_page_controlled(&counted, &paths, &paths, None, 10, || Ok(()))
+        .await
+        .expect("config manifest page");
+
+    assert_eq!(page.entries.len(), 1);
+    assert!(!page.has_more);
+    assert_eq!(page.rows_read, 1);
+    assert_eq!(counted.queries.load(Ordering::Relaxed), 0);
+    assert_eq!(page.entries[0].file_path, "Cargo.toml");
+    assert!(page.entries[0].node.is_none());
+    assert!(page.entries[0].is_config_summary);
 }
 
 #[tokio::test]
@@ -620,7 +670,7 @@ async fn nodes_by_files_page_cancellation_stops_mid_page() {
     let conn = seed_oversized_graph(&directory).await;
     let paths = vec!["src/hub.rs".to_owned()];
     let checkpoints = AtomicUsize::new(0);
-    let error = read_nodes_by_files_page_controlled(&conn, &paths, None, 500, || {
+    let error = read_nodes_by_files_page_controlled(&conn, &paths, &[], None, 500, || {
         let observed = checkpoints.fetch_add(1, Ordering::Relaxed);
         if observed == 1 {
             Err(crate::errors::TraceDecayError::Config {
@@ -642,7 +692,7 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     let conn = seed_oversized_graph(&directory).await;
     let paths = vec![format!("{FUNCTION_DIR}m00000.rs")];
     let snapshot = conn.read_snapshot().await.expect("begin graph snapshot");
-    let before = read_nodes_by_files_page_controlled(&snapshot, &paths, None, 10, || Ok(()))
+    let before = read_nodes_by_files_page_controlled(&snapshot, &paths, &[], None, 10, || Ok(()))
         .await
         .expect("read snapshot symbol page");
     assert_eq!(before.entries.len(), 1);
@@ -672,7 +722,7 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     .await
     .expect("publish concurrent edge");
 
-    let stable = read_nodes_by_files_page_controlled(&snapshot, &paths, None, 10, || Ok(()))
+    let stable = read_nodes_by_files_page_controlled(&snapshot, &paths, &[], None, 10, || Ok(()))
         .await
         .expect("repeat snapshot symbol page");
     assert_eq!(stable.entries.len(), 1);
@@ -694,9 +744,10 @@ async fn pr_context_reads_remain_on_one_snapshot_during_concurrent_index_write()
     );
 
     let current = conn.read_snapshot().await.expect("begin current snapshot");
-    let current_page = read_nodes_by_files_page_controlled(&current, &paths, None, 10, || Ok(()))
-        .await
-        .expect("read current symbol page");
+    let current_page =
+        read_nodes_by_files_page_controlled(&current, &paths, &[], None, 10, || Ok(()))
+            .await
+            .expect("read current symbol page");
     assert_eq!(current_page.entries.len(), 2);
 }
 
