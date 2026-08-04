@@ -202,7 +202,7 @@ mod tests {
     use tracedecay_domain::{GitOidV1, ProjectId};
 
     use super::*;
-    use crate::daemon::code_index_branch_diff::{diff_symbols, generation_symbols};
+    use crate::daemon::code_index_branch_diff::{bounded_diff, diff_symbols, generation_symbols};
     use crate::daemon::code_index_scheduler::{
         CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
     };
@@ -266,6 +266,22 @@ mod tests {
         let head_revision =
             GitOidV1::new(git(project.path(), &["rev-parse", "HEAD"])).expect("head revision");
         scheduler.reconcile_now().expect("publish head generation");
+        let mut large_source = String::new();
+        for index in 0..1_025 {
+            use std::fmt::Write as _;
+            writeln!(
+                large_source,
+                "pub fn bounded_generation_{index}() -> usize {{ {index} }}"
+            )
+            .expect("render large source");
+        }
+        std::fs::write(project.path().join("src/lib.rs"), large_source)
+            .expect("large generation source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "large"]);
+        let large_revision =
+            GitOidV1::new(git(project.path(), &["rev-parse", "HEAD"])).expect("large revision");
+        scheduler.reconcile_now().expect("publish large generation");
         drop(scheduler);
 
         let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -333,6 +349,74 @@ mod tests {
         assert_ne!(
             completed.changed[0].base.content_digest,
             completed.changed[0].head.content_digest
+        );
+
+        let large_pair = registry
+            .generations_for_revisions(&scope, &large_revision, &large_revision, control.clone())
+            .await
+            .expect("large exact generation");
+        let started = std::time::Instant::now();
+        let outcome = bounded_diff(
+            large_pair.base.generation(),
+            large_pair.head.generation(),
+            None,
+            None,
+            100,
+            &control,
+        )
+        .expect("bounded large diff");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "oversized generation admission must not materialize symbols"
+        );
+        assert!(matches!(
+            outcome,
+            tracedecay_query::code_search::CodeIndexBranchDiffOutcomeV1::Partial(
+                tracedecay_query::code_search::CodeIndexBranchDiffPartialV1 {
+                    reason:
+                        tracedecay_query::code_search::CodeIndexBranchDiffPartialReasonV1::GenerationSymbolLimit,
+                    added,
+                    removed,
+                    changed,
+                    ..
+                }
+            ) if added.is_empty() && removed.is_empty() && changed.is_empty()
+        ));
+
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancel.large-generation")
+                .expect("cancellation");
+        cancellation.cancel(tracedecay_application::clock::now_micros());
+        assert_eq!(
+            bounded_diff(
+                large_pair.base.generation(),
+                large_pair.head.generation(),
+                None,
+                None,
+                100,
+                &BranchGenerationReadControlV1 {
+                    deadline: None,
+                    cancellation: Some(cancellation),
+                },
+            ),
+            Err(CodeIndexSearchUnavailableReasonV1::Cancelled)
+        );
+        let expired =
+            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+                .expect("expired deadline");
+        assert_eq!(
+            bounded_diff(
+                large_pair.base.generation(),
+                large_pair.head.generation(),
+                None,
+                None,
+                100,
+                &BranchGenerationReadControlV1 {
+                    deadline: Some(expired),
+                    cancellation: None,
+                },
+            ),
+            Err(CodeIndexSearchUnavailableReasonV1::TimedOut)
         );
     }
 }

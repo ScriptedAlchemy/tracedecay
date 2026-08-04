@@ -8,8 +8,42 @@ use tracedecay_query::code_search;
 use super::{code_index_scheduler, project_open_owners, query_mcp_admission};
 
 const MAX_CONCURRENT_BRANCH_DIFFS: usize = 1;
+const MAX_BRANCH_DIFF_FILES_PER_GENERATION: usize = 1_024;
+const MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION: usize = 4_096;
+const MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION: usize = 1_024;
 
 type SymbolKey = (String, String, String);
+
+#[derive(Clone, Copy)]
+struct GenerationCountsV1 {
+    files: usize,
+    chunks: usize,
+    symbols: usize,
+}
+
+fn generation_counts(
+    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+) -> GenerationCountsV1 {
+    GenerationCountsV1 {
+        files: generation.snapshot().files.len(),
+        chunks: generation.chunks().chunks().len(),
+        symbols: generation.symbols().symbols.len(),
+    }
+}
+
+fn generation_bound_reason(
+    counts: GenerationCountsV1,
+) -> Option<code_search::CodeIndexBranchDiffPartialReasonV1> {
+    if counts.files > MAX_BRANCH_DIFF_FILES_PER_GENERATION {
+        Some(code_search::CodeIndexBranchDiffPartialReasonV1::GenerationFileLimit)
+    } else if counts.chunks > MAX_BRANCH_DIFF_CHUNKS_PER_GENERATION {
+        Some(code_search::CodeIndexBranchDiffPartialReasonV1::GenerationChunkLimit)
+    } else if counts.symbols > MAX_BRANCH_DIFF_SYMBOLS_PER_GENERATION {
+        Some(code_search::CodeIndexBranchDiffPartialReasonV1::GenerationSymbolLimit)
+    } else {
+        None
+    }
+}
 
 fn unavailable(
     base_generation: Option<String>,
@@ -137,6 +171,111 @@ pub(super) fn generation_symbols(
     Ok(symbols)
 }
 
+fn partial(
+    base_generation: &str,
+    head_generation: &str,
+    base_counts: GenerationCountsV1,
+    head_counts: GenerationCountsV1,
+    reason: code_search::CodeIndexBranchDiffPartialReasonV1,
+) -> code_search::CodeIndexBranchDiffOutcomeV1 {
+    code_search::CodeIndexBranchDiffOutcomeV1::Partial(code_search::CodeIndexBranchDiffPartialV1 {
+        base_generation: base_generation.to_owned(),
+        head_generation: head_generation.to_owned(),
+        reason,
+        base_file_count: base_counts.files,
+        head_file_count: head_counts.files,
+        base_chunk_count: base_counts.chunks,
+        head_chunk_count: head_counts.chunks,
+        base_symbol_count: base_counts.symbols,
+        head_symbol_count: head_counts.symbols,
+        total_changes: None,
+        added: Vec::new(),
+        removed: Vec::new(),
+        changed: Vec::new(),
+    })
+}
+
+fn bound_results(
+    completed: code_search::CodeIndexBranchDiffCompletedV1,
+    base_counts: GenerationCountsV1,
+    head_counts: GenerationCountsV1,
+    limit: usize,
+) -> code_search::CodeIndexBranchDiffOutcomeV1 {
+    let total_changes = completed.added.len() + completed.removed.len() + completed.changed.len();
+    if total_changes <= limit {
+        return code_search::CodeIndexBranchDiffOutcomeV1::Complete(completed);
+    }
+    let mut remaining = limit;
+    let added = completed
+        .added
+        .into_iter()
+        .take(remaining)
+        .collect::<Vec<_>>();
+    remaining -= added.len();
+    let removed = completed
+        .removed
+        .into_iter()
+        .take(remaining)
+        .collect::<Vec<_>>();
+    remaining -= removed.len();
+    let changed = completed
+        .changed
+        .into_iter()
+        .take(remaining)
+        .collect::<Vec<_>>();
+    code_search::CodeIndexBranchDiffOutcomeV1::Partial(code_search::CodeIndexBranchDiffPartialV1 {
+        base_generation: completed.base_generation,
+        head_generation: completed.head_generation,
+        reason: code_search::CodeIndexBranchDiffPartialReasonV1::ResultLimit,
+        base_file_count: base_counts.files,
+        head_file_count: head_counts.files,
+        base_chunk_count: base_counts.chunks,
+        head_chunk_count: head_counts.chunks,
+        base_symbol_count: base_counts.symbols,
+        head_symbol_count: head_counts.symbols,
+        total_changes: Some(total_changes),
+        added,
+        removed,
+        changed,
+    })
+}
+
+pub(super) fn bounded_diff(
+    base: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    head: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    file_filter: Option<&str>,
+    kind_filter: Option<&str>,
+    limit: usize,
+    control: &code_index_scheduler::branch_generations::BranchGenerationReadControlV1,
+) -> Result<
+    code_search::CodeIndexBranchDiffOutcomeV1,
+    code_search::CodeIndexSearchUnavailableReasonV1,
+> {
+    if let Some(reason) = control.termination() {
+        return Err(reason);
+    }
+    let base_id = base.manifest().generation_id.as_str();
+    let head_id = head.manifest().generation_id.as_str();
+    let base_counts = generation_counts(base);
+    let head_counts = generation_counts(head);
+    if let Some(reason) =
+        generation_bound_reason(base_counts).or_else(|| generation_bound_reason(head_counts))
+    {
+        return Ok(partial(base_id, head_id, base_counts, head_counts, reason));
+    }
+    let base_symbols = generation_symbols(base, file_filter, kind_filter, control)?;
+    let head_symbols = generation_symbols(head, file_filter, kind_filter, control)?;
+    if let Some(reason) = control.termination() {
+        return Err(reason);
+    }
+    Ok(bound_results(
+        diff_symbols(base_id, base_symbols, head_id, head_symbols),
+        base_counts,
+        head_counts,
+        limit.min(code_search::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1),
+    ))
+}
+
 pub(super) fn code_index_branch_diff_executor(
     schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     project_id: tracedecay_domain::ProjectId,
@@ -225,22 +364,15 @@ pub(super) fn code_index_branch_diff_executor(
                 .generation_id
                 .as_str()
                 .to_owned();
-            let base = match generation_symbols(
+            let outcome = match bounded_diff(
                 generations.base.generation(),
-                request.file_filter.as_deref(),
-                request.kind_filter.as_deref(),
-                &control,
-            ) {
-                Ok(symbols) => symbols,
-                Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
-            };
-            let head = match generation_symbols(
                 generations.head.generation(),
                 request.file_filter.as_deref(),
                 request.kind_filter.as_deref(),
+                request.limit,
                 &control,
             ) {
-                Ok(symbols) => symbols,
+                Ok(outcome) => outcome,
                 Err(reason) => return unavailable(Some(base_id), Some(head_id), reason),
             };
             let terminal_scope = match project_open_owners::resolved_scope_for_project(
@@ -280,18 +412,16 @@ pub(super) fn code_index_branch_diff_executor(
             if let Some(reason) = control.termination() {
                 return unavailable(Some(base_id), Some(head_id), reason);
             }
-            code_search::CodeIndexBranchDiffOutcomeV1::Complete(diff_symbols(
-                &base_id, base, &head_id, head,
-            ))
+            outcome
         })
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_query::code_search::CodeIndexBranchSymbolV1;
+    use tracedecay_query::code_search::{self, CodeIndexBranchSymbolV1};
 
-    use super::diff_symbols;
+    use super::{GenerationCountsV1, bound_results, diff_symbols};
 
     fn symbol(qualified_name: &str, file: &str, content_digest: &str) -> CodeIndexBranchSymbolV1 {
         CodeIndexBranchSymbolV1 {
@@ -341,5 +471,40 @@ mod tests {
         assert_eq!(completed.changed[0].head.content_digest, "sha256:head");
         assert_eq!(completed.base_generation, "generation.base");
         assert_eq!(completed.head_generation, "generation.head");
+    }
+
+    #[test]
+    fn result_limit_returns_a_deterministic_typed_partial() {
+        let head = (0..300)
+            .map(|index| {
+                symbol(
+                    &format!("crate::added_{index:03}"),
+                    "src/lib.rs",
+                    &format!("sha256:{index:064x}"),
+                )
+            })
+            .collect();
+        let completed = diff_symbols("generation.base", Vec::new(), "generation.head", head);
+        let counts = GenerationCountsV1 {
+            files: 1,
+            chunks: 300,
+            symbols: 300,
+        };
+
+        let outcome = bound_results(completed, counts, counts, 10);
+
+        assert!(matches!(
+            outcome,
+            code_search::CodeIndexBranchDiffOutcomeV1::Partial(
+                code_search::CodeIndexBranchDiffPartialV1 {
+                    reason: code_search::CodeIndexBranchDiffPartialReasonV1::ResultLimit,
+                    total_changes: Some(300),
+                    added,
+                    removed,
+                    changed,
+                    ..
+                }
+            ) if added.len() == 10 && removed.is_empty() && changed.is_empty()
+        ));
     }
 }

@@ -367,13 +367,10 @@ pub(super) async fn dispatch_git_tools(
     args: Value,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    // Every git handler below performs unbounded gix work — tree walks,
-    // revwalks, diffs, the branch-add index build — so a diverged or
-    // pathological ref would hang the request. The admission layer carries a
-    // dispatch deadline for exactly this (thirty seconds by default, see
-    // `dispatch_deadline_horizon_micros`); enforcing it here bounds every
-    // handler uniformly and reports exhaustion as the same typed semantic
-    // error the other git failures surface.
+    // Tree walks and revwalks still need a uniform dispatch deadline. Branch
+    // generation reads additionally carry this deadline into their bounded
+    // blocking/ref and daemon-generation executors, so timing out this future
+    // also tells the underlying operation to stop at its next checkpoint.
     let carried_deadline = options.application_deadline.as_ref();
     let remaining = carried_deadline.and_then(crate::daemon_client::deadline_remaining);
 
@@ -399,14 +396,22 @@ pub(super) async fn dispatch_git_tools(
                 git::handle_branch_diff(
                     cg,
                     args,
-                    None,
+                    options.code_index_branch_diff_executor.as_ref(),
                     options.code_index_search_authority.as_ref(),
                     options.application_deadline.clone(),
                     options.application_cancellation.clone(),
                 )
                 .await
             }
-            "tracedecay_branch_list" => Ok(git::handle_branch_list(cg, &args)),
+            "tracedecay_branch_list" => {
+                git::handle_branch_list(
+                    cg,
+                    args,
+                    options.application_deadline.clone(),
+                    options.application_cancellation.clone(),
+                )
+                .await
+            }
             _ => Err(unknown_tool_error(tool_name)),
         }
     };
