@@ -29,6 +29,7 @@ use tracedecay_store::{
     SessionRefreshCompletionRequestV1, SessionRefreshFailureRequestV1, SessionRefreshFrontierV1,
     SessionRefreshProgressV1, SessionRefreshStore, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use crate::common::{LcmTestRuntime, open_lcm_db};
@@ -789,6 +790,7 @@ async fn status_maps_complete_and_failed_receipts_without_error_details() {
                 *complete_progress.coverage(),
             )
             .unwrap(),
+            ExecutionControl::default(),
         )
         .await
         .unwrap();

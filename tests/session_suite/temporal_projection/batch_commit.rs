@@ -398,6 +398,7 @@ async fn duplicate_message_ids_within_one_batch_are_rejected_deterministically()
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -469,6 +470,7 @@ async fn duplicate_message_ids_across_batches_are_rejected_deterministically() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -548,6 +550,7 @@ async fn duplicate_message_ids_remain_rejected_after_restart() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )

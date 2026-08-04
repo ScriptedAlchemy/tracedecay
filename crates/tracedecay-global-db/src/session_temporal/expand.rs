@@ -17,12 +17,24 @@ use tracedecay_store::{
     SessionTemporalCapabilityV1, SessionTemporalRetrievalRequestV1,
     SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
+use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::query::{now_micros, storage, storage_message};
+use super::relations::{SessionRelationError, SummarySourceRef};
+use super::store::execution_control_graph_cancellation;
 use crate::RegisteredGlobalDb;
 
 const EXPAND_OPERATION: &str = "retrieve session temporal page";
 const FREEZE_OPERATION: &str = "freeze session temporal snapshot";
+const MAX_SUMMARY_TOPOLOGY_RELATIONS: usize = MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE * 3;
+
+struct SummarySeed {
+    summary_id: SessionSummaryIdV1,
+    summary_anchor_id: RetrievalAnchorId,
+    source_horizon: SummarySourceHorizonV1,
+    created_at: UtcMicros,
+    publication: Option<SummaryPublicationMetadataV1>,
+}
 
 impl RegisteredGlobalDb {
     pub async fn freeze_session_temporal_snapshot_result(
@@ -109,7 +121,7 @@ impl RegisteredGlobalDb {
             .map_err(|error| storage(EXPAND_OPERATION, error))?;
         validate_frozen_snapshot(&read, request.snapshot()).await?;
         if request.grain() == tracedecay_domain::RetrievalGrainV1::Summary {
-            return retrieve_summary_page(&read, &request, generation).await;
+            return retrieve_summary_page(self, &read, &request, generation).await;
         }
         let (after_knowledge, after_occurrence) = if let Some(after) = request.after_occurrence_id()
         {
@@ -242,40 +254,12 @@ impl RegisteredGlobalDb {
 
         let mut remaining =
             MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE.saturating_sub(occurrences.len());
-        let mut copies = Vec::new();
-        if remaining != 0 {
-            for (occurrence_id, _) in &occurrence_anchors {
-                let mut copy_rows = read
-                    .query(
-                        "SELECT occurrence_id, copied_from_occurrence_id, proof_json,
-                                knowledge_at, valid_time_json
-                         FROM session_logical_copy_edges
-                         WHERE session_id = ?1
-                           AND generation = ?2
-                           AND occurrence_id = ?3
-                         ORDER BY copied_from_occurrence_id",
-                        params![
-                            request.session_id().as_str(),
-                            generation,
-                            occurrence_id.as_str()
-                        ],
-                    )
-                    .await
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?;
-                while remaining != 0
-                    && let Some(row) = copy_rows
-                        .next()
-                        .await
-                        .map_err(|error| storage(EXPAND_OPERATION, error))?
-                {
-                    copies.push(copy_from_row(&row)?);
-                    remaining -= 1;
-                }
-                if remaining == 0 {
-                    break;
-                }
-            }
-        }
+        let copies = if remaining == 0 {
+            Vec::new()
+        } else {
+            relation_logical_copies(self, &request, &occurrence_anchors, remaining)?
+        };
+        remaining = remaining.saturating_sub(copies.len());
 
         let mut assertions = Vec::new();
         let mut seen_assertions = BTreeSet::new();
@@ -367,7 +351,141 @@ impl RegisteredGlobalDb {
     }
 }
 
+fn relation_logical_copies(
+    db: &RegisteredGlobalDb,
+    request: &SessionTemporalRetrievalRequestV1,
+    occurrence_anchors: &[(
+        tracedecay_domain::MessageOccurrenceIdV1,
+        tracedecay_domain::RetrievalAnchorId,
+    )],
+    max_relations: usize,
+) -> SessionStoreResult<Vec<LogicalCopyRecordV1>> {
+    let control = request.execution_control();
+    checkpoint_execution_control(control)?;
+    let (project_id, relation_store) = db
+        .session_relation_store()
+        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let occurrence_ids = occurrence_anchors
+        .iter()
+        .map(|(occurrence_id, _)| occurrence_id.clone())
+        .collect::<Vec<_>>();
+    let cancellation = execution_control_graph_cancellation(control);
+    checkpoint_execution_control(control)?;
+    let copies = relation_store.logical_copies(
+        project_id,
+        request.session_id(),
+        request.snapshot().watermarks().active_generation().value(),
+        &occurrence_ids,
+        max_relations,
+        cancellation,
+    );
+    checkpoint_execution_control(control)?;
+    copies.map_err(map_session_relation_error).map(|batches| {
+        batches
+            .into_iter()
+            .flatten()
+            .map(|copy| LogicalCopyRecordV1 {
+                occurrence_id: copy.occurrence_id,
+                copied_from_occurrence_id: copy.copied_from_occurrence_id,
+                proof: copy.proof,
+                knowledge_at: copy.knowledge_at,
+                valid_time: copy.valid_time,
+            })
+            .collect()
+    })
+}
+
+fn checkpoint_execution_control(control: &ExecutionControl) -> SessionStoreResult<()> {
+    control.checkpoint().map_err(map_execution_control_error)
+}
+
+fn map_execution_control_error(error: TemporalPortError) -> SessionStoreError {
+    match error {
+        TemporalPortError::Cancelled => SessionStoreError::Cancelled,
+        TemporalPortError::DeadlineExceeded => SessionStoreError::DeadlineExceeded,
+        TemporalPortError::BudgetExceeded { resource } => {
+            SessionStoreError::BudgetExceeded { resource }
+        }
+        _ => SessionStoreError::InvalidStateTransition {
+            context: "session retrieval execution control checkpoint",
+        },
+    }
+}
+
+fn map_session_relation_error(error: SessionRelationError) -> SessionStoreError {
+    match error {
+        SessionRelationError::Cancelled => SessionStoreError::Cancelled,
+        SessionRelationError::BudgetExhausted => SessionStoreError::BudgetExceeded {
+            resource: "session relation traversal",
+        },
+        error => storage(EXPAND_OPERATION, error),
+    }
+}
+
+fn relation_summary_relations(
+    db: &RegisteredGlobalDb,
+    request: &SessionTemporalRetrievalRequestV1,
+    summary_ids: &[String],
+) -> SessionStoreResult<Vec<super::relations::SummaryRelationRead>> {
+    if summary_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let control = request.execution_control();
+    checkpoint_execution_control(control)?;
+    let (project_id, relation_store) = db
+        .session_relation_store()
+        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let cancellation = execution_control_graph_cancellation(control);
+    checkpoint_execution_control(control)?;
+    let relations = relation_store.summary_relations(
+        project_id,
+        request.session_id(),
+        request.snapshot().watermarks().active_generation().value(),
+        summary_ids,
+        MAX_SUMMARY_TOPOLOGY_RELATIONS,
+        cancellation,
+    );
+    checkpoint_execution_control(control)?;
+    relations.map_err(map_session_relation_error)
+}
+
+async fn summary_anchor_for(
+    read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
+    session_id: &SessionId,
+    summary_id: &str,
+) -> SessionStoreResult<RetrievalAnchorId> {
+    let mut rows = read
+        .query(
+            "SELECT summary_anchor_id
+             FROM session_summary_nodes
+             WHERE session_id = ?1 AND summary_id = ?2
+             LIMIT 2",
+            params![session_id.as_str(), summary_id],
+        )
+        .await
+        .map_err(|error| storage(EXPAND_OPERATION, error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| storage(EXPAND_OPERATION, error))?
+        .ok_or_else(|| map_session_relation_error(SessionRelationError::Corrupt))?;
+    let anchor_id = decode_text(
+        row.get::<String>(0)
+            .map_err(|error| storage(EXPAND_OPERATION, error))?,
+    )?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage(EXPAND_OPERATION, error))?
+        .is_some()
+    {
+        return Err(map_session_relation_error(SessionRelationError::Corrupt));
+    }
+    Ok(anchor_id)
+}
+
 async fn retrieve_summary_page(
+    db: &RegisteredGlobalDb,
     read: &tracedecay_runtime_core::db::engine::ReadSnapshot,
     request: &SessionTemporalRetrievalRequestV1,
     generation: i64,
@@ -388,14 +506,6 @@ async fn retrieve_summary_page(
         .query(
             "SELECT node.summary_id, node.summary_anchor_id,
                     node.source_horizon_json, node.created_at,
-                    (
-                        SELECT predecessor.predecessor_summary_id
-                        FROM session_summary_successors AS predecessor
-                        WHERE predecessor.successor_summary_id = node.summary_id
-                        ORDER BY predecessor.created_at DESC,
-                                 predecessor.predecessor_summary_id
-                        LIMIT 1
-                    ),
                     node.publication_json
              FROM session_summary_nodes AS node
              JOIN session_summary_availability AS availability
@@ -417,13 +527,13 @@ async fn retrieve_summary_page(
         )
         .await
         .map_err(|error| storage(EXPAND_OPERATION, error))?;
-    let mut summaries = Vec::with_capacity(request.page_size());
+    let mut summary_seeds = Vec::with_capacity(request.page_size());
     while let Some(row) = rows
         .next()
         .await
         .map_err(|error| storage(EXPAND_OPERATION, error))?
     {
-        if summaries.len() == request.page_size() {
+        if summary_seeds.len() == request.page_size() {
             return Err(storage_message(
                 EXPAND_OPERATION,
                 "summary page exceeds the transitional store cursor capacity",
@@ -445,54 +555,56 @@ async fn retrieve_summary_page(
             row.get::<i64>(3)
                 .map_err(|error| storage(EXPAND_OPERATION, error))?,
         );
-        let predecessor = row
+        let publication = row
             .get::<Option<String>>(4)
             .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let publication = row
-            .get::<Option<String>>(5)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let mut source_rows = read
-            .query(
-                "SELECT COALESCE(source.source_anchor_id, nested.summary_anchor_id)
-                 FROM session_summary_sources AS source
-                 LEFT JOIN session_summary_nodes AS nested
-                   ON nested.summary_id = source.source_summary_id
-                  AND nested.session_id = ?2
-                 WHERE source.summary_id = ?1
-                   AND (
-                       source.source_anchor_id IS NOT NULL
-                       OR nested.summary_anchor_id IS NOT NULL
-                   )
-                 ORDER BY source.source_ordinal",
-                params![summary_id.as_str(), request.session_id().as_str()],
-            )
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let mut source_anchors = Vec::new();
-        while let Some(source_row) = source_rows
-            .next()
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?
-        {
-            source_anchors.push(decode_text::<RetrievalAnchorId>(
-                source_row
-                    .get::<String>(0)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-            )?);
-        }
-        let mut summary = SessionSummaryRecordV1::new(
+        summary_seeds.push(SummarySeed {
             summary_id,
-            request.session_id().clone(),
             summary_anchor_id,
-            source_anchors,
             source_horizon,
             created_at,
+            publication: publication
+                .as_deref()
+                .map(decode_summary_publication)
+                .transpose()?,
+        });
+    }
+    drop(rows);
+
+    let summary_ids = summary_seeds
+        .iter()
+        .map(|seed| seed.summary_id.as_str().to_owned())
+        .collect::<Vec<_>>();
+    let relations = relation_summary_relations(db, request, &summary_ids)?;
+    if relations.len() != summary_seeds.len() {
+        return Err(map_session_relation_error(SessionRelationError::Corrupt));
+    }
+    let mut summaries = Vec::with_capacity(summary_seeds.len());
+    for (seed, relation) in summary_seeds.into_iter().zip(relations) {
+        if relation.summary_id != seed.summary_id.as_str() {
+            return Err(map_session_relation_error(SessionRelationError::Corrupt));
+        }
+        let mut source_anchors = Vec::new();
+        for source in relation.sources {
+            match source {
+                SummarySourceRef::Anchor { anchor_id } => source_anchors.push(anchor_id),
+                SummarySourceRef::Summary { summary_id } => source_anchors
+                    .push(summary_anchor_for(read, request.session_id(), &summary_id).await?),
+            }
+        }
+        let mut summary = SessionSummaryRecordV1::new(
+            seed.summary_id,
+            request.session_id().clone(),
+            seed.summary_anchor_id,
+            source_anchors,
+            seed.source_horizon,
+            seed.created_at,
         )?;
-        if let Some(predecessor) = predecessor {
+        if let Some(predecessor) = relation.predecessor_summary_id {
             summary = summary.with_predecessor(decode_text(predecessor)?)?;
         }
-        if let Some(publication) = publication {
-            summary = summary.with_publication(decode_summary_publication(&publication)?)?;
+        if let Some(publication) = seed.publication {
+            summary = summary.with_publication(publication)?;
         }
         summaries.push(summary);
     }
@@ -608,25 +720,6 @@ fn occurrence_from_row(
         )?,
         "evidence": parse_json_value(
             row.get::<String>(13)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-    }))
-}
-
-fn copy_from_row(row: &Row) -> SessionStoreResult<LogicalCopyRecordV1> {
-    decode_json_value(serde_json::json!({
-        "occurrence_id": row.get::<String>(0)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "copied_from_occurrence_id": row.get::<String>(1)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "proof": parse_json_value(
-            row.get::<String>(2)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?
-        )?,
-        "knowledge_at": row.get::<i64>(3)
-            .map_err(|error| storage(EXPAND_OPERATION, error))?,
-        "valid_time": parse_json_value(
-            row.get::<String>(4)
                 .map_err(|error| storage(EXPAND_OPERATION, error))?
         )?,
     }))

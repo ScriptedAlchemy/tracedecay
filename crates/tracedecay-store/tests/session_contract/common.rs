@@ -207,6 +207,11 @@ fn semantic_store_errors_are_typed_and_non_storage() {
             operation_id: operation_id(),
             state: SessionRefreshStateV1::Complete,
         },
+        SessionStoreError::Cancelled,
+        SessionStoreError::DeadlineExceeded,
+        SessionStoreError::BudgetExceeded {
+            resource: "work units",
+        },
     ];
     assert!(
         errors

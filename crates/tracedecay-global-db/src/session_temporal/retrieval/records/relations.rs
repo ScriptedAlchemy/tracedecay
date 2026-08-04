@@ -23,6 +23,18 @@ pub(in crate::session_temporal::retrieval) struct RecordRelationBatch {
     pub(super) retained_summary_anchors: Vec<RecordRetainedSummaryAnchor>,
 }
 
+#[cfg(test)]
+impl RecordRelationBatch {
+    pub(in crate::session_temporal::retrieval) fn empty() -> Self {
+        Self {
+            copies: Vec::new(),
+            summaries: Vec::new(),
+            summary_sources: Vec::new(),
+            retained_summary_anchors: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct RecordCopyRelation {
     pub(super) candidate: usize,

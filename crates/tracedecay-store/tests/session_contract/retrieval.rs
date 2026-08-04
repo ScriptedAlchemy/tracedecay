@@ -1,5 +1,26 @@
 use super::common::*;
 use super::*;
+use tracedecay_temporal_query::ports::ExecutionControl;
+
+#[test]
+fn retrieval_request_retains_the_explicit_execution_control() {
+    let session_id = session("session.controlled-retrieval");
+    let control = ExecutionControl::default();
+    let request = SessionTemporalRetrievalRequestV1::new(
+        session_id,
+        TemporalModeV1::Current,
+        RetrievalGrainV1::Occurrence,
+        snapshot_for(session("session.controlled-retrieval"), 7),
+        1,
+        None,
+        control.clone(),
+    )
+    .expect("valid controlled retrieval request");
+
+    assert!(!request.execution_control().is_cancelled());
+    control.cancel();
+    assert!(request.execution_control().is_cancelled());
+}
 
 #[test]
 fn frozen_snapshots_preserve_exact_session_and_reject_cross_session_reads() {
@@ -14,6 +35,7 @@ fn frozen_snapshots_preserve_exact_session_and_reject_cross_session_reads() {
         snapshot,
         3,
         None,
+        ExecutionControl::default(),
     )
     .unwrap_err();
     assert!(matches!(
@@ -36,6 +58,7 @@ fn retrieval_requires_frozen_watermark_capability_and_enforces_page_bounds() {
             snapshot,
             3,
             None,
+            ExecutionControl::default(),
         ),
         Err(SessionStoreError::UnsupportedCapability {
             capability: SessionTemporalCapabilityV1::FrozenWatermarks
@@ -51,6 +74,7 @@ fn retrieval_requires_frozen_watermark_capability_and_enforces_page_bounds() {
                 snapshot_for(session_id.clone(), 7),
                 invalid_limit,
                 None,
+                ExecutionControl::default(),
             ),
             Err(SessionStoreError::InvalidPageLimit { .. })
         ));
@@ -143,6 +167,7 @@ fn cursor_pagination_requires_a_key_frozen_with_the_watermarks() {
             snapshot.clone(),
             1,
             Some(occurrence_id(0)),
+            ExecutionControl::default(),
         ),
         Err(SessionStoreError::CursorKeyRequired)
     ));

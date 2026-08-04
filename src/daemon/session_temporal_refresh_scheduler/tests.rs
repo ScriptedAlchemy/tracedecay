@@ -26,6 +26,7 @@ use tracedecay_store::{
     SessionRefreshStore, SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
     build_observation_resolution_authorization_v1, build_observation_retrieval_anchor_v2,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::global_db::RegisteredGlobalDb;
@@ -569,6 +570,7 @@ async fn restart_finalizes_ready_progress_without_replaying_projection() {
                     *progress.coverage(),
                 )
                 .unwrap(),
+                ExecutionControl::default(),
             )
             .await
             .unwrap()

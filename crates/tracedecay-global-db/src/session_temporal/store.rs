@@ -146,7 +146,8 @@ impl<'a> GlobalDbSessionTemporalStore<'a> {
                     {
                         request = request.with_source_coverage(source_coverage);
                     }
-                    self.complete_session_refresh(request).await?;
+                    self.complete_session_refresh(request, ExecutionControl::default())
+                        .await?;
                     return Ok(());
                 }
                 SessionRefreshRestartStateV1::BeginProjection
@@ -256,8 +257,10 @@ impl SessionRefreshStore for GlobalDbSessionTemporalStore<'_> {
         &self,
         _permit: SessionRefreshCompletePermit,
         request: SessionRefreshCompletionRequestV1,
+        execution_control: ExecutionControl,
     ) -> impl Future<Output = SessionStoreResult<SessionRefreshReceiptV1>> + Send {
-        self.db.complete_session_refresh_result(request)
+        self.db
+            .complete_session_refresh_result(request, execution_control)
     }
 
     fn fail_session_refresh_supported(

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_store::SessionRefreshBeginOrJoinRequestV1;
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::MAX_PENDING_REFRESH_REQUESTS;
 use crate::store::SessionRefreshRecoveryV1;
@@ -105,6 +106,7 @@ pub(super) struct SessionTemporalRefreshWakeState {
     pub(super) idle: tokio::sync::Notify,
     pub(super) cancelled: AtomicBool,
     pub(super) cancellation: tokio::sync::Notify,
+    completion_control: ExecutionControl,
     telemetry: std::sync::Mutex<SessionTemporalRefreshWorkerTelemetry>,
 }
 
@@ -121,6 +123,7 @@ impl Default for SessionTemporalRefreshWakeState {
             idle: tokio::sync::Notify::new(),
             cancelled: AtomicBool::new(false),
             cancellation: tokio::sync::Notify::new(),
+            completion_control: ExecutionControl::new(None),
             telemetry: std::sync::Mutex::new(SessionTemporalRefreshWorkerTelemetry::default()),
         }
     }
@@ -302,10 +305,15 @@ impl SessionTemporalRefreshWakeState {
     pub(super) fn cancel(&self) {
         let _requests = self.requests.lock().unwrap_or_else(PoisonError::into_inner);
         if !self.cancelled.swap(true, Ordering::AcqRel) {
+            self.completion_control.cancel();
             self.mark_stopped();
             self.cancellation.notify_waiters();
             self.wake.notify_waiters();
         }
+    }
+
+    pub(super) fn completion_control(&self) -> ExecutionControl {
+        self.completion_control.clone()
     }
 
     pub(super) async fn wait_for_cancellation(&self) {

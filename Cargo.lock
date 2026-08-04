@@ -6239,6 +6239,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracedecay-domain",
+ "tracedecay-temporal-query",
 ]
 
 [[package]]

@@ -271,6 +271,12 @@ pub enum SessionStoreError {
     UnsupportedCapability {
         capability: SessionTemporalCapabilityV1,
     },
+    #[error("session temporal operation was cancelled")]
+    Cancelled,
+    #[error("session temporal operation deadline elapsed")]
+    DeadlineExceeded,
+    #[error("session temporal operation exceeded its {resource} budget")]
+    BudgetExceeded { resource: &'static str },
     #[error("session temporal generation {generation:?} is missing")]
     MissingGeneration {
         generation: SessionProjectionGenerationV1,

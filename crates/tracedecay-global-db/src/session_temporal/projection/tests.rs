@@ -18,6 +18,7 @@ use tracedecay_store::{
     SessionRefreshFrontierV1, SessionRefreshProgressV1, SessionRefreshStore,
     SessionRefreshTerminalStateV1, SessionTemporalProjectionBatchV1,
 };
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use super::super::refresh::SessionRefreshRestartStateV1;
 use super::materialize::*;
@@ -344,12 +345,15 @@ async fn relation_batch_persists_restarts_and_completes_without_duplicates() {
     )
     .unwrap();
     let receipt = store
-        .complete_session_refresh(request.clone())
+        .complete_session_refresh(request.clone(), ExecutionControl::default())
         .await
         .unwrap();
     assert_eq!(receipt.state(), SessionRefreshTerminalStateV1::Complete);
     assert_eq!(
-        store.complete_session_refresh(request).await.unwrap(),
+        store
+            .complete_session_refresh(request, ExecutionControl::default())
+            .await
+            .unwrap(),
         receipt
     );
     for (kind, expected) in [
@@ -783,6 +787,7 @@ async fn multi_batch_refresh_progress_survives_restart_under_guard() {
                 *progress.coverage(),
             )
             .unwrap(),
+            ExecutionControl::default(),
         )
         .await
         .unwrap();

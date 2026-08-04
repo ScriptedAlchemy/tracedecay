@@ -408,6 +408,8 @@ pub enum LcmError {
         expected: i64,
         actual: i64,
     },
+    Cancelled,
+    DeadlineExceeded,
     LifecycleStateNotFound,
     Db(String),
     Io(String),
@@ -466,6 +468,8 @@ impl std::fmt::Display for LcmError {
                     "summary generation compare-and-swap failed: expected {expected}, actual {actual}"
                 )
             }
+            Self::Cancelled => write!(f, "LCM mutation cancelled before commit"),
+            Self::DeadlineExceeded => write!(f, "LCM mutation deadline exceeded before commit"),
             Self::LifecycleStateNotFound => {
                 write!(f, "payload database error: lifecycle state not found")
             }

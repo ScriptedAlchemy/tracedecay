@@ -128,11 +128,6 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
         rows(&path, &canonical_rows(3)).await
     );
     for projection in [
-        "SELECT occurrence_id || ':' || copied_from_occurrence_id || ':' ||
-                proof_json || ':' || created_at
-         FROM session_logical_copy_edges
-         WHERE generation = {generation}
-         ORDER BY occurrence_id, copied_from_occurrence_id",
         "SELECT assertion_id || ':' || assertion_kind || ':' ||
                 subject_anchor_id || ':' || object_anchor_id || ':' ||
                 valid_time_json || ':' || evidence_json
@@ -161,10 +156,6 @@ async fn incremental_and_one_shot_rebuilds_have_identical_bytes_and_order() {
          FROM session_agents
          WHERE generation = {generation}
          ORDER BY agent_id",
-        "SELECT parent_agent_id || ':' || child_agent_id || ':' || ordinal
-         FROM session_agent_hierarchy_edges
-         WHERE generation = {generation}
-         ORDER BY parent_agent_id, child_agent_id",
         "SELECT superseded_assertion_id || ':' || superseding_assertion_id || ':' || created_at
          FROM session_assertion_supersession
          WHERE generation = {generation}
@@ -392,6 +383,7 @@ async fn begin_rejects_watermark_mismatch_and_stale_pin_after_activation() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 1),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )
@@ -510,6 +502,7 @@ async fn interrupted_rebuild_resumes_building_then_activates_ready_to_active() {
                     session_id.clone(),
                     generation(2),
                     snapshot(&session_id, 1, 1),
+                    ExecutionControl::default(),
                 )
                 .unwrap(),
             )

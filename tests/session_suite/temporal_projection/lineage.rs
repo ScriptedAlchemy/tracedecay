@@ -381,6 +381,7 @@ async fn copied_from_requires_explicit_typed_copy_record() {
                 session_id.clone(),
                 generation(2),
                 snapshot(&session_id, 1, 2),
+                ExecutionControl::default(),
             )
             .unwrap(),
         )

@@ -22,32 +22,6 @@ pub(super) struct RecordQuery {
     pub(super) params: Vec<SqlValue>,
 }
 
-pub(super) fn build_record_query(
-    scope: &TemporalRetrievalScope,
-    snapshot: &TemporalExecutionSnapshot,
-    candidates: &[RankingCandidate],
-    candidate_offset: usize,
-    cursor: &RecordCursor,
-    limit: usize,
-    request: &PageRequest,
-) -> Result<RecordQuery, TemporalPortError> {
-    build_record_query_with_relations(
-        scope,
-        snapshot,
-        candidates,
-        candidate_offset,
-        cursor,
-        limit,
-        request,
-        &RecordRelationBatch {
-            copies: Vec::new(),
-            summaries: Vec::new(),
-            summary_sources: Vec::new(),
-            retained_summary_anchors: Vec::new(),
-        },
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_record_query_with_relations(
     scope: &TemporalRetrievalScope,
