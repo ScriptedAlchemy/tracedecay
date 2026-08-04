@@ -1,7 +1,7 @@
 use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish};
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    application, domain, operation, operations, work,
+    application, domain, operation, operations, remote, work,
 };
 
 #[test]
@@ -10,11 +10,15 @@ fn canonical_contracts_are_available_without_sdk_copies() {
     fn accepts_api_envelope<T>(_: Option<api::HttpJsonEnvelope<T>>) {}
     fn accepts_domain_identity(_: Option<domain::RepositoryId>) {}
     fn accepts_operation_metadata(_: Option<operation::CapabilityManifestV1>) {}
+    fn accepts_remote_authority(_: Option<domain::CurrentRemoteAuthorityStateV1>) {}
+    fn accepts_remote_response<T>(_: Option<remote::protocol::RemoteProtocolResponseV1<T>>) {}
 
     accepts_application_envelope::<serde_json::Value>(None);
     accepts_api_envelope::<serde_json::Value>(None);
     accepts_domain_identity(None);
     accepts_operation_metadata(None);
+    accepts_remote_authority(None);
+    accepts_remote_response::<serde_json::Value>(None);
 
     let _: operation::ReceiptContract = operation::ReceiptContract::Operation;
     let _: Option<application::ApplicationOperation> = None;
@@ -36,6 +40,13 @@ fn cancellation_types_are_the_canonical_application_types() {
             requested_at: domain::UtcMicros(41)
         }
     ));
+}
+
+#[test]
+fn remote_outcomes_are_the_canonical_application_types() {
+    let outcome: Option<remote::replay::RemoteReplayOutcomeV1> = None;
+    let canonical: Option<application::remote::replay::RemoteReplayOutcomeV1> = outcome;
+    let _: Option<remote::replay::RemoteReplayOutcomeV1> = canonical;
 }
 
 #[test]

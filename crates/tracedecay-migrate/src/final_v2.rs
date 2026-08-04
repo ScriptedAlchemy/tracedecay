@@ -419,6 +419,11 @@ pub enum FinalSchemaFamily {
     BranchStackJournals,
     BranchStackReceipts,
     BranchStackQuarantine,
+    RemoteObservationTransactions,
+    RemoteAdmittedEncryptionMetadata,
+    RemoteReplayDeduplication,
+    RemoteBackupStaging,
+    RemoteAuthorityCas,
     ExternalSourceAuthorityRevisions,
     ExternalSourceProjectionPublications,
 }
@@ -428,7 +433,9 @@ pub enum FinalSchemaInvariant {
     ExactProjectAndSourceGeneration,
     CompareAndSwap,
     OneUse,
+    VerifiedBackupBeforeDestruction,
     DurableReplayDeduplication,
+    AdmittedEncryptionOnly,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -460,6 +467,11 @@ impl FinalTargetSchemaManifest {
             BranchStackJournals,
             BranchStackReceipts,
             BranchStackQuarantine,
+            RemoteObservationTransactions,
+            RemoteAdmittedEncryptionMetadata,
+            RemoteReplayDeduplication,
+            RemoteBackupStaging,
+            RemoteAuthorityCas,
             ExternalSourceAuthorityRevisions,
             ExternalSourceProjectionPublications,
         ]
@@ -472,13 +484,24 @@ impl FinalTargetSchemaManifest {
                 | BranchStackPreviews
                 | BranchStackJournals
                 | BranchStackReceipts
-                | BranchStackQuarantine => {
+                | BranchStackQuarantine
+                | RemoteObservationTransactions => {
                     BTreeSet::from([FinalSchemaInvariant::ExactProjectAndSourceGeneration])
                 }
                 BranchStackConsumedApprovals => BTreeSet::from([
                     FinalSchemaInvariant::ExactProjectAndSourceGeneration,
                     FinalSchemaInvariant::OneUse,
                 ]),
+                RemoteAdmittedEncryptionMetadata => {
+                    BTreeSet::from([FinalSchemaInvariant::AdmittedEncryptionOnly])
+                }
+                RemoteReplayDeduplication => {
+                    BTreeSet::from([FinalSchemaInvariant::DurableReplayDeduplication])
+                }
+                RemoteBackupStaging => {
+                    BTreeSet::from([FinalSchemaInvariant::VerifiedBackupBeforeDestruction])
+                }
+                RemoteAuthorityCas => BTreeSet::from([FinalSchemaInvariant::CompareAndSwap]),
                 ExternalSourceAuthorityRevisions => BTreeSet::from([
                     FinalSchemaInvariant::ExactProjectAndSourceGeneration,
                     FinalSchemaInvariant::CompareAndSwap,

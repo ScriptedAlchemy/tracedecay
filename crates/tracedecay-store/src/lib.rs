@@ -21,6 +21,7 @@ pub mod git_index_transactions;
 pub mod memory;
 pub mod observation;
 pub mod projection;
+pub mod remote_recovery;
 pub mod retrieval_anchor;
 pub mod runtime;
 pub mod schema;
@@ -149,6 +150,7 @@ pub use projection::{
     SESSION_MESSAGE_PROJECTOR_VERSION_V4, SessionMessageProjection, WorkflowFactProjection,
     WorkflowFactRecord,
 };
+pub use remote_recovery::*;
 pub use retrieval_anchor::{
     AnchorDerivativeKindV1, AnchorDispositionAppendOutcomeV1, AnchorDispositionReasonClassV1,
     AnchorDispositionStateV1, RetrievalAnchorDerivativeV1, RetrievalAnchorDispositionRecordV1,

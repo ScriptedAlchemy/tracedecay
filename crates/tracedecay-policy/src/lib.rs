@@ -13,6 +13,7 @@ pub mod configuration;
 pub mod diagnostic_curation;
 pub mod git;
 pub mod hint_delivery;
+pub mod replay;
 pub mod retrieval_selection;
 pub mod routing;
 
@@ -22,5 +23,6 @@ pub use configuration::*;
 pub use diagnostic_curation::*;
 pub use git::*;
 pub use hint_delivery::*;
+pub use replay::*;
 pub use retrieval_selection::*;
 pub use routing::*;

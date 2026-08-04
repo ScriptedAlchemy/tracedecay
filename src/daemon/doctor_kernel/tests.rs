@@ -572,6 +572,7 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             ..DaemonRuntimeHealthSignalV1::default()
         }),
         operational_audit: OperationalAuditReadV1 {
+            remote: RemoteOperationalReadV1::Unconfigured,
             profile_authority: ProfileAuthorityReadV1::Unavailable,
         },
         host: HostIntegrationReadV1::Denied,

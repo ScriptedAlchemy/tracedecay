@@ -4,11 +4,14 @@
 
 pub mod client;
 pub mod operations;
+pub mod remote_client;
 
 /// Canonical HTTP/SSE presentation contracts.
 pub use tracedecay_api as api;
 /// Canonical transport-neutral use-case contracts, ports, and results.
 pub use tracedecay_application as application;
+/// Canonical transport-neutral remote authority, protocol, and outcome contracts.
+pub use tracedecay_application::remote;
 /// Canonical cancellation observations, identity, and process-local signal.
 pub use tracedecay_application::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId,
