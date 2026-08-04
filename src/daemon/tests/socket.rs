@@ -623,6 +623,61 @@ async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() 
     server.await.expect("server task");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_client_cancels_its_retained_controlled_invocation() {
+    use tokio::io::AsyncBufReadExt;
+
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let (request_seen, request_observed) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept connection");
+        let (reader, _writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake");
+        lines
+            .next_line()
+            .await
+            .expect("read invocation")
+            .expect("invocation");
+        request_seen.send(()).expect("observe invocation");
+        tokio::time::timeout(std::time::Duration::from_secs(1), lines.next_line())
+            .await
+            .expect("owned invocation must be cancelled with the client")
+            .expect("read client close")
+    });
+    let profile = TempDir::new().expect("profile");
+    let client = lsp_test_invocation(endpoint, &profile, "client.controlled-drop");
+    let (deadline, cancellation) = active_lsp_control("cancel.controlled-drop");
+    let mut invocation = Box::pin(client.invoke_controlled(
+        closed_feedback_list_request("request.controlled-drop", "handle.controlled-drop"),
+        deadline,
+        cancellation,
+        crate::daemon_client::InvocationCancellationPolicy::ReadOnly,
+    ));
+    tokio::select! {
+        result = &mut invocation => panic!("server unexpectedly completed invocation: {result:?}"),
+        observed = request_observed => observed.expect("server observation"),
+    }
+
+    drop(invocation);
+    drop(client);
+
+    assert_eq!(
+        server.await.expect("server task"),
+        None,
+        "the daemon socket must close when its owned invocation is cancelled"
+    );
+}
+
 #[test]
 fn tool_json_payload_requires_exactly_one_json_block() {
     let valid = serde_json::json!({

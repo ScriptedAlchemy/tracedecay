@@ -6,11 +6,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
 use tracedecay_application::{
     ApplicationEnvelope, ApplicationInvocation, ApplicationInvocationExecutor,
@@ -453,11 +453,75 @@ pub struct DaemonInvocationClient {
     connection: crate::daemon::DaemonConnection,
     handshake: crate::daemon::DaemonHandshake,
     state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
+    controlled_tasks: Arc<ControlledInvocationTaskRegistry>,
 }
 
 struct DaemonInvocationConnection {
     reader: BufReader<ReadHalf<crate::daemon::transport::BrokerStream>>,
     writer: WriteHalf<crate::daemon::transport::BrokerStream>,
+}
+
+type ControlledInvocationResult =
+    Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError>;
+
+#[derive(Default)]
+struct ControlledInvocationTaskRegistry {
+    state: StdMutex<ControlledInvocationTaskRegistryState>,
+}
+
+#[derive(Default)]
+struct ControlledInvocationTaskRegistryState {
+    next_id: u64,
+    tasks: std::collections::BTreeMap<u64, tokio::task::JoinHandle<()>>,
+}
+
+impl ControlledInvocationTaskRegistry {
+    fn start<F>(
+        self: &Arc<Self>,
+        task: F,
+    ) -> Result<oneshot::Receiver<ControlledInvocationResult>, DaemonInvocationError>
+    where
+        F: Future<Output = ControlledInvocationResult> + Send + 'static,
+    {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(task_id) = state.next_id.checked_add(1) else {
+            return Err(DaemonInvocationError::Unavailable);
+        };
+        state.next_id = task_id;
+        let (sender, receiver) = oneshot::channel();
+        let registry = Arc::downgrade(self);
+        let handle = tokio::spawn(async move {
+            let outcome = task.await;
+            let _receiver_was_dropped = sender.send(outcome).is_err();
+            if let Some(registry) = registry.upgrade() {
+                registry.finish(task_id);
+            }
+        });
+        state.tasks.insert(task_id, handle);
+        Ok(receiver)
+    }
+
+    fn finish(&self, task_id: u64) {
+        match self.state.lock() {
+            Ok(mut state) => state.tasks.remove(&task_id),
+            Err(poisoned) => poisoned.into_inner().tasks.remove(&task_id),
+        };
+    }
+}
+
+impl Drop for ControlledInvocationTaskRegistry {
+    fn drop(&mut self) {
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for task in state.tasks.values() {
+            task.abort();
+        }
+    }
 }
 
 impl DaemonInvocationClient {
@@ -466,6 +530,7 @@ impl DaemonInvocationClient {
             connection: crate::daemon::current_daemon_connection()?,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
+            controlled_tasks: Arc::new(ControlledInvocationTaskRegistry::default()),
         })
     }
 
@@ -478,6 +543,7 @@ impl DaemonInvocationClient {
             connection,
             handshake,
             state: Arc::new(AsyncMutex::new(None)),
+            controlled_tasks: Arc::new(ControlledInvocationTaskRegistry::default()),
         }
     }
 
@@ -485,65 +551,143 @@ impl DaemonInvocationClient {
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,
     ) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
-        let request_id = request.request_id.clone();
-        let request_label = request.operation().as_str();
-        let mut state = self.state.lock().await;
-        if state.is_none() {
-            let stream = crate::daemon::connect_to_daemon_connection(&self.connection).await?;
-            let (reader, mut writer) = stream.into_split();
-            crate::daemon::write_daemon_preamble(&mut writer, &self.connection, &self.handshake)
-                .await?;
-            *state = Some(DaemonInvocationConnection {
-                reader: BufReader::new(reader),
-                writer,
-            });
-        }
-        let result = async {
-            let connection = state.as_mut().ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: "daemon invocation connection was not initialized".to_owned(),
-            })?;
-            connection
-                .writer
-                .write_all(serde_json::to_string(&request)?.as_bytes())
-                .await?;
-            connection.writer.write_all(b"\n").await?;
-            connection.writer.flush().await?;
-
-            let Some(line) = crate::daemon::next_daemon_response_line(
-                &mut connection.reader,
-                &self.connection,
-                request_label,
-                crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
-            )
-            .await?
-            else {
-                return Err(crate::errors::TraceDecayError::Config {
-                    message: format!(
-                        "daemon closed the invocation connection after '{request_label}' was sent; the outcome is unknown"
-                    ),
-                });
-            };
-            let response: crate::daemon_contract::DaemonInvocationResponse =
-                serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
-                    message: "daemon returned an invalid invocation response".to_owned(),
-                })?;
-            if response.protocol != crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
-                || response.revision != crate::daemon_contract::DAEMON_INVOCATION_REVISION
-                || response.request_id != request_id
-            {
-                return Err(crate::errors::TraceDecayError::Config {
-                    message: "daemon invocation response did not match the request".to_owned(),
-                });
-            }
-            Ok(response)
-        }
-        .await;
-        if result.is_err() {
-            *state = None;
-        }
-        result
+        invoke_daemon_request(
+            self.connection.clone(),
+            self.handshake.clone(),
+            Arc::clone(&self.state),
+            request,
+        )
+        .await
     }
 
+    pub(crate) async fn invoke_controlled(
+        &self,
+        request: crate::daemon_contract::DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        policy: InvocationCancellationPolicy,
+    ) -> Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError> {
+        if cancellation.is_cancelled() {
+            return Err(DaemonInvocationError::Cancelled {
+                stage: CancellationStage::BeforeAdmission,
+            });
+        }
+        let remaining = deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
+            stage: CancellationStage::BeforeAdmission,
+        })?;
+        let connection = self.connection.clone();
+        let handshake = self.handshake.clone();
+        let state = Arc::clone(&self.state);
+        let task_state = Arc::clone(&state);
+        let receiver = self.controlled_tasks.start(async move {
+            let stage = match policy {
+                InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
+                InvocationCancellationPolicy::AuthoritativeEffect => {
+                    CancellationStage::EffectInFlight
+                }
+            };
+            if !policy.may_interrupt(stage) {
+                return invoke_daemon_request(connection, handshake, state, request)
+                    .await
+                    .map_err(|_| DaemonInvocationError::Unavailable);
+            }
+            let outcome = {
+                let invocation = invoke_daemon_request(connection, handshake, state, request);
+                tokio::pin!(invocation);
+                let cancellation_wait = wait_for_cancellation(cancellation);
+                tokio::pin!(cancellation_wait);
+                tokio::select! {
+                    result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
+                    () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled { stage }),
+                    () = tokio::time::sleep(remaining) => {
+                        Err(DaemonInvocationError::TimedOut { stage })
+                    }
+                }
+            };
+            if matches!(
+                outcome,
+                Err(
+                    DaemonInvocationError::Cancelled { .. }
+                        | DaemonInvocationError::TimedOut { .. }
+                )
+            ) {
+                *task_state.lock().await = None;
+            }
+            outcome
+        })?;
+        receiver
+            .await
+            .map_err(|_| DaemonInvocationError::Unavailable)?
+    }
+}
+
+async fn invoke_daemon_request(
+    daemon_connection: crate::daemon::DaemonConnection,
+    handshake: crate::daemon::DaemonHandshake,
+    state: Arc<AsyncMutex<Option<DaemonInvocationConnection>>>,
+    request: crate::daemon_contract::DaemonInvocationRequest,
+) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
+    let request_id = request.request_id.clone();
+    let request_label = request.operation().as_str();
+    let mut state = state.lock().await;
+    if state.is_none() {
+        let stream = crate::daemon::connect_to_daemon_connection(&daemon_connection).await?;
+        let (reader, mut writer) = stream.into_split();
+        crate::daemon::write_daemon_preamble(&mut writer, &daemon_connection, &handshake).await?;
+        *state = Some(DaemonInvocationConnection {
+            reader: BufReader::new(reader),
+            writer,
+        });
+    }
+    let result = async {
+        let connection = state
+            .as_mut()
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "daemon invocation connection was not initialized".to_owned(),
+            })?;
+        connection
+            .writer
+            .write_all(serde_json::to_string(&request)?.as_bytes())
+            .await?;
+        connection.writer.write_all(b"\n").await?;
+        connection.writer.flush().await?;
+
+        let Some(line) = crate::daemon::next_daemon_response_line(
+            &mut connection.reader,
+            &daemon_connection,
+            request_label,
+            crate::daemon::DAEMON_TOOL_LIVENESS_POLL_INTERVAL,
+        )
+        .await?
+        else {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "daemon closed the invocation connection after '{request_label}' was sent; the outcome is unknown"
+                ),
+            });
+        };
+        let response: crate::daemon_contract::DaemonInvocationResponse =
+            serde_json::from_str(&line).map_err(|_| crate::errors::TraceDecayError::Config {
+                message: "daemon returned an invalid invocation response".to_owned(),
+            })?;
+        if response.protocol != crate::daemon_contract::DAEMON_INVOCATION_PROTOCOL
+            || response.revision != crate::daemon_contract::DAEMON_INVOCATION_REVISION
+            || response.request_id != request_id
+        {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "daemon invocation response did not match the request".to_owned(),
+            });
+        }
+        Ok(response)
+    }
+    .await;
+    if result.is_err() {
+        *state = None;
+    }
+    result
+}
+
+impl DaemonInvocationClient {
     pub async fn observe_plan26_feedback(
         &self,
         subject_digest: ManifestDigest,
@@ -619,63 +763,6 @@ impl DaemonInvocationClient {
                 message: "daemon returned an invalid semantic evaluation response".to_owned(),
             }),
         }
-    }
-
-    pub(crate) async fn invoke_controlled(
-        &self,
-        request: crate::daemon_contract::DaemonInvocationRequest,
-        deadline: Deadline,
-        cancellation: CancellationSignal,
-        policy: InvocationCancellationPolicy,
-    ) -> Result<crate::daemon_contract::DaemonInvocationResponse, DaemonInvocationError> {
-        if cancellation.is_cancelled() {
-            return Err(DaemonInvocationError::Cancelled {
-                stage: CancellationStage::BeforeAdmission,
-            });
-        }
-        let remaining = deadline_remaining(&deadline).ok_or(DaemonInvocationError::TimedOut {
-            stage: CancellationStage::BeforeAdmission,
-        })?;
-        let client = self.clone();
-        tokio::spawn(async move {
-            let stage = match policy {
-                InvocationCancellationPolicy::ReadOnly => CancellationStage::DuringRead,
-                InvocationCancellationPolicy::AuthoritativeEffect => {
-                    CancellationStage::EffectInFlight
-                }
-            };
-            if !policy.may_interrupt(stage) {
-                return client
-                    .invoke(request)
-                    .await
-                    .map_err(|_| DaemonInvocationError::Unavailable);
-            }
-            let outcome = {
-                let invocation = client.invoke(request);
-                tokio::pin!(invocation);
-                let cancellation_wait = wait_for_cancellation(cancellation);
-                tokio::pin!(cancellation_wait);
-                tokio::select! {
-                    result = &mut invocation => result.map_err(|_| DaemonInvocationError::Unavailable),
-                    () = &mut cancellation_wait => Err(DaemonInvocationError::Cancelled { stage }),
-                    () = tokio::time::sleep(remaining) => {
-                        Err(DaemonInvocationError::TimedOut { stage })
-                    }
-                }
-            };
-            if matches!(
-                outcome,
-                Err(
-                    DaemonInvocationError::Cancelled { .. }
-                        | DaemonInvocationError::TimedOut { .. }
-                )
-            ) {
-                *client.state.lock().await = None;
-            }
-            outcome
-        })
-        .await
-        .map_err(|_| DaemonInvocationError::Unavailable)?
     }
 }
 

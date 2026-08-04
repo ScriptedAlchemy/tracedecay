@@ -456,7 +456,11 @@ impl LspSessionRegistry {
         access: &LspSessionAccess,
         credential: LspSessionCredential,
         now_ms: u64,
+        expires_at_ms: u64,
     ) -> Result<LspSessionAccess, LspEndpointError> {
+        if expires_at_ms <= now_ms {
+            return Err(LspEndpointError::SessionExpired);
+        }
         match self.authenticate(access, now_ms)?.lifecycle() {
             SessionLifecycle::Detached => self.reconnect(access, now_ms)?,
             SessionLifecycle::AwaitingInitialize
@@ -472,6 +476,7 @@ impl LspSessionRegistry {
             .get_mut(access.session_id())
             .ok_or(LspEndpointError::AuthenticationFailed)?;
         session.credential = credential.clone();
+        session.expires_at_ms = expires_at_ms;
         Ok(LspSessionAccess::new(
             access.session_id().clone(),
             credential,
@@ -881,7 +886,12 @@ mod tests {
         endpoint.registry_mut().detach(&access, 2).unwrap();
         let reconnected = endpoint
             .registry_mut()
-            .reconnect_with_credential(&access, LspSessionCredential::new(vec![9; 16]).unwrap(), 3)
+            .reconnect_with_credential(
+                &access,
+                LspSessionCredential::new(vec![9; 16]).unwrap(),
+                3,
+                3 + LSP_SESSION_TTL_MS,
+            )
             .unwrap();
         assert_eq!(endpoint.registry().active_sessions(), 1);
         assert_eq!(

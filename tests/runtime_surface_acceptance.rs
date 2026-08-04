@@ -308,52 +308,68 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         "params": {},
     });
     let (deadline, cancellation) = lsp_control();
-    match session
+    let shutdown_closed = match session
         .try_send_client_frame(&shutdown_request.to_string(), deadline, cancellation)
         .await
         .expect("send daemon LSP shutdown frame")
     {
-        FrameSend::Closed => return,
-        FrameSend::Sent => {}
+        FrameSend::Closed => true,
+        FrameSend::Sent => false,
         FrameSend::Backpressured => panic!("daemon LSP shutdown frame was backpressured"),
-    }
-    let shutdown = poll_lsp_response(session, request_id).await;
-    assert_eq!(shutdown["result"], Value::Null);
-    let exit_notification = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "exit",
-        "params": {},
-    });
-    let (deadline, cancellation) = lsp_control();
-    match session
-        .try_send_client_frame(&exit_notification.to_string(), deadline, cancellation)
-        .await
-        .expect("send daemon LSP exit frame")
-    {
-        FrameSend::Closed => return,
-        FrameSend::Sent => {}
-        FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
-    }
-    for _ in 0..100 {
+    };
+    if !shutdown_closed {
+        let shutdown = poll_lsp_response(session, request_id).await;
+        assert_eq!(shutdown["result"], Value::Null);
+        let exit_notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": {},
+        });
         let (deadline, cancellation) = lsp_control();
-        match session
-            .poll_daemon_frame(deadline, cancellation)
+        let exit_closed = match session
+            .try_send_client_frame(&exit_notification.to_string(), deadline, cancellation)
             .await
-            .expect("poll closed daemon LSP session")
+            .expect("send daemon LSP exit frame")
         {
-            FramePoll::Closed => return,
-            FramePoll::Pending => {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            FrameSend::Closed => true,
+            FrameSend::Sent => false,
+            FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
+        };
+        if !exit_closed {
+            let mut closed = false;
+            for _ in 0..100 {
+                let (deadline, cancellation) = lsp_control();
+                match session
+                    .poll_daemon_frame(deadline, cancellation)
+                    .await
+                    .expect("poll closed daemon LSP session")
+                {
+                    FramePoll::Closed => {
+                        closed = true;
+                        break;
+                    }
+                    FramePoll::Pending => {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    FramePoll::Frame(frame) => {
+                        panic!(
+                            "daemon LSP session emitted a frame after exit: {}",
+                            String::from_utf8_lossy(&frame)
+                        );
+                    }
+                }
             }
-            FramePoll::Frame(frame) => {
-                panic!(
-                    "daemon LSP session emitted a frame after exit: {}",
-                    String::from_utf8_lossy(&frame)
-                );
-            }
+            assert!(
+                closed,
+                "daemon LSP session did not close after shutdown and exit"
+            );
         }
     }
-    panic!("daemon LSP session did not close after shutdown and exit")
+    let (deadline, cancellation) = lsp_control();
+    session
+        .detach(deadline, cancellation)
+        .await
+        .expect("detach daemon LSP session after shutdown and exit");
 }
 
 async fn poll_lsp_context(

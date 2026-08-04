@@ -339,14 +339,14 @@ impl Drop for RuntimeLspSession {
     }
 }
 
-struct LspLeaseTask {
+pub(super) struct LspLeaseTask {
     generation: u64,
     cancellation: crate::application::context::CancellationToken,
     handle: tokio::task::JoinHandle<()>,
 }
 
 impl LspLeaseTask {
-    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
+    pub(super) async fn stop(self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
         self.handle
             .await
@@ -388,62 +388,71 @@ pub(super) struct LspLeaseTaskRegistry {
 }
 
 impl LspLeaseTaskRegistry {
-    pub(super) async fn start<F>(
+    pub(super) fn begin_start<F>(
         self: &Arc<Self>,
         session_id: LspSessionId,
         cancellation: crate::application::context::CancellationToken,
         task: F,
-    ) -> Result<(), DaemonInvocationProblem>
+    ) -> Result<Option<LspLeaseTask>, DaemonInvocationProblem>
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let current_session_id = session_id.clone();
-        let previous = {
-            let mut state = match self.state.lock() {
-                Ok(state) => state,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            if !state.accepting {
-                return Err(DaemonInvocationProblem::Unavailable);
-            }
-            let Some(generation) = state.next_generation.checked_add(1) else {
-                return Err(DaemonInvocationProblem::Unavailable);
-            };
-            state.next_generation = generation;
-            let task_registry = Arc::downgrade(self);
-            let task_session_id = session_id.clone();
-            let handle = tokio::spawn(async move {
-                task.await;
-                if let Some(task_registry) = task_registry.upgrade() {
-                    task_registry.finish(&task_session_id, generation);
-                }
-            });
-            state.tasks.insert(
-                session_id,
-                LspLeaseTask {
-                    generation,
-                    cancellation,
-                    handle,
-                },
-            )
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
         };
+        if !state.accepting {
+            return Err(DaemonInvocationProblem::Unavailable);
+        }
+        let Some(generation) = state.next_generation.checked_add(1) else {
+            return Err(DaemonInvocationProblem::Unavailable);
+        };
+        state.next_generation = generation;
+        let task_registry = Arc::downgrade(self);
+        let task_session_id = session_id.clone();
+        let handle = tokio::spawn(async move {
+            task.await;
+            if let Some(task_registry) = task_registry.upgrade() {
+                task_registry.finish(&task_session_id, generation);
+            }
+        });
+        Ok(state.tasks.insert(
+            session_id,
+            LspLeaseTask {
+                generation,
+                cancellation,
+                handle,
+            },
+        ))
+    }
+
+    pub(super) async fn finish_start(
+        &self,
+        session_id: &LspSessionId,
+        previous: Option<LspLeaseTask>,
+    ) -> Result<(), DaemonInvocationProblem> {
         if let Some(previous) = previous {
             if previous.stop().await.is_err() {
-                self.cancel(&current_session_id).await?;
+                self.cancel(session_id).await?;
                 return Err(DaemonInvocationProblem::Unavailable);
             }
         }
         Ok(())
     }
 
+    pub(super) fn begin_cancel(&self, session_id: &LspSessionId) -> Option<LspLeaseTask> {
+        match self.state.lock() {
+            Ok(mut state) => state.tasks.remove(session_id),
+            Err(poisoned) => poisoned.into_inner().tasks.remove(session_id),
+        }
+        .inspect(|task| task.cancellation.cancel())
+    }
+
     pub(super) async fn cancel(
         &self,
         session_id: &LspSessionId,
     ) -> Result<(), DaemonInvocationProblem> {
-        let task = match self.state.lock() {
-            Ok(mut state) => state.tasks.remove(session_id),
-            Err(poisoned) => poisoned.into_inner().tasks.remove(session_id),
-        };
+        let task = self.begin_cancel(session_id);
         if let Some(task) = task {
             task.stop().await?;
         }

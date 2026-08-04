@@ -642,27 +642,37 @@ impl DaemonInvocationService {
         session: DaemonLspSessionAccess,
         now_ms: u64,
     ) -> DaemonInvocationResponse {
-        let access = match self.authenticate(lsp_registry, session, now_ms).await {
+        let access = match session.into_access() {
             Ok(access) => access,
             Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
         };
-        let endpoint_detached = {
+        let (mut session, lease_task) = {
             let mut registry = lsp_registry.lock().await;
-            registry.close(&access, now_ms).is_ok()
+            let mut sessions = self.lsp_sessions.lock().await;
+            if registry.close(&access, now_ms).is_err() {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
+            let Some(session) = sessions.remove(access.session_id()) else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let lease_task = self.lsp_lease_tasks.begin_cancel(access.session_id());
+            (session, lease_task)
         };
-        let Some(mut session) = self.lsp_sessions.lock().await.remove(access.session_id()) else {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
+        let actor_detached = match session.actor.lifecycle() {
+            SessionLifecycle::Exited | SessionLifecycle::Expired => true,
+            _ => session.actor.detach().is_ok(),
         };
-        let lease_cancelled = self
-            .lsp_lease_tasks
-            .cancel(access.session_id())
-            .await
-            .is_ok();
-        let actor_detached = session.actor.detach().is_ok();
-        if !endpoint_detached || !lease_cancelled || !actor_detached {
+        let lease_cancelled = match lease_task {
+            Some(task) => task.stop().await.is_ok(),
+            None => true,
+        };
+        if !lease_cancelled || !actor_detached {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
@@ -695,41 +705,61 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::Unavailable,
             );
         };
-        let reconnected_access = lsp_registry
-            .lock()
-            .await
-            .reconnect_with_credential(&access, credential, now_ms);
-        let Ok(reconnected_access) = reconnected_access else {
+        let Some(expires_at_ms) = now_ms.checked_add(LSP_SESSION_TTL_MS) else {
             return DaemonInvocationResponse::problem(
                 request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                DaemonInvocationProblem::Unavailable,
             );
         };
-        let mut sessions = self.lsp_sessions.lock().await;
-        let Some(session) = sessions.get_mut(access.session_id()) else {
-            drop(sessions);
-            let _ = lsp_registry.lock().await.close(&reconnected_access, now_ms);
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
+        let (reconnected_access, lease_task) = {
+            let mut registry = lsp_registry.lock().await;
+            let mut sessions = self.lsp_sessions.lock().await;
+            let reconnected_access =
+                registry.reconnect_with_credential(&access, credential, now_ms, expires_at_ms);
+            let Ok(reconnected_access) = reconnected_access else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let Some(session) = sessions.get_mut(access.session_id()) else {
+                let _ = registry.close(&reconnected_access, now_ms);
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let actor_reconnected = match session.actor.lifecycle() {
+                SessionLifecycle::Detached => session.actor.reconnect().is_ok(),
+                SessionLifecycle::AwaitingInitialize
+                | SessionLifecycle::AwaitingInitialized
+                | SessionLifecycle::Ready
+                | SessionLifecycle::Shutdown => true,
+                SessionLifecycle::Exited | SessionLifecycle::Expired => false,
+            };
+            if !actor_reconnected {
+                let _ = registry.close(&reconnected_access, now_ms);
+                sessions.remove(access.session_id());
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
+            session.expires_at_ms = expires_at_ms;
+            let lease_task = self.lsp_lease_tasks.begin_cancel(access.session_id());
+            (reconnected_access, lease_task)
         };
-        let actor_reconnected = match session.actor.lifecycle() {
-            SessionLifecycle::Detached => session.actor.reconnect().is_ok(),
-            SessionLifecycle::AwaitingInitialize
-            | SessionLifecycle::AwaitingInitialized
-            | SessionLifecycle::Ready
-            | SessionLifecycle::Shutdown => true,
-            SessionLifecycle::Exited | SessionLifecycle::Expired => false,
-        };
-        if !actor_reconnected {
-            drop(sessions);
-            let _ = lsp_registry.lock().await.close(&reconnected_access, now_ms);
-            self.lsp_sessions.lock().await.remove(access.session_id());
-            return DaemonInvocationResponse::problem(
-                request_id,
-                DaemonInvocationProblem::NotFoundOrNotAuthorized,
-            );
+        if let Some(task) = lease_task {
+            if task.stop().await.is_err() {
+                let mut registry = lsp_registry.lock().await;
+                let mut sessions = self.lsp_sessions.lock().await;
+                let _ = registry.close(&reconnected_access, now_ms);
+                sessions.remove(access.session_id());
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            }
         }
         DaemonInvocationResponse::with_outcome(
             request_id,
@@ -746,55 +776,62 @@ impl DaemonInvocationService {
     ) -> Result<(), DaemonInvocationProblem> {
         let access = session.into_access()?;
         let now_ms = now_millis();
-        if lsp_registry.lock().await.detach(&access, now_ms).is_err() {
-            return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
-        }
-        let actor_detached = {
-            let mut sessions = self.lsp_sessions.lock().await;
-            let Some(session) = sessions.get_mut(access.session_id()) else {
-                drop(sessions);
-                let _ = lsp_registry.lock().await.close(&access, now_ms);
-                return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
-            };
-            session.actor.detach().map(|()| session.expires_at_ms)
-        };
-        let expires_at_ms = match actor_detached {
-            Ok(expires_at_ms) => expires_at_ms,
-            Err(_) => {
-                let _ = lsp_registry.lock().await.close(&access, now_ms);
-                self.lsp_sessions.lock().await.remove(access.session_id());
-                self.lsp_lease_tasks.cancel(access.session_id()).await?;
-                return Err(DaemonInvocationProblem::Unavailable);
-            }
-        };
         let session_id = access.session_id().clone();
         let sessions = Arc::clone(&self.lsp_sessions);
         let registry = Arc::clone(lsp_registry);
         let cancellation = crate::application::context::CancellationToken::new();
         let task_cancellation = cancellation.clone();
-        let lease_task = async move {
-            let elapsed = tokio::select! {
-                () = tokio::time::sleep(std::time::Duration::from_millis(
-                    expires_at_ms.saturating_sub(now_millis()),
-                )) => true,
-                () = task_cancellation.cancelled() => false,
-            };
-            if elapsed {
-                registry.lock().await.expire_at(expires_at_ms);
-                sessions
-                    .lock()
-                    .await
-                    .retain(|_, session| session.expires_at_ms > expires_at_ms);
+        let previous = {
+            let mut registry_guard = lsp_registry.lock().await;
+            let mut session_guard = self.lsp_sessions.lock().await;
+            if registry_guard.detach(&access, now_ms).is_err() {
+                return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
             }
+            let Some(session) = session_guard.get_mut(access.session_id()) else {
+                let _ = registry_guard.close(&access, now_ms);
+                return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
+            };
+            let expires_at_ms = match session.actor.detach() {
+                Ok(()) => session.expires_at_ms,
+                Err(_) => {
+                    let _ = registry_guard.close(&access, now_ms);
+                    session_guard.remove(access.session_id());
+                    let lease_task = self.lsp_lease_tasks.begin_cancel(access.session_id());
+                    drop(session_guard);
+                    drop(registry_guard);
+                    if let Some(task) = lease_task {
+                        task.stop().await?;
+                    }
+                    return Err(DaemonInvocationProblem::Unavailable);
+                }
+            };
+            let lease_task = async move {
+                let elapsed = tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_millis(
+                        expires_at_ms.saturating_sub(now_millis()),
+                    )) => true,
+                    () = task_cancellation.cancelled() => false,
+                };
+                if elapsed {
+                    let mut registry = registry.lock().await;
+                    let mut sessions = sessions.lock().await;
+                    registry.expire_at(expires_at_ms);
+                    sessions.retain(|_, session| session.expires_at_ms > expires_at_ms);
+                }
+            };
+            self.lsp_lease_tasks
+                .begin_start(session_id.clone(), cancellation, lease_task)?
         };
         if self
             .lsp_lease_tasks
-            .start(session_id, cancellation, lease_task)
+            .finish_start(&session_id, previous)
             .await
             .is_err()
         {
-            let _ = lsp_registry.lock().await.close(&access, now_ms);
-            self.lsp_sessions.lock().await.remove(access.session_id());
+            let mut registry = lsp_registry.lock().await;
+            let mut sessions = self.lsp_sessions.lock().await;
+            let _ = registry.close(&access, now_ms);
+            sessions.remove(access.session_id());
             return Err(DaemonInvocationProblem::Unavailable);
         }
         Ok(())
