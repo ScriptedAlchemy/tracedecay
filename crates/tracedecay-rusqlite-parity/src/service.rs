@@ -66,14 +66,6 @@ fn execute(driver: &ReadOnlyDriver, command: Command) -> Result<Output, ErrorPay
         Command::PageSize => driver.page_size(),
         Command::JournalMode => driver.journal_mode().map(Output::JournalMode),
         Command::Integrity { check } => driver.integrity(check).map(Output::Integrity),
-        Command::RowParity { table } => driver.row_parity(table).map(Output::RowParity),
-        Command::FtsParity {
-            table,
-            query,
-            limit,
-        } => driver
-            .fts_parity(table, &query, limit)
-            .map(Output::FtsParity),
         Command::SessionStoreCount { family, table } => driver
             .session_store_count(family, table)
             .map(Output::SessionStoreCount),

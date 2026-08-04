@@ -84,7 +84,7 @@ fn protocol_rejects_short_invalid_and_inconsistent_sqlite_headers() {
 }
 
 #[test]
-fn subprocess_reports_version_options_metadata_and_unicode_fts() {
+fn subprocess_reports_version_options_and_metadata() {
     let fixture = fixture();
     let metadata = invoke(&request(&fixture.path, json!({ "type": "metadata" })));
     assert_eq!(metadata["protocol_version"], 1);
@@ -94,16 +94,5 @@ fn subprocess_reports_version_options_metadata_and_unicode_fts() {
         metadata["output"]["compile_options"]
             .as_array()
             .is_some_and(|options| options.iter().any(|option| option == "ENABLE_FTS5"))
-    );
-
-    let fts = invoke(&request(
-        &fixture.path,
-        json!({ "type": "fts_parity", "table": "nodes", "query": "東京", "limit": 10 }),
-    ));
-    assert_eq!(fts["status"], "ok");
-    assert!(
-        fts["output"]["matches"][0]["snippet"]
-            .as_str()
-            .is_some_and(|snippet| snippet.contains("東京"))
     );
 }
