@@ -3,7 +3,7 @@ use super::{
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
     MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
-    SessionsRefreshAction,
+    SessionsRefreshAction, WorkflowCliOperationArg,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -203,6 +203,32 @@ fn tool_command_preserves_trailing_help_and_reserved_args() {
                         "@payload.json".to_string(),
                     ]
     ));
+}
+
+#[test]
+fn workflow_command_binds_one_closed_typed_operation() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "workflow",
+        "execute-fan-out",
+        "--request-file",
+        "workflow.json",
+        "--project",
+        "/tmp/project",
+        "--json",
+    ])
+    .expect("Workflow command should parse");
+
+    let Some(Commands::Workflow { invocation }) = cli.command else {
+        panic!("unexpected Workflow command");
+    };
+    assert_eq!(invocation.operation, WorkflowCliOperationArg::ExecuteFanOut);
+    assert_eq!(
+        invocation.request_file,
+        std::path::Path::new("workflow.json")
+    );
+    assert_eq!(invocation.project.as_deref(), Some("/tmp/project"));
+    assert!(invocation.json);
 }
 
 #[test]

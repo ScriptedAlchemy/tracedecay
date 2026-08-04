@@ -599,26 +599,31 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             return Ok(WorkflowExecutionAdmissionV1::Execute);
         };
 
-        if let Some(terminal) = stored.terminal {
-            let admission = if &stored.plan_digest == plan_digest {
-                WorkflowExecutionAdmissionV1::Replay(terminal)
-            } else {
-                WorkflowExecutionAdmissionV1::PlanConflict
-            };
+        if stored.fence.attempt_id != fence.attempt_id
+            || stored.fence.lease.lease_id() != fence.lease.lease_id()
+            || stored.fence.lease.epoch().get() > fence.lease.epoch().get()
+        {
             let _ = transaction.rollback();
-            return Ok(admission);
+            return Ok(WorkflowExecutionAdmissionV1::StaleLease);
+        }
+
+        if let Some(terminal) = stored.terminal {
+            if &stored.plan_digest != plan_digest {
+                let _ = transaction.rollback();
+                return Ok(WorkflowExecutionAdmissionV1::PlanConflict);
+            }
+            if stored.fence != *fence {
+                update_execution_fence(&transaction, identity, fence)?;
+                transaction.commit().map_err(execution_unavailable)?;
+            } else {
+                let _ = transaction.rollback();
+            }
+            return Ok(WorkflowExecutionAdmissionV1::Replay(terminal));
         }
 
         if &stored.plan_digest != plan_digest {
             let _ = transaction.rollback();
             return Ok(WorkflowExecutionAdmissionV1::PlanConflict);
-        }
-        if stored.fence.lease.lease_id() != fence.lease.lease_id()
-            || (stored.fence != *fence
-                && stored.fence.lease.epoch().get() >= fence.lease.epoch().get())
-        {
-            let _ = transaction.rollback();
-            return Ok(WorkflowExecutionAdmissionV1::StaleLease);
         }
 
         if stored.fence != *fence {
@@ -647,6 +652,11 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
         if stored.terminal.is_some()
             || &stored.fence != fence
             || stored.plan_digest != checkpoint.plan_digest
+            || !checkpoint_is_well_formed(checkpoint)
+            || stored
+                .checkpoint
+                .as_ref()
+                .is_some_and(|current| !checkpoint_advances(current, checkpoint))
         {
             let _ = transaction.rollback();
             return Err(WorkflowExecutionAuthorityError::Conflict);
@@ -683,7 +693,20 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             .map_err(execution_unavailable)?;
         let stored = load_execution(&transaction, identity)?
             .ok_or(WorkflowExecutionAuthorityError::Conflict)?;
-        if stored.terminal.is_some() || &stored.fence != fence {
+        let checkpoint = truth.checkpoint();
+        if stored.terminal.is_some()
+            || &stored.fence != fence
+            || stored.plan_digest != checkpoint.plan_digest
+            || !checkpoint_is_well_formed(checkpoint)
+            || checkpoint
+                .children
+                .iter()
+                .any(|child| child.receipt.is_none())
+            || match stored.checkpoint.as_ref() {
+                Some(stored) => stored != checkpoint,
+                None => !checkpoint.children.is_empty(),
+            }
+        {
             let _ = transaction.rollback();
             return Err(WorkflowExecutionAuthorityError::Conflict);
         }
@@ -706,4 +729,44 @@ impl WorkflowExecutionAuthorityPort for WorkflowSqliteAuthority {
             .map(|_| ())
             .map_err(execution_unavailable)
     }
+}
+
+fn checkpoint_advances(
+    current: &WorkflowFanOutCheckpointV1,
+    replacement: &WorkflowFanOutCheckpointV1,
+) -> bool {
+    checkpoint_is_well_formed(replacement)
+        && current.plan_digest == replacement.plan_digest
+        && current.children.iter().all(|stored| {
+            replacement.children.iter().any(|candidate| {
+                stored.task_id == candidate.task_id
+                    && stored.attempt_identity == candidate.attempt_identity
+                    && stored.lease.lease_id() == candidate.lease.lease_id()
+                    && stored.lease.epoch().get() <= candidate.lease.epoch().get()
+                    && match (&stored.receipt, &candidate.receipt) {
+                        (None, _) => true,
+                        (Some(stored_receipt), Some(candidate_receipt)) => {
+                            stored.lease == candidate.lease && stored_receipt == candidate_receipt
+                        }
+                        (Some(_), None) => false,
+                    }
+            })
+        })
+}
+
+fn checkpoint_is_well_formed(checkpoint: &WorkflowFanOutCheckpointV1) -> bool {
+    checkpoint
+        .children
+        .iter()
+        .enumerate()
+        .all(|(index, child)| {
+            if child.task_id != *child.attempt_identity.task_id() {
+                return false;
+            }
+            checkpoint.children.iter().skip(index + 1).all(|other| {
+                child.task_id != other.task_id
+                    && child.attempt_identity != other.attempt_identity
+                    && child.lease.lease_id() != other.lease.lease_id()
+            })
+        })
 }
