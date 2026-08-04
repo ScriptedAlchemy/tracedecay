@@ -16,11 +16,11 @@
  * So the key, the route, the contract, and the period are decided here, once,
  * and both callers take what this returns.
  */
-import { StorageFindingsPayloadSchema } from '../../contracts/wire.ts';
+import { StorageFindingsPayloadV1Schema } from '../../contracts/generated.ts';
 import { fetchEnvelope, type EnvelopeResult } from './envelope.ts';
 import { scopeKey, scopedUrl, useScope, type DashboardScope } from '../scope/store.ts';
 import { useQuery } from '@tanstack/react-query';
-import type { StorageFindingsPayload } from '../../contracts/wire.ts';
+import type { StorageFindingsPayloadV1 } from '../../contracts/generated.ts';
 
 /** The route, named once. Scope rewrites it; nothing else may spell it. */
 export const STORAGE_FINDINGS_URL = '/api/storage/findings';
@@ -48,9 +48,9 @@ export function storageFindingsKey(scope: DashboardScope): readonly string[] {
  */
 export function useStorageFindings() {
   const scope = useScope((s) => s.scope);
-  return useQuery<EnvelopeResult<StorageFindingsPayload>>({
+  return useQuery<EnvelopeResult<StorageFindingsPayloadV1>>({
     queryKey: storageFindingsKey(scope),
-    queryFn: () => fetchEnvelope(scopedUrl(scope, STORAGE_FINDINGS_URL), StorageFindingsPayloadSchema),
+    queryFn: () => fetchEnvelope(scopedUrl(scope, STORAGE_FINDINGS_URL), StorageFindingsPayloadV1Schema),
     refetchInterval: STORAGE_FINDINGS_REFETCH_MS,
   });
 }

@@ -1,11 +1,11 @@
 import { RefreshCw } from 'lucide-react';
 import {
   assertNever,
-  type WireAuthorization,
-  type WireCoverage,
-  type WireEnvelope,
-  type WireFreshness,
-} from '../contracts/wire.ts';
+  type DashboardAuthorizationV1,
+  type DashboardCoverageV1,
+  type DashboardEnvelopeV1,
+  type DashboardFreshnessV1,
+} from '../contracts/generated.ts';
 import { EvidenceTruthStrip } from './EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from './StateChip';
 
@@ -25,7 +25,7 @@ export function EnvelopeTruth({
   refreshing,
   onRefresh,
 }: {
-  envelope: WireEnvelope<unknown>;
+  envelope: DashboardEnvelopeV1<unknown>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -71,7 +71,7 @@ export function EnvelopeTruth({
 /** The envelope's authorization outcome as its own domain state. `authorized`
  * has no chip — it is the ordinary case, and a badge on every read would make
  * the three that matter invisible. */
-export function authorizationState(authorization: WireAuthorization): DomainStateKind | null {
+export function authorizationState(authorization: DashboardAuthorizationV1): DomainStateKind | null {
   switch (authorization.outcome) {
     case 'authorized':
       return null;
@@ -88,7 +88,7 @@ export function authorizationState(authorization: WireAuthorization): DomainStat
 
 /** Server omission reasons, verbatim. A coverage shortfall the server explained
  * is never reduced to the word "partial" on its own. */
-export function OmissionReasons({ coverage }: { coverage: WireCoverage }) {
+export function OmissionReasons({ coverage }: { coverage: DashboardCoverageV1 }) {
   if (coverage.omission_reasons.length === 0) return null;
   return (
     <div className="mx-4 mt-2">
@@ -104,7 +104,7 @@ export function OmissionReasons({ coverage }: { coverage: WireCoverage }) {
   );
 }
 
-export function toStripCoverage(coverage: WireCoverage) {
+export function toStripCoverage(coverage: DashboardCoverageV1) {
   return {
     completeness: coverage.completeness,
     examined: coverage.examined,
@@ -112,7 +112,7 @@ export function toStripCoverage(coverage: WireCoverage) {
   };
 }
 
-export function toStripFreshness(freshness: WireFreshness) {
+export function toStripFreshness(freshness: DashboardFreshnessV1) {
   return {
     state: freshness.state,
     observed_at:

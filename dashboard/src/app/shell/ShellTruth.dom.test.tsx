@@ -4,12 +4,12 @@ import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  ProjectContextPayloadSchema,
-  ProjectsPayloadSchema,
-  type ProjectContextPayload,
-  type ProjectsPayload,
+  ProjectContextPayloadV1Schema,
+  ProjectsPayloadV1Schema,
+  type ProjectContextPayloadV1,
+  type ProjectsPayloadV1,
   type PublicCodeProject,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { projectRegistryInvalidationKey } from '../../data/query/projectRegistry.ts';
 import { scopeWritable, useScope } from '../../data/scope/store.ts';
 import { DoctorInspector } from '../../workspaces/observatory/DoctorInspector.tsx';
@@ -458,8 +458,8 @@ function entryPayload({
 }: {
   label: string;
   isActive: boolean;
-}): ProjectContextPayload {
-  return ProjectContextPayloadSchema.parse({
+}): ProjectContextPayloadV1 {
+  return ProjectContextPayloadV1Schema.parse({
     status: 'ok',
     error: null,
     is_active: isActive,
@@ -481,8 +481,8 @@ function entryPayload({
  * arrives as a build mismatch, which is a different reading from the one the
  * daemon is actually reporting.
  */
-function failurePayload(status: string, error: string | null = null): ProjectContextPayload {
-  return ProjectContextPayloadSchema.parse({
+function failurePayload(status: string, error: string | null = null): ProjectContextPayloadV1 {
+  return ProjectContextPayloadV1Schema.parse({
     status,
     error,
     is_active: null,
@@ -500,8 +500,8 @@ function failurePayload(status: string, error: string | null = null): ProjectCon
  * simply missing. Reconciliation must not consult this at all, which the test
  * using it asserts directly by checking the route is never requested.
  */
-function truncatedListing(): ProjectsPayload {
-  return ProjectsPayloadSchema.parse({
+function truncatedListing(): ProjectsPayloadV1 {
+  return ProjectsPayloadV1Schema.parse({
     active_project_id: 'proj-first',
     active_project_root: '/repos/proj-first',
     error: null,
@@ -520,7 +520,7 @@ function truncatedListing(): ProjectsPayload {
 /** Every request, in order, so a test can assert what was *not* asked for. */
 let requestedUrls: string[] = [];
 
-function stubRegistry(payload: ProjectContextPayload) {
+function stubRegistry(payload: ProjectContextPayloadV1) {
   requestedUrls = [];
   vi.stubGlobal(
     'fetch',

@@ -11,8 +11,8 @@ import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import {
-  GraphNeighborsPayloadSchema,
-} from '../../contracts/wire.ts';
+  GraphNeighborsPayloadV1Schema,
+} from '../../contracts/generated.ts';
 import { TRACE_BUDGET, buildSimSpec, buildTraceModel, type NeighborsPayload } from './model.ts';
 import { ringLabel } from './render.ts';
 
@@ -41,11 +41,11 @@ function model(focusId = 'sym-0', expandCount: number = TRACE_BUDGET.expand) {
 
 describe('neighbors payload', () => {
   it('parses against the schema the workspace validates it with', () => {
-    expect(() => GraphNeighborsPayloadSchema.parse(neighbors('sym-0'))).not.toThrow();
+    expect(() => GraphNeighborsPayloadV1Schema.parse(neighbors('sym-0'))).not.toThrow();
   });
 
   it('carries one caller/callee ROW PER CALL SITE, which is the only place the wire counts them', () => {
-    const payload = GraphNeighborsPayloadSchema.parse(neighbors('sym-0'));
+    const payload = GraphNeighborsPayloadV1Schema.parse(neighbors('sym-0'));
     const callers = payload.callers ?? [];
     const distinct = new Set(callers.map((row) => row.id));
     // If rows were already deduped per pair the drill-in would have no

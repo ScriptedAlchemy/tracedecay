@@ -956,7 +956,20 @@ benchmarks do not ship.
   fresh-store boundary.
 - PR20: [Plan 33](33-end-to-end-performance-optimization.md) and
   [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
-  size-telemetry budgets.
+  size-telemetry budgets, plus
+  [Plan 39](39-embedded-grafeo-graph-database.md)'s embedded graph/vector
+  storage cutover.
+
+Embedded graph and vector storage
+([Plan 39](39-embedded-grafeo-graph-database.md)) threads through the active
+delivery slices rather than creating a standalone product or service.
+`tracedecay-graph-db` is the sole Grafeo dependency boundary. Code, Git,
+session/LCM, memory, Work, workflow, and semantic crates keep their typed
+domain contracts while graph-shaped data and vector indexes move off custom
+adjacency structures and SQLite. Relational journals, receipts, raw content,
+configuration, and execution fencing remain in SQLite. The cutover is
+fresh-profile, embedded, in-process, and single-authority: no sidecar,
+`petgraph`, migration, backfill, dual-write, or compatibility reader.
 
 Storage retention, size, and efficiency
 ([Plan 38](38-storage-retention-size-and-efficiency.md)) threads through the

@@ -14,7 +14,7 @@ import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { LcmTimelinePayloadSchema } from '../../contracts/wire.ts';
+import { LcmTimelinePayloadV1Schema } from '../../contracts/generated.ts';
 import { SessionInspector } from './SessionInspector.tsx';
 
 const BASE = '/api/plugins/hermes-lcm';
@@ -50,7 +50,7 @@ const SearchPayload = z
  * provider, session list, and drill-down. */
 export function SessionsPage() {
   const overview = useLegacy(['lcm', 'overview'], `${BASE}/overview`, OverviewPayload);
-  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, LcmTimelinePayloadSchema);
+  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, LcmTimelinePayloadV1Schema);
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');

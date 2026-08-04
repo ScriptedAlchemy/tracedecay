@@ -33,6 +33,7 @@ fn manifest_serialization_preserves_stable_ids_and_contract_metadata() {
         "schema.source.read.result"
     );
     assert_eq!(serialized["effect"], "read");
+    assert_eq!(serialized["inverse"]["mode"], "not_applicable");
     assert_eq!(serialized["denied_disclosure"], "indistinguishable");
     assert_eq!(serialized["streaming"]["mode"], "unsupported");
     assert_eq!(serialized["cancellation"]["mode"], "cooperative");
@@ -75,6 +76,9 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
         deadline: DeadlineContract::new(30_000, DeadlineBehavior::ReturnEffectReceipt).unwrap(),
         pagination: None,
         idempotency: IdempotencyContract::Required,
+        inverse: tracedecay_tool_catalog::InverseContract::Unavailable {
+            reason: tracedecay_tool_catalog::InverseUnavailableReason::NoShippedInverse,
+        },
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
@@ -117,11 +121,17 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
     );
     assert_eq!(serialized["deadline"]["behavior"], "return_effect_receipt");
     assert_eq!(serialized["idempotency"], "required");
+    assert_eq!(serialized["inverse"]["mode"], "unavailable");
+    assert_eq!(serialized["inverse"]["reason"], "no_shipped_inverse");
     assert_eq!(serialized["receipt"], "durable_effect");
 
-    let mut invalid = input;
+    let mut invalid = input.clone();
     invalid.receipt = ReceiptContract::Operation;
     assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(invalid).is_err());
+
+    let mut missing_inverse_contract = input;
+    missing_inverse_contract.inverse = tracedecay_tool_catalog::InverseContract::NotApplicable;
+    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(missing_inverse_contract).is_err());
 }
 
 #[test]
