@@ -15,7 +15,7 @@ use crate::schema::{
     SEQUENCE_PROPERTY,
 };
 use crate::state::{
-    StateCache, latest_projection, projection_entities, projection_relations, publication,
+    FormatState, latest_projection, projection_entities, projection_relations, publication,
 };
 use crate::{
     GraphCancellation, GraphCommit, GraphDbError, GraphDbOpenOptions, GraphDurability,
@@ -33,7 +33,7 @@ pub struct GraphDb {
 
 pub(crate) struct Inner {
     pub(crate) database: RwLock<Option<GrafeoDB>>,
-    state: RwLock<StateCache>,
+    state: RwLock<FormatState>,
     durability: GraphDurability,
     snapshot_gate: Arc<ParkingRwLock<()>>,
     closed: AtomicBool,
@@ -70,7 +70,7 @@ impl GraphDb {
         let database = GrafeoDB::with_config(validated.config.clone())
             .map_err(|error| map_open_error(error, validated.preexisting_file))?;
         validate_or_initialize_format(&database, &validated)?;
-        let state = StateCache::load(&database)?;
+        let state = FormatState::load(&database)?;
         if cancellation.is_cancelled() {
             return Err(GraphDbError::Cancelled);
         }
@@ -372,12 +372,12 @@ impl GraphDb {
     fn apply_locked(
         &self,
         database: &GrafeoDB,
-        state: &mut StateCache,
+        state: &mut FormatState,
         batch: GraphWriteBatch,
         digest: String,
         publication_record: Option<(GraphIdempotencyKey, String)>,
     ) -> Result<GraphCommit, GraphDbError> {
-        ensure_native_vector_indexes(database, &batch)?;
+        ensure_initial_vector_indexes(database, &batch)?;
         let vector_updates = batch
             .mutations
             .iter()
@@ -428,7 +428,12 @@ impl GraphDb {
             // write is index refresh only. The outer database write guard keeps
             // readers excluded; after reopen the non-durable index is Missing
             // until an explicit retained owner calls `ensure_vector_index`.
-            database.set_node_property(stored.node, &property, value);
+            if database.graph_store().has_vector_index(
+                &vector::native_vector_label(&namespace, &stored.projection),
+                &property,
+            ) {
+                database.set_node_property(stored.node, &property, value);
+            }
         }
         if self.inner.durability == GraphDurability::Sync
             && let Err(error) = database.wal_checkpoint()
@@ -477,7 +482,7 @@ impl GraphDb {
         Ok(guard)
     }
 
-    fn state_write_guard(&self) -> Result<RwLockWriteGuard<'_, StateCache>, GraphDbError> {
+    fn state_write_guard(&self) -> Result<RwLockWriteGuard<'_, FormatState>, GraphDbError> {
         self.inner
             .state
             .write()
@@ -495,10 +500,13 @@ impl GraphDb {
     }
 }
 
-fn ensure_native_vector_indexes(
+fn ensure_initial_vector_indexes(
     database: &GrafeoDB,
     batch: &GraphWriteBatch,
 ) -> Result<(), GraphDbError> {
+    if latest_projection(database, &batch.namespace, &batch.projection)?.is_some() {
+        return Ok(());
+    }
     let store = database.graph_store();
     let label = vector::native_vector_label(&batch.namespace, &batch.projection);
     for entity in batch

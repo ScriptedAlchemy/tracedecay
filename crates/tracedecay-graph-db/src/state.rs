@@ -47,12 +47,12 @@ pub(crate) struct ProjectionState {
 }
 
 #[derive(Clone)]
-pub(crate) struct StateCache {
+pub(crate) struct FormatState {
     pub(crate) marker: NodeId,
     pub(crate) sequence: u64,
 }
 
-impl StateCache {
+impl FormatState {
     pub(crate) fn load(database: &GrafeoDB) -> Result<Self, GraphDbError> {
         let store = database.graph_store();
         let markers = store.nodes_by_label(FORMAT_LABEL);
