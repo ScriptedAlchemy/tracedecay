@@ -1,9 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
 
+use serde_json::json;
+
 use crate::errors::{Result, TraceDecayError};
+use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
 #[cfg(any(unix, test))]
 use super::ProjectServerKey;
@@ -18,7 +21,9 @@ use super::scheduler::{AutomationSchedulerHandle, MaintenanceTaskTermination};
 use super::session_temporal_refresh_scheduler::SessionTemporalRefreshSchedulerRegistry;
 use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
-use super::{DatabaseOwnerRegistry, authority};
+use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
+
+const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 
 /// Resolves the writer scope for one store family.
 ///
@@ -77,6 +82,9 @@ impl HostAdmissionBrokerState {
         }
     }
 }
+
+#[cfg(test)]
+type ExternalHolderVerifier = fn(&[PathBuf]) -> Result<()>;
 
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -449,6 +457,8 @@ pub(super) struct StoreAdministration {
     git_index_transaction_services: Arc<DaemonGitIndexTransactionServiceRegistry>,
     #[cfg(unix)]
     retirement_reapers: Arc<MaintenanceReaperRegistry>,
+    #[cfg(test)]
+    external_holder_verifier: Option<ExternalHolderVerifier>,
 }
 
 impl Default for StoreAdministration {
@@ -475,6 +485,8 @@ impl Default for StoreAdministration {
             ),
             #[cfg(unix)]
             retirement_reapers: Arc::new(MaintenanceReaperRegistry::default()),
+            #[cfg(test)]
+            external_holder_verifier: None,
         }
     }
 }
@@ -671,6 +683,16 @@ impl StoreAdministration {
     ) -> Self {
         Self {
             project_servers,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(super) fn with_external_holder_verifier(
+        external_holder_verifier: ExternalHolderVerifier,
+    ) -> Self {
+        Self {
+            external_holder_verifier: Some(external_holder_verifier),
             ..Self::default()
         }
     }
@@ -1044,6 +1066,15 @@ impl StoreAdministration {
         Ok(outcomes)
     }
 
+    #[cfg_attr(not(test), allow(clippy::unused_self))]
+    fn prove_no_external_branch_store_holders(&self, database_paths: &[PathBuf]) -> Result<()> {
+        #[cfg(test)]
+        if let Some(external_holder_verifier) = self.external_holder_verifier {
+            return external_holder_verifier(database_paths);
+        }
+        ensure_no_external_branch_store_holders(database_paths)
+    }
+
     /// Acquires daemon-wide writer administration before constructing the
     /// supplied future and holds it until that future completes.
     ///
@@ -1091,12 +1122,364 @@ impl StoreAdministration {
         drop(writer);
         Some(output)
     }
+
+    /// Resolves the authenticated client's project layout and runs destructive
+    /// branch administration against that exact profile-owned store.
+    pub(super) async fn execute_branch_admin_for_handshake(
+        &self,
+        handshake: &DaemonHandshake,
+        action: crate::branch::BranchAdminAction,
+    ) -> Result<crate::branch::BranchAdminReport> {
+        let project_root =
+            handshake
+                .project_path
+                .as_deref()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "branch administration requires a project path".to_string(),
+                })?;
+        let layout = crate::storage::resolve_persisted_layout(
+            project_root,
+            &handshake.client_identity.profile_root,
+        )?
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "branch administration requires an enrolled project session authority"
+                .to_owned(),
+        })?;
+        let Some(_) = layout.identity.project_id.as_deref() else {
+            return Err(TraceDecayError::Config {
+                message:
+                    "branch administration requires an authoritative registered project identity"
+                        .to_owned(),
+            });
+        };
+        let configuration_database = self
+            .registered_project_session_database(project_root, &layout)
+            .await?;
+        // Branch administration runs inside the daemon, which owns the durable
+        // configuration store. Resolve the pinned snapshot on demand when this
+        // process has not yet opened the project (first operation, or the first
+        // after a daemon restart) instead of failing closed. The resolver reads
+        // only durable authority; it never consults legacy config input and a
+        // genuinely unresolvable store still fails before any destructive store
+        // action.
+        let config = crate::config::resolve_runtime_configuration_for_registered_database(
+            project_root,
+            &layout,
+            configuration_database,
+        )
+        .await?
+        .config
+        .sync;
+        self.execute_branch_admin_in_layout(
+            project_root,
+            &layout.data_root,
+            action,
+            config.branch_gc_days,
+            config.orphan_db_gc_days,
+        )
+        .await
+    }
+
+    /// Prepares, proves, and commits one destructive branch-store mutation under
+    /// the physical runtime registry's exact path reservation.
+    pub(super) async fn execute_branch_admin_in_layout(
+        &self,
+        project_root: &Path,
+        data_root: &Path,
+        action: crate::branch::BranchAdminAction,
+        branch_gc_days: u64,
+        orphan_db_gc_days: u64,
+    ) -> Result<crate::branch::BranchAdminReport> {
+        if let Some(recovery) = crate::branch::prepare_pending_branch_admin_recovery(data_root)? {
+            let database_paths = canonical_branch_database_paths(recovery.database_paths())?;
+            {
+                let project_servers = self.project_servers.lock().await;
+                let refresh_scheduler_busy = self
+                    .session_temporal_refresh_schedulers
+                    .owns_project_database_paths(&database_paths)
+                    .await;
+                #[cfg(unix)]
+                let scheduler_busy = cached_scheduler_owns_selected(
+                    &*self.automation_schedulers.lock().await,
+                    &database_paths,
+                ) || cached_scheduler_owns_selected(
+                    &*self.memory_repair_schedulers.lock().await,
+                    &database_paths,
+                ) || refresh_scheduler_busy;
+                #[cfg(not(unix))]
+                let scheduler_busy = refresh_scheduler_busy;
+                ensure_no_cached_store_owners(&project_servers, scheduler_busy, &database_paths)?;
+            }
+
+            let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            canonical_paths.sort();
+            let reservation = self
+                .session_runtime_registry()
+                .await?
+                .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
+                .await?;
+            let disposition = recovery.disposition();
+            recovery.recover(
+                |paths| self.prove_no_external_branch_store_holders(paths),
+                |_| Ok(()),
+            )?;
+            match disposition {
+                crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => {
+                    reservation.abort_preserved()
+                }
+                crate::branch::BranchAdminRecoveryDisposition::CommittedCleanup => {
+                    reservation.finish_deleted()
+                }
+            }
+            .map_err(destructive_reservation_error)?;
+        }
+
+        let prepared = crate::branch::prepare_branch_admin_mutation(
+            project_root,
+            data_root,
+            action,
+            branch_gc_days,
+            orphan_db_gc_days,
+        )?;
+        let database_paths = canonical_branch_database_paths(prepared.database_paths())?;
+        if database_paths.is_empty() {
+            return prepared.finish_without_database_deletion();
+        }
+
+        {
+            let project_servers = self.project_servers.lock().await;
+            let refresh_scheduler_busy = self
+                .session_temporal_refresh_schedulers
+                .owns_project_database_paths(&database_paths)
+                .await;
+            #[cfg(unix)]
+            let scheduler_busy = cached_scheduler_owns_selected(
+                &*self.automation_schedulers.lock().await,
+                &database_paths,
+            ) || cached_scheduler_owns_selected(
+                &*self.memory_repair_schedulers.lock().await,
+                &database_paths,
+            ) || refresh_scheduler_busy;
+            #[cfg(not(unix))]
+            let scheduler_busy = refresh_scheduler_busy;
+            ensure_no_cached_store_owners(&project_servers, scheduler_busy, &database_paths)?;
+        }
+
+        let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+        canonical_paths.sort();
+        let reservation = self
+            .session_runtime_registry()
+            .await?
+            .begin_destructive_code_maintenance(data_root, canonical_paths.iter().cloned())
+            .await?;
+        let report = prepared
+            .commit_registered(|paths| self.prove_no_external_branch_store_holders(paths))?;
+        reservation
+            .finish_deleted()
+            .map_err(destructive_reservation_error)?;
+        Ok(report)
+    }
+}
+
+pub(super) struct BranchAdminRequest {
+    pub(super) id: serde_json::Value,
+    pub(super) action: std::result::Result<crate::branch::BranchAdminAction, String>,
+}
+
+pub(super) fn parse_branch_admin_request(line: &str) -> Option<BranchAdminRequest> {
+    let request = serde_json::from_str::<JsonRpcRequest>(line.trim()).ok()?;
+    if request.method != "tools/call" {
+        return None;
+    }
+    let params = request.params.as_ref()?;
+    if params.get("name").and_then(serde_json::Value::as_str) != Some(BRANCH_ADMIN_TOOL_NAME) {
+        return None;
+    }
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    Some(BranchAdminRequest {
+        id: request.id.unwrap_or(serde_json::Value::Null),
+        action: serde_json::from_value(arguments)
+            .map_err(|error| format!("invalid branch administration arguments: {error}")),
+    })
+}
+
+fn canonical_branch_database_paths(paths: &[PathBuf]) -> Result<HashSet<PathBuf>> {
+    paths
+        .iter()
+        .map(|path| authority::canonical_identity_path(path))
+        .collect()
+}
+
+fn branch_administration_busy(detail: impl Into<String>) -> TraceDecayError {
+    TraceDecayError::project_route("branch_administration_busy", true, detail)
+}
+
+#[cfg(any(unix, test))]
+fn cached_scheduler_owns_selected<Scheduler>(
+    automation_schedulers: &HashMap<ProjectServerKey, Scheduler>,
+    database_paths: &HashSet<PathBuf>,
+) -> bool {
+    automation_schedulers
+        .keys()
+        .any(|key| database_paths.contains(&key.owner.graph_db_path))
+}
+
+fn ensure_no_cached_store_owners<Server>(
+    project_servers: &DatabaseOwnerRegistry<Server>,
+    scheduler_busy: bool,
+    database_paths: &HashSet<PathBuf>,
+) -> Result<()> {
+    let server_busy = project_servers
+        .servers
+        .keys()
+        .any(|key| database_paths.contains(&key.owner.graph_db_path));
+    if !server_busy && !scheduler_busy {
+        return Ok(());
+    }
+
+    let cached_as = match (server_busy, scheduler_busy) {
+        (true, true) => "a project server and a background scheduler",
+        (true, false) => "a project server",
+        (false, true) => "a background scheduler",
+        (false, false) => return Ok(()),
+    };
+    let mut paths = database_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    paths.sort();
+    Err(branch_administration_busy(format!(
+        "branch store administration is busy: selected database(s) {} are still cached by the daemon as {cached_as}; restart the TraceDecay daemon before retrying",
+        paths.join(", ")
+    )))
+}
+
+fn destructive_reservation_error(
+    error: crate::daemon::store_runtime::registry::StoreRuntimeRegistryFailure,
+) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("destructive store runtime reservation failed: {error:?}"),
+    }
+}
+
+fn ensure_no_external_branch_store_holders(database_paths: &[PathBuf]) -> Result<()> {
+    let options = crate::open_store_holders::OpenStoreHolderScanOptions {
+        include_current_process: true,
+        excluded_current_process_fds: BTreeSet::new(),
+    };
+    let scan = crate::open_store_holders::scan_with_options(database_paths, &options).map_err(
+        |error| TraceDecayError::Config {
+            message: format!("failed to inspect open branch stores: {error}"),
+        },
+    )?;
+    match scan {
+        crate::open_store_holders::OpenStoreHolderScan::Supported(holders)
+            if holders.is_empty() =>
+        {
+            Ok(())
+        }
+        crate::open_store_holders::OpenStoreHolderScan::Supported(holders) => {
+            let details = holders
+                .into_iter()
+                .map(|holder| format!("pid {} ({})", holder.pid, holder.command))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "cannot delete branch stores while external processes still hold them: {details}"
+                ),
+            })
+        }
+        crate::open_store_holders::OpenStoreHolderScan::Unsupported { reason } => {
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "cannot prove branch stores are closed: {reason}; destructive branch operation refused"
+                ),
+            })
+        }
+    }
+}
+
+fn branch_admin_tool_result(
+    report: &crate::branch::BranchAdminReport,
+) -> Result<serde_json::Value> {
+    Ok(json!({
+        "content": [{
+            "type": "text",
+            "text": serde_json::to_string(report)?,
+        }]
+    }))
+}
+
+fn branch_admin_error_response(id: serde_json::Value, error: &TraceDecayError) -> JsonRpcResponse {
+    if let Some((reason_code, retryable, detail)) = error.project_route_context() {
+        return JsonRpcResponse::error_with_data(
+            id,
+            ErrorCode::InternalError,
+            format!("branch administration unavailable: {detail}"),
+            Some(json!({
+                "tool": BRANCH_ADMIN_TOOL_NAME,
+                "reason_code": reason_code,
+                "retryable": retryable,
+                "detail": detail,
+            })),
+        );
+    }
+    JsonRpcResponse::error(id, ErrorCode::InternalError, error.to_string())
+}
+
+pub(super) async fn write_branch_admin_response(
+    transport: &mut impl McpTransport,
+    request: BranchAdminRequest,
+    result: Result<crate::branch::BranchAdminReport>,
+) -> Result<()> {
+    let response = match (request.action, result) {
+        (Err(message), _) => JsonRpcResponse::error(request.id, ErrorCode::InvalidParams, message),
+        (Ok(_), Ok(report)) => {
+            JsonRpcResponse::success(request.id, branch_admin_tool_result(&report)?)
+        }
+        (Ok(_), Err(error)) => branch_admin_error_response(request.id, &error),
+    };
+    write_json_rpc_response(transport, &response).await
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
+    use super::super::{ProjectRouteKey, StoreOwnerKey};
     use super::*;
+
+    #[test]
+    fn branch_administration_busy_is_retryable_and_typed() {
+        let error = branch_administration_busy("another daemon writer is active");
+
+        assert_eq!(
+            error.project_route_context(),
+            Some((
+                "branch_administration_busy",
+                true,
+                "another daemon writer is active",
+            ))
+        );
+
+        let response = branch_admin_error_response(json!(7), &error);
+        let response_error = response
+            .error
+            .expect("branch busy response must be an error");
+        assert_eq!(response_error.code, ErrorCode::InternalError.as_i32());
+        assert_eq!(
+            response_error.data,
+            Some(json!({
+                "tool": BRANCH_ADMIN_TOOL_NAME,
+                "reason_code": "branch_administration_busy",
+                "retryable": true,
+                "detail": "another daemon writer is active",
+            }))
+        );
+    }
 
     /// Rank 1 regression: a git-watch sync of project A used to hold the one
     /// daemon-wide gate across a full `cg.sync()`, so the first request for
@@ -1173,5 +1556,218 @@ mod tests {
             .unwrap();
         assert!(healthy.broker().is_some());
         administration.shutdown_host_admission_replay().await;
+    }
+
+    fn owner(graph_db_path: &str) -> StoreOwnerKey {
+        StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("project".to_string()),
+            store_root: PathBuf::from("/profile/projects/project"),
+            graph_db_path: PathBuf::from(graph_db_path),
+        }
+    }
+
+    fn server_key(graph_db_path: &str, scope_prefix: Option<&str>) -> ProjectServerKey {
+        ProjectServerKey {
+            owner: owner(graph_db_path),
+            project_root: PathBuf::from("/project"),
+            scope_prefix: scope_prefix.map(str::to_string),
+        }
+    }
+
+    fn route(project_path: &str, scope_prefix: Option<&str>) -> ProjectRouteKey {
+        ProjectRouteKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_path: PathBuf::from(project_path),
+            scope_prefix: scope_prefix.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn matching_cached_server_and_scheduler_fail_busy_without_mutation() {
+        let target_a = server_key("/profile/projects/project/branches/feature.db", None);
+        let target_b = server_key("/profile/projects/project/branches/feature.db", Some("src"));
+        let survivor = server_key("/profile/projects/project/tracedecay.db", None);
+        let target_route_a = route("/repo", None);
+        let target_route_b = route("/repo", Some("src"));
+        let survivor_route = route("/repo-main", None);
+        let target_server_a = Arc::new("target-a");
+        let target_server_b = Arc::new("target-b");
+        let survivor_server = Arc::new("survivor");
+        let mut registry = DatabaseOwnerRegistry::default();
+        registry.insert_route(
+            target_route_a.clone(),
+            target_a.clone(),
+            Arc::clone(&target_server_a),
+        );
+        registry.insert_route(
+            target_route_b.clone(),
+            target_b.clone(),
+            Arc::clone(&target_server_b),
+        );
+        registry.insert_route(
+            survivor_route.clone(),
+            survivor.clone(),
+            Arc::clone(&survivor_server),
+        );
+        let scheduler = Arc::new("scheduler");
+        let mut schedulers = HashMap::from([(target_b.clone(), Arc::clone(&scheduler))]);
+        let selected = HashSet::from([PathBuf::from(
+            "/profile/projects/project/branches/feature.db",
+        )]);
+
+        let error = ensure_no_cached_store_owners(
+            &registry,
+            cached_scheduler_owns_selected(&schedulers, &selected),
+            &selected,
+        )
+        .expect_err("matching daemon owners must fail closed");
+
+        let message = error.to_string();
+        assert!(message.contains("busy"), "{message}");
+        assert!(
+            message.contains("restart the TraceDecay daemon"),
+            "{message}"
+        );
+        ensure_no_cached_store_owners(&registry, false, &selected)
+            .expect_err("a matching project server alone must fail closed");
+        let no_servers: DatabaseOwnerRegistry<Arc<&str>> = DatabaseOwnerRegistry::default();
+        ensure_no_cached_store_owners(
+            &no_servers,
+            cached_scheduler_owns_selected(&schedulers, &selected),
+            &selected,
+        )
+        .expect_err("a matching scheduler alone must fail closed");
+        assert!(Arc::ptr_eq(
+            registry
+                .get_route(&target_route_a)
+                .expect("target a route")
+                .1,
+            &target_server_a
+        ));
+        assert!(Arc::ptr_eq(
+            registry
+                .get_route(&target_route_b)
+                .expect("target b route")
+                .1,
+            &target_server_b
+        ));
+        assert!(Arc::ptr_eq(
+            registry
+                .get_route(&survivor_route)
+                .expect("survivor route")
+                .1,
+            &survivor_server
+        ));
+        assert!(Arc::ptr_eq(
+            schedulers.get(&target_b).expect("scheduler entry"),
+            &scheduler
+        ));
+        assert_eq!(registry.servers.len(), 3);
+        assert_eq!(registry.aliases.len(), 3);
+        assert_eq!(schedulers.len(), 1);
+
+        // Keep the maps mutable in this regression test so accidental eviction
+        // implementations cannot hide behind immutable test fixtures.
+        assert!(schedulers.remove(&survivor).is_none());
+    }
+
+    #[test]
+    fn unmatched_cached_owners_allow_administration_to_continue() {
+        let survivor = server_key("/profile/projects/project/tracedecay.db", None);
+        let survivor_route = route("/repo-main", None);
+        let survivor_server = Arc::new("survivor");
+        let mut registry = DatabaseOwnerRegistry::default();
+        registry.insert_route(
+            survivor_route.clone(),
+            survivor.clone(),
+            Arc::clone(&survivor_server),
+        );
+        let scheduler = Arc::new("scheduler");
+        let schedulers = HashMap::from([(survivor.clone(), Arc::clone(&scheduler))]);
+        let selected = HashSet::from([PathBuf::from(
+            "/profile/projects/project/branches/feature.db",
+        )]);
+
+        ensure_no_cached_store_owners(
+            &registry,
+            cached_scheduler_owns_selected(&schedulers, &selected),
+            &selected,
+        )
+        .expect("unmatched owners must proceed to holder proof and commit");
+
+        assert!(Arc::ptr_eq(
+            registry
+                .get_route(&survivor_route)
+                .expect("survivor route")
+                .1,
+            &survivor_server
+        ));
+        assert!(Arc::ptr_eq(
+            schedulers.get(&survivor).expect("scheduler entry"),
+            &scheduler
+        ));
+    }
+
+    #[test]
+    fn branch_admin_parser_accepts_only_the_hidden_destructive_tool() {
+        let request = parse_branch_admin_request(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {
+                    "name": BRANCH_ADMIN_TOOL_NAME,
+                    "arguments": { "action": "remove", "branch": "feature/a" }
+                }
+            })
+            .to_string(),
+        )
+        .expect("branch admin request");
+        assert_eq!(request.id, json!(7));
+        assert_eq!(
+            request.action.expect("valid action"),
+            crate::branch::BranchAdminAction::Remove {
+                branch: "feature/a".to_string()
+            }
+        );
+
+        assert!(
+            parse_branch_admin_request(
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": { "name": "tracedecay_status", "arguments": {} }
+                })
+                .to_string()
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn branch_admin_parser_preserves_invalid_arguments_for_error_response() {
+        let request = parse_branch_admin_request(
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "bad",
+                "method": "tools/call",
+                "params": {
+                    "name": BRANCH_ADMIN_TOOL_NAME,
+                    "arguments": { "action": "remove" }
+                }
+            })
+            .to_string(),
+        )
+        .expect("recognized hidden tool");
+        assert!(
+            request
+                .action
+                .unwrap_err()
+                .contains("invalid branch administration arguments")
+        );
     }
 }
