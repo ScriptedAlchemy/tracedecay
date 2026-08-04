@@ -311,106 +311,127 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
             },
         };
-        let authority = self
-            .query_authority_for_scope(scope)
-            .await
-            .ok_or(QuerySearchExecutionErrorV1::AuthorityUnavailable)?;
-        let generation = latest.generation.manifest().generation_id.clone();
-        let request = RetrievalRequest {
-            principal: input.principal,
-            scope: RetrievalScope {
-                privacy_domain: latest.generation.manifest().privacy_domain.clone(),
-                root: SingleRootScopeV1 {
-                    repository: latest.generation.snapshot().repository.clone(),
-                    worktree: latest.generation.snapshot().worktree.clone(),
-                    reference: latest.generation.snapshot().reference.clone(),
-                },
-            },
-            temporal_mode: TemporalModeV1::Current,
-            snapshot: RetrievalSnapshot {
-                watermarks: VectorWatermark::default(),
-                freshness_digest: FreshnessVectorDigest::new(
-                    latest.generation.manifest().snapshot_digest.as_str(),
-                )
-                .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
-                authorization_revision: input.authorization_revision,
-                captured_at: latest.generation.manifest().seal.sealed_at,
-            },
-            profile_id: authority.profile().profile_id.clone(),
-            budget: authority.profile().retrieval_budget,
-        };
-        let sanitized = RawRetrievalRequestV1::new(input.query, request)
-            .sanitize(input.sanitizer_revision, input.normalization_revision)?;
-        let request = sanitized.request();
-        let query_view = sanitized.query_view();
-        let owners = latest.production_query_owners()?;
-
-        let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
-        let exact_request = ExactLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            literals: parser.parse_literals(query_view, request),
-            budget: request.budget,
-        };
-        let exact = owners.exact.retrieve_exact(&exact_request)?;
-
-        let lexical_parts = lexical_query_parts(query_view.as_str())?;
-        let lexical_request = LexicalLaneRequest {
-            base: request.clone(),
-            query_view,
-            generation: generation.clone(),
-            whole_terms: lexical_parts.whole_terms,
-            subtokens: lexical_parts.subtokens,
-            phrases: lexical_parts.phrases,
-            field_filters: Vec::new(),
-            fuzzy_budget: input.fuzzy_budget,
-            lexical_profile_revision: input.lexical_profile_revision,
-            score_domain: input.lexical_score_domain,
-            budget: request.budget,
-        };
-        let lexical = owners.lexical.retrieve_lexical(&lexical_request)?;
-
-        let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
-        let graph = if graph_seeds.is_empty() {
-            RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
-                detail: "exact and lexical lanes produced no graph seed".to_owned(),
-            })
-        } else {
-            owners.graph.retrieve_graph(&GraphLaneRequest {
-                base: request.clone(),
-                generation: generation.clone(),
-                seed_anchors: graph_seeds,
-                edge_kinds: input.graph_edge_kinds,
-                max_depth: input.graph_max_depth,
-                budget: request.budget,
-            })?
-        };
-        let lanes = vec![
-            CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
-                .map_err(QueryAuthorityErrorV1::from)?,
-            CompositionLaneInput::new(RetrieverKind::Lexical, lexical)
-                .map_err(QueryAuthorityErrorV1::from)?,
-            CompositionLaneInput::new(RetrieverKind::Graph, graph)
-                .map_err(QueryAuthorityErrorV1::from)?,
-        ];
-        let authorized = self
-            .compose_query_fallback(
-                scope,
-                request,
-                query_view,
-                lanes,
-                input.page_size,
-                input.cursor.as_ref(),
-            )
-            .await?;
-        Ok(ExecutedQuerySearchV1 {
-            generation,
-            authorized,
-            sanitized,
-            served_stale,
-        })
+        execute_query_search_on_latest(self, scope, input, latest, served_stale).await
     }
+
+    pub(in crate::daemon) async fn execute_query_search_on_generation(
+        &self,
+        scope: &ResolvedScope,
+        input: QuerySearchExecutionRequestV1,
+        latest: super::LatestCompleteCodeIndexV1,
+    ) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
+        scope
+            .validate()
+            .map_err(|error| QuerySearchExecutionErrorV1::InvalidScope(error.to_string()))?;
+        validate_search_policy(&input)?;
+        if !Self::latest_matches_scope(&latest, scope) {
+            return Err(QuerySearchExecutionErrorV1::GenerationUnavailable);
+        }
+        execute_query_search_on_latest(self, scope, input, latest, false).await
+    }
+}
+
+async fn execute_query_search_on_latest(
+    schedulers: &CodeIndexSchedulerRegistryV1,
+    scope: &ResolvedScope,
+    input: QuerySearchExecutionRequestV1,
+    latest: super::LatestCompleteCodeIndexV1,
+    served_stale: bool,
+) -> Result<ExecutedQuerySearchV1, QuerySearchExecutionErrorV1> {
+    let authority = schedulers
+        .query_authority_for_scope(scope)
+        .await
+        .ok_or(QuerySearchExecutionErrorV1::AuthorityUnavailable)?;
+    let generation = latest.generation.manifest().generation_id.clone();
+    let request = RetrievalRequest {
+        principal: input.principal,
+        scope: RetrievalScope {
+            privacy_domain: latest.generation.manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: latest.generation.snapshot().repository.clone(),
+                worktree: latest.generation.snapshot().worktree.clone(),
+                reference: latest.generation.snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(
+                latest.generation.manifest().snapshot_digest.as_str(),
+            )
+            .map_err(|error| QuerySearchExecutionErrorV1::InvalidPolicy(error.to_string()))?,
+            authorization_revision: input.authorization_revision,
+            captured_at: latest.generation.manifest().seal.sealed_at,
+        },
+        profile_id: authority.profile().profile_id.clone(),
+        budget: authority.profile().retrieval_budget,
+    };
+    let sanitized = RawRetrievalRequestV1::new(input.query, request)
+        .sanitize(input.sanitizer_revision, input.normalization_revision)?;
+    let request = sanitized.request();
+    let query_view = sanitized.query_view();
+    let owners = latest.production_query_owners()?;
+    let parser = CentralExactAdmissionAuthorityV1::new(input.exact_rule_revision);
+    let exact = owners.exact.retrieve_exact(&ExactLaneRequest {
+        base: request.clone(),
+        query_view,
+        generation: generation.clone(),
+        literals: parser.parse_literals(query_view, request),
+        budget: request.budget,
+    })?;
+    let lexical_parts = lexical_query_parts(query_view.as_str())?;
+    let lexical = owners.lexical.retrieve_lexical(&LexicalLaneRequest {
+        base: request.clone(),
+        query_view,
+        generation: generation.clone(),
+        whole_terms: lexical_parts.whole_terms,
+        subtokens: lexical_parts.subtokens,
+        phrases: lexical_parts.phrases,
+        field_filters: Vec::new(),
+        fuzzy_budget: input.fuzzy_budget,
+        lexical_profile_revision: input.lexical_profile_revision,
+        score_domain: input.lexical_score_domain,
+        budget: request.budget,
+    })?;
+    let graph_seeds = graph_seeds_from_outcomes(&exact, &lexical);
+    let graph = if graph_seeds.is_empty() {
+        RetrieverOutcome::Unavailable(RetrievalFailure::AuthorityUnavailable {
+            detail: "exact and lexical lanes produced no graph seed".to_owned(),
+        })
+    } else {
+        owners.graph.retrieve_graph(&GraphLaneRequest {
+            base: request.clone(),
+            generation: generation.clone(),
+            seed_anchors: graph_seeds,
+            edge_kinds: input.graph_edge_kinds,
+            max_depth: input.graph_max_depth,
+            budget: request.budget,
+        })?
+    };
+    let lanes = vec![
+        CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact)
+            .map_err(QueryAuthorityErrorV1::from)?,
+        CompositionLaneInput::new(RetrieverKind::Lexical, lexical)
+            .map_err(QueryAuthorityErrorV1::from)?,
+        CompositionLaneInput::new(RetrieverKind::Graph, graph)
+            .map_err(QueryAuthorityErrorV1::from)?,
+    ];
+    let authorized = schedulers
+        .compose_query_fallback(
+            scope,
+            request,
+            query_view,
+            lanes,
+            input.page_size,
+            input.cursor.as_ref(),
+        )
+        .await?;
+    Ok(ExecutedQuerySearchV1 {
+        generation,
+        authorized,
+        sanitized,
+        served_stale,
+    })
 }
 
 fn validate_search_policy(

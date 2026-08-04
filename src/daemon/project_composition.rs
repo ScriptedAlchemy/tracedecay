@@ -556,6 +556,11 @@ pub(super) async fn production_project_server(
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id.clone(),
+        read_admission_provider.clone(),
+    );
+    let code_index_branch_diff_executor = code_index_branch_diff_executor(
+        invocation.code_index_schedulers.clone(),
+        code_search_project_id.clone(),
         read_admission_provider,
     );
     let dashboard_code_index_schedulers = invocation.code_index_schedulers.clone();
@@ -600,6 +605,7 @@ pub(super) async fn production_project_server(
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
     .with_code_index_publication_identity(Arc::clone(&code_index_publication_identity))
     .with_code_index_search_executor(Arc::clone(&code_index_search_executor))
+    .with_code_index_branch_diff_executor(Arc::clone(&code_index_branch_diff_executor))
     .with_code_index_search_authority(code_search_authority.clone())
     .with_project_server_live(Arc::clone(&route_registered))
     .with_application_invocation_executor(Arc::clone(&application_invocation_executor))
@@ -867,6 +873,7 @@ pub(super) async fn production_project_server(
             .with_code_index_hook_sink(code_index_hook_sink)
             .with_code_index_publication_identity(code_index_publication_identity)
             .with_code_index_search_executor(code_index_search_executor)
+            .with_code_index_branch_diff_executor(code_index_branch_diff_executor)
             .with_code_index_search_authority(code_search_authority)
             .with_project_server_live(Arc::clone(&route_registered))
             .with_application_invocation_executor(application_invocation_executor)

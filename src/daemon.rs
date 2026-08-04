@@ -140,6 +140,8 @@ mod branch_admin;
 mod broker_stream_transport;
 use broker_stream_transport::BrokerStreamTransport;
 mod callable_code_authorization;
+mod code_index_branch_diff;
+use code_index_branch_diff::code_index_branch_diff_executor;
 mod code_index_executor;
 use code_index_executor::code_index_search_executor;
 #[cfg(test)]
