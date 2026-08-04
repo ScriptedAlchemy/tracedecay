@@ -375,7 +375,7 @@ mod tests {
     use crate::store_runtime::registry::{
         PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, ProfileAuthorityPinResult,
         PublishedShardRuntime, ResolvedStoreLocator, ShardRuntimeBuildRequest,
-        ShardRuntimePublisher, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
+        ShardRuntimePublisher, StoreRuntimeLookup, StoreRuntimeOpenRequest, StoreRuntimeOpenResult,
         StoreRuntimeRegistryFuture, StoreRuntimeResolver,
     };
     use crate::store_runtime::shard::ShardRuntime;
@@ -438,6 +438,7 @@ mod tests {
         close_started: tokio::sync::Notify,
         close_released: Mutex<bool>,
         close_wake: Condvar,
+        closed: AtomicBool,
     }
 
     impl BlockingCloseAttachment {
@@ -471,6 +472,7 @@ mod tests {
             while !*released {
                 released = self.close_wake.wait(released).unwrap();
             }
+            self.closed.store(true, Ordering::SeqCst);
             Ok(())
         }
     }
@@ -518,6 +520,7 @@ mod tests {
             close_started: tokio::sync::Notify::new(),
             close_released: Mutex::new(false),
             close_wake: Condvar::new(),
+            closed: AtomicBool::new(false),
         });
         let authority =
             DatabaseAuthority::for_runtime(&code_path, "reserve destructive evicting runtime")
@@ -592,5 +595,136 @@ mod tests {
             reservation,
             Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress { .. })
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_destructive_reservation_releases_and_reopens_runtime() {
+        let temporary = tempfile::tempdir().unwrap();
+        let profile_path = temporary.path().join("profile.db");
+        let code_path = temporary.path().join("code.db");
+        create_graph_fixture_database_v1(&profile_path).unwrap();
+        create_graph_fixture_database_v1(&code_path).unwrap();
+        let profile_path = profile_path.canonicalize().unwrap();
+        let code_path = code_path.canonicalize().unwrap();
+        let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();
+        let attachment = Arc::new(BlockingCloseAttachment {
+            opened_file_identity,
+            drained: AtomicBool::new(false),
+            close_started: tokio::sync::Notify::new(),
+            close_released: Mutex::new(false),
+            close_wake: Condvar::new(),
+            closed: AtomicBool::new(false),
+        });
+        let authority = DatabaseAuthority::for_runtime(
+            &code_path,
+            "mount cancellation-safe destructive reservation",
+        )
+        .unwrap();
+        let registry = StoreRuntimeRegistry::new(
+            Arc::new(FixtureResolver { profile_path }),
+            Arc::new(BlockingClosePublisher {
+                attachment: Arc::clone(&attachment),
+            }),
+        );
+        let incarnation = StoreIncarnationV1::new(1).unwrap();
+        let profile = match registry
+            .open(StoreRuntimeOpenRequest::new(
+                profile_shard(),
+                incarnation,
+                None,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("profile publication failed: {failure:?}")
+            }
+        };
+        let pin = match registry.profile_authority_pin(&profile_shard()) {
+            ProfileAuthorityPinResult::Pinned(pin) => pin,
+            other => panic!("profile pin failed: {other:?}"),
+        };
+        let code = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin.clone()),
+                authority.clone(),
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("code publication failed: {failure:?}")
+            }
+        };
+        let binding = code.binding().clone();
+        drop(code);
+
+        let target =
+            DestructiveMaintenanceTarget::new(temporary.path(), [code_path.clone()]).unwrap();
+        let reservation_registry = registry.clone();
+        let reservation = tokio::spawn(async move {
+            reservation_registry
+                .begin_destructive_maintenance(target)
+                .await
+        });
+        if tokio::time::timeout(Duration::from_secs(2), attachment.close_started.notified())
+            .await
+            .is_err()
+        {
+            attachment.release_close();
+            panic!("destructive close did not enter the blocking physical close");
+        }
+        reservation.abort();
+        assert!(matches!(reservation.await, Err(error) if error.is_cancelled()));
+        assert!(matches!(
+            registry.lookup(&binding),
+            StoreRuntimeLookup::Evicting { .. }
+        ));
+        assert!(
+            registry.destructive_wait(&code_path).is_none(),
+            "cancelling the reservation must release its path fence before close completes"
+        );
+        assert!(matches!(
+            registry
+                .begin_destructive_maintenance(
+                    DestructiveMaintenanceTarget::new(temporary.path(), [code_path.clone()])
+                        .unwrap(),
+                )
+                .await,
+            Err(StoreRuntimeRegistryFailure::RuntimeEvictionInProgress { .. })
+        ));
+
+        attachment.release_close();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !matches!(
+                registry.lookup(&binding),
+                StoreRuntimeLookup::Missing { .. }
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(attachment.closed.load(Ordering::SeqCst));
+
+        let reopened = match registry
+            .open(StoreRuntimeOpenRequest::new_authorized(
+                code_shard(),
+                incarnation,
+                Some(pin),
+                authority,
+            ))
+            .await
+        {
+            StoreRuntimeOpenResult::Published(handle) => handle,
+            StoreRuntimeOpenResult::Failed(failure) => {
+                panic!("reopen after cancelled destructive reservation failed: {failure:?}")
+            }
+        };
+        assert_ne!(reopened.binding(), &binding);
+        drop(reopened);
+        drop(profile);
     }
 }
