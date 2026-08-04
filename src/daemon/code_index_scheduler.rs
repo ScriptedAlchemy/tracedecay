@@ -2252,23 +2252,22 @@ impl RestoreFreshnessWitnessV1 {
     }
 }
 
+mod activation;
 #[cfg(test)]
 mod activation_tests;
+mod cadence;
+mod classification;
+pub(crate) mod identity;
 #[cfg(test)]
 mod memory_tests;
 #[cfg(test)]
 mod overlay_ephemerality_tests;
-#[cfg(test)]
-mod tests;
-
-mod activation;
-mod cadence;
-mod classification;
-pub(crate) mod identity;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod registry;
 pub(crate) mod semantic_query_runtime;
+#[cfg(test)]
+mod tests;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
@@ -2282,5 +2281,6 @@ pub(crate) use cadence::{
     newly_eligible_percentile,
 };
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
+pub(in crate::daemon) use registry::GitStateChangeRequestV1;
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;

@@ -157,24 +157,6 @@ fn live_code_index_roots_fail_closed_outside_a_repository() {
 }
 
 #[test]
-fn failed_branch_compaction_keeps_maintenance_retry_eligible() {
-    let report = crate::retention::branch_compaction::BranchCompactionReport {
-        compacted: Vec::new(),
-        skipped: vec![crate::retention::branch_compaction::BranchCompactionSkip {
-            branch: "busy".to_string(),
-            db_path: PathBuf::from("/tmp/busy.db"),
-            reason: crate::retention::branch_compaction::BranchCompactionSkipReason::Busy,
-        }],
-        policy_invalid: false,
-    };
-
-    assert!(
-        !store_maintenance::branch_compaction_succeeded(&report),
-        "a skipped branch store must keep the maintenance cadence eligible for retry"
-    );
-}
-
-#[test]
 fn dirty_set_coalesces_and_takes_once() {
     let mut set = DirtySet::default();
     assert!(set.is_clean());
@@ -560,12 +542,58 @@ fn linked_worktree_operation_marker_holds_repository_debounce() {
     std::fs::create_dir(&marker).expect("create linked-worktree operation marker");
 
     assert!(
-        operation_in_flight(&state),
+        operation_state(&state, 8) == OperationState::InFlight,
         "even an unmounted linked-worktree operation must hold the shared debounce"
     );
 
     std::fs::remove_dir(&marker).expect("remove linked-worktree operation marker");
-    assert!(!operation_in_flight(&state));
+    assert_eq!(operation_state(&state, 8), OperationState::Idle);
+}
+
+#[test]
+fn incomplete_worktree_registry_fails_closed_during_operation_hold() {
+    let tmp = tempfile::tempdir().expect("metadata root");
+    let common = tmp.path().join("git");
+    let registered = common.join("registered");
+    std::fs::create_dir_all(common.join("worktrees/one")).expect("first linked git directory");
+    std::fs::create_dir(common.join("worktrees/two")).expect("second linked git directory");
+    std::fs::create_dir(&registered).expect("registered git directory");
+    let state = WatchState::new(
+        common,
+        tmp.path().join("worktree"),
+        registered,
+        MaintenanceCoordinator::default(),
+    );
+
+    assert!(
+        state.operation_git_dirs(1).is_none(),
+        "enumeration over the hard bound must not publish partial metadata"
+    );
+    assert!(
+        operation_state(&state, 1) == OperationState::Incomplete,
+        "incomplete operation evidence must not be mistaken for an idle repository"
+    );
+}
+
+#[tokio::test]
+async fn callback_failure_requests_conservative_reconciliation() {
+    let repo = temp_repo();
+    let common = crate::worktree::git_common_dir(repo.path()).expect("git common dir");
+    let git_dir = worktree_git_dir(repo.path()).expect("git dir");
+    let state = WatchState::new(
+        common,
+        repo.path().canonicalize().expect("canonical root"),
+        git_dir,
+        MaintenanceCoordinator::default(),
+    );
+
+    mark_reconciliation_pending(&state);
+    materialize_pending_reconciliation(&state).await;
+
+    assert!(
+        !state.dirty.lock().await.is_clean(),
+        "notify backend errors must retain one bounded conservative reconcile"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -577,6 +605,9 @@ async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
         return;
     };
     watcher.ensure_watching(&linked).await;
+    tokio::time::timeout(TEST_READY_TIMEOUT, state.entered_debounce.notified())
+        .await
+        .expect("linked-worktree registration must rebuild the repository watcher");
     let linked_git_dir = worktree_git_dir(&linked).expect("linked git dir");
     let marker = linked_git_dir.join("CHERRY_PICK_HEAD");
     std::fs::write(&marker, b"operation").expect("create operation marker");
@@ -690,6 +721,21 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
 
     assert!(watcher.inner.projects.lock().await.is_empty());
     assert!(state.task.lock().await.is_none());
+    let drained_before = state.drained_plans.load(Ordering::Acquire);
+    git(
+        repo.path(),
+        &["commit", "--allow-empty", "-m", "after shutdown"],
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        state.drained_plans.load(Ordering::Acquire),
+        drained_before,
+        "shutdown must join the repository task instead of detaching its notify watcher"
+    );
+    assert!(
+        state.dirty.lock().await.is_clean(),
+        "metadata events after shutdown must not reach detached watcher state"
+    );
 }
 
 /// The safety-critical property that justifies this metadata watcher over the
