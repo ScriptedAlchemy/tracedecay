@@ -934,15 +934,26 @@ impl DaemonLspSessionClient {
         client_revision: impl Into<String>,
         requested_root_uri: Option<String>,
         workspace_folders: Vec<String>,
-    ) -> crate::errors::Result<Self> {
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<Self, InvocationError> {
+        let cancellation_context = cancellation.context();
         let response = invocation
-            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_open(
-                "lsp.1",
-                client_revision,
-                requested_root_uri,
-                workspace_folders,
-            ))
-            .await?;
+            .invoke_controlled(
+                crate::daemon_contract::DaemonInvocationRequest::lsp_open(
+                    "lsp.1",
+                    client_revision,
+                    requested_root_uri,
+                    workspace_folders,
+                    deadline.clone(),
+                    cancellation_context,
+                ),
+                deadline,
+                cancellation,
+                InvocationCancellationPolicy::ReadOnly,
+            )
+            .await
+            .map_err(map_invocation_error)?;
         let crate::daemon_contract::DaemonInvocationOutcome::LspOpened {
             session,
             scope_set_id,
@@ -970,14 +981,26 @@ impl DaemonLspSessionClient {
         self.scope_set_digest.as_ref()
     }
 
-    pub async fn try_send_client_frame(&mut self, frame: &str) -> crate::errors::Result<FrameSend> {
+    pub async fn try_send_client_frame(
+        &mut self,
+        frame: &str,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<FrameSend, InvocationError> {
         let request_id = self.next_request_id()?;
+        let cancellation_context = cancellation.context();
         let response = self
-            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_frame(
-                request_id,
-                self.session.clone(),
-                frame,
-            ))
+            .invoke(
+                crate::daemon_contract::DaemonInvocationRequest::lsp_frame(
+                    request_id,
+                    self.session.clone(),
+                    frame,
+                    deadline.clone(),
+                    cancellation_context,
+                ),
+                deadline,
+                cancellation,
+            )
             .await?;
         match response.outcome {
             crate::daemon_contract::DaemonInvocationOutcome::LspFrameAccepted {
@@ -994,13 +1017,24 @@ impl DaemonLspSessionClient {
         }
     }
 
-    pub async fn poll_daemon_frame(&mut self) -> crate::errors::Result<FramePoll> {
+    pub async fn poll_daemon_frame(
+        &mut self,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<FramePoll, InvocationError> {
         let request_id = self.next_request_id()?;
+        let cancellation_context = cancellation.context();
         let response = self
-            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_poll(
-                request_id,
-                self.session.clone(),
-            ))
+            .invoke(
+                crate::daemon_contract::DaemonInvocationRequest::lsp_poll(
+                    request_id,
+                    self.session.clone(),
+                    deadline.clone(),
+                    cancellation_context,
+                ),
+                deadline,
+                cancellation,
+            )
             .await?;
         match response.outcome {
             crate::daemon_contract::DaemonInvocationOutcome::LspFrame { frame, closed } => {
@@ -1014,14 +1048,23 @@ impl DaemonLspSessionClient {
         }
     }
 
-    pub async fn acknowledge_daemon_frame(&mut self) -> crate::errors::Result<()> {
+    pub async fn acknowledge_daemon_frame(
+        &mut self,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<(), InvocationError> {
         let request_id = self.next_request_id()?;
+        let cancellation_context = cancellation.context();
         let response = self
             .invoke(
                 crate::daemon_contract::DaemonInvocationRequest::lsp_acknowledge(
                     request_id,
                     self.session.clone(),
+                    deadline.clone(),
+                    cancellation_context,
                 ),
+                deadline,
+                cancellation,
             )
             .await?;
         match response.outcome {
@@ -1030,14 +1073,23 @@ impl DaemonLspSessionClient {
         }
     }
 
-    pub async fn reconnect(&mut self) -> crate::errors::Result<()> {
+    pub async fn reconnect(
+        &mut self,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<(), InvocationError> {
         let request_id = self.next_request_id()?;
+        let cancellation_context = cancellation.context();
         let response = self
             .invoke(
                 crate::daemon_contract::DaemonInvocationRequest::lsp_reconnect(
                     request_id,
                     self.session.clone(),
+                    deadline.clone(),
+                    cancellation_context,
                 ),
+                deadline,
+                cancellation,
             )
             .await?;
         match response.outcome {
@@ -1049,13 +1101,24 @@ impl DaemonLspSessionClient {
         }
     }
 
-    pub async fn detach(&mut self) -> crate::errors::Result<()> {
+    pub async fn detach(
+        &mut self,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<(), InvocationError> {
         let request_id = self.next_request_id()?;
+        let cancellation_context = cancellation.context();
         let response = self
-            .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
-                request_id,
-                self.session.clone(),
-            ))
+            .invoke(
+                crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
+                    request_id,
+                    self.session.clone(),
+                    deadline.clone(),
+                    cancellation_context,
+                ),
+                deadline,
+                cancellation,
+            )
             .await?;
         match response.outcome {
             crate::daemon_contract::DaemonInvocationOutcome::LspDetached => {
@@ -1069,16 +1132,24 @@ impl DaemonLspSessionClient {
     async fn invoke(
         &self,
         request: crate::daemon_contract::DaemonInvocationRequest,
-    ) -> crate::errors::Result<crate::daemon_contract::DaemonInvocationResponse> {
-        self.invocation.invoke(request).await
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+    ) -> Result<crate::daemon_contract::DaemonInvocationResponse, InvocationError> {
+        self.invocation
+            .invoke_controlled(
+                request,
+                deadline,
+                cancellation,
+                InvocationCancellationPolicy::ReadOnly,
+            )
+            .await
+            .map_err(map_invocation_error)
     }
 
-    fn next_request_id(&mut self) -> crate::errors::Result<String> {
-        self.next_request.next_string("lsp.").map_err(|error| {
-            crate::errors::TraceDecayError::Config {
-                message: error.to_string(),
-            }
-        })
+    fn next_request_id(&mut self) -> Result<String, InvocationError> {
+        self.next_request
+            .next_string("lsp.")
+            .map_err(|_| InvocationError::Unavailable)
     }
 }
 
@@ -1095,11 +1166,30 @@ impl Drop for DaemonLspSessionClient {
         let Ok(request_id) = self.next_request_id() else {
             return;
         };
+        let Ok(deadline) = Deadline::new(UtcMicros(
+            invocation_now_micros().0.saturating_add(2_000_000),
+        )) else {
+            return;
+        };
+        let Ok(cancellation) =
+            CancellationSignal::active(format!("cancellation.{request_id}.detach"))
+        else {
+            return;
+        };
+        let cancellation_context = cancellation.context();
         runtime.spawn(async move {
             let _ = invocation
-                .invoke(crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
-                    request_id, session,
-                ))
+                .invoke_controlled(
+                    crate::daemon_contract::DaemonInvocationRequest::lsp_detach(
+                        request_id,
+                        session,
+                        deadline.clone(),
+                        cancellation_context,
+                    ),
+                    deadline,
+                    cancellation,
+                    InvocationCancellationPolicy::ReadOnly,
+                )
                 .await;
         });
     }
@@ -1107,26 +1197,24 @@ impl Drop for DaemonLspSessionClient {
 
 fn invocation_outcome_error(
     outcome: crate::daemon_contract::DaemonInvocationOutcome,
-) -> crate::errors::TraceDecayError {
-    let message = match outcome {
+) -> InvocationError {
+    match outcome {
+        crate::daemon_contract::DaemonInvocationOutcome::ApplicationProblem { problem } => {
+            invocation_error_from_problem(&problem)
+        }
         crate::daemon_contract::DaemonInvocationOutcome::Problem { problem } => match problem {
-            crate::daemon_contract::DaemonInvocationProblem::InvalidRequest => {
-                "daemon rejected the invocation input"
-            }
-            crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
-                "daemon does not support this invocation revision"
+            crate::daemon_contract::DaemonInvocationProblem::InvalidRequest
+            | crate::daemon_contract::DaemonInvocationProblem::UnsupportedRevision => {
+                InvocationError::InvalidRequest
             }
             crate::daemon_contract::DaemonInvocationProblem::NotFoundOrNotAuthorized => {
-                "daemon invocation was not found or is not authorized"
+                InvocationError::Denied
             }
             crate::daemon_contract::DaemonInvocationProblem::Unavailable => {
-                "daemon invocation authority is unavailable"
+                InvocationError::Unavailable
             }
         },
-        _ => "daemon returned an unexpected invocation response",
-    };
-    crate::errors::TraceDecayError::Config {
-        message: message.to_owned(),
+        _ => InvocationError::Unavailable,
     }
 }
 
