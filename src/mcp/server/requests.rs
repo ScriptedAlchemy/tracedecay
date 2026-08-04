@@ -100,18 +100,7 @@ pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
 }
 
 fn is_source_edit_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_str_replace"
-            | "tracedecay_multi_str_replace"
-            | "tracedecay_insert_at"
-            | "tracedecay_ast_grep_rewrite"
-            | "tracedecay_replace_symbol"
-            | "tracedecay_insert_at_symbol"
-            | "tracedecay_move_symbol"
-            | "tracedecay_api_migration_apply"
-            | "tracedecay_source_edit_reconcile"
-    )
+    crate::mcp::tools::tool_dispatches_source_edit_effect(tool_name)
 }
 
 /// Reads that walk a git tree or the whole code graph, and so must not run
