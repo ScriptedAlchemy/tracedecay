@@ -164,26 +164,27 @@ fn child_attempt_identity_survives_workflow_fence_renewal() {
 }
 
 #[test]
-fn checkpoint_records_only_canonical_attempt_identity() {
+fn checkpoint_round_trip_preserves_child_fence_and_terminal_receipt() {
     let plan = prepare_workflow_fan_out(&request(&["a"], 1, 1)).unwrap();
     let child = &plan.children[0];
-    let checkpoint = WorkflowFanOutCheckpointV1 {
-        plan_digest: plan.plan_digest.clone(),
-        children: vec![tracedecay_application::WorkflowChildRecordV1 {
-            task_id: child.task_id.clone(),
-            attempt_identity: child.attempt_identity.clone(),
-        }],
-    };
+    let checkpoint_value = serde_json::json!({
+        "plan_digest": plan.plan_digest,
+        "children": [{
+            "task_id": child.task_id,
+            "attempt_identity": child.attempt_identity,
+            "lease": {
+                "lease_id": "lease.workflow.runtime.child",
+                "epoch": 1
+            },
+            "receipt": {
+                "observation_digest": digest('d'),
+                "terminal_receipt_digest": digest('e')
+            }
+        }]
+    });
+    let checkpoint: WorkflowFanOutCheckpointV1 =
+        serde_json::from_value(checkpoint_value.clone()).expect("durable checkpoint");
 
     validate_workflow_checkpoint(&plan, &checkpoint).unwrap();
-    let value = serde_json::to_value(checkpoint).unwrap();
-    assert_eq!(
-        value["children"][0]
-            .as_object()
-            .expect("child checkpoint object")
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>(),
-        vec!["attempt_identity", "task_id"]
-    );
+    assert_eq!(serde_json::to_value(checkpoint).unwrap(), checkpoint_value);
 }

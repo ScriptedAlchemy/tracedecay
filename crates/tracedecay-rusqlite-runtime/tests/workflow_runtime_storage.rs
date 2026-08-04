@@ -2,7 +2,7 @@
 
 use tracedecay_application::{
     TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildRecordV1,
+    TaskHandoffGrantV1, TaskHandoffScopeV1, WorkflowChildReceiptV1, WorkflowChildRecordV1,
     WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort,
     WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
     WorkflowExecutionFenceV1, WorkflowExecutionIdentityV1, WorkflowExecutionTruthV1,
@@ -114,6 +114,15 @@ fn checkpoint(plan: ManifestDigest) -> WorkflowFanOutCheckpointV1 {
                 id::<AttemptId>("attempt.workflow.runtime-store.child"),
             )
             .unwrap(),
+            lease: WorkLeaseFenceV1::new(
+                id::<WorkLeaseId>("lease.workflow.runtime-store.child"),
+                WorkFenceEpochV1::new(1).unwrap(),
+            )
+            .unwrap(),
+            receipt: Some(WorkflowChildReceiptV1 {
+                observation_digest: digest('8'),
+                terminal_receipt_digest: digest('9'),
+            }),
         }],
     }
 }
@@ -122,6 +131,184 @@ fn terminal_truth() -> WorkflowExecutionTruthV1 {
     WorkflowExecutionTruthV1::Completed {
         checkpoint: checkpoint(plan_digest('5')),
     }
+}
+
+#[test]
+fn execution_lease_renewal_rejects_replacement_outer_attempt() {
+    let store = RegisteredWorkStore::start("workflow-outer-attempt-cas");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let identity = execution_identity();
+    let plan = plan_digest('5');
+    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
+    let replacement_attempt = fence(2, "attempt.workflow.runtime-store.replacement");
+
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
+        WorkflowExecutionAdmissionV1::Execute
+    );
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &replacement_attempt, &plan,)
+            .unwrap(),
+        WorkflowExecutionAdmissionV1::StaleLease
+    );
+}
+
+#[test]
+fn execution_terminal_replay_rejects_replacement_outer_attempt() {
+    let store = RegisteredWorkStore::start("workflow-terminal-replay-fence");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let identity = execution_identity();
+    let plan = plan_digest('5');
+    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
+    let replacement_attempt = fence(2, "attempt.workflow.runtime-store.replacement");
+    let checkpoint = checkpoint(plan.clone());
+    let truth = WorkflowExecutionTruthV1::Completed {
+        checkpoint: checkpoint.clone(),
+    };
+
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
+        WorkflowExecutionAdmissionV1::Execute
+    );
+    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
+        .unwrap();
+    WorkflowExecutionAuthorityPort::complete(&authority, &identity, &first_fence, &truth).unwrap();
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &replacement_attempt, &plan,)
+            .unwrap(),
+        WorkflowExecutionAdmissionV1::StaleLease
+    );
+}
+
+#[test]
+fn execution_checkpoint_cas_rejects_child_regression() {
+    let store = RegisteredWorkStore::start("workflow-checkpoint-cas");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let identity = execution_identity();
+    let plan = plan_digest('5');
+    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
+
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
+        WorkflowExecutionAdmissionV1::Execute
+    );
+    let mut checkpoint = checkpoint(plan.clone());
+    checkpoint.children[0].receipt = None;
+    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
+        .unwrap();
+    let regressed = WorkflowFanOutCheckpointV1 {
+        plan_digest: plan,
+        children: Vec::new(),
+    };
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::checkpoint(
+            &authority,
+            &identity,
+            &first_fence,
+            &regressed,
+        )
+        .unwrap_err(),
+        WorkflowExecutionAuthorityError::Conflict
+    );
+}
+
+#[test]
+fn execution_checkpoint_rejects_unjoined_child_identity_and_lease() {
+    let store = RegisteredWorkStore::start("workflow-checkpoint-child-fence");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let identity = execution_identity();
+    let plan = plan_digest('5');
+    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
+
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
+        WorkflowExecutionAdmissionV1::Execute
+    );
+
+    let mut mismatched = checkpoint(plan.clone());
+    mismatched.children[0].task_id = id::<TaskId>("task.workflow.runtime-store.child-mismatch");
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::checkpoint(
+            &authority,
+            &identity,
+            &first_fence,
+            &mismatched,
+        )
+        .unwrap_err(),
+        WorkflowExecutionAuthorityError::Conflict
+    );
+
+    let mut colliding = checkpoint(plan);
+    let mut second = colliding.children[0].clone();
+    second.task_id = id::<TaskId>("task.workflow.runtime-store.child-second");
+    second.attempt_identity = WorkAttemptIdentityV1::new(
+        second.task_id.clone(),
+        id::<RunId>("run.workflow.runtime-store"),
+        id::<AttemptId>("attempt.workflow.runtime-store.child-second"),
+    )
+    .unwrap();
+    colliding.children.push(second);
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::checkpoint(
+            &authority,
+            &identity,
+            &first_fence,
+            &colliding,
+        )
+        .unwrap_err(),
+        WorkflowExecutionAuthorityError::Conflict
+    );
+}
+
+#[test]
+fn execution_completion_rejects_truth_for_another_plan() {
+    let store = RegisteredWorkStore::start("workflow-completion-cas");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let identity = execution_identity();
+    let plan = plan_digest('5');
+    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
+
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
+        WorkflowExecutionAdmissionV1::Execute
+    );
+    let wrong_truth = WorkflowExecutionTruthV1::Completed {
+        checkpoint: checkpoint(plan_digest('6')),
+    };
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::complete(
+            &authority,
+            &identity,
+            &first_fence,
+            &wrong_truth,
+        )
+        .unwrap_err(),
+        WorkflowExecutionAuthorityError::Conflict
+    );
+}
+
+#[test]
+fn execution_completion_rejects_child_without_terminal_receipt() {
+    let store = RegisteredWorkStore::start("workflow-completion-receipt");
+    let authority = WorkflowSqliteAuthority::from_work_storage(store.storage()).unwrap();
+    let identity = execution_identity();
+    let plan = plan_digest('5');
+    let first_fence = fence(1, "attempt.workflow.runtime-store.1");
+    let mut checkpoint = checkpoint(plan.clone());
+    checkpoint.children[0].receipt = None;
+
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(&authority, &identity, &first_fence, &plan).unwrap(),
+        WorkflowExecutionAdmissionV1::Execute
+    );
+    WorkflowExecutionAuthorityPort::checkpoint(&authority, &identity, &first_fence, &checkpoint)
+        .unwrap();
+    let truth = WorkflowExecutionTruthV1::Completed { checkpoint };
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::complete(&authority, &identity, &first_fence, &truth)
+            .unwrap_err(),
+        WorkflowExecutionAuthorityError::Conflict
+    );
 }
 
 #[test]
@@ -304,7 +491,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
     let identity = execution_identity();
     let plan = plan_digest('5');
     let first_fence = fence(1, "attempt.workflow.runtime-store.1");
-    let newer_fence = fence(2, "attempt.workflow.runtime-store.2");
+    let newer_fence = fence(2, "attempt.workflow.runtime-store.1");
     let stale_fence = fence(1, "attempt.workflow.runtime-store.stale");
     let other_lease = WorkflowExecutionFenceV1 {
         attempt_id: id::<AttemptId>("attempt.workflow.runtime-store.other-lease"),
@@ -360,7 +547,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
         WorkflowExecutionAuthorityPort::begin(
             &authority,
             &identity,
-            &fence(3, "attempt.workflow.runtime-store.3"),
+            &fence(3, "attempt.workflow.runtime-store.1"),
             &plan,
         )
         .unwrap(),
@@ -370,7 +557,17 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
         WorkflowExecutionAuthorityPort::begin(
             &authority,
             &identity,
-            &fence(3, "attempt.workflow.runtime-store.3"),
+            &fence(2, "attempt.workflow.runtime-store.1"),
+            &plan,
+        )
+        .unwrap(),
+        WorkflowExecutionAdmissionV1::StaleLease
+    );
+    assert_eq!(
+        WorkflowExecutionAuthorityPort::begin(
+            &authority,
+            &identity,
+            &fence(3, "attempt.workflow.runtime-store.1"),
             &digest('7'),
         )
         .unwrap(),
@@ -391,7 +588,7 @@ fn execution_checkpoints_recover_replay_and_survive_restart() {
         WorkflowExecutionAuthorityPort::begin(
             &authority,
             &identity,
-            &fence(4, "attempt.workflow.runtime-store.4"),
+            &fence(4, "attempt.workflow.runtime-store.1"),
             &plan,
         )
         .unwrap(),
