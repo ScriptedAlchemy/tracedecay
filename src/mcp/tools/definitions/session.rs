@@ -538,9 +538,10 @@ mod lcm_definition_compatibility_tests {
             expand.input_schema["properties"]["target"]["oneOf"][1]["properties"]["node_id"]["type"],
             "string"
         );
-        assert_eq!(
-            expand.input_schema["properties"]["source_offset"]["minimum"],
-            0
+        assert!(
+            expand.input_schema["properties"]
+                .get("source_offset")
+                .is_none()
         );
         assert_eq!(
             expand.input_schema["properties"]["source_limit"]["maximum"],

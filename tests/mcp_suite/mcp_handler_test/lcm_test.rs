@@ -2872,8 +2872,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_offset": 1,
-            "source_limit": 2
+            "source_limit": 3
         }),
     )
     .await;
@@ -2881,23 +2880,28 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
 
     assert_eq!(payload["status"], "ok", "{payload}");
     let sources = payload["expansion"]["summary_sources"].as_array().unwrap();
-    assert_eq!(sources.len(), 2);
-    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[1]));
-    assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[2]));
-    for (source, expected_body) in sources
-        .iter()
-        .zip(["paged source body 2", "paged source body 3"])
-    {
+    assert_eq!(sources.len(), 3);
+    assert_eq!(sources[0]["raw_message"]["store_id"], json!(store_ids[0]));
+    assert_eq!(sources[1]["raw_message"]["store_id"], json!(store_ids[1]));
+    assert_eq!(sources[2]["raw_message"]["store_id"], json!(store_ids[2]));
+    for (source, expected_body) in sources.iter().zip([
+        "paged source body 1",
+        "paged source body 2",
+        "paged source body 3",
+    ]) {
         assert_eq!(source["state"], "available", "{source}");
         assert_eq!(source["content"], expected_body, "{source}");
         assert_eq!(source["raw_message"]["content"], expected_body, "{source}");
     }
     let pagination = &payload["expansion"]["source_pagination"];
-    assert_eq!(pagination["source_offset"], 1);
-    assert_eq!(pagination["source_limit"], 2);
-    assert_eq!(pagination["returned_sources"], 2);
+    assert!(pagination.get("source_offset").is_none(), "{pagination}");
+    assert!(
+        pagination.get("next_source_offset").is_none(),
+        "{pagination}"
+    );
+    assert_eq!(pagination["source_limit"], 3);
+    assert_eq!(pagination["returned_sources"], 3);
     assert_eq!(pagination["total_sources"], 4);
-    assert_eq!(pagination["next_source_offset"], 3);
     assert_eq!(pagination["has_more"], true);
     assert_eq!(pagination["remaining_sources"], 1);
     assert_eq!(payload["grain"], "summary");
@@ -2916,7 +2920,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_limit": 2,
+            "source_limit": 3,
             "cursor": format!("{cursor}00")
         }),
     )
@@ -2946,7 +2950,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": "summary.missing"},
-            "source_limit": 2,
+            "source_limit": 3,
             "cursor": cursor
         }),
     )
@@ -2965,7 +2969,7 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
             "provider": "cursor",
             "session_id": "lcm-page-session",
             "target": {"kind": "summary_node", "node_id": summary_id},
-            "source_limit": 2,
+            "source_limit": 3,
             "cursor": cursor
         }),
     )
@@ -2987,9 +2991,10 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         continued["expansion"]["summary_sources"][0]["raw_message"]["content"],
         "paged source body 4"
     );
-    assert_eq!(
-        continued["expansion"]["source_pagination"]["source_offset"],
-        3
+    assert!(
+        continued["expansion"]["source_pagination"]
+            .get("source_offset")
+            .is_none()
     );
     assert!(continued["next_cursor"].is_null());
 
