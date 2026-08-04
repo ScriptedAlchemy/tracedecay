@@ -35,15 +35,19 @@ use super::super::ToolResult;
 use super::super::render;
 use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
 
+mod affected_test_failure;
+mod test_request;
 mod test_runner;
 
+use test_request::{MAX_TEST_TIMEOUT_SECS, RunAffectedArgs};
 use test_runner::{
-    TestRunControl, TestRunFailure, TestRunOutput, cargo_test_args, run_cargo_tests,
+    TestRunControl, TestRunFailure, TestRunOutput, cargo_test_args, parse_libtest_output,
+    run_cargo_tests,
 };
 
-/// Maximum tests we'll allow `cargo test` to receive in one call. A loose
-/// cap — libtest filters are passed as positional args so very long lists
-/// can blow past OS argv limits on some platforms.
+/// Maximum exact test identities admitted to one managed foreground request.
+/// Each identity receives a separate Cargo invocation under the request's
+/// shared deadline, cancellation, and output budget.
 const MAX_TESTS_HARD_CAP: usize = 500;
 /// Cap on cached fingerprint rows the near-duplicate lookup pulls per
 /// diagnostic. A single diagnose call can resolve many diagnostics, so we
@@ -64,7 +68,7 @@ const MANAGED_TEST_DIGEST_READ_CONCURRENCY: usize = 32;
 
 #[derive(Debug, Clone)]
 struct TestTarget {
-    filter: String,
+    test_identity: String,
     qualified_name: String,
     node_id: String,
     covers_source_ids: Vec<String>,
@@ -72,8 +76,14 @@ struct TestTarget {
 
 impl TestTarget {
     fn new(node: &Node) -> Self {
+        let prefix = format!("{}::", node.file_path);
+        let test_identity = node
+            .qualified_name
+            .strip_prefix(&prefix)
+            .unwrap_or_default()
+            .to_owned();
         Self {
-            filter: node.name.clone(),
+            test_identity,
             qualified_name: node.qualified_name.clone(),
             node_id: node.id.clone(),
             covers_source_ids: Vec::new(),
@@ -87,11 +97,21 @@ impl TestTarget {
     }
 
     fn matches_libtest_name(&self, name: &str) -> bool {
-        name == self.filter
-            || name.rsplit("::").next() == Some(self.filter.as_str())
-            || (!self.qualified_name.is_empty() && name == self.qualified_name)
-            || name == self.node_id
+        name == self.test_identity
     }
+}
+
+fn validate_test_identity(identity: &str) -> std::result::Result<(), String> {
+    if identity.trim().is_empty() {
+        return Err("test identity is empty".to_owned());
+    }
+    if identity.starts_with('-') {
+        return Err(format!("test identity `{identity}` cannot begin with `-`"));
+    }
+    if identity.contains('\0') {
+        return Err("test identity contains a NUL byte".to_owned());
+    }
+    Ok(())
 }
 
 fn test_target_key(node: &Node) -> String {
@@ -99,65 +119,6 @@ fn test_target_key(node: &Node) -> String {
         node.id.clone()
     } else {
         node.qualified_name.clone()
-    }
-}
-
-#[derive(Debug)]
-struct RunAffectedArgs {
-    explicit_paths: Option<Vec<String>>,
-    profile: String,
-    timeout_secs: u64,
-    max_tests: usize,
-}
-
-impl RunAffectedArgs {
-    fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
-        let explicit_paths = match args.get("changed_paths") {
-            Some(Value::Array(paths)) => {
-                let mut parsed = Vec::with_capacity(paths.len());
-                for path in paths {
-                    let Some(path) = path.as_str() else {
-                        return Err(error_result(
-                            args,
-                            "invalid_request",
-                            "changed_paths",
-                            "`changed_paths` must contain only project-relative string paths",
-                        ));
-                    };
-                    parsed.push(path.to_owned());
-                }
-                Some(parsed)
-            }
-            Some(_) => {
-                return Err(error_result(
-                    args,
-                    "invalid_request",
-                    "changed_paths",
-                    "`changed_paths` must be an array of project-relative string paths",
-                ));
-            }
-            None => None,
-        };
-        let profile = args
-            .get("profile")
-            .and_then(|v| v.as_str())
-            .unwrap_or("debug")
-            .to_string();
-        let timeout_secs = args
-            .get("timeout_secs")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(300);
-        let max_tests = args
-            .get("max_tests")
-            .and_then(serde_json::Value::as_u64)
-            .map_or(100_usize, |v| (v as usize).min(MAX_TESTS_HARD_CAP));
-
-        Ok(Self {
-            explicit_paths,
-            profile,
-            timeout_secs,
-            max_tests,
-        })
     }
 }
 
@@ -622,6 +583,16 @@ where
 
     let (selected_targets, test_names, truncated) =
         select_test_targets(test_targets, run_args.max_tests);
+    for test_name in &test_names {
+        if let Err(message) = validate_test_identity(test_name) {
+            return Ok(error_result(
+                &args,
+                "invalid_test_identity",
+                "test_identity",
+                &message,
+            ));
+        }
+    }
     let started_at = test_run_now();
     let effective_deadline = Deadline::new(UtcMicros(
         started_at.0.saturating_add(
@@ -639,8 +610,9 @@ where
     )
     .await?;
 
-    // 3) Run cargo test --no-fail-fast with each test name as a libtest
-    // filter. We use `--` to pass them through.
+    // 3) Execute each selected libtest identity exactly once. The runner
+    // retains one deadline, cancellation control, and output budget across
+    // the whole selected set.
     let control = TestRunControl::default();
     let run = runner(
         project_root.clone(),
@@ -661,102 +633,56 @@ where
     };
     let output = match run_result {
         Ok(output) => output,
-        Err(TestRunFailure::Spawn(error)) => {
-            let receipt = finish_test_run(
+        Err(failure) => {
+            return affected_test_failure::terminal_failure(
                 &emitter,
+                &args,
                 started_at,
                 &effective_deadline,
-                OperationTermination::Failed,
-                0,
+                run_args.timeout_secs,
+                failure,
             )
-            .await?;
-            return Ok(managed_test_error_result(
-                &args,
-                "cargo",
-                "test",
-                &format!("failed to spawn cargo test: {error}"),
-                &emitter,
-                receipt,
-            ));
-        }
-        Err(TestRunFailure::Cancelled { output_bytes }) => {
-            let receipt = finish_test_run(
-                &emitter,
-                started_at,
-                &effective_deadline,
-                OperationTermination::Cancelled,
-                output_bytes,
-            )
-            .await?;
-            return Ok(managed_test_error_result(
-                &args,
-                "cargo",
-                "test",
-                "cargo test cancelled",
-                &emitter,
-                receipt,
-            ));
-        }
-        Err(TestRunFailure::Timeout { output_bytes }) => {
-            let receipt = finish_test_run(
-                &emitter,
-                started_at,
-                &effective_deadline,
-                OperationTermination::TimedOut,
-                output_bytes,
-            )
-            .await?;
-            return Ok(managed_test_error_result(
-                &args,
-                "cargo",
-                "test",
-                &format!("cargo test timed out after {}s", run_args.timeout_secs),
-                &emitter,
-                receipt,
-            ));
-        }
-        Err(TestRunFailure::OutputLimit {
-            stream,
-            output_bytes,
-        }) => {
-            let receipt = finish_test_run(
-                &emitter,
-                started_at,
-                &effective_deadline,
-                OperationTermination::Failed,
-                output_bytes,
-            )
-            .await?;
-            return Ok(managed_test_error_result(
-                &args,
-                "cargo",
-                "test",
-                &format!("cargo test {stream} exceeded its output bound"),
-                &emitter,
-                receipt,
-            ));
-        }
-        Err(TestRunFailure::Read { output_bytes, .. }) => {
-            let receipt = finish_test_run(
-                &emitter,
-                started_at,
-                &effective_deadline,
-                OperationTermination::Failed,
-                output_bytes,
-            )
-            .await?;
-            return Ok(managed_test_error_result(
-                &args,
-                "cargo",
-                "test",
-                "cargo test output could not be read",
-                &emitter,
-                receipt,
-            ));
+            .await;
         }
     };
 
     let results = parse_libtest_output(&output.stdout);
+    if output.exit_code != Some(0) {
+        let receipt = finish_test_run(
+            &emitter,
+            started_at,
+            &effective_deadline,
+            OperationTermination::Failed,
+            output.output_bytes,
+        )
+        .await?;
+        return Ok(managed_test_error_result(
+            &args,
+            "cargo",
+            "test",
+            "cargo test returned a nonzero exit status",
+            &emitter,
+            receipt,
+        ));
+    }
+    if let Some(test_name) = missing_requested_test(&test_names, &results) {
+        let receipt = finish_test_run(
+            &emitter,
+            started_at,
+            &effective_deadline,
+            OperationTermination::Failed,
+            output.output_bytes,
+        )
+        .await?;
+        return Ok(managed_test_error_result(
+            &args,
+            "cargo",
+            "test",
+            &format!("cargo test did not report the requested test `{test_name}`"),
+            &emitter,
+            receipt,
+        ));
+    }
     for (test, passed) in &results {
         emitter
             .test_result(test.clone(), *passed)
@@ -1113,12 +1039,21 @@ fn select_test_targets(
 
     let mut test_names: Vec<String> = selected_targets
         .iter()
-        .map(|target| target.filter.clone())
+        .map(|target| target.test_identity.clone())
         .collect();
     test_names.sort();
     test_names.dedup();
 
     (selected_targets, test_names, truncated)
+}
+
+fn missing_requested_test<'a>(
+    requested: &'a [String],
+    results: &[(String, bool)],
+) -> Option<&'a str> {
+    requested.iter().find_map(|requested| {
+        (!results.iter().any(|(observed, _)| observed == requested)).then_some(requested.as_str())
+    })
 }
 
 fn run_affected_tests_body(
@@ -1233,36 +1168,6 @@ fn tail(s: &str, n: usize) -> String {
         start += 1;
     }
     s[start..].to_string()
-}
-
-/// Parses libtest stdout for `test <name> ... ok` / `... FAILED` lines.
-/// Returns `(test_name, passed)` pairs. Robust to colour codes by trimming
-/// the common ANSI reset prefix.
-fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
-    let mut out = Vec::new();
-    for raw in stdout.lines() {
-        let line = raw.trim_start_matches("\u{1b}[0m").trim();
-        let Some(rest) = line.strip_prefix("test ") else {
-            continue;
-        };
-        // Skip the "running N tests" / summary lines, which start with "test " followed
-        // by something other than a test name (e.g. "test result:").
-        if rest.starts_with("result:") {
-            continue;
-        }
-        let Some((name, status)) = rest.rsplit_once(" ... ") else {
-            continue;
-        };
-        let status = status.trim();
-        let passed = match status {
-            "ok" => true,
-            "FAILED" | "failed" => false,
-            // Skip "ignored", "bench", incomplete lines, etc.
-            _ => continue,
-        };
-        out.push((name.trim().to_string(), passed));
-    }
-    out
 }
 
 #[cfg(test)]
