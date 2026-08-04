@@ -258,7 +258,7 @@ mod tests {
 
         std::fs::write(
             project.path().join("src/lib.rs"),
-            "pub fn exact_branch_value() -> usize { 2 }\n",
+            "pub fn exact_branch_value() -> u64 { 2 }\n",
         )
         .expect("head source");
         git(project.path(), &["add", "."]);
@@ -328,7 +328,7 @@ mod tests {
         assert_eq!(completed.changed.len(), 1);
         assert_eq!(
             completed.changed[0].head.qualified_name,
-            "crate::exact_branch_value"
+            "src/lib.rs::exact_branch_value"
         );
         assert_ne!(
             completed.changed[0].base.content_digest,
