@@ -12,8 +12,7 @@ use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
-    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, StoreShardScopeV1,
-    VerifiedStoreLocatorV1,
+    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::{
@@ -54,9 +53,6 @@ impl RepositoryPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
-            return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
-        }
         let opened_database =
             OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
@@ -77,9 +73,6 @@ impl RepositoryPhysicalAttachmentFactory {
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
-            return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
-        }
         let opened_database = OpenedDatabaseFile::create_new(&path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
@@ -256,7 +249,6 @@ fn repository_start_failure(
 
 #[derive(Debug)]
 pub enum RepositoryAttachmentStartError {
-    UnsupportedShardScope,
     Identity(crate::connection::OpenedDatabaseFileError),
     Reader(ReaderStartError),
     Writer(WriterStartError),
@@ -265,9 +257,6 @@ pub enum RepositoryAttachmentStartError {
 impl fmt::Display for RepositoryAttachmentStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedShardScope => {
-                formatter.write_str("repository attachment does not own code shards")
-            }
             Self::Identity(error) => write!(formatter, "identify repository attachment: {error}"),
             Self::Reader(error) => write!(formatter, "start repository readers: {error}"),
             Self::Writer(error) => write!(formatter, "start repository writer: {error}"),
@@ -281,7 +270,6 @@ impl Error for RepositoryAttachmentStartError {
             Self::Identity(error) => Some(error),
             Self::Reader(error) => Some(error),
             Self::Writer(error) => Some(error),
-            Self::UnsupportedShardScope => None,
         }
     }
 }

@@ -39,7 +39,7 @@ fn graph_projection_bounds_convergent_fanout_by_nodes_and_edges() {
         push_edge(source, "symbol.sink");
     }
 
-    let adapter = CodeGraphEvidenceAdapterV1::new(
+    let adapter = CodeGraphEvidenceReader::new(
         request.generation.clone(),
         None,
         freshness(FreshnessCompatibilityV1::Current),
