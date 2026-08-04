@@ -1,21 +1,129 @@
 use std::cmp;
+use std::sync::Arc;
 
 use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 
 use tracedecay_capture::parse_rfc3339_timestamp;
+use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId};
+use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::Value as SqlValue;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
 use tracedecay_temporal_query::ports::{
-    CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
-    TemporalRetrievalScope,
+    CandidateFieldCaps, ExecutionControl, PageRequest, TemporalExecutionSnapshot,
+    TemporalPortError, TemporalRetrievalScope,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
+use super::super::relations::{
+    SessionRelationError, SessionRelationGraphStore, SummarySourceVisitKind,
+};
 use super::super::sql::{TemporalSqlRead, TemporalSqlRow, TemporalSqlRows};
 use super::cursors::*;
 use super::queries::*;
 use super::rows::*;
 use super::{CANDIDATE_OPERATION, RECORD_OPERATION, SNAPSHOT_OPERATION};
+
+#[derive(Clone, Debug)]
+struct CandidateGraphCancellation(ExecutionControl);
+
+impl GraphCancellation for CandidateGraphCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.checkpoint().is_err()
+    }
+}
+
+pub(super) fn load_summary_source_anchors(
+    store: &SessionRelationGraphStore,
+    project_id: &ProjectId,
+    snapshot: &TemporalExecutionSnapshot,
+    candidate: &RankingCandidate,
+    max_relations: usize,
+) -> Result<Vec<RetrievalAnchorId>, TemporalPortError> {
+    if candidate.channel != CandidateChannel::Summary {
+        return Err(read_message(
+            CANDIDATE_OPERATION,
+            "summary relation read requires a summary candidate",
+        ));
+    }
+    if max_relations == 0 {
+        return Err(TemporalPortError::BudgetExceeded {
+            resource: "summary source relations",
+        });
+    }
+    let session_id = candidate
+        .session
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate session is missing"))
+        .and_then(|value| {
+            SessionId::new(value).map_err(|error| read_error(CANDIDATE_OPERATION, error))
+        })?;
+    let generation = if snapshot.has_authoritative_participant_manifest() {
+        let source = candidate
+            .source
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate provider is missing"))?;
+        snapshot
+            .participant_manifest()
+            .entries()
+            .iter()
+            .find(|participant| {
+                participant.session_id() == &session_id && participant.source_id() == source
+            })
+            .map(tracedecay_temporal_query::ports::TemporalParticipantGeneration::generation)
+            .ok_or_else(|| {
+                read_message(
+                    CANDIDATE_OPERATION,
+                    "candidate is absent from the frozen participant manifest",
+                )
+            })?
+    } else {
+        snapshot.watermarks().generation
+    };
+    let control = snapshot.request().execution_control();
+    control.checkpoint()?;
+    let visits = store
+        .summary_sources(
+            project_id,
+            &session_id,
+            generation,
+            &candidate.retriever_record_id,
+            max_relations,
+            Arc::new(CandidateGraphCancellation(control.clone())),
+        )
+        .map_err(|error| map_candidate_relation_error(error, control))?;
+    control.checkpoint()?;
+    Ok(visits
+        .into_iter()
+        .filter_map(|visit| match visit.source {
+            SummarySourceVisitKind::Anchor { anchor_id } => Some(anchor_id),
+            SummarySourceVisitKind::Summary { .. } => None,
+        })
+        .collect())
+}
+
+fn map_candidate_relation_error(
+    error: SessionRelationError,
+    control: &ExecutionControl,
+) -> TemporalPortError {
+    if let Err(control_error) = control.checkpoint() {
+        return control_error;
+    }
+    match error {
+        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
+            resource: "summary source relations",
+        },
+        SessionRelationError::Cancelled => TemporalPortError::Cancelled,
+        SessionRelationError::Invalid
+        | SessionRelationError::Cycle
+        | SessionRelationError::NotFound
+        | SessionRelationError::Unavailable
+        | SessionRelationError::Conflict
+        | SessionRelationError::Corrupt
+        | SessionRelationError::Storage(_) => read_error(CANDIDATE_OPERATION, error),
+    }
+}
 
 pub(super) fn validate_clause(
     clause: &CandidateClause,
@@ -137,41 +245,6 @@ impl RootAuthorityChannel {
                             AND json_extract(authority_anchor.owner_json, '$.project_id')
                                 = authority_session.project_key)
                        )
-                       AND (?{provider_param} IS NULL OR EXISTS (
-                           WITH RECURSIVE retained_sources(
-                               source_anchor_id, source_summary_id, depth
-                           ) AS (
-                               SELECT source_anchor_id, source_summary_id, 0
-                               FROM session_summary_sources
-                               WHERE summary_id = summary.summary_id
-                               UNION ALL
-                               SELECT nested.source_anchor_id, nested.source_summary_id,
-                                      retained.depth + 1
-                               FROM retained_sources AS retained
-                               JOIN session_summary_nodes AS retained_summary
-                                 ON retained_summary.summary_id = retained.source_summary_id
-                                AND retained_summary.session_id = summary.session_id
-                               JOIN session_summary_sources AS nested
-                                 ON nested.summary_id = retained_summary.summary_id
-                               WHERE retained.depth < 63
-                               LIMIT 257
-                           )
-                           SELECT 1
-                           FROM retained_sources AS retained
-                           JOIN session_occurrences AS source_occurrence
-                             ON source_occurrence.retrieval_anchor_id =
-                                retained.source_anchor_id
-                            AND source_occurrence.session_id = summary.session_id
-                            AND source_occurrence.generation = generation.generation
-                           JOIN observations AS source_observation
-                             ON source_observation.observation_id =
-                                source_occurrence.source_observation_id
-                           WHERE json_extract(
-                               source_observation.observation_json,
-                               '$.identity.source.provider'
-                           ) = ?{provider_param}
-                           LIMIT 1
-                       ))
                      LIMIT 1
                  )"
             ),
@@ -539,7 +612,6 @@ pub(super) async fn query_candidate_clause(
                 root_project_key.ok_or_else(|| {
                     read_message(CANDIDATE_OPERATION, "authorized root is missing")
                 })?,
-                provider,
                 SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.session_id.clone()),
@@ -626,7 +698,6 @@ pub(super) async fn query_candidate_clause(
             vec![
                 SqlValue::Text(session_id.as_str().to_string()),
                 SqlValue::Integer(generation),
-                provider,
                 SqlValue::Text(fts_phrase(&clause.value)),
                 SqlValue::Integer(cursor.knowledge_at),
                 SqlValue::Text(cursor.stable_id.clone()),
