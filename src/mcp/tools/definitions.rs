@@ -1018,11 +1018,14 @@ mod tests {
         )
         .expect("catalog-filtered definitions");
 
-        assert!(
-            definitions
-                .iter()
-                .any(|definition| definition.name == "tracedecay_ast_grep_rewrite")
-        );
+        let source_edit = definitions
+            .iter()
+            .find(|definition| definition.name == "tracedecay_ast_grep_rewrite")
+            .expect("available source-edit handler is advertised");
+        let source_edit_dispatch = &source_edit.meta.as_ref().unwrap()["tracedecay/dispatch"];
+        assert_eq!(source_edit_dispatch["effect"], "source_edit");
+        assert_eq!(source_edit_dispatch["availability"]["state"], "available");
+        assert_eq!(source_edit_dispatch["idempotency"], "key_required");
 
         let fingerprints = definitions
             .iter()
