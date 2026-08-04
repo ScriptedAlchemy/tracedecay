@@ -160,9 +160,7 @@ impl McpServer {
     }
 
     /// Re-read the file-to-token-count map from the DB and swap it into the
-    /// cached `file_token_map`. Called after each lazy sync triggered by
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so the accounting
-    /// tracks newly indexed / removed files.
+    /// cached `file_token_map` for explicit lifecycle callers.
     pub async fn refresh_file_token_map(&self) {
         // best-effort; leave stale map in place if the DB read fails
         let Ok(fresh) = self.cg_snapshot().await.get_file_token_map().await else {

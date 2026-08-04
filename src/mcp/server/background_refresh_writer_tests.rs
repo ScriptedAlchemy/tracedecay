@@ -3,139 +3,25 @@ use super::{
     BackgroundRefreshRequest, BackgroundRefreshWriter, McpServer, McpServerConstructionContext,
 };
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[tokio::test]
-async fn read_refresh_uses_injected_writer_without_direct_fallback() {
-    let (cg, dir, authority) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
-    // `init_indexed_repo` persists `session_start_sync = false`, but the handle
-    // it returns still carries the init-time config snapshot (default true).
-    // Re-open the project so the constructed server honors the persisted
-    // setting and does not spawn a startup catch-up that would also drive the
-    // injected writer, leaving this test's explicit read refresh as the only
-    // observed call.
-    drop(cg);
-    let cg = authority.reopen_project_graph(&root).await;
-    let source_path = root.join("src/a.rs");
-    std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
-    std::fs::File::options()
-        .write(true)
-        .open(&source_path)
-        .expect("open modified source")
-        .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
-        .expect("advance source mtime");
-    assert!(
-        cg.find_stale_files()
-            .await
-            .iter()
-            .any(|path| path == "src/a.rs"),
-        "fixture must be stale before refresh"
-    );
-
-    let observed = Arc::new(Mutex::new(Vec::<(PathBuf, usize)>::new()));
-    let refresh_writer: BackgroundRefreshWriter = {
-        let observed = Arc::clone(&observed);
-        Arc::new(move |request: BackgroundRefreshRequest| {
-            let observed = Arc::clone(&observed);
-            Box::pin(async move {
-                observed
-                    .lock()
-                    .expect("recording lock")
-                    .push((request.project_root, request.full_sync_escalation_files));
-                Ok(Some(HashMap::from([("injected.rs".to_string(), 41)])))
-            })
-        })
-    };
-    let server = McpServer::new_with_context(
-        McpServerConstructionContext::direct(cg, None)
-            .with_background_refresh_writer(refresh_writer),
-    )
-    .await;
-    assert!(
-        server
-            .wait_for_startup_catch_up(Duration::from_secs(5))
-            .await,
-        "startup catch-up settles before the explicit read refresh"
-    );
-    observed.lock().expect("recording lock").clear();
-    let snapshot = server.cg_snapshot().await;
-    server
-        .background_refresh_running
-        .store(true, Ordering::Release);
-
-    server.spawn_read_refresh_task(&snapshot, 17);
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while server.background_refresh_running.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("injected refresh settles");
-
-    assert_eq!(
-        observed.lock().expect("recording lock").as_slice(),
-        &[(root, 17)]
-    );
-    assert_eq!(
-        server.file_token_map_snapshot(),
-        HashMap::from([("injected.rs".to_string(), 41)])
-    );
-    assert!(
-        snapshot
-            .find_stale_files()
-            .await
-            .iter()
-            .any(|path| path == "src/a.rs"),
-        "injected refresh must not execute the direct open/sync fallback"
-    );
-    assert_ne!(
-        server
-            .last_background_refresh_done_at
-            .load(Ordering::Acquire),
-        0,
-        "completion timestamp must be preserved"
-    );
-    server.shutdown().await;
-}
-
-/// Edit-shaped tools claim the lazy-sync window but never wait on it: the tool
-/// answers while the sync is still running, and the sync completes behind it.
-#[tokio::test]
-async fn lazy_stale_sync_is_detached_from_the_request() {
+async fn admitted_tool_call_does_not_start_a_legacy_refresh() {
     let (cg, dir, authority) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
     drop(cg);
     let cg = authority.reopen_project_graph(&root).await;
 
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let completed = Arc::new(AtomicUsize::new(0));
-    // Armed only after startup catch-up has settled, so the startup sync (which
-    // drives the same injected writer) is not the call this test parks.
-    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let calls = Arc::new(AtomicUsize::new(0));
     let refresh_writer: BackgroundRefreshWriter = {
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
-        let completed = Arc::clone(&completed);
-        let armed = Arc::clone(&armed);
+        let calls = Arc::clone(&calls);
         Arc::new(move |_request: BackgroundRefreshRequest| {
-            let entered = Arc::clone(&entered);
-            let release = Arc::clone(&release);
-            let completed = Arc::clone(&completed);
-            let armed = Arc::clone(&armed);
+            let calls = Arc::clone(&calls);
             Box::pin(async move {
-                if !armed.load(Ordering::Acquire) {
-                    return Ok(Some(HashMap::new()));
-                }
-                entered.notify_one();
-                release.notified().await;
-                completed.fetch_add(1, Ordering::AcqRel);
-                Ok(Some(HashMap::from([("detached.rs".to_string(), 7)])))
+                calls.fetch_add(1, Ordering::AcqRel);
+                Ok(Some(HashMap::new()))
             })
         })
     };
@@ -148,41 +34,23 @@ async fn lazy_stale_sync_is_detached_from_the_request() {
         server
             .wait_for_startup_catch_up(Duration::from_secs(5))
             .await,
-        "startup catch-up settles before the lazy sync claim"
+        "startup catch-up settles before request admission"
     );
-    armed.store(true, Ordering::Release);
-    // Re-arm the cooldown so this call is the one that claims the window.
-    server.last_staleness_check_at.store(0, Ordering::Release);
+    calls.store(0, Ordering::Release);
+    let snapshot = server.cg_snapshot().await;
+
     server
-        .background_refresh_running
-        .store(false, Ordering::Release);
+        .begin_tool_dispatch("tracedecay_search", &snapshot, false)
+        .await;
+    server
+        .begin_tool_dispatch("tracedecay_str_replace", &snapshot, false)
+        .await;
 
-    // The request path. It must return while the injected sync is parked.
-    tokio::time::timeout(Duration::from_secs(5), server.maybe_sync_if_stale())
-        .await
-        .expect("maybe_sync_if_stale must not block on the sync");
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
-        .await
-        .expect("the detached sync must have started");
+    tokio::task::yield_now().await;
     assert_eq!(
-        completed.load(Ordering::Acquire),
+        calls.load(Ordering::Acquire),
         0,
-        "the tool answered before the sync finished"
-    );
-
-    // ...and the sync still completes, refreshing the token map.
-    release.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while server.background_refresh_running.load(Ordering::Acquire) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the detached sync settles");
-    assert_eq!(completed.load(Ordering::Acquire), 1);
-    assert_eq!(
-        server.file_token_map_snapshot(),
-        HashMap::from([("detached.rs".to_string(), 7)])
+        "read and edit admission must serve the sealed generation without opening legacy refresh"
     );
     server.shutdown().await;
 }

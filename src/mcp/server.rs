@@ -50,6 +50,7 @@ mod lifecycle;
 mod project_registry;
 mod protocol;
 mod read_coalescing;
+mod request_receipts;
 mod requests;
 mod rmcp;
 mod routing;
@@ -332,16 +333,9 @@ pub struct McpServer {
     /// field measuring the handler's pure execution time. Toggled by
     /// `tracedecay serve --timings`. Off by default to keep responses clean.
     timings_enabled: AtomicBool,
-    /// UNIX timestamp (secs) of the most recent staleness check started by
-    /// the server. Read-modify-update via `compare_exchange` in
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale) so concurrent
-    /// tool calls don't pile on the same walk.
-    last_staleness_check_at: AtomicI64,
     /// UNIX timestamp (secs) of the most recent staged-automation notice
-    /// check. Same `compare_exchange` cooldown pattern as
-    /// [`last_staleness_check_at`](Self::last_staleness_check_at) so the
-    /// pending-review stores are re-read at most once per window no matter
-    /// how many tool calls fire.
+    /// check. A compare-exchange cooldown keeps pending-review stores from
+    /// being re-read more than once per window.
     last_automation_notice_check_at: AtomicI64,
     /// Cached worktree-vs-index mismatch detection for this session. `None`
     /// when no mismatch exists (the common case) or detection was skipped
@@ -356,26 +350,6 @@ pub struct McpServer {
     /// previous flag soup carried. `Arc` so the detached ingest task can
     /// settle the same machine that waiters and shutdown read.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
-    /// `true` while a detached sync-on-read refresh (D4) is in flight.
-    /// Single-flights the background refresh: `compare_exchange`d to `true`
-    /// before spawning and cleared on completion. Also read by the D7
-    /// staleness banner so an in-progress refresh emits the informational
-    /// "refresh in progress" note instead of the manual-sync warning.
-    /// `Arc` so the detached refresh task holds a cheap clone to clear it on
-    /// completion.
-    background_refresh_running: Arc<AtomicBool>,
-    /// UNIX timestamp (secs) of the most recent sync-on-read background
-    /// refresh spawn (D4). Gates the read-refresh cooldown independently of
-    /// [`last_staleness_check_at`](Self::last_staleness_check_at), which
-    /// gates the *blocking* edit-tool path — the two cooldowns must not
-    /// share a stamp or one path would starve the other.
-    last_background_refresh_at: AtomicI64,
-    /// UNIX timestamp (secs) at which the most recent background refresh (D4)
-    /// *completed*. `0` = never. Read by the D7 staleness banner so a refresh
-    /// that finished within `read_cooldown_secs` suppresses the banner
-    /// entirely (the index is as fresh as auto-sync can make it). `Arc` so
-    /// the detached refresh task can stamp it on completion.
-    last_background_refresh_done_at: Arc<AtomicI64>,
     /// The `[sync]` config resolved once at construction from the project
     /// root (plus `TRACEDECAY_SYNC_*` env overrides). Cached so the read
     /// hot path never re-reads the config file per `tools/call`.
@@ -445,15 +419,9 @@ impl McpServer {
 
     /// Creates a new MCP server backed by the given code graph.
     ///
-    /// Index freshness for source-editing tools is maintained by a lazy
-    /// staleness check ([`maybe_sync_if_stale`](Self::maybe_sync_if_stale))
-    /// gated by a 30 s cooldown — there is no background watcher task. This
-    /// replaces the
-    /// `notify-debouncer-full` watcher removed in v6.x (#80), which was
-    /// the source of severe CPU and memory pressure on large monorepos
-    /// where nested ignored directories (`apps/*/node_modules`,
-    /// `packages/*/target`) drove unbounded event traffic and `FileId`
-    /// cache growth.
+    /// Index freshness is owned by daemon code-index scheduler ingress.
+    /// MCP requests serve the current sealed generation without opening a
+    /// second scan or refresh path.
     pub async fn new(cg: TraceDecay, scope_prefix: Option<String>) -> Arc<Self> {
         Self::new_with_context(McpServerConstructionContext::direct(cg, scope_prefix)).await
     }
@@ -898,13 +866,9 @@ impl McpServer {
             scope_prefix,
             shutdown_done: AtomicBool::new(false),
             timings_enabled: AtomicBool::new(telemetry_config.timings),
-            last_staleness_check_at: AtomicI64::new(0),
             last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up: Arc::new(StartupCatchUpMachineV1::default()),
-            background_refresh_running: Arc::new(AtomicBool::new(false)),
-            last_background_refresh_at: AtomicI64::new(0),
-            last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
             sync_config,
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
@@ -1022,9 +986,7 @@ impl McpServer {
     }
 
     /// Test-only accessor for the backing `TraceDecay`. Exposed so
-    /// integration tests can drive the staleness pipeline directly,
-    /// bypassing the 30 s cooldown in
-    /// [`maybe_sync_if_stale`](Self::maybe_sync_if_stale).
+    /// integration tests can inspect the currently served graph directly.
     #[doc(hidden)]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await

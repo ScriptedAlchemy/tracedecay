@@ -1510,7 +1510,6 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     .unwrap();
     cg.index_all().await.unwrap();
 
-    let started = std::time::Instant::now();
     let result = handle_tool_call_with_registry_and_implicit_project(
         &cg,
         "tracedecay_context",
@@ -1521,12 +1520,31 @@ async fn a_warm_call_is_unaffected_by_the_ceiling() {
     )
     .await
     .expect("a warm context call succeeds under the ceiling");
-    assert!(
-        started.elapsed() < TOOL_DISPATCH_CEILING,
-        "a warm call must finish far inside the ceiling, took {:?}",
-        started.elapsed(),
-    );
     assert!(result.value["content"][0]["text"].is_string());
+
+    let mut samples = Vec::with_capacity(40);
+    for _ in 0..40 {
+        let started = std::time::Instant::now();
+        let result = handle_tool_call_with_registry_and_implicit_project(
+            &cg,
+            "tracedecay_context",
+            json!({ "task": "probe" }),
+            None,
+            None,
+            ToolCallRegistryOptions::default(),
+        )
+        .await
+        .expect("a measured warm context call succeeds");
+        assert!(result.value["content"][0]["text"].is_string());
+        samples.push(started.elapsed());
+    }
+    samples.sort_unstable();
+    let p95 = samples[37];
+    eprintln!("warm tracedecay_context p95 across 40 samples: {p95:?}");
+    assert!(
+        p95 < std::time::Duration::from_secs(1),
+        "warm tracedecay_context p95 must remain interactive, got {p95:?}",
+    );
 
     cg.close();
 }

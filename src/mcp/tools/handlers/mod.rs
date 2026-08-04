@@ -94,7 +94,9 @@ pub(crate) use lcm_tool_entry::{
 pub use session_authorities::SessionAuthorities;
 use std::path::Path;
 use std::sync::Arc;
-pub(crate) use tool_call_support::selected_registered_project_reader;
+pub(crate) use tool_call_support::{
+    McpToolDispatchControl, McpToolDispatchStage, selected_registered_project_reader,
+};
 pub(super) use tool_call_support::{json_result, text_tool_result};
 
 use serde_json::{Value, json};

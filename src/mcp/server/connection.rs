@@ -23,7 +23,7 @@ fn queued_cancellable_request_key(
                     .as_ref()
                     .and_then(|params| params.get("name"))
                     .and_then(Value::as_str)
-                    .is_some_and(super::requests::tool_supports_live_cancellation)
+                    .is_some()
                 && request
                     .id
                     .as_ref()
@@ -94,12 +94,14 @@ impl McpServer {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
                         }
+                        let _ = (&mut handling).await;
                         return Ok((None, true));
                     }
                     () = peer_close_check => {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
                         }
+                        let _ = (&mut handling).await;
                         return Ok((None, true));
                     }
                 }
@@ -110,6 +112,7 @@ impl McpServer {
                     if let Some(id) = request.id.as_ref() {
                         let _ = self.cancel_application_surface_request(id, &connection_scope);
                     }
+                    let _ = (&mut handling).await;
                     return Ok((None, true));
                 }
                 incoming = transport.read_line() => {
@@ -125,6 +128,7 @@ impl McpServer {
                             if let Some(id) = request.id.as_ref() {
                                 let _ = self.cancel_application_surface_request(id, &connection_scope);
                             }
+                            let _ = (&mut handling).await;
                             return Err(error.into());
                         }
                     };
@@ -156,6 +160,7 @@ impl McpServer {
                         if let Some(id) = request.id.as_ref() {
                             let _ = self.cancel_application_surface_request(id, &connection_scope);
                         }
+                        let _ = (&mut handling).await;
                         return Ok((None, true));
                     }
                     pending_lines.push_back(line);
@@ -442,17 +447,25 @@ impl McpServer {
             let response = if rejecting_for_drain {
                 parsed.as_ref().ok().and_then(|request| {
                     request.id.clone().map(|id| {
-                        JsonRpcResponse::error(
+                        let response = JsonRpcResponse::error(
                             id,
                             ErrorCode::InternalError,
                             "TraceDecay daemon is draining for upgrade; retry the request"
                                 .to_string(),
-                        )
+                        );
+                        if request.method == "tools/call" {
+                            super::request_receipts::finish_early_tool_call_response(
+                                response,
+                                super::request_receipts::ToolCallTerminal::Shutdown,
+                            )
+                        } else {
+                            response
+                        }
                     })
                 })
             } else if !project_request_admitted {
                 revocable_tool_call.as_ref().map(|(id, tool_name)| {
-                    JsonRpcResponse::error_with_data(
+                    let response = JsonRpcResponse::error_with_data(
                         id.clone(),
                         ErrorCode::InternalError,
                         "tool project route failed: project server was retired".to_owned(),
@@ -462,6 +475,10 @@ impl McpServer {
                             "retryable": true,
                             "detail": "the retained project server was replaced or revoked; retry against the current owner",
                         })),
+                    );
+                    super::request_receipts::finish_early_tool_call_response(
+                        response,
+                        super::request_receipts::ToolCallTerminal::Unavailable,
                     )
                 })
             } else {
@@ -477,13 +494,12 @@ impl McpServer {
                                 )
                                 .await;
                         }
-                        let cancellable_tool_call = request.method == "tools/call"
-                            && request
-                                .params
-                                .as_ref()
-                                .and_then(|params| params.get("name"))
-                                .and_then(Value::as_str)
-                                .is_some_and(super::requests::tool_supports_live_cancellation);
+                        // Every tools/call admission now owns one dispatch
+                        // cancellation signal, even when a legacy handler does
+                        // not consume the request id itself. This keeps
+                        // connection teardown from dropping an in-flight
+                        // handler and detaching blocking work.
+                        let cancellable_tool_call = request.method == "tools/call";
                         if cancellable_tool_call {
                             let external_shutdown_requested = async {
                                 if listen_for_process_signals {
