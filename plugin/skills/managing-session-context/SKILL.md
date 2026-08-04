@@ -42,8 +42,8 @@ with `tracedecay_project_search`/`tracedecay_project_context`, then pass
 4. **Summary-DAG drill-down:** use `tracedecay_lcm_describe` (`provider`,
    `session_id`, optional target) to inspect a session or node without opening
    its body, then `tracedecay_lcm_expand` (`provider`, `session_id`, target) to
-   open one raw message, summary node, or external payload. Page immediate
-   summary sources with `source_offset`/`source_limit`. Continue only with the
+   open one raw message, summary node, or external payload. Bound immediate
+   summary sources with `source_limit`. Continue only with the
    returned opaque `next_cursor` unchanged with the same target, source limit, and content slice;
    changing a bound continuation input is denied. For a bounded prompt
    context, `tracedecay_lcm_expand_query` takes `provider`, `session_id`, and

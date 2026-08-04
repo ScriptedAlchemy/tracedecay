@@ -551,7 +551,7 @@ assert "node_id" in expand_params["properties"]
 assert "store_id" in expand_params["properties"]
 assert "externalized_ref" in expand_params["properties"]
 assert "session_id" in expand_params["properties"]
-assert "source_offset" in expand_params["properties"]
+assert "source_offset" not in expand_params["properties"]
 assert "source_limit" in expand_params["properties"]
 assert "target" not in expand_params["properties"]
 assert expand_params.get("required") == []
@@ -2844,7 +2844,7 @@ summary = plugin._translate_lcm_args(
     },
 )
 assert summary["target"] == {"kind": "summary_node", "node_id": "summary-v1:abc"}
-assert summary["source_offset"] == 4
+assert "source_offset" not in summary
 assert summary["source_limit"] == 7
 assert summary["content_offset"] == 3
 assert summary["cursor"] == "opaque-summary-page"
