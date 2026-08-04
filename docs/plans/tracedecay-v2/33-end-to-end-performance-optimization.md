@@ -18,7 +18,6 @@ Users experience materially faster or less resource-intensive:
 - edit-to-diagnostic, impact, CI/review, and proximity feedback;
 - dashboard investigation, health, settings, and legal remediation;
 - authorized multi-root query and explicit Git operations;
-- remote capture, synchronization, query, backup, restore, and failover;
 - task/work updates, admitted provider execution, cancellation, and resume;
 - public SDK operations; and
 - startup, package installation, migration, recovery, and common developer

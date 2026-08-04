@@ -802,7 +802,6 @@ pub(super) async fn production_project_server(
                 Arc::clone(&session_db),
                 profile_identity.profile_root().to_path_buf(),
                 transcript_source_home.clone(),
-                tracedecay_application::doctor::RemoteOperationalReadV1::Unconfigured,
                 cg.get_config().sync.retention.clone(),
                 invocation.code_index_schedulers.clone(),
                 Arc::clone(&diagnostic_broker),

@@ -96,3 +96,31 @@ fn nested_subcommands_accept_help() {
 fn tool_name_help_still_prints_tool_schema() {
     assert_help_succeeds(&["tool", "search", "--help"], "tracedecay tool search");
 }
+
+#[test]
+fn cli_help_does_not_advertise_retired_remote_brain_commands() {
+    let output = Command::new(tracedecay_bin())
+        .arg("--help")
+        .output()
+        .expect("run tracedecay --help");
+    assert!(output.status.success());
+    let rendered = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+    .to_lowercase();
+
+    for retired_surface in [
+        "remote brain",
+        "remote authority",
+        "remote enrollment",
+        "remote replay",
+        "remote recovery",
+    ] {
+        assert!(
+            !rendered.contains(retired_surface),
+            "CLI help advertised retired {retired_surface:?}: {rendered}"
+        );
+    }
+}

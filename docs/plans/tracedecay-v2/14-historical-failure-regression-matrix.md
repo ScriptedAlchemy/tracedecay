@@ -213,9 +213,6 @@ acceptance, effect success, or an independent outcome.
   visible; stack fanout obeys debounce, preflight concurrency, batch,
   overflow, watermark, restart, and circuit-breaker contracts; Git apply is
   exact, approved, mechanical, and receipt-backed.
-- **PR16:** remote fencing, offline replay, cache verification, backup,
-  restore, failover, retention, and deletion never admit two writers or move
-  unsaved overlays/analyzers/proximity into durable or remote state.
 - **PR17:** canonical work identity, readiness, proposals, task intelligence,
   separate ephemeral expertise, provider/runtime authority, execution
   topology, review, outcomes, handoff, replanning, and Git integration retain
@@ -251,7 +248,7 @@ acceptance, effect success, or an independent outcome.
   the direct feedback rollback switch.
 - Plan 37 tests keep one-shot termination, GitHub item lifecycle, GitHub ingress
   outcome, semantic-provider state, CI provenance, proximity threshold,
-  expansion, multi-root fanout, and remote fencing as separate typed
+  expansion, multi-root fanout, and authority boundaries as separate typed
   dimensions. No automatic continuation, GitHub write, CI rerun, task
   mutation, Git mutation, schedule, or clean-by-silence is representable.
 - Plan 09 Doctor tests compose source disagreements into one finding family,
