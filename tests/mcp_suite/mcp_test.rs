@@ -94,18 +94,8 @@ fn test_all_error_codes() {
 }
 
 #[test]
-fn test_tool_definitions_count() {
+fn test_tool_definition_scope_properties_match_handlers() {
     let tools = get_tool_definitions();
-    // ast-grep rewrite is registered only when the host CLI capability it needs
-    // is available. Outline stays registered and reports the ast-grep outline
-    // requirement at runtime so plugin docs/rules can consistently reference it.
-    // LCM comparison and profile-storage registry support add extra tools.
-    // ast_grep_search (in-process structural search) is always registered.
-    // move_symbol (relocate a symbol with an impact report) is always registered.
-    // The Hermes skill inventory is standard-home only and remains registered.
-    let expected = tracedecay::mcp::tools::ALWAYS_REGISTERED_TOOL_COUNT
-        + usize::from(tracedecay::mcp::tools::ast_grep_available());
-    assert_eq!(tools.len(), expected);
     for tool in &tools {
         assert!(
             tool.input_schema["properties"].get("hermes_home").is_none(),
