@@ -230,6 +230,7 @@ impl TraceDecay {
     where
         F: Fn(usize, usize, &str),
     {
+        self.ensure_branch_writable("full index")?;
         let sync_lease = match locks {
             Some(locks) => self.begin_active_sync_with_locks(locks)?,
             None => self.begin_active_sync()?,
@@ -255,6 +256,7 @@ impl TraceDecay {
         F: Fn(usize, usize, &str),
         V: Fn(&str),
     {
+        self.ensure_branch_writable("full index")?;
         let sync_lease = self.begin_active_sync()?;
         let (result, sync_lease) = self
             .index_all_with_progress_verbose_under_lease(on_file, on_verbose, sync_lease)
@@ -278,7 +280,6 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "project root is not a directory"
         );
-        self.ensure_branch_writable("full index")?;
         let start = Instant::now();
 
         // 1. Clear existing data and enter bulk-load mode
