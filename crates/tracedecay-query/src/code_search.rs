@@ -31,6 +31,9 @@ pub struct CodeIndexSearchAuthorityV1 {
 pub struct CodeIndexSearchRequestV1 {
     pub project_root: PathBuf,
     pub query: String,
+    /// Exact Git commit whose published code generation must answer. `None`
+    /// selects the current admitted generation.
+    pub source_revision: Option<tracedecay_domain::GitOidV1>,
     pub limit: usize,
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub mode: CodeIndexSearchModeV1,
@@ -230,6 +233,7 @@ impl CodeIndexSearchCoverageV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeIndexSearchDisplayV1 {
+    pub node_id: Option<String>,
     pub name: String,
     pub qualified_name: String,
     pub kind: String,
@@ -280,6 +284,62 @@ pub type CodeIndexSearchFuture =
 /// fail capability-closed instead of substituting the legacy graph search.
 pub type CodeIndexSearchExecutor =
     Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchSymbolV1 {
+    pub qualified_name: String,
+    pub name: String,
+    pub kind: String,
+    pub file: String,
+    pub content_digest: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct CodeIndexBranchDiffRequestV1 {
+    pub project_root: PathBuf,
+    pub base_revision: tracedecay_domain::GitOidV1,
+    pub head_revision: tracedecay_domain::GitOidV1,
+    pub file_filter: Option<String>,
+    pub kind_filter: Option<String>,
+    pub authority: Option<CodeIndexSearchAuthorityV1>,
+    pub deadline: Option<tracedecay_application::Deadline>,
+    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchChangedSymbolV1 {
+    pub base: CodeIndexBranchSymbolV1,
+    pub head: CodeIndexBranchSymbolV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffCompletedV1 {
+    pub base_generation: String,
+    pub head_generation: String,
+    pub added: Vec<CodeIndexBranchSymbolV1>,
+    pub removed: Vec<CodeIndexBranchSymbolV1>,
+    pub changed: Vec<CodeIndexBranchChangedSymbolV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffUnavailableV1 {
+    pub base_generation: Option<String>,
+    pub head_generation: Option<String>,
+    pub reason: CodeIndexSearchUnavailableReasonV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CodeIndexBranchDiffOutcomeV1 {
+    Complete(CodeIndexBranchDiffCompletedV1),
+    Unavailable(CodeIndexBranchDiffUnavailableV1),
+}
+
+pub type CodeIndexBranchDiffFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = CodeIndexBranchDiffOutcomeV1> + Send + 'static>,
+>;
+
+pub type CodeIndexBranchDiffExecutor =
+    Arc<dyn Fn(CodeIndexBranchDiffRequestV1) -> CodeIndexBranchDiffFuture + Send + Sync + 'static>;
 
 #[cfg(test)]
 mod tests {
