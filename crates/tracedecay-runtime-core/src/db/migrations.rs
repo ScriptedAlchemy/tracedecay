@@ -358,6 +358,7 @@ async fn run_migrations(conn: &Connection, current: u32) -> Result<()> {
         run_migration(conn, version).await?;
         set_version(conn, version).await?;
     }
+    ensure_metadata_table(conn, "migrate").await?;
     conn.execute(
         "INSERT OR REPLACE INTO metadata (key, value)
          VALUES (?1, ?2)",
@@ -896,18 +897,7 @@ async fn migrate_v1(conn: &Connection) -> Result<()> {
 
 /// Adds the key-value metadata table for persistent counters.
 async fn migrate_v2(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )",
-        (),
-    )
-    .await
-    .map_err(|e| TraceDecayError::Database {
-        message: format!("v2: failed to create metadata table: {e}"),
-        operation: "migrate_v2".to_string(),
-    })?;
+    ensure_metadata_table(conn, "migrate_v2").await?;
 
     // Drop the legacy schema_versions table if it exists.
     conn.execute("DROP TABLE IF EXISTS schema_versions", ())
@@ -917,6 +907,22 @@ async fn migrate_v2(conn: &Connection) -> Result<()> {
             operation: "migrate_v2".to_string(),
         })?;
 
+    Ok(())
+}
+
+async fn ensure_metadata_table(conn: &Connection, operation: &str) -> Result<()> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )",
+        (),
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("{operation}: failed to create metadata table: {e}"),
+        operation: operation.to_string(),
+    })?;
     Ok(())
 }
 
