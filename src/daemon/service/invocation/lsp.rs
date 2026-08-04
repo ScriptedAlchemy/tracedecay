@@ -3,6 +3,26 @@
 use super::*;
 use tracedecay_lsp::MAX_LSP_WORKSPACE_ROOTS;
 
+pub(super) fn admit_lsp_control(
+    request_id: String,
+    deadline: &Deadline,
+    cancellation: &CancellationContext,
+) -> Result<(), DaemonInvocationResponse> {
+    if cancellation.is_cancelled() {
+        return Err(DaemonInvocationResponse::application_problem(
+            request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        ));
+    }
+    if deadline.is_elapsed_at(current_micros()) {
+        return Err(DaemonInvocationResponse::application_problem(
+            request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn canonicalize_lsp_roots(roots: &mut [(PathBuf, String, ResolvedScope)]) -> bool {
     roots.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
     !roots
