@@ -2,20 +2,24 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tracedecay_api::HttpApplicationOperation;
-use tracedecay_tool_catalog::ExecutableUnavailableDispositionV1;
+use tracedecay_tool_catalog::{
+    EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
+};
 pub trait TypedOperation {
     type Request: Serialize;
     type Result: DeserializeOwned;
     const OPERATION_ID: &'static str;
     const ROUTE: &'static str;
     const BINDING_ID: &'static str;
+    const EFFECT: EffectClass;
+    const IDEMPOTENCY: IdempotencyContract;
     const RESULT_SCHEMA_ID: &'static str;
     const RESULT_SCHEMA_REVISION: u32;
 }
 macro_rules! typed_operation {
     (
         $name:ident, $module:ident, $operation:literal, $route:literal, $binding:literal,
-        $schema:literal, $revision:literal
+        $effect:expr, $idempotency:expr, $schema:literal, $revision:literal
     ) => {
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
         pub struct $name;
@@ -25,6 +29,8 @@ macro_rules! typed_operation {
             const OPERATION_ID: &'static str = $operation;
             const ROUTE: &'static str = $route;
             const BINDING_ID: &'static str = $binding;
+            const EFFECT: EffectClass = $effect;
+            const IDEMPOTENCY: IdempotencyContract = $idempotency;
             const RESULT_SCHEMA_ID: &'static str = $schema;
             const RESULT_SCHEMA_REVISION: u32 = $revision;
         }
@@ -1005,6 +1011,8 @@ typed_operation!(
     "operation.work.accept_proposal",
     "/application/work/accept-proposal",
     "binding.http.work.accept_proposal",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.accept_proposal.result",
     1
 );
@@ -1847,6 +1855,8 @@ typed_operation!(
     "operation.work.accept_task",
     "/application/work/accept-task",
     "binding.http.work.accept_task",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.accept_task.result",
     1
 );
@@ -2689,6 +2699,8 @@ typed_operation!(
     "operation.work.admit_execution",
     "/application/work/admit-execution",
     "binding.http.work.admit_execution",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.admit_execution.result",
     1
 );
@@ -3672,6 +3684,8 @@ typed_operation!(
     "operation.work.attach_runtime_evidence",
     "/application/work/attach-runtime-evidence",
     "binding.http.work.attach_runtime_evidence",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attach_runtime_evidence.result",
     1
 );
@@ -7902,6 +7916,8 @@ typed_operation!(
     "operation.work.attempt_acquire_lease",
     "/application/work/attempt/acquire-lease",
     "binding.http.work.attempt_acquire_lease",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_acquire_lease.result",
     1
 );
@@ -10757,6 +10773,8 @@ typed_operation!(
     "operation.work.attempt_cancel",
     "/application/work/attempt/cancel",
     "binding.http.work.attempt_cancel",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_cancel.result",
     1
 );
@@ -13538,6 +13556,8 @@ typed_operation!(
     "operation.work.attempt_finish",
     "/application/work/attempt/finish",
     "binding.http.work.attempt_finish",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_finish.result",
     1
 );
@@ -16397,6 +16417,8 @@ typed_operation!(
     "operation.work.attempt_publish_artifact",
     "/application/work/attempt/publish-artifact",
     "binding.http.work.attempt_publish_artifact",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_publish_artifact.result",
     1
 );
@@ -19151,6 +19173,8 @@ typed_operation!(
     "operation.work.attempt_publish_progress",
     "/application/work/attempt/publish-progress",
     "binding.http.work.attempt_publish_progress",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_publish_progress.result",
     1
 );
@@ -21954,6 +21978,8 @@ typed_operation!(
     "operation.work.attempt_recover",
     "/application/work/attempt/recover",
     "binding.http.work.attempt_recover",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_recover.result",
     1
 );
@@ -24675,6 +24701,8 @@ typed_operation!(
     "operation.work.attempt_renew_lease",
     "/application/work/attempt/renew-lease",
     "binding.http.work.attempt_renew_lease",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_renew_lease.result",
     1
 );
@@ -27739,6 +27767,8 @@ typed_operation!(
     "operation.work.attempt_start",
     "/application/work/attempt/start",
     "binding.http.work.attempt_start",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_start.result",
     1
 );
@@ -30680,6 +30710,8 @@ typed_operation!(
     "operation.work.attempt_terminalize",
     "/application/work/attempt/terminalize",
     "binding.http.work.attempt_terminalize",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.attempt_terminalize.result",
     1
 );
@@ -31536,6 +31568,8 @@ typed_operation!(
     "operation.work.create",
     "/application/work/create",
     "binding.http.work.create",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.create.result",
     1
 );
@@ -32630,6 +32664,8 @@ typed_operation!(
     "operation.work.delta",
     "/application/work/delta",
     "binding.http.work.delta",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
     "schema.work.delta.result",
     1
 );
@@ -33488,6 +33524,8 @@ typed_operation!(
     "operation.work.replan_dependencies",
     "/application/work/replan-dependencies",
     "binding.http.work.replan_dependencies",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.replan_dependencies.result",
     1
 );
@@ -34546,6 +34584,8 @@ typed_operation!(
     "operation.work.review_proposal",
     "/application/work/review-proposal",
     "binding.http.work.review_proposal",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.work.review_proposal.result",
     1
 );
@@ -35543,6 +35583,8 @@ typed_operation!(
     "operation.work.snapshot",
     "/application/work/snapshot",
     "binding.http.work.snapshot",
+    EffectClass::Read,
+    IdempotencyContract::NotRequired,
     "schema.work.snapshot.result",
     1
 );
@@ -35790,6 +35832,8 @@ typed_operation!(
     "operation.workflow.activate_definition",
     "/application/workflow/activate-definition",
     "binding.http.workflow.activate_definition",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.workflow.activate_definition.result",
     1
 );
@@ -38127,6 +38171,8 @@ typed_operation!(
     "operation.workflow.execute_fan_out",
     "/application/workflow/execute-fan-out",
     "binding.http.workflow.execute_fan_out",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.workflow.execute_fan_out.result",
     1
 );
@@ -39515,6 +39561,8 @@ typed_operation!(
     "operation.workflow.handoff_issue",
     "/application/workflow/handoff-issue",
     "binding.http.workflow.handoff_issue",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.workflow.handoff_issue.result",
     1
 );
@@ -40777,6 +40825,8 @@ typed_operation!(
     "operation.workflow.handoff_redeem",
     "/application/workflow/handoff-redeem",
     "binding.http.workflow.handoff_redeem",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.workflow.handoff_redeem.result",
     1
 );
@@ -41846,6 +41896,8 @@ typed_operation!(
     "operation.workflow.register_definition",
     "/application/workflow/register-definition",
     "binding.http.workflow.register_definition",
+    EffectClass::Administrative,
+    IdempotencyContract::Required,
     "schema.workflow.register_definition.result",
     1
 );

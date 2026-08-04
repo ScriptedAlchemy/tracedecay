@@ -90,9 +90,7 @@ fn sdk_method_name(operation_id: &OperationId) -> Result<String, CatalogValidati
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_tool_catalog::{
-        ExecutableUnavailableDispositionV1, OperationId, SdkTransportBindingV1,
-    };
+    use tracedecay_tool_catalog::{OperationId, SdkTransportBindingV1};
 
     use super::sdk_executable_binding_registry;
 
@@ -112,15 +110,18 @@ mod tests {
                 if route_path == "/application/work/snapshot"
         ));
 
-        let unmounted = registry
+        let workflow = registry
             .get(&OperationId::new("operation.workflow.register_definition").expect("operation ID"))
-            .expect("workflow capability is explicit");
+            .and_then(|availability| availability.binding())
+            .expect("mounted workflow register-definition");
         assert!(matches!(
-            unmounted,
-            tracedecay_tool_catalog::SdkExecutableBindingAvailabilityV1::Unavailable {
-                disposition: ExecutableUnavailableDispositionV1::RouteUnavailable,
-                ..
-            }
+            workflow.transport(),
+            SdkTransportBindingV1::Http { route_path }
+                if route_path == "/application/workflow/register-definition"
         ));
+        assert_eq!(
+            workflow.sdk_method().as_str(),
+            "workflow_register_definition"
+        );
     }
 }
