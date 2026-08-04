@@ -24,7 +24,7 @@ pub(crate) struct DaemonProjectSessionRetrievalRouter {
 }
 
 enum RoutedProjectService {
-    Ready(DaemonSessionRetrievalService),
+    Ready(Box<DaemonSessionRetrievalService>),
     Unavailable {
         code: &'static str,
         message: &'static str,
@@ -256,7 +256,7 @@ impl DaemonProjectSessionRetrievalRouter {
                 retryable: false,
             });
         };
-        Ok(RoutedProjectService::Ready(service))
+        Ok(RoutedProjectService::Ready(Box::new(service)))
     }
 
     fn routing_unavailable(

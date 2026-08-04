@@ -203,7 +203,7 @@ impl AllRegisteredCursor {
                 "all_registered cursor does not match this query or registered project set",
             ));
         }
-        if cursor.next_offset == 0 || cursor.next_offset % page_size != 0 {
+        if cursor.next_offset == 0 || !cursor.next_offset.is_multiple_of(page_size) {
             return Err(argument_error(
                 "all_registered cursor does not name a canonical page boundary",
             ));
