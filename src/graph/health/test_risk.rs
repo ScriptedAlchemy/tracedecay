@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
+use tracedecay_application::{
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadServiceV1,
+    GitHealthProjectionSnapshotV1, GitHealthProjectionUnavailableReasonV1,
+};
 
 use crate::errors::Result;
 use crate::tracedecay::TraceDecay;
@@ -12,6 +16,7 @@ const ATTRIBUTION_DEPTH: usize = 3;
 pub struct TestRiskReport {
     pub risks: Vec<TestRiskEntry>,
     pub summary: TestRiskSummary,
+    pub git_history: GitHealthProjectionAvailabilityV1,
 }
 
 #[derive(Debug, Serialize)]
@@ -26,7 +31,7 @@ pub struct TestRiskEntry {
     pub attribution_method: &'static str,
     pub attribution_depth: Option<usize>,
     pub risk: f64,
-    pub churn: usize,
+    pub churn: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,7 +77,7 @@ struct RiskEntry {
     attribution_method: TestAttributionMethod,
     attribution_depth: Option<usize>,
     risk: f64,
-    churn: usize,
+    churn: Option<usize>,
 }
 
 impl RiskEntry {
@@ -128,6 +133,7 @@ pub async fn analyze_test_risk(
     path_prefix: Option<&str>,
     include_tested: bool,
     limit: usize,
+    git_health: Option<&GitHealthProjectionReadServiceV1>,
 ) -> Result<TestRiskReport> {
     let all_nodes = cg.get_all_nodes().await?;
     let all_edges = cg.get_all_edges().await?;
@@ -236,21 +242,26 @@ pub async fn analyze_test_risk(
                 attribution_method,
                 attribution_depth,
                 risk,
-                churn: 0,
+                churn: None,
             }
         })
         .filter(|risk| include_tested || !risk.has_test())
         .collect();
 
-    let churn_map = crate::graph::git::file_churn(cg.project_root(), 90)
-        .await
-        .unwrap_or_default();
-    for risk in &mut risks {
-        let churn = churn_map.get(&risk.file).copied().unwrap_or(0);
-        risk.churn = churn;
-        if churn > 0 {
-            risk.risk *= (churn as f64 + 1.0).log2();
+    let git_history = git_health.map_or(
+        GitHealthProjectionAvailabilityV1::Unavailable {
+            reason: GitHealthProjectionUnavailableReasonV1::NotMounted,
+        },
+        GitHealthProjectionReadServiceV1::read,
+    );
+    match &git_history {
+        GitHealthProjectionAvailabilityV1::Ready { snapshot }
+        | GitHealthProjectionAvailabilityV1::Refreshing { snapshot, .. } => {
+            apply_churn(&mut risks, snapshot);
         }
+        GitHealthProjectionAvailabilityV1::Warming { .. }
+        | GitHealthProjectionAvailabilityV1::Stale { .. }
+        | GitHealthProjectionAvailabilityV1::Unavailable { .. } => {}
     }
     risks.sort_by(|a, b| {
         b.risk
@@ -284,6 +295,7 @@ pub async fn analyze_test_risk(
     risks.truncate(limit);
     Ok(TestRiskReport {
         risks: risks.into_iter().map(RiskEntry::into_public).collect(),
+        git_history,
         summary: TestRiskSummary {
             total_functions,
             tested: attributed_count,
@@ -310,6 +322,16 @@ pub async fn analyze_test_risk(
             confidence_note: "coverage_pct is a depth-3 static attribution lower bound; direct_unit is strongest, closure is calibrated integration-style evidence and keeps a higher residual risk than a direct test edge.",
         },
     })
+}
+
+fn apply_churn(risks: &mut [RiskEntry], snapshot: &GitHealthProjectionSnapshotV1) {
+    for risk in risks {
+        let churn = snapshot.file_churn.get(&risk.file).copied().unwrap_or(0);
+        risk.churn = Some(churn);
+        if churn > 0 {
+            risk.risk *= (churn as f64 + 1.0).log2();
+        }
+    }
 }
 
 fn build_test_attribution_depths(

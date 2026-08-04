@@ -330,6 +330,26 @@ pub(super) async fn production_project_server(
             .map_err(|error| TraceDecayError::Config {
                 message: format!("project search scope is invalid: {error:?}"),
             })?;
+    let git_health_projection_store = code_index_scheduler::scoped_code_index_store_root(
+        &code_index_store_root,
+        canonical_project_path,
+    )
+    .join("git-health.grafeo");
+    invocation.git_health_projections.mount(
+        canonical_project_path,
+        git_health_projection_store,
+        code_search_scope.clone(),
+    );
+    let git_health_projection_port: Arc<dyn tracedecay_application::GitHealthProjectionReadPortV1> =
+        Arc::new(invocation.git_health_projections.clone());
+    let git_health_projection_reader =
+        tracedecay_application::GitHealthProjectionReadServiceV1::new(
+            code_search_scope.clone(),
+            git_health_projection_port,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("Git health projection scope is invalid: {error}"),
+        })?;
     let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),
         &code_search_project_id,
@@ -595,6 +615,7 @@ pub(super) async fn production_project_server(
         },
     )
     .with_dashboard_code_index_freshness_reader(Arc::clone(&dashboard_code_index_freshness_reader))
+    .with_git_health_projection_reader(git_health_projection_reader.clone())
     .with_dashboard_feedback_status_reader(Arc::clone(&dashboard_feedback_status_reader))
     .with_diagnostics_lsp(Arc::clone(&diagnostic_broker))
     .with_code_index_hook_sink(Arc::clone(&code_index_hook_sink))
@@ -862,6 +883,7 @@ pub(super) async fn production_project_server(
             .with_dashboard_doctor_report_reader(doctor_report_reader)
             .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
             .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
+            .with_git_health_projection_reader(git_health_projection_reader)
             .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
             .with_diagnostics_lsp(diagnostic_broker)
             .with_code_index_hook_sink(code_index_hook_sink)

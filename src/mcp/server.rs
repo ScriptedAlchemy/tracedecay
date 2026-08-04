@@ -291,6 +291,7 @@ pub struct McpServer {
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    git_health_projection_reader: Option<tracedecay_application::GitHealthProjectionReadServiceV1>,
     dashboard_feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
@@ -681,6 +682,7 @@ impl McpServer {
             dashboard_doctor_report_reader,
             dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
+            git_health_projection_reader,
             dashboard_feedback_status_reader,
             diagnostics_lsp,
             hook_branch_writer,
@@ -876,6 +878,7 @@ impl McpServer {
             doctor_report_published: AtomicBool::new(false),
             dashboard_doctor_remediation_dispatcher,
             dashboard_code_index_freshness_reader,
+            git_health_projection_reader,
             dashboard_feedback_status_reader,
             hook_branch_writer,
             background_refresh_writer,
