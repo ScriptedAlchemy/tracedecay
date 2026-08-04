@@ -319,6 +319,7 @@ function RegistryFieldView({
         selectedId={null}
         onSelect={handleSelect}
         ariaLabel={fieldDescription(field)}
+        fallbackDescription="the Project registry beside this field remains available as a text alternative"
         encoding={{
           body: 'project / repo hub',
           size: 'mass / checkouts',
