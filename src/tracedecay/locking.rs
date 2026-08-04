@@ -181,106 +181,55 @@ pub struct SyncLockGuard {
     epoch: String,
 }
 
-pub(super) struct ActiveSyncLockGuard {
-    _active: SyncLockGuard,
-    _legacy: Option<SyncLockGuard>,
-}
-
 pub(super) struct ActiveSyncLease {
-    _locks: ActiveSyncLockGuard,
-    dirty_markers: Vec<(PathBuf, MarkerIdentity)>,
+    _lock: SyncLockGuard,
+    dirty_marker: (PathBuf, MarkerIdentity),
 }
 
 impl super::TraceDecay {
-    pub(super) fn try_acquire_active_sync_lock(&self) -> Result<ActiveSyncLockGuard> {
-        try_acquire_graph_sync_locks(
-            &self.active_graph_layout.sync_lock_path,
-            &self.store_layout.sync_lock_path,
-        )
+    pub(super) fn try_acquire_active_sync_lock(&self) -> Result<SyncLockGuard> {
+        try_acquire_sync_lock_at(&self.store_layout.sync_lock_path)
     }
 
     pub(super) fn begin_active_sync(&self) -> Result<ActiveSyncLease> {
-        let locks = self.try_acquire_active_sync_lock()?;
+        let lock = self.try_acquire_active_sync_lock()?;
         let epoch = next_epoch();
-        let mut paths = vec![self.active_graph_layout.dirty_path.clone()];
-        if self.active_graph_layout.dirty_path != self.store_layout.dirty_path {
-            paths.push(self.store_layout.dirty_path.clone());
-        }
-        for path in &paths {
-            write_dirty_sentinel_for_epoch(path, &epoch).map_err(|error| {
-                TraceDecayError::SyncLock {
-                    message: format!(
-                        "could not publish dirty marker '{}': {error}",
-                        path.display()
-                    ),
-                }
-            })?;
-        }
+        let path = self.store_layout.dirty_path.clone();
+        write_dirty_sentinel_for_epoch(&path, &epoch).map_err(|error| {
+            TraceDecayError::SyncLock {
+                message: format!(
+                    "could not publish dirty marker '{}': {error}",
+                    path.display()
+                ),
+            }
+        })?;
         Ok(ActiveSyncLease {
-            _locks: locks,
-            dirty_markers: paths
-                .into_iter()
-                .map(|path| (path, MarkerIdentity::Epoch(epoch.clone())))
-                .collect(),
+            _lock: lock,
+            dirty_marker: (path, MarkerIdentity::Epoch(epoch)),
         })
     }
 }
 
 impl ActiveSyncLease {
-    /// Marks the operation clean while both active and legacy locks remain
-    /// held. Drop without commit intentionally leaves every dirty marker.
+    /// Marks the operation clean while the project-store lock remains held.
+    /// Drop without commit intentionally leaves the dirty marker.
     pub(super) fn commit(self) -> Result<()> {
-        // Validate every marker before mutating any of them. A changed epoch
-        // fails closed and leaves recovery evidence in place.
-        for (path, expected) in &self.dirty_markers {
-            let contents = std::fs::read(path).map_err(|error| TraceDecayError::SyncLock {
-                message: format!("could not read dirty marker '{}': {error}", path.display()),
-            })?;
-            if &marker_identity(&contents) != expected {
-                return Err(TraceDecayError::SyncLock {
-                    message: format!(
-                        "dirty marker epoch changed before commit: {}",
-                        path.display()
-                    ),
-                });
-            }
+        let (path, expected) = &self.dirty_marker;
+        let contents = std::fs::read(path).map_err(|error| TraceDecayError::SyncLock {
+            message: format!("could not read dirty marker '{}': {error}", path.display()),
+        })?;
+        if &marker_identity(&contents) != expected {
+            return Err(TraceDecayError::SyncLock {
+                message: format!(
+                    "dirty marker epoch changed before commit: {}",
+                    path.display()
+                ),
+            });
         }
-        for (path, expected) in &self.dirty_markers {
-            clear_marker_if_matches(path, expected).map_err(|error| TraceDecayError::SyncLock {
-                message: format!("could not clear dirty marker '{}': {error}", path.display()),
-            })?;
-        }
+        clear_marker_if_matches(path, expected).map_err(|error| TraceDecayError::SyncLock {
+            message: format!("could not clear dirty marker '{}': {error}", path.display()),
+        })?;
         Ok(())
-    }
-}
-
-pub(super) fn try_acquire_graph_sync_locks(
-    active_path: &Path,
-    legacy_path: &Path,
-) -> Result<ActiveSyncLockGuard> {
-    if active_path == legacy_path {
-        return Ok(ActiveSyncLockGuard {
-            _active: try_acquire_sync_lock_at(active_path)?,
-            _legacy: None,
-        });
-    }
-
-    // Every caller uses the same total order. This prevents active/legacy
-    // lock inversion when different store layouts overlap during migration.
-    if active_path < legacy_path {
-        let active = try_acquire_sync_lock_at(active_path)?;
-        let legacy = try_acquire_sync_lock_at(legacy_path)?;
-        Ok(ActiveSyncLockGuard {
-            _active: active,
-            _legacy: Some(legacy),
-        })
-    } else {
-        let legacy = try_acquire_sync_lock_at(legacy_path)?;
-        let active = try_acquire_sync_lock_at(active_path)?;
-        Ok(ActiveSyncLockGuard {
-            _active: active,
-            _legacy: Some(legacy),
-        })
     }
 }
 

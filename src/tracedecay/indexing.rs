@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 #[cfg(any(test, feature = "test-transport"))]
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -181,8 +181,8 @@ const UNRESOLVED_REFS_PERSISTED_KEY: &str = "unresolved_refs_persisted";
 /// Marker value for [`UNRESOLVED_REFS_PERSISTED_KEY`]. Bump this string if a
 /// future change requires the ref set to be repopulated again on upgrade.
 const UNRESOLVED_REFS_PERSISTED_VALUE: &str = "1";
-const BRANCH_SYNC_WRITE_PAGE_ROWS: usize = 256;
-const BRANCH_SYNC_EXTRACTION_PAGE_FILES: usize = 8;
+const INDEX_SYNC_WRITE_PAGE_ROWS: usize = 256;
+const INDEX_SYNC_EXTRACTION_PAGE_FILES: usize = 8;
 
 fn release_process_allocator_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -437,14 +437,14 @@ impl TraceDecay {
             return Ok(());
         }
         if let Err(error) = self.ensure_branch_writable("schedule graph rebuild") {
-            eprintln!("[tracedecay] graph rebuild remains pending on a read-only branch: {error}");
+            eprintln!("[tracedecay] graph rebuild remains pending on a read-only store: {error}");
             return Ok(());
         }
         #[cfg(any(test, feature = "test-transport"))]
         if GRAPH_REBUILD_TEST_DISABLE_SPAWN.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let key = self.active_graph_layout.sync_lock_path.clone();
+        let key = self.store_layout.sync_lock_path.clone();
         if !GRAPH_REBUILD_WORKERS
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -700,7 +700,7 @@ impl TraceDecay {
     }
 
     fn graph_rebuild_checkpoint_root(&self) -> PathBuf {
-        self.active_graph_layout
+        self.store_layout
             .sync_lock_path
             .with_extension(GRAPH_REBUILD_CHECKPOINT_DIR)
     }
@@ -714,14 +714,10 @@ impl TraceDecay {
             configuration_runtime: Arc::clone(&self.configuration_runtime),
             project_root: self.project_root.clone(),
             store_layout: self.store_layout.clone(),
-            active_graph_layout: self.active_graph_layout.clone(),
             open_options: self.open_options.clone(),
             registry: tracedecay_code_extraction::LanguageRegistry::new(),
             active_branch: self.active_branch.clone(),
-            serving_branch: self.serving_branch.clone(),
-            fallback_warning: self.fallback_warning.clone(),
             read_only: self.read_only,
-            db_path_cache: OnceLock::new(),
             context_scout_owner: self.context_scout_owner.clone(),
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
             #[cfg(any(test, feature = "test-transport"))]
@@ -777,10 +773,7 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "project root is not a directory"
         );
-        // R4: one branch resolution for the whole full index — the write gate
-        // and the closing branch-meta stamp share it.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("full index", &live_branch)?;
+        self.ensure_branch_writable("full index")?;
         let sync_lease = self.begin_active_sync()?;
         #[cfg(any(test, feature = "test-transport"))]
         if rebuild_availability.is_some() {
@@ -960,8 +953,6 @@ impl TraceDecay {
         // Stamp HEAD after releasing the full-index transaction: this helper
         // acquires its own writer lane, as do the incremental-sync call sites.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
-
         let result = IndexResult {
             file_count: files.len(),
             node_count: total_nodes,
@@ -1016,17 +1007,13 @@ impl TraceDecay {
             return Ok(false);
         }
 
-        // R4: one branch resolution for this whole sync — the entry gate, the
-        // inner `sync_single_files` gate, and the branch-meta stamp all read
-        // it instead of re-opening the repository three times.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("sync files", &live_branch)?;
+        self.ensure_branch_writable("sync files")?;
 
         let Ok(sync_lease) = self.begin_active_sync() else {
             return Ok(true);
         };
 
-        let result = self.sync_single_files(&stale_files, &live_branch).await;
+        let result = self.sync_single_files(&stale_files).await;
 
         match result {
             Ok(()) => {
@@ -1057,10 +1044,7 @@ impl TraceDecay {
             return Ok(());
         }
 
-        // R4: one branch resolution threaded through the entry gate, the inner
-        // `sync_single_files` gate, and the branch-meta stamp.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("sync files", &live_branch)?;
+        self.ensure_branch_writable("sync files")?;
 
         let sync_lease = if let Ok(sync_lease) = self.begin_active_sync() {
             sync_lease
@@ -1090,11 +1074,7 @@ impl TraceDecay {
             }
         };
 
-        if self
-            .sync_single_files(&stale_files, &live_branch)
-            .await
-            .is_ok()
-        {
+        if self.sync_single_files(&stale_files).await.is_ok() {
             sync_lease.commit()?;
         }
         Ok(())
@@ -1103,16 +1083,10 @@ impl TraceDecay {
     /// Index/reexamine the given file paths, updating their graph nodes and edges.
     /// This is a focused, single-shot operation used by `sync_if_stale`.
     ///
-    /// `live_branch` is the caller's per-request branch resolution; every
-    /// public entry that reaches here already made one.
-    async fn sync_single_files(
-        &self,
-        file_paths: &[String],
-        live_branch: &crate::branch::BranchMemo,
-    ) -> Result<()> {
+    async fn sync_single_files(&self, file_paths: &[String]) -> Result<()> {
         use crate::sync as sync_mod;
 
-        self.ensure_branch_writable_with("sync files", live_branch)?;
+        self.ensure_branch_writable("sync files")?;
 
         let start = Instant::now();
         let project_root = &self.project_root;
@@ -1216,7 +1190,6 @@ impl TraceDecay {
         // HEAD is unchanged, re-stamping the same commit is idempotent; if a
         // hook-driven edit accompanied a commit, this keeps the base accurate.
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(live_branch);
         self.db
             .set_metadata(
                 "last_sync_duration_ms",
@@ -1234,10 +1207,7 @@ impl TraceDecay {
         &self,
         file_paths: &[String],
     ) -> Result<Vec<String>> {
-        // R4: one branch resolution for the entry gate and the inner
-        // `sync_single_files` gate.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("lazy index ignored dependency files", &live_branch)?;
+        self.ensure_branch_writable("lazy index ignored dependency files")?;
 
         let mut accepted = Vec::new();
         let mut seen = HashSet::new();
@@ -1264,7 +1234,7 @@ impl TraceDecay {
 
         if !accepted.is_empty() {
             let sync_lease = self.begin_active_sync()?;
-            self.sync_single_files(&accepted, &live_branch).await?;
+            self.sync_single_files(&accepted).await?;
             sync_lease.commit()?;
         }
         Ok(accepted)
@@ -1368,7 +1338,7 @@ impl TraceDecay {
             // Replace the incomplete persisted set with the freshly extracted
             // complete one. Clearing first also bounds unbounded ref growth (#4).
             self.db.clear_unresolved_refs().await?;
-            for paths in files.chunks(BRANCH_SYNC_EXTRACTION_PAGE_FILES) {
+            for paths in files.chunks(INDEX_SYNC_EXTRACTION_PAGE_FILES) {
                 let (extractions, _skipped) =
                     extract_files_isolated(&self.project_root, &self.registry, paths.to_vec());
                 let unresolved = extractions
@@ -1433,10 +1403,7 @@ impl TraceDecay {
             self.project_root.is_dir(),
             "sync: project root is not a directory"
         );
-        // R4: one branch resolution for the whole sync — the write gate and
-        // both branch-meta stamp points below share it.
-        let live_branch = self.branch_memo();
-        self.ensure_branch_writable_with("sync", &live_branch)?;
+        self.ensure_branch_writable("sync")?;
         let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
@@ -1593,7 +1560,7 @@ impl TraceDecay {
             }
 
             let mut indexed = 0_usize;
-            for paths in to_index.chunks(BRANCH_SYNC_EXTRACTION_PAGE_FILES) {
+            for paths in to_index.chunks(INDEX_SYNC_EXTRACTION_PAGE_FILES) {
                 let (extractions, batch_skipped) =
                     extract_files_isolated(project_root, registry, paths.to_vec());
                 skipped.extend(batch_skipped);
@@ -1602,7 +1569,7 @@ impl TraceDecay {
                     indexed += 1;
                     on_progress(indexed, to_index.len(), file_path);
                     self.db.delete_nodes_by_file(file_path).await?;
-                    for page in result.nodes.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
+                    for page in result.nodes.chunks(INDEX_SYNC_WRITE_PAGE_ROWS) {
                         self.db.insert_nodes(page).await?;
                     }
                     self.db
@@ -1620,7 +1587,7 @@ impl TraceDecay {
                         .await?;
                     batch_edges.extend(result.edges.iter().cloned());
                 }
-                for page in batch_edges.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
+                for page in batch_edges.chunks(INDEX_SYNC_WRITE_PAGE_ROWS) {
                     self.db.insert_edges(page).await?;
                 }
                 // Checkpointed daemon sync persists unresolved refs above but
@@ -1641,7 +1608,6 @@ impl TraceDecay {
                 .set_metadata("last_sync_at", &current_timestamp().to_string())
                 .await?;
             self.stamp_last_synced_commit().await;
-            self.touch_branch_meta_synced(&live_branch);
             self.db
                 .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
                 .await?;
@@ -1783,7 +1749,6 @@ impl TraceDecay {
             .await?;
         // Stamp HEAD so the watcher can diff-scope future syncs (best-effort).
         self.stamp_last_synced_commit().await;
-        self.touch_branch_meta_synced(&live_branch);
         self.db
             .set_metadata("last_sync_duration_ms", &duration_ms.to_string())
             .await?;
@@ -1960,16 +1925,6 @@ impl TraceDecay {
     /// any gix error (not a repo, detached/unborn HEAD, unreadable object)
     /// this is a silent no-op — a missing/stale stamp only forces the watcher
     /// to fall back to a full tree walk, never a failed sync.
-    /// Best-effort branch-meta freshness stamp on every successful sync, so
-    /// `branch_list` reflects real sync recency rather than branch-add time
-    /// only. No-op when the active branch cannot be resolved (detached HEAD)
-    /// or the branch is untracked.
-    fn touch_branch_meta_synced(&self, live_branch: &crate::branch::BranchMemo) {
-        if let Some(branch) = live_branch.resolve_for(&self.project_root) {
-            crate::branch_meta::update_synced_timestamp(&self.store_layout.data_root, &branch);
-        }
-    }
-
     async fn stamp_last_synced_commit(&self) {
         // Scope the gix values so they drop before the `.await`:
         // `gix::Repository`/`Commit` are `!Send`, and holding them across the

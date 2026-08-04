@@ -19,7 +19,6 @@ use tracedecay_usecases::config::{
     open_runtime_configuration_for_registered_database_read_only,
 };
 
-use super::recovery::active_graph_layout;
 use super::{TraceDecay, TraceDecayOpenOptions};
 
 impl TraceDecay {
@@ -117,10 +116,7 @@ impl TraceDecay {
         profile_database: Arc<RegisteredGlobalDb>,
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
-        if !branch::local_branch_exists(project_root, branch_name)
-            && crate::worktree::detached_worktree_graph_scope(project_root).as_deref()
-                != Some(branch_name)
-        {
+        if !branch::local_branch_exists(project_root, branch_name) {
             return Err(TraceDecayError::Config {
                 message: format!("branch ref '{branch_name}' is unavailable"),
             });
@@ -131,12 +127,11 @@ impl TraceDecay {
                 message: "registered project store is unavailable".to_owned(),
             });
         }
-        let db = Self::mount_worktree_graph(
+        let db = Self::mount_project_graph(
             runtime_registry.as_ref(),
             project_root,
             &store_layout,
             &db_path,
-            Some(branch_name),
             "open branch snapshot",
             DatabaseAccessMode::ReadOnly,
         )
@@ -156,9 +151,6 @@ impl TraceDecay {
             &configuration.target,
             configuration_runtime.client(),
         );
-        let internal_detached_scope = crate::worktree::detached_worktree_graph_scope(project_root)
-            .as_deref()
-            == Some(branch_name);
         Ok(Self {
             db,
             profile_database,
@@ -167,10 +159,9 @@ impl TraceDecay {
             configuration_runtime,
             project_root: project_root.to_path_buf(),
             store_layout,
-            active_graph_layout: active_graph_layout(&db_path),
             open_options,
             registry: LanguageRegistry::new(),
-            active_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
+            active_branch: Some(branch_name.to_string()),
             read_only: true,
             context_scout_owner: None,
             context_scout_claim_authorities: tokio::sync::RwLock::default(),
