@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use serde_json::Value;
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
@@ -16,9 +15,8 @@ use super::post_tool_use::{
     trusted_tool_failure,
 };
 use super::steering::{
-    HookWorkspaceStatus, append_context_block, append_context_recovery_hint,
-    build_codex_session_context_for_workspace, cursor_index_signals_for_root,
-    session_start_from_compaction,
+    HookWorkspaceStatus, append_context_block, build_codex_session_context_for_workspace,
+    cursor_index_signals_for_root,
 };
 use super::tool_hints::{HintAgent, HintCategory, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -59,31 +57,26 @@ pub async fn hook_codex_session_start() -> i32 {
         &event,
         &parsed,
     );
-    if let (Some(root), Some(event)) = (root.as_ref(), codex_session_start_hook_event(&parsed)) {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
-    }
-    let (mut context, _) = codex_session_context_for_event(&event).await;
-    let session_id = event_session_id(&parsed);
-    if root.is_none() && ingest_user_codex_session(session_id.clone(), Some(&hook_telemetry)).await
-    {
-        super::schedule_user_session_review("codex", session_id.as_deref());
-    }
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
+    let guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
+            tracedecay_hooks::HookHostV1::Codex,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+        .flatten()
+    } else {
+        None
     };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
+    match guidance {
+        Some(guidance) => println!(
+            "{}",
+            codex_additional_context_json("SessionStart", &guidance)
+        ),
+        None => println!("{}", serde_json::json!({})),
     }
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    println!(
-        "{}",
-        codex_additional_context_json("SessionStart", &context)
-    );
     0
 }
 
@@ -302,26 +295,23 @@ fn decide_codex_post_tool_use_hint(parsed: &Value) -> Option<ToolHint> {
 
 /// Codex `PostCompact` hook handler.
 ///
-/// Replaces temporary compaction summaries from visible LCM source messages.
+/// Requests daemon-owned compaction. The hook only waits for the bounded
+/// daemon acknowledgement; transcript capture and model work remain detached.
 pub async fn hook_codex_post_compact() -> i32 {
     let event = read_hook_event!();
     let root = event_project_root_with_identity_from_json(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Codex, "PostCompact", &event);
-    if std::env::var_os(crate::sessions::codex_app_server::CODEX_SUMMARY_CHILD_ENV).is_none() {
-        codex_post_compact(&event, Some(&hook_telemetry)).await;
-    }
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(25),
+        codex_post_compact(&event, Some(&hook_telemetry)),
+    )
+    .await;
     println!("{}", serde_json::json!({}));
     0
 }
 
-const CODEX_STOP_INGEST_BUDGET: Duration = Duration::from_secs(3);
-
 /// Codex `Stop` hook handler.
-///
-/// Codex emits this after the assistant finishes a turn. Projectless sessions
-/// need this terminal receipt because the prompt hook runs before the final
-/// assistant message has been appended to the rollout.
 pub async fn hook_codex_stop() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
@@ -344,23 +334,6 @@ pub async fn hook_codex_stop() -> i32 {
             println!("{}", serde_json::json!({}));
         }
         return 0;
-    }
-    let session_id = event_session_id(&parsed);
-    hook_telemetry.note_timeout_budget(CODEX_STOP_INGEST_BUDGET);
-    let ingested = if let Ok(ingested) = tokio::time::timeout(
-        CODEX_STOP_INGEST_BUDGET,
-        finalize_codex_user_session(root.as_deref(), session_id.clone(), Some(&hook_telemetry)),
-    )
-    .await
-    {
-        hook_telemetry.note_timed_out(false);
-        ingested
-    } else {
-        hook_telemetry.note_timed_out(true);
-        false
-    };
-    if ingested {
-        super::schedule_user_session_review("codex", session_id.as_deref());
     }
     println!("{}", serde_json::json!({}));
     0

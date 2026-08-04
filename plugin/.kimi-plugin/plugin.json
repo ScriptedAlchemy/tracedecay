@@ -11,13 +11,13 @@
       "event": "PostToolUse",
       "matcher": "Edit|Write|NotebookEdit|MultiEdit",
       "command": "__TRACEDECAY_SYNC__",
-      "timeout": 30
+      "timeout": 5
     },
     {
       "event": "Stop",
       "matcher": "",
       "command": "__TRACEDECAY_STOP__",
-      "timeout": 30
+      "timeout": 5
     }
   ],
   "mcpServers": {

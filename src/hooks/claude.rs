@@ -8,14 +8,12 @@ use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 use super::codex::codex_additional_context_json;
 use super::memory_inject;
 use super::post_tool_use::{
-    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
-    is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event,
-    notify_post_tool_use_with_telemetry, tool_input_command_str, tool_input_edit_text,
-    tool_input_file_path_str, trusted_tool_failure,
+    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, captured_tool_output, is_claude_edit_tool,
+    is_claude_hint_tool, tool_input_command_str, tool_input_edit_text, tool_input_file_path_str,
+    trusted_tool_failure,
 };
 use super::steering::{
-    append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
-    cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
+    append_tracedecay_bootstrap_context, cursor_index_signals_for_root, index_status_line,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
 use super::{
@@ -156,42 +154,25 @@ pub async fn hook_claude_session_start() -> i32 {
         &event,
         &parsed,
     );
-    let mut context = claude_session_context_for_event(&event).await;
-    let session_id = event_session_id(&parsed);
-    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
-        super::schedule_user_session_review("claude", session_id.as_deref());
-    }
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
-    };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
-    }
-    // Fire-and-forget: nudge the daemon to refresh the index (and, when this
-    // session runs in a harness-created linked worktree, auto-track its branch
-    // store) before we print the staleness hint. `notify_hook_event` is
-    // timeout-guarded and a no-op when the daemon socket is missing, so it is
-    // safe on every session start and never blocks it. Gated on a resolved
-    // project root and the real session cwd so the linked-worktree detection in
-    // `plan_hook_event` sees the session tree rather than the daemon's cwd.
-    if let Some(root) = root.as_ref()
-        && let Some(event) = claude_session_start_hook_event(&parsed)
-    {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
-    }
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    if context.is_empty() {
-        println!("{}", serde_json::json!({}));
+    let guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
+            tracedecay_hooks::HookHostV1::ClaudeCode,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+        .flatten()
     } else {
-        println!(
+        None
+    };
+    match guidance {
+        Some(guidance) => println!(
             "{}",
-            codex_additional_context_json("SessionStart", &context)
-        );
+            codex_additional_context_json("SessionStart", &guidance)
+        ),
+        None => println!("{}", serde_json::json!({})),
     }
     0
 }
@@ -270,39 +251,20 @@ pub async fn claude_session_context_for_event(event_json: &str) -> String {
     }
 }
 
-/// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler used to keep
-/// the graph fresh and surface outcome-aware `TraceDecay` hints.
-///
-/// Two independent outputs: the daemon notification (targeted sync / branch
-/// tracking, via stderr/IPC only) and, for the native `Grep`/`Glob`/`Read`
-/// tools plus recursive shell searches or compiler failures, an event-matched
-/// `additionalContext` hint printed to stdout. The daemon path never writes
-/// stdout, so the two do not interfere. Fail-open: no surviving hint leaves
-/// prior behavior unchanged.
+/// Claude Code `PostToolUse` bounded native edit admission.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
-    // One parse for the whole hook: the failure classification, the project
-    // root, the analytics row, the hint surface, and the daemon notification
-    // all read this value. `PostToolUse` fires on every tool call, so each
-    // re-parse of the payload was pure per-event latency. Hook V2 still runs
-    // its own typed native decode; that one is the host contract, not a repeat
-    // of this parse.
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
-    let hook_event_name = if is_post_tool_use_failure_event(&parsed) {
-        "PostToolUseFailure"
-    } else {
-        "PostToolUse"
-    };
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Claude,
-        hook_event_name,
+        "PostToolUse",
         &event,
         &parsed,
     );
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+    let guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
             root,
@@ -310,22 +272,16 @@ pub async fn hook_claude_post_tool_use() -> i32 {
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!(
-                "{}",
-                codex_additional_context_json(hook_event_name, &guidance)
-            );
-        }
-        return 0;
-    }
-    if let Some(context) = claude_post_tool_use_hint_context(&parsed) {
+        .flatten()
+    } else {
+        None
+    };
+    if let Some(guidance) = guidance {
         println!(
             "{}",
-            codex_additional_context_json(hook_event_name, &context)
+            codex_additional_context_json("PostToolUse", &guidance)
         );
     }
-    notify_post_tool_use_with_telemetry(&CLAUDE_POST_TOOL_USE_SPEC, &parsed, &hook_telemetry).await;
     0
 }
 
@@ -456,7 +412,8 @@ pub async fn hook_prompt_submit() {
     }
 }
 
-/// `Stop` hook handler: ingests new session data and prints a cost receipt.
+/// `Stop` hook handler: admits the native turn boundary without transcript or
+/// model work on the hook path.
 pub async fn hook_stop() {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
@@ -488,13 +445,7 @@ pub async fn hook_stop() {
         }
         return;
     }
-    let session_id = event_session_id(&parsed);
-    if root.is_none()
-        && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
-            .await
-    {
-        super::schedule_user_session_review("claude", session_id.as_deref());
-    }
+    println!("{}", serde_json::json!({}));
 }
 
 /// Incrementally ingests one live projectless Claude session into the profile

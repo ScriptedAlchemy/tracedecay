@@ -133,8 +133,8 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 
 /// Kiro `userPromptSubmit` hook handler.
 ///
-/// Resets the per-turn counter, catches up transcripts, and injects bounded
-/// user/project memory relevant to the submitted prompt.
+/// Admits Kiro's proved native prompt boundary. All retrieval, memory, and
+/// follow-up work is daemon-owned and cannot delay the host callback.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
     let root = event_project_root_from_json(&event);
@@ -154,23 +154,6 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
             println!("{guidance}");
         }
         return 0;
-    }
-    reset_counter_for_kiro_event(&event, Some(&hook_telemetry)).await;
-    let ingest = ingest_kiro_transcript_for_event(
-        &event,
-        Some(KIRO_HOT_INGEST_MAX_BYTES),
-        KIRO_HOT_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    if ingest.user_scope && ingest.messages_upserted > 0 {
-        // User-scope catch-up can ingest several changed Kiro sessions in one
-        // bounded sweep, so let the reflector select all recent Kiro evidence
-        // instead of falsely attributing the batch to the prompt's session id.
-        super::schedule_user_session_review("kiro", None);
-    }
-    if let Some(recall) = Box::pin(kiro_prompt_memory_recall(&event)).await {
-        println!("{recall}");
     }
     0
 }

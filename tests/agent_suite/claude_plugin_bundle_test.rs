@@ -249,26 +249,17 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
         .and_then(Value::as_object)
         .unwrap_or_else(|| panic!("{} must declare a hooks object", hooks_path.display()));
 
-    // (event, expected subcommand, expected matcher). The PostToolUse matcher
-    // is derived from the tool lists so the on-disk JSON is validated against
-    // the single source of truth and can never silently drift.
-    let post_matcher = tracedecay::hooks::claude_post_tool_use_matcher();
+    // Only proven native lifecycle boundaries are registered. Tool-routing,
+    // prompt interception, and advisory work happen through explicit host
+    // surfaces or the daemon after bounded event admission.
     let expected: &[(&str, &str, Option<&str>)] = &[
-        ("PreToolUse", "hook-pre-tool-use", Some("Agent")),
-        ("UserPromptSubmit", "hook-prompt-submit", None),
         ("Stop", "hook-stop", None),
         ("SessionStart", "hook-claude-session-start", None),
         (
             "PostToolUse",
             "hook-claude-post-tool-use",
-            Some(post_matcher.as_str()),
+            Some("Edit|MultiEdit|Write|NotebookEdit"),
         ),
-        (
-            "PostToolUseFailure",
-            "hook-claude-post-tool-use",
-            Some("Bash"),
-        ),
-        ("SubagentStart", "hook-claude-subagent-start", None),
     ];
 
     let actual_events: BTreeSet<String> = hooks.keys().cloned().collect();
@@ -279,7 +270,7 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
     assert_eq!(
         actual_events,
         expected_events,
-        "{} must declare exactly the 7 expected lifecycle events",
+        "{} must declare exactly the supported native lifecycle events",
         hooks_path.display()
     );
 

@@ -34,7 +34,9 @@ multi-project setups. If tools still do not connect, run
 `tracedecay doctor --agent cursor`.
 
 Hook commands derive the active project from Cursor's event payload /
-`CURSOR_PROJECT_DIR`, not from the plugin directory.
+`CURSOR_PROJECT_DIR`, not from the plugin directory. They only submit bounded
+native envelopes; daemon-side work handles capture, indexing, preflight,
+compaction, and advisory delivery after admission.
 
 Every MCP tool is also available from the shell as `tracedecay tool <name>`
 (`tracedecay tool` lists tools; `tracedecay tool <name> --help` shows
@@ -77,10 +79,9 @@ For literal strings, regexes, and config keys inside indexed code, use
 `tracedecay_grep`; reserve `tracedecay_search` for symbol names and
 `tracedecay_context` for concept-level discovery.
 
-For sessions resumed from compacted context, the `sessionStart` hook adds a
-short recovery hint through Cursor's `additional_context` channel so the agent
-knows to query TraceDecay LCM/session recall before assuming the compacted
-summary is complete.
+For sessions resumed from compacted context, any recovery guidance is produced
+from the daemon's canonical session state after the hook admission succeeds;
+the `sessionStart` adapter does not read a session store itself.
 
 Slash workflows ship as Cursor-native commands
 (`/tracedecay-map-architecture`, `/tracedecay-check-health`,
@@ -282,13 +283,11 @@ window.
 
 ## Known limitations
 
-- **Cloud agents:** plugin `sessionStart`, `sessionEnd`, `beforeSubmitPrompt`,
-  `workspaceOpen`, and `stop` hooks never run in Cursor cloud agents, so the
-  TraceDecay steering context and transcript ingest are desktop-only.
-  Cloud agents do run repo-level `.cursor/hooks.json` hooks for the supported
-  subset (`afterFileEdit`, `afterShellExecution`, tool hooks, subagent hooks).
-- The plugin's session-recall tools only see transcripts ingested on this
-  machine.
+- **Cloud agents:** lifecycle availability is host-dependent. The installed
+  desktop projection uses `sessionStart`, `preCompact`, `afterFileEdit`, and
+  `stop`; each is fail-open and only performs bounded daemon admission.
+- Session recall is sourced from the daemon's canonical project store, not a
+  host hook's local transcript read.
 
 ## Local development
 

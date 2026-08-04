@@ -4,7 +4,7 @@ use std::io::Write;
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 #[cfg(unix)]
-use tracedecay::hooks::cursor_pre_compact_via_daemon;
+use tracedecay::daemon::{DaemonHandshake, call_default_tool, tool_json_payload};
 use tracedecay::sessions::cursor::{
     CursorSweepSource, CursorTranscriptIngestStats, cursor_project_slug,
     ingest_cursor_transcript_event as ingest_cursor_transcript_event_for_project,
@@ -348,9 +348,23 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
         "context_tokens": 124000,
         "context_window_size": 128000
     });
-    let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
-    assert_eq!(outcome.status, "ok", "{}", outcome.reason);
-    assert_eq!(outcome.summary_nodes_created, 1);
+    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, true)
+        .expect("daemon handshake");
+    let result = call_default_tool(
+        &handshake,
+        "tracedecay_hook_runtime",
+        serde_json::json!({
+            "action": "cursor_compact",
+            "event_json": event.to_string(),
+            "format": "json",
+        }),
+    )
+    .await
+    .expect("daemon-owned Cursor compaction");
+    let outcome = tool_json_payload(&result, "tracedecay_hook_runtime")
+        .expect("Cursor compaction response payload");
+    assert_eq!(outcome["status"], "ok", "{}", outcome["reason"]);
+    assert_eq!(outcome["summary_nodes_created"], 1);
 
     // The daemon is the sole writer authority for its session store. Stop it
     // before mounting the persisted database for post-run assertions.
@@ -358,9 +372,10 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let runtime = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id)
         .await
         .unwrap();
-    let node_id = outcome
-        .summary_node_ids
-        .first()
+    let node_id = outcome["summary_node_ids"]
+        .as_array()
+        .and_then(|node_ids| node_ids.first())
+        .and_then(serde_json::Value::as_str)
         .expect("summary node id should be returned");
     let expanded = runtime
         .lcm_expand_summary_node_for_test("cursor", "cursor-session", node_id)

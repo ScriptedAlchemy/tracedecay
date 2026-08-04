@@ -201,13 +201,7 @@ TraceDecay works as an MCP (Model Context Protocol) server. AI coding agents con
 tracedecay install
 ```
 
-This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs lifecycle hooks, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tracedecay tools (including the CLI fallback for MCP transport failures). That CLI fallback still routes through the daemon; it never opens a TraceDecay store directly. The hooks:
-
-- `PreToolUse` redirects Claude away from spawning expensive Explore agents.
-- `UserPromptSubmit` resets the per-turn token-savings counter.
-- `Stop` ingests new session transcript data and prints a cost receipt.
-- `SessionStart` reports index freshness (or a `tracedecay init` nudge) and, when the session restarts from compaction, injects the LCM context-recovery hint.
-- `PostToolUse` (matcher `Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash`) notifies the daemon so edits and shell commands trigger targeted incremental convergence, and broad search/read tools get routed toward TraceDecay equivalents.
+This is the default. It registers the MCP server in `~/.claude/settings.json`, grants tool permissions so Claude doesn't have to ask you every time, installs lifecycle hooks, and adds prompt rules to `~/.claude/CLAUDE.md` that tell Claude to prefer tracedecay tools (including the CLI fallback for MCP transport failures). The hooks submit bounded native lifecycle envelopes only: `SessionStart`, `Stop`, and saved-edit `PostToolUse` (`Edit|MultiEdit|Write|NotebookEdit`). The daemon owns all later capture, indexing, staleness checks, compaction, and advisory work; a hook never routes tools, reads a store, or starts a model.
 
 The install also ships three read-only custom subagents into `~/.claude/agents/` — `code-explorer`, `code-health-auditor`, and `session-historian` — the same tracedecay subagents the Cursor plugin bundles. They are only replaced or removed when the file is tracedecay-managed; a same-named agent you authored yourself is left untouched. `tracedecay update-plugin` refreshes installed copies.
 
@@ -324,15 +318,12 @@ Cursor install is plugin-based:
 - `tracedecay install --local --agent cursor` installs the same user-local plugin without writing project Cursor config files.
 - The plugin MCP config runs `tracedecay serve --path ${workspaceFolder}`, so the server resolves the active workspace's project store instead of the plugin directory. If a host spawns the server without expanding `${workspaceFolder}`, `serve` warns and falls back to project discovery where possible (details in the plugin's `README.md`).
 - Cursor install no longer writes `.cursor/mcp.json`, `.cursor/hooks.json`, `.cursor/rules/tracedecay.mdc`, or `.cursor/permissions.json`; approvals are left to Cursor approval/run-mode behavior.
-- The plugin bundles Cursor-specific, fail-open hooks. File and shell hooks notify the TraceDecay daemon; if no daemon is available they return success without indexing:
-  - `sessionStart` injects context steering the Agent toward tracedecay MCP tools and reports index freshness (suggests `tracedecay init` when uninitialized).
-  - `postToolUse` (unmatched) injects a nonblocking `additional_context` hint after broad search/read tools (Grep, Glob, Read, semantic search, shell `rg`) so Cursor can switch to `tracedecay_grep`, `tracedecay_context`, `tracedecay_search`, `tracedecay_outline`, or `tracedecay_files`; each hint category fires at most once per session.
-  - `beforeSubmitPrompt` resets the local token counter and ingests the current Cursor transcript into the active project session store when `transcript_path` is present.
-  - `afterFileEdit` (unmatched, so every Agent edit tool counts) sends the edited path(s) to the daemon, whose bounded reconciler captures the exact worktree snapshot and warms only affected generation evidence — not a client-side database or full-tree fallback.
-  - `afterShellExecution` sends shell command effects to the daemon. Checkout, ref, worktree, merge, reset, cherry-pick, and stash hints trigger exact identity re-resolution and coalesced background convergence; no client-side authority is created.
-  - `workspaceOpen` notifies the daemon, which resolves the registered project/worktree and reports the selected generation or typed warming/refresh-required state.
-
-  Blind spot: Cursor hooks only observe the Cursor Agent's own actions and IDE lifecycle. Manual or external-terminal Git changes may not emit a hook; the daemon's bounded freshness check and native Git identity re-resolution report the resulting warming/stale state. The Cursor `postToolUse` hint remains nonblocking to avoid noisy denials.
+- The plugin bundles Cursor-specific, fail-open hooks: `sessionStart`,
+  `preCompact`, `afterFileEdit`, and `stop`. Each uses the native event only to
+  make a bounded daemon-admission attempt. The daemon then owns transcript
+  capture, indexing, compaction, branch/preflight work, and advisory delivery.
+  Manual or external-terminal changes are still best covered by the git
+  post-commit hook and on-demand MCP staleness checks.
 
 Manual Cursor plugin install for local development:
 

@@ -499,20 +499,13 @@ pub fn assert_cursor_plugin_bundle(
     );
 
     let hooks = read_json(&plugin_dir.join("hooks/hooks.json"));
-    // The hint hook lives on postToolUse (the only generic tool event whose
-    // documented output supports `additional_context`) and runs unmatched so
-    // it also sees Read and Cursor's semantic search, whose matcher names are
-    // not documented. afterFileEdit runs unmatched so every Agent edit tool
-    // (not just Write) triggers the targeted sync.
+    // The plugin registers only native lifecycle boundaries. The daemon owns
+    // follow-up indexing, ingestion, compaction, and advisory work after the
+    // bounded hook admission returns.
     let expected_hooks = [
         ("sessionStart", "hook-cursor-session-start"),
-        ("sessionEnd", "hook-cursor-session-end"),
-        ("postToolUse", "hook-cursor-post-tool-use"),
         ("preCompact", "hook-cursor-pre-compact"),
-        ("beforeSubmitPrompt", "hook-cursor-before-submit-prompt"),
         ("afterFileEdit", "hook-cursor-after-file-edit"),
-        ("afterShellExecution", "hook-cursor-after-shell"),
-        ("workspaceOpen", "hook-cursor-workspace-open"),
         ("stop", "hook-cursor-stop"),
     ];
     for (event, subcommand) in expected_hooks {
@@ -757,33 +750,15 @@ pub fn codex_matcher_for_handler(
 pub fn assert_codex_hooks_registered(hooks: &serde_json::Value) {
     assert!(
         codex_event_has_handler(hooks, "SessionStart", "hook-codex-session-start"),
-        "Codex SessionStart hook should steer toward tracedecay MCP tools: {hooks}"
-    );
-    assert!(
-        codex_event_has_handler(hooks, "UserPromptSubmit", "hook-codex-user-prompt-submit"),
-        "Codex UserPromptSubmit hook should reset the counter and steer the agent: {hooks}"
-    );
-    assert!(
-        codex_event_has_handler(hooks, "SubagentStart", "hook-codex-subagent-start"),
-        "Codex SubagentStart hook should redirect research subagents: {hooks}"
-    );
-    assert!(
-        codex_event_has_handler(hooks, "PostToolUse", "hook-codex-post-tool-use"),
-        "Codex PostToolUse hook should keep the index fresh: {hooks}"
+        "Codex SessionStart must admit its native session boundary: {hooks}"
     );
     assert!(
         codex_event_has_handler(hooks, "PostCompact", "hook-codex-post-compact"),
-        "Codex PostCompact hook should generate app-server LCM summaries: {hooks}"
+        "Codex PostCompact hook must defer compaction to the daemon: {hooks}"
     );
     assert!(
         codex_event_has_handler(hooks, "Stop", "hook-codex-stop"),
-        "Codex Stop hook should ingest and review the final user-scoped turn: {hooks}"
-    );
-    let matcher = codex_matcher_for_handler(hooks, "PostToolUse", "hook-codex-post-tool-use")
-        .expect("PostToolUse handler should exist");
-    assert!(
-        matcher.contains("Bash") && matcher.contains("apply_patch"),
-        "PostToolUse matcher should target Bash and apply_patch, got {matcher:?}"
+        "Codex Stop hook must admit its native turn boundary: {hooks}"
     );
     let compact_matcher =
         codex_matcher_for_handler(hooks, "PostCompact", "hook-codex-post-compact")
