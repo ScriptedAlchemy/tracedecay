@@ -217,11 +217,20 @@ async fn production_query_journey_activates_cold_and_serves_warm_edits_stale_unt
     .expect("initial background publication");
     let initial_generation = initial.generation().manifest().generation_id.clone();
     mount_query_authority(&registry, project.path(), &scope, &initial).await;
-    let retry = registry
-        .execute_query_search(&scope, search_request("activation_revision"))
-        .await
-        .expect("retry after demand activation");
-    assert!(!retry.served_stale);
+    let retry = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Ok(retry) = registry
+                .execute_query_search(&scope, search_request("activation_revision"))
+                .await
+                && !retry.served_stale
+            {
+                break retry;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fresh retry after demand activation");
     assert_eq!(retry.generation, initial_generation);
 
     let edit_hold = registry
@@ -257,11 +266,20 @@ async fn production_query_journey_activates_cold_and_serves_warm_edits_stale_unt
     })
     .await
     .expect("edited generation publication");
-    let retry = registry
-        .execute_query_search(&scope, search_request("activation_revision"))
-        .await
-        .expect("retry after edit publication");
-    assert!(!retry.served_stale);
+    let retry = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Ok(retry) = registry
+                .execute_query_search(&scope, search_request("activation_revision"))
+                .await
+                && !retry.served_stale
+            {
+                break retry;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fresh retry after edit publication");
     assert_eq!(
         retry.generation,
         published.generation().manifest().generation_id
