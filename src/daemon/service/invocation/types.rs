@@ -339,6 +339,124 @@ impl Drop for RuntimeLspSession {
     }
 }
 
+struct LspLeaseTask {
+    generation: u64,
+    cancellation: crate::application::context::CancellationToken,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl LspLeaseTask {
+    async fn stop(self) {
+        self.cancellation.cancel();
+        let _ = self.handle.await;
+    }
+
+    fn abort(&self) {
+        self.cancellation.cancel();
+        self.handle.abort();
+    }
+}
+
+/// Owns one bounded expiry task per disconnected session.
+///
+/// Generations prevent an older task from retiring its replacement, and each
+/// task holds only a weak registry reference so dropping the daemon aborts all
+/// remaining work without creating an ownership cycle.
+#[derive(Default)]
+pub(super) struct LspLeaseTaskRegistry {
+    next_generation: AtomicU64,
+    tasks: StdMutex<BTreeMap<LspSessionId, LspLeaseTask>>,
+}
+
+impl LspLeaseTaskRegistry {
+    pub(super) fn reserve_generation(&self) -> Option<u64> {
+        self.next_generation
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .ok()
+    }
+
+    pub(super) async fn replace(
+        &self,
+        session_id: LspSessionId,
+        generation: u64,
+        cancellation: crate::application::context::CancellationToken,
+        handle: tokio::task::JoinHandle<()>,
+    ) {
+        let previous = {
+            let mut tasks = match self.tasks.lock() {
+                Ok(tasks) => tasks,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            tasks.insert(
+                session_id,
+                LspLeaseTask {
+                    generation,
+                    cancellation,
+                    handle,
+                },
+            )
+        };
+        if let Some(previous) = previous {
+            previous.stop().await;
+        }
+    }
+
+    pub(super) async fn cancel(&self, session_id: &LspSessionId) {
+        let task = match self.tasks.lock() {
+            Ok(mut tasks) => tasks.remove(session_id),
+            Err(poisoned) => poisoned.into_inner().remove(session_id),
+        };
+        if let Some(task) = task {
+            task.stop().await;
+        }
+    }
+
+    pub(super) fn finish(&self, session_id: &LspSessionId, generation: u64) {
+        let mut tasks = match self.tasks.lock() {
+            Ok(tasks) => tasks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if tasks
+            .get(session_id)
+            .is_some_and(|task| task.generation == generation)
+        {
+            tasks.remove(session_id);
+        }
+    }
+
+    pub(super) async fn shutdown(&self) {
+        let tasks = match self.tasks.lock() {
+            Ok(mut tasks) => std::mem::take(&mut *tasks),
+            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+        };
+        for task in tasks.into_values() {
+            task.stop().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn active_tasks(&self) -> usize {
+        match self.tasks.lock() {
+            Ok(tasks) => tasks.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        }
+    }
+}
+
+impl Drop for LspLeaseTaskRegistry {
+    fn drop(&mut self) {
+        let tasks = match self.tasks.get_mut() {
+            Ok(tasks) => tasks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for task in tasks.values() {
+            task.abort();
+        }
+    }
+}
+
 pub(super) type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
