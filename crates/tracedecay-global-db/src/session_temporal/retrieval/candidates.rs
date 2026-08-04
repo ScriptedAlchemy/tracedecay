@@ -1,129 +1,21 @@
 use std::cmp;
-use std::sync::Arc;
 
 use tracedecay_domain::MAX_OBSERVATION_RECORD_BYTES;
 
 use tracedecay_capture::parse_rfc3339_timestamp;
-use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId};
-use tracedecay_graph_db::GraphCancellation;
 use tracedecay_runtime_core::db::engine::Value as SqlValue;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidateClause};
 use tracedecay_temporal_query::ports::{
-    CandidateFieldCaps, ExecutionControl, PageRequest, TemporalExecutionSnapshot,
-    TemporalPortError, TemporalRetrievalScope,
+    CandidateFieldCaps, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
+    TemporalRetrievalScope,
 };
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
-use super::super::relations::{
-    SessionRelationError, SessionRelationGraphStore, SummarySourceVisitKind,
-};
 use super::super::sql::{TemporalSqlRead, TemporalSqlRow, TemporalSqlRows};
 use super::cursors::*;
 use super::queries::*;
 use super::rows::*;
 use super::{CANDIDATE_OPERATION, RECORD_OPERATION, SNAPSHOT_OPERATION};
-
-#[derive(Clone, Debug)]
-struct CandidateGraphCancellation(ExecutionControl);
-
-impl GraphCancellation for CandidateGraphCancellation {
-    fn is_cancelled(&self) -> bool {
-        self.0.checkpoint().is_err()
-    }
-}
-
-pub(super) fn load_summary_source_anchors(
-    store: &SessionRelationGraphStore,
-    project_id: &ProjectId,
-    snapshot: &TemporalExecutionSnapshot,
-    candidate: &RankingCandidate,
-    max_relations: usize,
-) -> Result<Vec<RetrievalAnchorId>, TemporalPortError> {
-    if candidate.channel != CandidateChannel::Summary {
-        return Err(read_message(
-            CANDIDATE_OPERATION,
-            "summary relation read requires a summary candidate",
-        ));
-    }
-    if max_relations == 0 {
-        return Err(TemporalPortError::BudgetExceeded {
-            resource: "summary source relations",
-        });
-    }
-    let session_id = candidate
-        .session
-        .as_deref()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate session is missing"))
-        .and_then(|value| {
-            SessionId::new(value).map_err(|error| read_error(CANDIDATE_OPERATION, error))
-        })?;
-    let generation = if snapshot.has_authoritative_participant_manifest() {
-        let source = candidate
-            .source
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| read_message(CANDIDATE_OPERATION, "candidate provider is missing"))?;
-        snapshot
-            .participant_manifest()
-            .entries()
-            .iter()
-            .find(|participant| {
-                participant.session_id() == &session_id && participant.source_id() == source
-            })
-            .map(tracedecay_temporal_query::ports::TemporalParticipantGeneration::generation)
-            .ok_or_else(|| {
-                read_message(
-                    CANDIDATE_OPERATION,
-                    "candidate is absent from the frozen participant manifest",
-                )
-            })?
-    } else {
-        snapshot.watermarks().generation
-    };
-    let control = snapshot.request().execution_control();
-    control.checkpoint()?;
-    let visits = store
-        .summary_sources(
-            project_id,
-            &session_id,
-            generation,
-            &candidate.retriever_record_id,
-            max_relations,
-            Arc::new(CandidateGraphCancellation(control.clone())),
-        )
-        .map_err(|error| map_candidate_relation_error(error, control))?;
-    control.checkpoint()?;
-    Ok(visits
-        .into_iter()
-        .filter_map(|visit| match visit.source {
-            SummarySourceVisitKind::Anchor { anchor_id } => Some(anchor_id),
-            SummarySourceVisitKind::Summary { .. } => None,
-        })
-        .collect())
-}
-
-fn map_candidate_relation_error(
-    error: SessionRelationError,
-    control: &ExecutionControl,
-) -> TemporalPortError {
-    if let Err(control_error) = control.checkpoint() {
-        return control_error;
-    }
-    match error {
-        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
-            resource: "summary source relations",
-        },
-        SessionRelationError::Cancelled => TemporalPortError::Cancelled,
-        SessionRelationError::Invalid
-        | SessionRelationError::Cycle
-        | SessionRelationError::NotFound
-        | SessionRelationError::Unavailable
-        | SessionRelationError::Conflict
-        | SessionRelationError::Corrupt
-        | SessionRelationError::Storage(_) => read_error(CANDIDATE_OPERATION, error),
-    }
-}
 
 pub(super) fn validate_clause(
     clause: &CandidateClause,

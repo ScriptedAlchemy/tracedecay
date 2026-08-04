@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tracedecay_domain::{MessageOccurrenceIdV1, ProjectId, SessionId};
+use tracedecay_domain::{MessageOccurrenceIdV1, SessionId};
 use tracedecay_graph_db::GraphCancellation;
 use tracedecay_temporal_query::ports::{
     ExecutionControl, PageRequest, TemporalExecutionSnapshot, TemporalPortError,
@@ -9,7 +9,8 @@ use tracedecay_temporal_query::ports::{
 use tracedecay_temporal_query::ranking::RankingCandidate;
 
 use super::super::super::relations::{
-    SessionRelationError, SessionRelationGraphStore, SummarySourceRef, SummarySourceVisitKind,
+    SessionRelationError, SessionRelationGraphStore, SessionRelationScope, SummarySourceRef,
+    SummarySourceVisitKind,
 };
 use super::super::{MAX_SUMMARY_SOURCES_PER_RECORD, RECORD_OPERATION};
 use super::{read_error, read_message};
@@ -71,7 +72,7 @@ impl GraphCancellation for TemporalGraphCancellation {
 #[allow(clippy::too_many_arguments)]
 pub(in crate::session_temporal::retrieval) fn load_record_relations(
     store: &SessionRelationGraphStore,
-    project_id: &ProjectId,
+    relation_scope: &SessionRelationScope,
     scope: &TemporalRetrievalScope,
     snapshot: &TemporalExecutionSnapshot,
     candidates: &[RankingCandidate],
@@ -102,7 +103,7 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
             let summary_id = candidate.retriever_record_id.clone();
             let reads = store
                 .summary_relations(
-                    project_id,
+                    relation_scope,
                     &session_id,
                     generation,
                     std::slice::from_ref(&summary_id),
@@ -143,7 +144,7 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
             }
             let visits = store
                 .summary_sources(
-                    project_id,
+                    relation_scope,
                     &session_id,
                     generation,
                     &summary_id,
@@ -190,7 +191,7 @@ pub(in crate::session_temporal::retrieval) fn load_record_relations(
         }
         let batches = store
             .logical_copies(
-                project_id,
+                relation_scope,
                 &session_id,
                 generation,
                 std::slice::from_ref(&occurrence_id),
