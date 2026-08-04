@@ -35,6 +35,7 @@ pub mod remote;
 pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;
+pub mod sdk_catalog;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
@@ -205,6 +206,7 @@ pub use retrieval::{
     callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
     callable_code_request_schema, callable_code_result_schema,
 };
+pub use sdk_catalog::sdk_executable_binding_registry;
 pub use settings_preview::{
     MIN_AUTO_TRACK_PR_POLL_SECS_V1, ProjectSettingsPatchInputV1, SettingsValidationIssueV1,
     UserSettingsPatchInputV1, UserSettingsPreviewErrorV1, UserSettingsPreviewV1,
