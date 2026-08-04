@@ -64,17 +64,17 @@ test-group = 'cli-subprocess'
 threads-required = "num-cpus"
 
 [[profile.ci.overrides]]
-filter = 'binary(=agent_suite) | (binary(=storage_suite) & test(/^branch_db_safety_test::/)) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_template_path_test)::/))'
+filter = 'binary(=agent_suite) | (binary(=core_cli_suite) & test(/^cli_non_interactive_test::/)) | (binary(=mcp_suite) & test(/^(mcp_cli_serve_test|serve_template_path_test)::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-tracedecay-init'
 
 [[profile.ci.overrides]]
-filter = '(binary(=automation_runner_test) & !test(~backend::)) | (binary(=storage_suite) & test(/^branch_drift_test::/)) | (binary(=core_cli_suite) & test(/^(integration_test|regression_core_engine_test|tracedecay_test)::/))'
+filter = '(binary(=automation_runner_test) & !test(~backend::)) | (binary(=core_cli_suite) & test(/^(integration_test|regression_core_engine_test|tracedecay_test)::/))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-init-heavy'
 
 [[profile.ci.overrides]]
-filter = '(binary(=storage_suite) & (test(/^storage_resolver_test::/) | test(/^profile_storage_migration_test::/))) | (binary(=transcript_ingest_suite) & test(~cursor::))'
+filter = '(binary(=storage_suite) & (test(/^storage_resolver_test::/) | test(/^profile_storage_reset_test::/))) | (binary(=transcript_ingest_suite) & test(~cursor::))'
 platform = { host = 'cfg(windows)' }
 test-group = 'windows-profile-storage'
 
