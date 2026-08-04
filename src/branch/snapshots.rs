@@ -2,59 +2,179 @@
 
 use gix::bstr::ByteSlice as _;
 
+#[derive(Clone, Debug)]
+pub struct LocalBranchReadControlV1 {
+    pub max_refs: usize,
+    pub deadline: Option<tracedecay_application::Deadline>,
+    pub cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+impl LocalBranchReadControlV1 {
+    fn termination(&self) -> Option<LocalBranchSnapshotErrorV1> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
+        {
+            return Some(LocalBranchSnapshotErrorV1::Cancelled);
+        }
+        self.deadline
+            .as_ref()
+            .is_some_and(|deadline| {
+                deadline.is_elapsed_at(tracedecay_application::clock::now_micros())
+            })
+            .then_some(LocalBranchSnapshotErrorV1::TimedOut)
+    }
+}
+
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum LocalBranchSnapshotErrorV1 {
+    #[error("branch name is not a valid local reference: {branch}")]
+    InvalidReference { branch: String },
+    #[error("local branch was not found: {branch}")]
+    NotFound { branch: String },
+    #[error("Git repository is unavailable")]
+    RepositoryUnavailable,
+    #[error("local branch reference is unavailable: {branch}")]
+    ReferenceUnavailable { branch: String },
+    #[error("local branch enumeration is unavailable")]
+    EnumerationUnavailable,
+    #[error("local branch enumeration requires a positive reference limit")]
+    InvalidLimit,
+    #[error("local branch read was cancelled")]
+    Cancelled,
+    #[error("local branch read timed out")]
+    TimedOut,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchSnapshot {
     pub name: String,
     pub commit: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBranchSnapshotsV1 {
+    pub snapshots: Vec<BranchSnapshot>,
+    pub examined: usize,
+    pub truncated: bool,
+}
+
 /// Resolves one exact local `refs/heads/*` branch tip to its peeled commit.
 pub fn local_branch_commit(
     project_root: &std::path::Path,
     branch: &str,
-) -> Result<tracedecay_domain::GitOidV1, String> {
-    if branch.is_empty() {
-        return Err("branch name cannot be empty".to_owned());
-    }
-    let repo = gix::open(project_root)
-        .map_err(|error| format!("failed to open Git repository: {error}"))?;
-    let refname = format!("refs/heads/{branch}");
-    let mut reference = repo
-        .find_reference(&refname)
-        .map_err(|error| format!("local branch '{branch}' is unavailable: {error}"))?;
-    let commit = reference
-        .peel_to_id()
-        .map_err(|error| format!("failed to resolve branch '{branch}': {error}"))?
-        .to_string();
-    tracedecay_domain::GitOidV1::new(commit)
-        .map_err(|error| format!("branch '{branch}' resolved to an invalid commit: {error}"))
+) -> Result<tracedecay_domain::GitOidV1, LocalBranchSnapshotErrorV1> {
+    local_branch_commit_controlled(
+        project_root,
+        branch,
+        &LocalBranchReadControlV1 {
+            max_refs: 1,
+            deadline: None,
+            cancellation: None,
+        },
+    )
 }
 
-/// Lists exact local branch tips without spawning Git.
+pub fn local_branch_commit_controlled(
+    project_root: &std::path::Path,
+    branch: &str,
+    control: &LocalBranchReadControlV1,
+) -> Result<tracedecay_domain::GitOidV1, LocalBranchSnapshotErrorV1> {
+    control.termination().map_or(Ok(()), Err)?;
+    let refname = format!("refs/heads/{branch}");
+    gix::refs::FullName::try_from(refname.as_str()).map_err(|_| {
+        LocalBranchSnapshotErrorV1::InvalidReference {
+            branch: branch.to_owned(),
+        }
+    })?;
+    let repo =
+        gix::open(project_root).map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
+    let mut reference = repo
+        .try_find_reference(&refname)
+        .map_err(|_| LocalBranchSnapshotErrorV1::ReferenceUnavailable {
+            branch: branch.to_owned(),
+        })?
+        .ok_or_else(|| LocalBranchSnapshotErrorV1::NotFound {
+            branch: branch.to_owned(),
+        })?;
+    control.termination().map_or(Ok(()), Err)?;
+    let commit = reference
+        .peel_to_commit()
+        .map_err(|_| LocalBranchSnapshotErrorV1::InvalidReference {
+            branch: branch.to_owned(),
+        })?
+        .id()
+        .to_string();
+    control.termination().map_or(Ok(()), Err)?;
+    tracedecay_domain::GitOidV1::new(commit).map_err(|_| {
+        LocalBranchSnapshotErrorV1::InvalidReference {
+            branch: branch.to_owned(),
+        }
+    })
+}
+
+/// Lists a bounded prefix of exact local branch tips without spawning Git.
 pub fn local_branch_snapshots(
     project_root: &std::path::Path,
-) -> Result<Vec<BranchSnapshot>, String> {
-    let repo = gix::open(project_root)
-        .map_err(|error| format!("failed to open Git repository: {error}"))?;
+) -> Result<LocalBranchSnapshotsV1, LocalBranchSnapshotErrorV1> {
+    local_branch_snapshots_controlled(
+        project_root,
+        &LocalBranchReadControlV1 {
+            max_refs: 128,
+            deadline: None,
+            cancellation: None,
+        },
+    )
+}
+
+pub fn local_branch_snapshots_controlled(
+    project_root: &std::path::Path,
+    control: &LocalBranchReadControlV1,
+) -> Result<LocalBranchSnapshotsV1, LocalBranchSnapshotErrorV1> {
+    if control.max_refs == 0 {
+        return Err(LocalBranchSnapshotErrorV1::InvalidLimit);
+    }
+    control.termination().map_or(Ok(()), Err)?;
+    let repo =
+        gix::open(project_root).map_err(|_| LocalBranchSnapshotErrorV1::RepositoryUnavailable)?;
     let references = repo
         .references()
-        .map_err(|error| format!("failed to open Git references: {error}"))?;
+        .map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?;
     let branches = references
         .local_branches()
-        .map_err(|error| format!("failed to enumerate local branches: {error}"))?;
+        .map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?;
     let mut snapshots = Vec::new();
+    let mut examined = 0;
     for reference in branches {
+        control.termination().map_or(Ok(()), Err)?;
+        examined += 1;
+        if snapshots.len() == control.max_refs {
+            snapshots.sort_unstable_by(|left: &BranchSnapshot, right| left.name.cmp(&right.name));
+            return Ok(LocalBranchSnapshotsV1 {
+                snapshots,
+                examined,
+                truncated: true,
+            });
+        }
         let mut reference =
-            reference.map_err(|error| format!("failed to read local branch: {error}"))?;
+            reference.map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?;
         let name = reference.name().shorten().to_str_lossy().into_owned();
         let commit = reference
-            .peel_to_id()
-            .map_err(|error| format!("failed to resolve branch '{name}': {error}"))?
+            .peel_to_commit()
+            .map_err(|_| LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: name.clone(),
+            })?
+            .id()
             .to_string();
         snapshots.push(BranchSnapshot { name, commit });
     }
     snapshots.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    Ok(snapshots)
+    Ok(LocalBranchSnapshotsV1 {
+        snapshots,
+        examined,
+        truncated: false,
+    })
 }
 
 #[cfg(test)]
@@ -122,5 +242,85 @@ mod tests {
         assert_eq!(resolved.as_str(), selected);
         assert_ne!(resolved.as_str(), git(root.path(), &["rev-parse", "HEAD"]));
         assert!(local_branch_commit(root.path(), "missing").is_err());
+    }
+
+    #[test]
+    fn many_refs_are_bounded_and_termination_is_typed() {
+        let root = tempfile::tempdir().expect("tempdir");
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(root.path().join("fixture.txt"), "base\n").expect("write base");
+        git(root.path(), &["add", "fixture.txt"]);
+        git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+        let head = git(root.path(), &["rev-parse", "HEAD"]);
+        for index in 0..96 {
+            std::fs::write(
+                root.path()
+                    .join(".git/refs/heads")
+                    .join(format!("many-{index:03}")),
+                format!("{head}\n"),
+            )
+            .expect("write loose ref");
+        }
+        let page = local_branch_snapshots_controlled(
+            root.path(),
+            &LocalBranchReadControlV1 {
+                max_refs: 32,
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .expect("bounded branch page");
+        assert_eq!(page.snapshots.len(), 32);
+        assert_eq!(page.examined, 33);
+        assert!(page.truncated);
+
+        let cancellation = tracedecay_application::CancellationSignal::active("cancel.branch-refs")
+            .expect("cancellation");
+        cancellation.cancel(tracedecay_application::clock::now_micros());
+        assert_eq!(
+            local_branch_snapshots_controlled(
+                root.path(),
+                &LocalBranchReadControlV1 {
+                    max_refs: 32,
+                    deadline: None,
+                    cancellation: Some(cancellation),
+                },
+            ),
+            Err(LocalBranchSnapshotErrorV1::Cancelled)
+        );
+        let expired =
+            tracedecay_application::Deadline::new(tracedecay_application::clock::now_micros())
+                .expect("deadline");
+        assert_eq!(
+            local_branch_snapshots_controlled(
+                root.path(),
+                &LocalBranchReadControlV1 {
+                    max_refs: 32,
+                    deadline: Some(expired),
+                    cancellation: None,
+                },
+            ),
+            Err(LocalBranchSnapshotErrorV1::TimedOut)
+        );
+        assert!(matches!(
+            local_branch_commit(root.path(), "missing"),
+            Err(LocalBranchSnapshotErrorV1::NotFound { .. })
+        ));
+        assert!(matches!(
+            local_branch_commit(root.path(), "bad..name"),
+            Err(LocalBranchSnapshotErrorV1::InvalidReference { .. })
+        ));
     }
 }

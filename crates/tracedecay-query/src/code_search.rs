@@ -293,6 +293,8 @@ pub struct CodeIndexBranchSymbolV1 {
     pub content_digest: String,
 }
 
+pub const CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1: usize = 256;
+
 #[derive(Clone, Debug)]
 pub struct CodeIndexBranchDiffRequestV1 {
     pub project_root: PathBuf,
@@ -300,9 +302,29 @@ pub struct CodeIndexBranchDiffRequestV1 {
     pub head_revision: tracedecay_domain::GitOidV1,
     pub file_filter: Option<String>,
     pub kind_filter: Option<String>,
+    pub limit: usize,
     pub authority: Option<CodeIndexSearchAuthorityV1>,
     pub deadline: Option<tracedecay_application::Deadline>,
     pub cancellation: Option<tracedecay_application::CancellationSignal>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodeIndexBranchDiffPartialReasonV1 {
+    GenerationFileLimit,
+    GenerationChunkLimit,
+    GenerationSymbolLimit,
+    ResultLimit,
+}
+
+impl CodeIndexBranchDiffPartialReasonV1 {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GenerationFileLimit => "generation_file_limit",
+            Self::GenerationChunkLimit => "generation_chunk_limit",
+            Self::GenerationSymbolLimit => "generation_symbol_limit",
+            Self::ResultLimit => "result_limit",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -321,6 +343,24 @@ pub struct CodeIndexBranchDiffCompletedV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIndexBranchDiffPartialV1 {
+    pub base_generation: String,
+    pub head_generation: String,
+    pub reason: CodeIndexBranchDiffPartialReasonV1,
+    pub base_file_count: usize,
+    pub head_file_count: usize,
+    pub base_chunk_count: usize,
+    pub head_chunk_count: usize,
+    pub base_symbol_count: usize,
+    pub head_symbol_count: usize,
+    /// Known only when both generations fit the scan bound.
+    pub total_changes: Option<usize>,
+    pub added: Vec<CodeIndexBranchSymbolV1>,
+    pub removed: Vec<CodeIndexBranchSymbolV1>,
+    pub changed: Vec<CodeIndexBranchChangedSymbolV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CodeIndexBranchDiffUnavailableV1 {
     pub base_generation: Option<String>,
     pub head_generation: Option<String>,
@@ -330,6 +370,7 @@ pub struct CodeIndexBranchDiffUnavailableV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CodeIndexBranchDiffOutcomeV1 {
     Complete(CodeIndexBranchDiffCompletedV1),
+    Partial(CodeIndexBranchDiffPartialV1),
     Unavailable(CodeIndexBranchDiffUnavailableV1),
 }
 

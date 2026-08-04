@@ -1,12 +1,114 @@
 //! Exact immutable branch-snapshot reads.
 
+use std::path::Path;
+use std::sync::{Arc, LazyLock};
+
 use super::*;
 
+const MAX_BRANCH_REFS_PER_READ: usize = 128;
+static BRANCH_REF_READ_ADMISSION: LazyLock<Arc<tokio::sync::Semaphore>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
+
+enum BranchRouteReadErrorV1 {
+    Capacity,
+    Task,
+    Ref(crate::branch::LocalBranchSnapshotErrorV1),
+}
+
+async fn run_branch_ref_read<T, F>(
+    project_root: std::path::PathBuf,
+    max_refs: usize,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+    operation: F,
+) -> std::result::Result<T, BranchRouteReadErrorV1>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &Path,
+            &crate::branch::LocalBranchReadControlV1,
+        ) -> std::result::Result<T, crate::branch::LocalBranchSnapshotErrorV1>
+        + Send
+        + 'static,
+{
+    let permit = Arc::clone(&BRANCH_REF_READ_ADMISSION)
+        .try_acquire_owned()
+        .map_err(|_| BranchRouteReadErrorV1::Capacity)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation(
+            &project_root,
+            &crate::branch::LocalBranchReadControlV1 {
+                max_refs,
+                deadline,
+                cancellation,
+            },
+        )
+        .map_err(BranchRouteReadErrorV1::Ref)
+    })
+    .await
+    .map_err(|_| BranchRouteReadErrorV1::Task)?
+}
+
+fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
+    use crate::branch::LocalBranchSnapshotErrorV1;
+
+    match error {
+        BranchRouteReadErrorV1::Capacity => ("branch_read_capacity_unavailable", true),
+        BranchRouteReadErrorV1::Task => ("branch_read_failed", true),
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::InvalidReference { .. }) => {
+            ("branch_ref_invalid", false)
+        }
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::NotFound { .. }) => {
+            ("branch_ref_not_found", false)
+        }
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::RepositoryUnavailable) => {
+            ("repository_unavailable", true)
+        }
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::ReferenceUnavailable {
+            ..
+        })
+        | BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::EnumerationUnavailable) => {
+            ("branch_refs_unavailable", true)
+        }
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::InvalidLimit) => {
+            ("invalid_request", false)
+        }
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::Cancelled) => ("cancelled", false),
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::TimedOut) => ("timed_out", true),
+    }
+}
+
 /// Lists exact local branch refs. A branch name never selects a branch DB.
-pub(crate) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
-    match crate::branch::local_branch_snapshots(cg.project_root()) {
-        Ok(snapshots) => {
-            let snapshots = snapshots
+pub(crate) async fn handle_branch_list(
+    cg: &TraceDecay,
+    args: Value,
+    deadline: Option<tracedecay_application::Deadline>,
+    cancellation: Option<tracedecay_application::CancellationSignal>,
+) -> Result<ToolResult> {
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(100, |value| {
+            value.min(MAX_BRANCH_REFS_PER_READ as u64) as usize
+        });
+    if limit == 0 {
+        return Err(TraceDecayError::Config {
+            message: "branch-list limit must be positive".to_owned(),
+        });
+    }
+    match run_branch_ref_read(
+        cg.project_root().to_path_buf(),
+        limit,
+        deadline,
+        cancellation,
+        crate::branch::local_branch_snapshots_controlled,
+    )
+    .await
+    {
+        Ok(page) => {
+            let snapshots = page
+                .snapshots
                 .into_iter()
                 .map(|snapshot| {
                     json!({
@@ -16,24 +118,35 @@ pub(crate) fn handle_branch_list(cg: &TraceDecay, args: &Value) -> ToolResult {
                 })
                 .collect::<Vec<_>>();
             let result = json!({
-                "status": "complete",
+                "status": if page.truncated { "partial" } else { "complete" },
+                "reason": page.truncated.then_some("reference_limit"),
                 "snapshot_count": snapshots.len(),
+                "examined": page.examined,
+                "limit": limit,
                 "snapshots": snapshots,
             });
-            generic_tool_result(Some(cg.project_root()), args, &result, vec![])
+            Ok(generic_tool_result(
+                Some(cg.project_root()),
+                &args,
+                &result,
+                vec![],
+            ))
         }
-        Err(_) => generic_tool_result(
-            Some(cg.project_root()),
-            args,
-            &json!({
-                "status": "unavailable",
-                "reason": "local_refs_unavailable",
-                "retryable": false,
-            }),
-            vec![],
-        )
-        .with_semantic_error(true)
-        .with_failure_message("local branch snapshots are unavailable"),
+        Err(error) => {
+            let (reason, retryable) = branch_read_reason(&error);
+            Ok(generic_tool_result(
+                Some(cg.project_root()),
+                &args,
+                &json!({
+                    "status": "unavailable",
+                    "reason": reason,
+                    "retryable": retryable,
+                }),
+                vec![],
+            )
+            .with_semantic_error(true)
+            .with_failure_message("local branch snapshots are unavailable"))
+        }
     }
 }
 
@@ -42,15 +155,17 @@ fn branch_reference_unavailable(
     args: &Value,
     field: &str,
     branch: &str,
+    error: &BranchRouteReadErrorV1,
 ) -> ToolResult {
+    let (reason, retryable) = branch_read_reason(error);
     generic_tool_result(
         Some(cg.project_root()),
         args,
         &json!({
             "status": "unavailable",
             field: branch,
-            "reason": "branch_ref_unavailable",
-            "retryable": false,
+            "reason": reason,
+            "retryable": retryable,
         }),
         vec![],
     )
@@ -105,6 +220,7 @@ pub(crate) async fn handle_branch_search(
         .get("branch")
         .and_then(Value::as_str)
         .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: branch".to_string(),
         })?;
@@ -112,6 +228,7 @@ pub(crate) async fn handle_branch_search(
         .get("query")
         .and_then(Value::as_str)
         .filter(|query| !query.is_empty())
+        .map(str::to_owned)
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: query".to_string(),
         })?;
@@ -119,15 +236,30 @@ pub(crate) async fn handle_branch_search(
         .get("limit")
         .and_then(Value::as_u64)
         .map_or(10, |value| value.min(500) as usize);
-    let revision = match crate::branch::local_branch_commit(cg.project_root(), branch) {
+    let revision_branch = branch.clone();
+    let revision = match run_branch_ref_read(
+        cg.project_root().to_path_buf(),
+        1,
+        deadline.clone(),
+        cancellation.clone(),
+        move |root, control| {
+            crate::branch::local_branch_commit_controlled(root, &revision_branch, control)
+        },
+    )
+    .await
+    {
         Ok(revision) => revision,
-        Err(_) => return Ok(branch_reference_unavailable(cg, &args, "branch", branch)),
+        Err(error) => {
+            return Ok(branch_reference_unavailable(
+                cg, &args, "branch", &branch, &error,
+            ));
+        }
     };
     let Some(executor) = executor else {
         return Ok(branch_search_unavailable(
             cg,
             &args,
-            branch,
+            &branch,
             &revision,
             &crate::mcp::server::CodeIndexSearchUnavailableV1 {
                 code_generation: None,
@@ -144,7 +276,7 @@ pub(crate) async fn handle_branch_search(
     };
     match executor(crate::mcp::server::CodeIndexSearchRequestV1 {
         project_root: cg.project_root().to_path_buf(),
-        query: query.to_owned(),
+        query,
         source_revision: Some(revision.clone()),
         limit,
         cursor: None,
@@ -186,7 +318,7 @@ pub(crate) async fn handle_branch_search(
             ))
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => Ok(
-            branch_search_unavailable(cg, &args, branch, &revision, &unavailable),
+            branch_search_unavailable(cg, &args, &branch, &revision, &unavailable),
         ),
     }
 }
@@ -249,6 +381,7 @@ pub(crate) async fn handle_branch_diff(
         .get("base")
         .and_then(Value::as_str)
         .filter(|base| !base.is_empty())
+        .map(str::to_owned)
         .ok_or_else(|| TraceDecayError::Config {
             message: "missing required parameter: base".to_string(),
         })?;
@@ -257,23 +390,55 @@ pub(crate) async fn handle_branch_diff(
         .and_then(Value::as_str)
         .or_else(|| cg.active_branch())
         .filter(|head| !head.is_empty())
+        .map(str::to_owned)
         .ok_or_else(|| TraceDecayError::Config {
             message: "cannot determine head branch — specify it explicitly".to_string(),
         })?;
-    let base_revision = match crate::branch::local_branch_commit(cg.project_root(), base_name) {
-        Ok(revision) => revision,
-        Err(_) => return Ok(branch_reference_unavailable(cg, &args, "base", base_name)),
-    };
-    let head_revision = match crate::branch::local_branch_commit(cg.project_root(), head_name) {
-        Ok(revision) => revision,
-        Err(_) => return Ok(branch_reference_unavailable(cg, &args, "head", head_name)),
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(100, |value| {
+            value.min(crate::mcp::server::CODE_INDEX_BRANCH_DIFF_MAX_RESULTS_V1 as u64) as usize
+        });
+    if limit == 0 {
+        return Err(TraceDecayError::Config {
+            message: "branch-diff limit must be positive".to_owned(),
+        });
+    }
+    let resolution_base = base_name.clone();
+    let resolution_head = head_name.clone();
+    let (base_revision, head_revision) = match run_branch_ref_read(
+        cg.project_root().to_path_buf(),
+        1,
+        deadline.clone(),
+        cancellation.clone(),
+        move |root, control| {
+            let base =
+                crate::branch::local_branch_commit_controlled(root, &resolution_base, control)?;
+            let head =
+                crate::branch::local_branch_commit_controlled(root, &resolution_head, control)?;
+            Ok((base, head))
+        },
+    )
+    .await
+    {
+        Ok(revisions) => revisions,
+        Err(error) => {
+            return Ok(branch_reference_unavailable(
+                cg,
+                &args,
+                "base_or_head",
+                &format!("{base_name}..{head_name}"),
+                &error,
+            ));
+        }
     };
     let Some(executor) = executor else {
         return Ok(branch_diff_unavailable(
             cg,
             &args,
-            (base_name, &base_revision),
-            (head_name, &head_revision),
+            (&base_name, &base_revision),
+            (&head_name, &head_revision),
             &crate::mcp::server::CodeIndexBranchDiffUnavailableV1 {
                 base_generation: None,
                 head_generation: None,
@@ -288,6 +453,7 @@ pub(crate) async fn handle_branch_diff(
         head_revision: head_revision.clone(),
         file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
         kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
+        limit,
         authority: authority.cloned(),
         deadline,
         cancellation,
@@ -349,14 +515,98 @@ pub(crate) async fn handle_branch_diff(
                 touched,
             ))
         }
+        crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Partial(partial) => {
+            let added = partial
+                .added
+                .iter()
+                .map(branch_symbol_json)
+                .collect::<Vec<_>>();
+            let removed = partial
+                .removed
+                .iter()
+                .map(branch_symbol_json)
+                .collect::<Vec<_>>();
+            let changed = partial
+                .changed
+                .iter()
+                .map(|value| {
+                    json!({
+                        "base": branch_symbol_json(&value.base),
+                        "head": branch_symbol_json(&value.head),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(generic_tool_result(
+                Some(cg.project_root()),
+                &args,
+                &json!({
+                    "status": "partial",
+                    "reason": partial.reason.as_str(),
+                    "base": base_name,
+                    "head": head_name,
+                    "base_revision": base_revision.as_str(),
+                    "head_revision": head_revision.as_str(),
+                    "base_generation": partial.base_generation,
+                    "head_generation": partial.head_generation,
+                    "base_counts": {
+                        "files": partial.base_file_count,
+                        "chunks": partial.base_chunk_count,
+                        "symbols": partial.base_symbol_count,
+                    },
+                    "head_counts": {
+                        "files": partial.head_file_count,
+                        "chunks": partial.head_chunk_count,
+                        "symbols": partial.head_symbol_count,
+                    },
+                    "total_changes": partial.total_changes,
+                    "summary": {
+                        "added": added.len(),
+                        "removed": removed.len(),
+                        "changed": changed.len(),
+                    },
+                    "added": added,
+                    "removed": removed,
+                    "changed": changed,
+                }),
+                vec![],
+            ))
+        }
         crate::mcp::server::CodeIndexBranchDiffOutcomeV1::Unavailable(unavailable) => {
             Ok(branch_diff_unavailable(
                 cg,
                 &args,
-                (base_name, &base_revision),
-                (head_name, &head_revision),
+                (&base_name, &base_revision),
+                (&head_name, &head_revision),
                 &unavailable,
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn branch_ref_route_reports_capacity_without_queueing() {
+        let first = Arc::clone(&BRANCH_REF_READ_ADMISSION)
+            .acquire_owned()
+            .await
+            .expect("first permit");
+        let second = Arc::clone(&BRANCH_REF_READ_ADMISSION)
+            .acquire_owned()
+            .await
+            .expect("second permit");
+        let result = run_branch_ref_read(
+            std::path::PathBuf::from("/unread"),
+            1,
+            None,
+            None,
+            |_root, _control| Ok(()),
+        )
+        .await;
+
+        assert!(matches!(result, Err(BranchRouteReadErrorV1::Capacity)));
+        drop((first, second));
     }
 }
