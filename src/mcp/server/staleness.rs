@@ -29,10 +29,7 @@ pub(crate) fn format_per_file_staleness_banner(
     project_root: &std::path::Path,
     stale_files: &[String],
 ) -> String {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now_secs = crate::tracedecay::current_timestamp();
 
     let mut lines = Vec::with_capacity(stale_files.len() + 2);
     lines.push(format!(

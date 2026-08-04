@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 
 use serde_json::Value;
 
 use super::recover_lock;
-use crate::errors::{Result, TraceDecayError};
+use crate::errors::Result;
 use crate::global_db::ProjectRegistryContext;
 use crate::mcp::ToolResult;
 use crate::mcp::project_route::ResolvedProjectRoute;
@@ -68,10 +68,7 @@ pub(in crate::mcp::server) struct ToolTokenAccounting {
     pub(super) net_saved_tokens: u64,
 }
 
-static NEXT_DISPATCH_EXECUTION_RECONCILIATION_ID: AtomicU64 = AtomicU64::new(1);
-
-pub(in crate::mcp::server) struct DispatchExecutionSettlement {
-    reconciliation_id: u64,
+pub(crate) struct DispatchExecutionSettlement {
     state: std::sync::atomic::AtomicU8,
 }
 
@@ -79,21 +76,13 @@ impl DispatchExecutionSettlement {
     const STARTED: u8 = 1;
     const JOINED: u8 = 2;
 
-    pub(super) fn new() -> Result<Self> {
-        let reconciliation_id = NEXT_DISPATCH_EXECUTION_RECONCILIATION_ID
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |next| {
-                next.checked_add(1)
-            })
-            .map_err(|_| TraceDecayError::Config {
-                message: "MCP dispatch execution reconciliation identity exhausted".to_owned(),
-            })?;
-        Ok(Self {
-            reconciliation_id,
+    pub(crate) fn new() -> Self {
+        Self {
             state: std::sync::atomic::AtomicU8::new(0),
-        })
+        }
     }
 
-    pub(super) async fn observe<T, F>(&self, future: F) -> T
+    pub(crate) async fn observe<T, F>(self: Arc<Self>, future: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -106,8 +95,76 @@ impl DispatchExecutionSettlement {
     pub(super) fn snapshot(&self) -> ToolCallWorkerSettlement {
         match self.state.load(Ordering::Acquire) {
             Self::JOINED => ToolCallWorkerSettlement::Joined,
-            Self::STARTED => ToolCallWorkerSettlement::indeterminate(self.reconciliation_id),
+            Self::STARTED => ToolCallWorkerSettlement::Settling,
             _ => ToolCallWorkerSettlement::NotStarted,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_settling(&self) -> bool {
+        self.state.load(Ordering::Acquire) == Self::STARTED
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_joined(&self) -> bool {
+        self.state.load(Ordering::Acquire) == Self::JOINED
+    }
+}
+
+/// Server-owned tasks whose handlers outlive the transport-visible deadline.
+///
+/// A timed-out request gets a bounded response while its admitted handler
+/// remains owned here. Completed tasks are reaped on later admissions and all
+/// remaining tasks are joined during server shutdown.
+pub(crate) struct RetainedToolDispatchTasks {
+    accepting: std::sync::atomic::AtomicBool,
+    tasks: std::sync::Mutex<tokio::task::JoinSet<()>>,
+}
+
+impl RetainedToolDispatchTasks {
+    pub(crate) fn new() -> Self {
+        Self {
+            accepting: std::sync::atomic::AtomicBool::new(true),
+            tasks: std::sync::Mutex::new(tokio::task::JoinSet::new()),
+        }
+    }
+
+    pub(crate) fn spawn<T, F>(&self, future: F) -> Result<tokio::sync::oneshot::Receiver<T>>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = T> + Send + 'static,
+    {
+        let mut tasks = recover_lock(&self.tasks);
+        while let Some(joined) = tasks.try_join_next() {
+            if let Err(error) = joined {
+                tracing::error!(error = %error, "retained MCP tool dispatch task failed");
+            }
+        }
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(crate::errors::TraceDecayError::project_route(
+                "tool_dispatch_shutdown",
+                true,
+                "MCP server is shutting down and cannot retain another tool dispatch",
+            ));
+        }
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tasks.spawn(async move {
+            let output = future.await;
+            let _ = sender.send(output);
+        });
+        Ok(receiver)
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.accepting.store(false, Ordering::Release);
+        let mut tasks = {
+            let mut retained = recover_lock(&self.tasks);
+            std::mem::take(&mut *retained)
+        };
+        while let Some(joined) = tasks.join_next().await {
+            if let Err(error) = joined {
+                tracing::error!(error = %error, "retained MCP tool dispatch task failed");
+            }
         }
     }
 }

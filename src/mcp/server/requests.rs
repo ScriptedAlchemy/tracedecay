@@ -8,9 +8,10 @@ use tracedecay_sessions::WorkflowIndexReadPort;
 mod tool_call_lifecycle;
 
 pub(super) use tool_call_lifecycle::{
-    ApplicationCancellationRegistration, DispatchExecutionSettlement, DispatchedToolCall,
-    PreparedToolCall, PreparedToolCallError, RoutedToolCall, ToolTokenAccounting, mcp_now_micros,
+    ApplicationCancellationRegistration, DispatchedToolCall, PreparedToolCall,
+    PreparedToolCallError, RoutedToolCall, ToolTokenAccounting, mcp_now_micros,
 };
+pub(crate) use tool_call_lifecycle::{DispatchExecutionSettlement, RetainedToolDispatchTasks};
 
 pub(super) fn invocation_target_for_route(
     route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
@@ -241,7 +242,10 @@ impl McpServer {
     /// Dispatches a parsed JSON-RPC request to the appropriate handler.
     ///
     /// Returns `None` for notifications (requests without an `id`).
-    pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+    pub(crate) async fn handle_request(
+        self: &Arc<Self>,
+        request: &JsonRpcRequest,
+    ) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
         // exactly like the live connection loop. These callers never dispatch
@@ -284,7 +288,7 @@ impl McpServer {
     }
 
     pub(crate) async fn handle_request_for_connection(
-        &self,
+        self: &Arc<Self>,
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
@@ -1045,7 +1049,7 @@ impl McpServer {
 
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool_call(
-        &self,
+        self: &Arc<Self>,
         id: &Value,
         tool_name: &str,
         arguments: Value,
@@ -1175,37 +1179,35 @@ impl McpServer {
                 };
             }
         };
-        let settlement = match DispatchExecutionSettlement::new() {
-            Ok(settlement) => settlement,
-            Err(error) => {
-                return DispatchedToolCall {
-                    cg,
-                    selected_owner,
-                    selected_scope,
-                    outcome: Err(error),
-                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
-                    worker_settlement:
-                        super::request_receipts::ToolCallWorkerSettlement::NotStarted,
-                };
-            }
+        let settlement = Arc::new(DispatchExecutionSettlement::new());
+        let execution_server = Arc::clone(self);
+        let execution_cg = Arc::clone(&cg);
+        let execution_tool_name = tool_name.to_owned();
+        let execution_implicit_project_path = implicit_project_path.map(Path::to_path_buf);
+        let execution_dispatch_control = dispatch_control.clone();
+        let execution = async move {
+            execution_server
+                .execute_tool_dispatch(
+                    execution_cg.as_ref(),
+                    &execution_tool_name,
+                    routed.arguments,
+                    project_reader_preselected,
+                    server_stats,
+                    execution_implicit_project_path.as_deref(),
+                    application_invocation_executor.as_deref(),
+                    application_invocation_target,
+                    application_request_id,
+                    Some(execution_dispatch_control.deadline()),
+                    Some(execution_dispatch_control.cancellation()),
+                )
+                .await
         };
-        let execution = self.execute_tool_dispatch(
-            &cg,
-            tool_name,
-            routed.arguments,
-            project_reader_preselected,
-            server_stats,
-            implicit_project_path,
-            application_invocation_executor,
-            application_invocation_target,
-            application_request_id,
-            Some(dispatch_control.deadline()),
-            Some(dispatch_control.cancellation()),
-        );
         let outcome = dispatch_control
-            .run(
+            .run_retained(
                 crate::mcp::tools::handlers::McpToolDispatchStage::Handler,
-                settlement.observe(execution),
+                &self.retained_tool_dispatch_tasks,
+                Arc::clone(&settlement),
+                execution,
             )
             .await;
         let worker_settlement = settlement.snapshot();
@@ -1240,16 +1242,16 @@ impl McpServer {
         }
     }
 
-    async fn application_surface_invocation_executor<'a>(
-        &'a self,
+    async fn application_surface_invocation_executor(
+        &self,
         cg: &TraceDecay,
         tool_name: &str,
-    ) -> Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor> {
+    ) -> Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
         if application_surface.is_some() {
-            match self.application_invocation_executor.as_deref() {
-                Some(executor) => Some(executor),
+            match self.application_invocation_executor.as_ref() {
+                Some(executor) => Some(Arc::clone(executor)),
                 None => self
                     .application_surface_client
                     .get_or_try_init(|| async {
@@ -1260,10 +1262,14 @@ impl McpServer {
                             false,
                         )?;
                         crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                            .map(Arc::new)
                     })
                     .await
                     .ok()
-                    .map(|client| client as &dyn crate::daemon_client::DaemonInvocationExecutor),
+                    .map(|client| {
+                        Arc::clone(client)
+                            as Arc<dyn crate::daemon_client::DaemonInvocationExecutor>
+                    }),
             }
         } else {
             None
@@ -1791,7 +1797,7 @@ impl McpServer {
 
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
-        &self,
+        self: &Arc<Self>,
         id: Value,
         params: Option<&Value>,
         timings_enabled: bool,

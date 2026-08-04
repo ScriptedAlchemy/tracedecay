@@ -52,6 +52,7 @@ mod protocol;
 mod read_coalescing;
 mod request_receipts;
 mod requests;
+pub(crate) use requests::{DispatchExecutionSettlement, RetainedToolDispatchTasks};
 mod rmcp;
 mod routing;
 mod session_refresh;
@@ -391,7 +392,8 @@ pub struct McpServer {
     /// never masquerades as a real session.
     connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
-    application_surface_client: tokio::sync::OnceCell<crate::daemon_client::DaemonInvocationClient>,
+    application_surface_client:
+        tokio::sync::OnceCell<Arc<crate::daemon_client::DaemonInvocationClient>>,
     /// Daemon-local executor installed by production project composition.
     /// External/direct servers fall back to the authenticated socket client.
     application_invocation_executor:
@@ -404,6 +406,9 @@ pub struct McpServer {
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
+    /// Owns admitted tool handlers that need longer than the response-side
+    /// settlement grace after cancellation or deadline expiry.
+    retained_tool_dispatch_tasks: requests::RetainedToolDispatchTasks,
 }
 
 impl McpServer {
@@ -883,6 +888,7 @@ impl McpServer {
             project_server_live,
             project_server_lifecycle: ProjectServerResponseLifecycle::default(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
+            retained_tool_dispatch_tasks: requests::RetainedToolDispatchTasks::new(),
         });
 
         tokio::task::spawn_blocking(move || {

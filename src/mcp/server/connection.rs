@@ -56,7 +56,7 @@ impl McpServer {
     }
 
     async fn handle_cancellable_application_request(
-        &self,
+        self: &Arc<Self>,
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
@@ -174,7 +174,7 @@ impl McpServer {
     /// reports the peer's write side closed; this keeps one-shot CLI responses
     /// intact while dropping abandoned handlers and their admission permits.
     async fn handle_non_cancellable_application_request(
-        &self,
+        self: &Arc<Self>,
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
@@ -266,7 +266,7 @@ impl McpServer {
     /// Used to replay a peeked `initialize` message that was consumed before
     /// the server's main loop started.
     pub async fn handle_and_write(
-        &self,
+        self: &Arc<Self>,
         line: &str,
         transport: &mut impl crate::mcp::transport::McpTransport,
     ) -> Result<()> {
@@ -293,7 +293,7 @@ impl McpServer {
     /// responses to stdout. Runs until stdin is closed or a shutdown signal
     /// (SIGINT/SIGTERM) is received, then performs graceful cleanup.
     pub async fn run(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, true, true, None, None)
@@ -304,7 +304,7 @@ impl McpServer {
     /// connection closes. Daemon-owned servers use this so the engine remains
     /// shared across independent clients.
     pub async fn run_connection(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
     ) -> Result<()> {
         self.run_with_shutdown_policy(transport, false, false, None, None)
@@ -314,7 +314,7 @@ impl McpServer {
     /// Runs one daemon client connection using connection-local timing
     /// settings. The shared server's default timing flag remains unchanged.
     pub async fn run_connection_with_timings(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         timings_enabled: bool,
     ) -> Result<()> {
@@ -323,7 +323,7 @@ impl McpServer {
     }
 
     pub(crate) async fn run_daemon_connection_with_timings(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         timings_enabled: bool,
         lifecycle: &crate::daemon::DaemonLifecycle,
@@ -339,7 +339,7 @@ impl McpServer {
     }
 
     pub(crate) async fn run_with_shutdown_policy(
-        &self,
+        self: &Arc<Self>,
         transport: &mut impl crate::mcp::transport::McpTransport,
         shutdown_on_exit: bool,
         listen_for_process_signals: bool,
@@ -749,6 +749,14 @@ impl McpServer {
     }
 
     pub(crate) async fn shutdown_background_tasks(&self) {
+        let now = crate::mcp::server::requests::mcp_now_micros();
+        for cancellation in
+            crate::mcp::server::requests::recover_lock(&self.application_surface_cancellations)
+                .values()
+        {
+            cancellation.cancel(now);
+        }
+        self.retained_tool_dispatch_tasks.shutdown().await;
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }

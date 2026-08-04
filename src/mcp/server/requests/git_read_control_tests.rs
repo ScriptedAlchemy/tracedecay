@@ -1,35 +1,18 @@
 use super::*;
 
 #[tokio::test]
-async fn execution_settlement_reports_only_observed_worker_state() {
-    let not_started = DispatchExecutionSettlement::new().expect("settlement");
+async fn execution_settlement_reports_not_started_and_joined() {
+    let not_started = DispatchExecutionSettlement::new();
     assert_eq!(
         not_started.snapshot(),
         super::request_receipts::ToolCallWorkerSettlement::NotStarted
     );
 
-    let joined = DispatchExecutionSettlement::new().expect("settlement");
-    assert_eq!(joined.observe(async { 7_u8 }).await, 7);
+    let joined = Arc::new(DispatchExecutionSettlement::new());
+    assert_eq!(Arc::clone(&joined).observe(async { 7_u8 }).await, 7);
     assert_eq!(
         joined.snapshot(),
         super::request_receipts::ToolCallWorkerSettlement::Joined
-    );
-
-    let indeterminate = DispatchExecutionSettlement::new().expect("settlement");
-    let mut execution = Box::pin(indeterminate.observe(std::future::pending::<()>()));
-    tokio::time::timeout(std::time::Duration::from_millis(1), execution.as_mut())
-        .await
-        .expect_err("pending execution");
-    drop(execution);
-    let super::request_receipts::ToolCallWorkerSettlement::Indeterminate(reconciliation) =
-        indeterminate.snapshot()
-    else {
-        panic!("started execution must not fabricate a join");
-    };
-    assert!(reconciliation.id > 0);
-    assert_eq!(
-        reconciliation.status,
-        super::request_receipts::ToolCallWorkerReconciliationStatus::Unavailable
     );
 }
 

@@ -17,12 +17,14 @@ use super::super::render;
 use super::support;
 use super::support::{project_registry_context, project_selector_present};
 
+const WORKER_SETTLEMENT_GRACE: std::time::Duration = std::time::Duration::from_millis(25);
+
 pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
     support::text_tool_result(text, Vec::new())
 }
 
-pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&serde_json::to_string(value).unwrap_or_default())
+pub(in crate::mcp::tools) fn json_result(value: &Value) -> Result<ToolResult> {
+    Ok(text_tool_result(&serde_json::to_string(value)?))
 }
 
 pub(super) fn boxed_send<'a, T, F>(
@@ -184,6 +186,44 @@ impl McpToolDispatchControl {
         self.run(stage, async move { Ok(future.await) }).await
     }
 
+    pub(crate) async fn run_retained<T, F>(
+        &self,
+        stage: McpToolDispatchStage,
+        tasks: &crate::mcp::server::RetainedToolDispatchTasks,
+        settlement: Arc<crate::mcp::server::DispatchExecutionSettlement>,
+        future: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: Future<Output = Result<T>> + Send + 'static,
+    {
+        self.check(stage)?;
+        let mut result = tasks.spawn(settlement.observe(future))?;
+        let deadline = tokio::time::sleep_until(self.deadline_at);
+        let cancellation = crate::daemon_client::wait_for_cancellation(self.cancellation.clone());
+        tokio::pin!(deadline);
+        tokio::pin!(cancellation);
+        let terminal_error = tokio::select! {
+            biased;
+            () = &mut cancellation => self.terminal_cancellation_error(stage),
+            () = &mut deadline => {
+                self.deadline_triggered.store(true, Ordering::Release);
+                self.cancel(tracedecay_application::clock::now_micros());
+                self.deadline_error(stage)
+            }
+            output = &mut result => return output.map_err(|error| TraceDecayError::Config {
+                message: format!("retained MCP tool dispatch ended without a result: {error}"),
+            })?,
+        };
+
+        // Cooperative handlers normally settle inside this grace and can say
+        // "joined" in the terminal receipt. Non-cooperative work remains
+        // owned by the server registry and reports "settling"; the response
+        // deadline is never extended indefinitely by worker teardown.
+        let _ = tokio::time::timeout(WORKER_SETTLEMENT_GRACE, &mut result).await;
+        Err(terminal_error)
+    }
+
     fn deadline_error(&self, stage: McpToolDispatchStage) -> TraceDecayError {
         Self::deadline_error_for(&self.tool_name, self.budget, stage)
     }
@@ -337,8 +377,7 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
                     "created_at": record.created_at,
                     "expires_at": record.expires_at,
                     "content": record.content,
-                }))
-                .unwrap_or_default()
+                }))?
             } else {
                 format!(
                     "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n\n{}",
@@ -433,5 +472,55 @@ mod dispatch_control_tests {
             Some("tool_dispatch_deadline_exceeded"),
             "deadline-triggered cancellation must not be reclassified"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_cooperative_worker_returns_settling_receipt_state_and_remains_owned() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.settling.fixture")
+                .expect("cancellation");
+        let control = McpToolDispatchControl::new("tracedecay_search", None, cancellation)
+            .expect("dispatch control");
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::new());
+        let settlement = Arc::new(crate::mcp::server::DispatchExecutionSettlement::new());
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let runner_control = control.clone();
+        let runner_tasks = Arc::clone(&tasks);
+        let runner_settlement = Arc::clone(&settlement);
+        let started = Arc::clone(&worker_started);
+        let release = Arc::clone(&worker_release);
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run_retained(
+                    McpToolDispatchStage::Handler,
+                    runner_tasks.as_ref(),
+                    runner_settlement,
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+
+        worker_started.notified().await;
+        tokio::time::advance(control.budget + std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(WORKER_SETTLEMENT_GRACE + std::time::Duration::from_millis(1)).await;
+        let error = runner
+            .await
+            .expect("dispatch runner joins")
+            .expect_err("non-cooperative handler exceeds deadline");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_deadline_exceeded")
+        );
+        assert!(settlement.is_settling());
+
+        worker_release.notify_one();
+        tasks.shutdown().await;
+        assert!(settlement.is_joined());
     }
 }

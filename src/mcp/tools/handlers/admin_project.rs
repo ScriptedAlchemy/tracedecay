@@ -470,7 +470,7 @@ pub(super) async fn handle_admin_project(
             run_automation(cg, global_db, task, options).await?
         }
     };
-    Ok(json_result(&value))
+    json_result(&value)
 }
 
 async fn run_automation(

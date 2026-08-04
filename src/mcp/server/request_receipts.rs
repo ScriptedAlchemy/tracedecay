@@ -57,44 +57,18 @@ impl ToolCallTerminal {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ToolCallWorkerReconciliationStatus {
-    Unavailable,
-}
-
-impl ToolCallWorkerReconciliationStatus {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Unavailable => "unavailable",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct ToolCallWorkerReconciliation {
-    pub(super) id: u64,
-    pub(super) status: ToolCallWorkerReconciliationStatus,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ToolCallWorkerSettlement {
     NotStarted,
+    Settling,
     Joined,
-    Indeterminate(ToolCallWorkerReconciliation),
 }
 
 impl ToolCallWorkerSettlement {
-    pub(super) const fn indeterminate(id: u64) -> Self {
-        Self::Indeterminate(ToolCallWorkerReconciliation {
-            id,
-            status: ToolCallWorkerReconciliationStatus::Unavailable,
-        })
-    }
-
     const fn as_str(self) -> &'static str {
         match self {
             Self::NotStarted => "not_started",
+            Self::Settling => "settling",
             Self::Joined => "joined",
-            Self::Indeterminate(_) => "indeterminate",
         }
     }
 }
@@ -161,7 +135,7 @@ impl ToolCallReceipt {
         mut response: JsonRpcResponse,
         outcome: ToolCallOutcome,
     ) -> JsonRpcResponse {
-        let mut receipt = json!({
+        let receipt = json!({
             "route_admission_us": self.route_admission_us,
             "handler_us": self.handler_us,
             "result_materialization_us": self.result_materialization_us,
@@ -169,17 +143,6 @@ impl ToolCallReceipt {
             "terminal": outcome.terminal.as_str(),
             "worker_settlement": outcome.worker_settlement.as_str(),
         });
-        if let ToolCallWorkerSettlement::Indeterminate(reconciliation) = outcome.worker_settlement
-            && let Some(receipt) = receipt.as_object_mut()
-        {
-            receipt.insert(
-                "worker_reconciliation".to_owned(),
-                json!({
-                    "id": reconciliation.id,
-                    "status": reconciliation.status.as_str(),
-                }),
-            );
-        }
         attach_execution_receipt(&mut response, receipt);
         response
     }
@@ -196,37 +159,58 @@ fn elapsed_micros(duration: Duration) -> u64 {
     u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }
 
-fn attach_execution_receipt(response: &mut JsonRpcResponse, receipt: Value) {
-    if let Some(result) = response.result.as_mut() {
-        let Some(result) = result.as_object_mut() else {
-            tracing::error!("MCP tool result is not an object; execution receipt omitted");
-            return;
-        };
+fn attach_execution_receipt(response: &mut JsonRpcResponse, mut receipt: Value) {
+    if response.error.is_none()
+        && let Some(result) = response.result.as_mut()
+        && let Some(result) = result.as_object_mut()
+    {
         let meta = result.entry("_meta").or_insert_with(|| json!({}));
         if let Some(meta) = meta.as_object_mut() {
             meta.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
         } else {
-            *meta = json!({ EXECUTION_RECEIPT_KEY: receipt });
+            let original_meta = std::mem::take(meta);
+            *meta = json!({
+                "original_meta": original_meta,
+                EXECUTION_RECEIPT_KEY: receipt,
+            });
         }
         return;
     }
 
-    let Some(error) = response.error.as_mut() else {
-        tracing::error!(
-            "MCP tool response has neither result nor error; execution receipt omitted"
-        );
-        return;
-    };
-    let data = error.data.get_or_insert_with(|| json!({}));
-    if let Some(data) = data.as_object_mut() {
-        data.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
+    if response.result.is_none()
+        && let Some(error) = response.error.as_mut()
+    {
+        let data = error.data.get_or_insert_with(|| json!({}));
+        if let Some(data) = data.as_object_mut() {
+            data.insert(EXECUTION_RECEIPT_KEY.to_owned(), receipt);
+            return;
+        }
+        let original_data = std::mem::take(data);
+        *data = json!({
+            "original_data": original_data,
+            EXECUTION_RECEIPT_KEY: receipt,
+        });
         return;
     }
-    let original_data = std::mem::take(data);
-    *data = json!({
-        "original_data": original_data,
-        EXECUTION_RECEIPT_KEY: receipt,
-    });
+
+    // A tools/call response must be exactly one object result or one error.
+    // Convert every impossible shape into a typed JSON-RPC internal error and
+    // keep the original payload in error data for diagnosis.
+    receipt["terminal"] = json!(ToolCallTerminal::Failed.as_str());
+    let original_result = response.result.take();
+    let original_error = response.error.take();
+    *response = JsonRpcResponse::error_with_data(
+        response.id.clone(),
+        crate::mcp::transport::ErrorCode::InternalError,
+        "MCP tool response had an invalid result/error shape".to_owned(),
+        Some(json!({
+            "reason_code": "tool_response_invalid_shape",
+            "retryable": false,
+            "original_result": original_result,
+            "original_error": original_error,
+            EXECUTION_RECEIPT_KEY: receipt,
+        })),
+    );
 }
 
 #[cfg(test)]
@@ -261,22 +245,10 @@ mod tests {
                     | "shutdown"
             )
         ));
-        match receipt["worker_settlement"].as_str() {
-            Some("not_started" | "joined") => {
-                assert!(receipt.get("worker_reconciliation").is_none());
-            }
-            Some("indeterminate") => {
-                let reconciliation = receipt
-                    .get("worker_reconciliation")
-                    .expect("indeterminate worker reconciliation");
-                assert!(reconciliation["id"].as_u64().is_some_and(|id| id > 0));
-                assert!(matches!(
-                    reconciliation["status"].as_str(),
-                    Some("pending" | "joined" | "failed" | "unavailable")
-                ));
-            }
-            settlement => panic!("invalid worker settlement: {settlement:?}"),
-        }
+        assert!(matches!(
+            receipt["worker_settlement"].as_str(),
+            Some("not_started" | "settling" | "joined")
+        ));
         receipt.clone()
     }
 
@@ -333,19 +305,19 @@ mod tests {
                 JsonRpcResponse::error(json!(5), ErrorCode::InternalError, "deadline".to_owned()),
                 ToolCallOutcome::new(
                     ToolCallTerminal::DeadlineExceeded,
-                    ToolCallWorkerSettlement::indeterminate(7),
+                    ToolCallWorkerSettlement::Joined,
                 ),
                 "deadline_exceeded",
-                "indeterminate",
+                "joined",
             ),
             (
                 JsonRpcResponse::error(json!(6), ErrorCode::InternalError, "cancelled".to_owned()),
                 ToolCallOutcome::new(
                     ToolCallTerminal::Cancelled,
-                    ToolCallWorkerSettlement::indeterminate(8),
+                    ToolCallWorkerSettlement::Settling,
                 ),
                 "cancelled",
-                "indeterminate",
+                "settling",
             ),
             (
                 JsonRpcResponse::error(json!(7), ErrorCode::InternalError, "shutdown".to_owned()),
@@ -363,6 +335,95 @@ mod tests {
             assert_eq!(receipt["terminal"], expected_terminal);
             assert_eq!(receipt["worker_settlement"], expected_settlement);
         }
+    }
+
+    #[test]
+    fn invalid_tool_response_shapes_become_receipted_internal_errors() {
+        let timing = ToolCallReceipt::new();
+        for response in [
+            JsonRpcResponse::success(json!(8), json!("not an object")),
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_owned(),
+                id: json!(9),
+                result: None,
+                error: None,
+            },
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_owned(),
+                id: json!(10),
+                result: Some(json!({})),
+                error: Some(crate::mcp::transport::JsonRpcError {
+                    code: ErrorCode::InternalError.as_i32(),
+                    message: "both branches".to_owned(),
+                    data: None,
+                }),
+            },
+        ] {
+            let response = timing.finish(
+                response,
+                ToolCallOutcome::new(
+                    ToolCallTerminal::Completed,
+                    ToolCallWorkerSettlement::Joined,
+                ),
+            );
+            assert!(response.result.is_none());
+            let error = response.error.expect("typed internal error");
+            assert_eq!(error.code, ErrorCode::InternalError.as_i32());
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data["reason_code"].as_str()),
+                Some("tool_response_invalid_shape")
+            );
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data[EXECUTION_RECEIPT_KEY]["terminal"].as_str()),
+                Some("failed")
+            );
+        }
+    }
+
+    #[test]
+    fn scalar_metadata_and_error_data_are_preserved_under_receipt_wrappers() {
+        let success = ToolCallReceipt::new().finish(
+            JsonRpcResponse::success(json!(11), json!({"_meta": "legacy"})),
+            ToolCallOutcome::new(
+                ToolCallTerminal::Completed,
+                ToolCallWorkerSettlement::Joined,
+            ),
+        );
+        assert_eq!(
+            success.result.as_ref().expect("result")["_meta"]["original_meta"],
+            "legacy"
+        );
+        canonical_receipt(success);
+
+        let failure = ToolCallReceipt::new().finish(
+            JsonRpcResponse::error_with_data(
+                json!(12),
+                ErrorCode::InternalError,
+                "failed".to_owned(),
+                Some(json!("legacy")),
+            ),
+            ToolCallOutcome::new(
+                ToolCallTerminal::Failed,
+                ToolCallWorkerSettlement::NotStarted,
+            ),
+        );
+        assert_eq!(
+            failure
+                .error
+                .as_ref()
+                .expect("error")
+                .data
+                .as_ref()
+                .expect("data")["original_data"],
+            "legacy"
+        );
+        canonical_receipt(failure);
     }
 
     #[test]
