@@ -452,6 +452,7 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                 snapshot_content_identity,
                 overflow_reconciled,
+                ..
             }) => (
                 CodeIndexCadenceOutcomeV1::Noop {
                     snapshot_content_identity: snapshot_content_identity.clone(),

@@ -122,6 +122,40 @@ impl WorktreeChangeClassificationV1 {
         })
     }
 
+    /// Classify only explicitly named repository-relative paths.
+    ///
+    /// Literal pathspecs preserve hook identity: metacharacters in a real file
+    /// name never widen one exact hint into a repository scan.
+    pub(crate) fn changed_paths_for(
+        repository: &gix::Repository,
+        exact_paths: &BTreeSet<String>,
+    ) -> Result<BTreeSet<String>, ClassificationErrorV1> {
+        if exact_paths.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let patterns = exact_paths
+            .iter()
+            .map(|path| gix::bstr::BString::from(format!(":(literal){path}")))
+            .collect::<Vec<_>>();
+        let status = repository
+            .status(gix::progress::Discard)
+            .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?
+            .untracked_files(gix::status::UntrackedFiles::Files)
+            .tree_index_track_renames(gix::status::tree_index::TrackRenames::Disabled)
+            .index_worktree_rewrites(None)
+            .index_worktree_submodules(None)
+            .into_iter(patterns)
+            .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+        let mut changed = BTreeSet::new();
+        for item in status {
+            let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+            if classify_item(&item).is_some() {
+                changed.insert(item.location().to_str_lossy().into_owned());
+            }
+        }
+        Ok(changed)
+    }
+
     /// Present files worth hashing and considering for (re)indexing: the
     /// committed baseline, plus untracked/added/rename-destination paths, minus
     /// any path removed by a deletion.

@@ -307,8 +307,10 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
         .expect("published generation survives restart");
     assert_eq!(restored.manifest(), first.manifest());
 
+    let mut unchanged_request = request("file.production.2", 1_200_000);
+    unchanged_request.captured_files.clear();
     let second = restarted
-        .build_and_publish(request("file.production.2", 1_200_000), &ActiveControl)
+        .build_and_publish(unchanged_request, &ActiveControl)
         .expect("unchanged source carries forward");
     assert_eq!(
         second.manifest().parent_generation,
@@ -330,6 +332,33 @@ fn production_owner_publishes_complete_generation_and_restores_it_after_restart(
             .expect("carry-forward retains parser-backed exact authority")
             .is_empty()
     );
+}
+
+#[test]
+fn changed_file_without_captured_bytes_is_rejected_before_materialization() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    owner
+        .build_and_publish(
+            request("file.capture-required.1", 1_100_000),
+            &ActiveControl,
+        )
+        .expect("baseline generation");
+
+    let changed_source = b"pub fn changed() -> u32 { 2 }\n";
+    let mut changed = request("file.capture-required.2", 1_200_000);
+    changed.snapshot.files[0].content_digest = content_digest(changed_source);
+    changed.snapshot.content_identity = content_digest(changed_source);
+    changed.changed_files.insert("src/lib.rs".to_owned());
+    changed.captured_files.clear();
+
+    assert!(matches!(
+        owner.build_and_publish(changed, &ActiveControl),
+        Err(CodeIndexProductionErrorV1::Input(
+            tracedecay_code_index::production::CodeIndexInputErrorV1::MissingCapturedFile
+        ))
+    ));
 }
 
 #[test]

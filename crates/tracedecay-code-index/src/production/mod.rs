@@ -35,6 +35,7 @@ use super::{
     },
     extract::{
         ExtractionCancellation, LanguageExtractor, TreeSitterExtractor, rebind_extraction_batch,
+        rebind_extraction_batch_to,
     },
     generations::{
         FileExtractionActionV1, GenerationPlanner, GenerationPlanningErrorV1, RebuildTriggerV1,
@@ -443,6 +444,34 @@ impl FileGenerationArtifactsV1 {
             .map_err(|_| ChunkingFailureV1::GenerationMismatch)?;
         Ok(Self {
             authority: file.authority().clone(),
+            extraction,
+            artifacts,
+            exact_authority,
+        })
+    }
+
+    fn rematerialize_for_snapshot_file(
+        &self,
+        target_authority: ReceiptBoundCodeFileAuthorityV1,
+        generation_id: &CodeGenerationId,
+        file_occurrence_id: &FileOccurrenceId,
+    ) -> Result<Self, ChunkingFailureV1> {
+        let artifacts = self
+            .artifacts
+            .rematerialize_for_generation(generation_id.clone(), file_occurrence_id.clone())?;
+        let exact_authority = self
+            .exact_authority
+            .rematerialize_for_generation(&self.artifacts.chunks, &artifacts.chunks)?;
+        let extraction = rebind_extraction_batch_to(
+            &self.authority,
+            &self.extraction,
+            &target_authority,
+            generation_id,
+            file_occurrence_id,
+        )
+        .map_err(|_| ChunkingFailureV1::GenerationMismatch)?;
+        Ok(Self {
+            authority: target_authority,
             extraction,
             artifacts,
             exact_authority,
@@ -1285,6 +1314,7 @@ where
             ),
         };
         Self::checkpoint(control)?;
+        Self::validate_required_captures(&validated.snapshot, increment.as_ref(), &captured_files)?;
 
         let parser_registry = Arc::new(tracedecay_code_extraction::LanguageRegistry::new());
         let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
@@ -1373,6 +1403,31 @@ where
         self.publication
             .publish_atomically(&scope, expected.as_ref(), candidate.clone())?;
         Ok(candidate)
+    }
+
+    fn validate_required_captures(
+        snapshot: &SanitizedCodeSnapshotV1,
+        increment: Option<&super::generations::GenerationIncrementPlanV1>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
+    ) -> Result<(), CodeIndexProductionErrorV1> {
+        let missing = match increment {
+            None => snapshot
+                .files
+                .iter()
+                .filter(|file| file.disposition == SnapshotFileDispositionV1::Present)
+                .any(|file| !captured_files.contains_key(&file.file_occurrence_id)),
+            Some(increment) => increment.files.iter().any(|file| {
+                matches!(
+                    &file.action,
+                    FileExtractionActionV1::ReExtract { file }
+                        if !captured_files.contains_key(&file.file_occurrence_id)
+                )
+            }),
+        };
+        if missing {
+            return Err(CodeIndexInputErrorV1::MissingCapturedFile.into());
+        }
+        Ok(())
     }
 
     fn intake_at(
@@ -1655,22 +1710,20 @@ where
                                     "increment plan refers to a missing current file".to_owned(),
                                 )
                             })?;
-                        let captured = captured_files
-                            .get(file_occurrence_id)
-                            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
-                        let receipt_bound = intake
-                            .bind_file(
-                                capability,
-                                &config.project_id,
-                                ValidatedCodeFileV1 {
-                                    generation_id: manifest.generation_id.clone(),
-                                    file: (**current_file).clone(),
-                                    snapshot_digest: capability.snapshot().intake_digest.clone(),
-                                    sanitized_bytes: captured.sanitized_bytes.clone(),
-                                },
-                            )
-                            .map_err(CodeIndexProductionErrorV1::Intake)?;
-                        if let Ok(artifact) = prior.rematerialize_for_file(&receipt_bound) {
+                        let snapshot = &capability.snapshot().snapshot;
+                        let target_authority = ReceiptBoundCodeFileAuthorityV1 {
+                            project_id: config.project_id.clone(),
+                            repository_id: snapshot.repository.clone(),
+                            worktree_id: snapshot.worktree.clone(),
+                            reference: snapshot.reference.clone(),
+                            logical_path: current_file.logical_path.clone(),
+                            content_digest: current_file.content_digest.clone(),
+                        };
+                        if let Ok(artifact) = prior.rematerialize_for_snapshot_file(
+                            target_authority,
+                            &manifest.generation_id,
+                            file_occurrence_id,
+                        ) {
                             Ok(IncrementFileMaterializationV1::CarryForward(artifact))
                         } else {
                             // Opaque exact evidence may refuse generation-local

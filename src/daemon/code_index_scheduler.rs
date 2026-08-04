@@ -23,8 +23,7 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
-    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizerRevision, ScoreDomainId, WorktreeId,
     canonical_sha256,
 };
 
@@ -47,9 +46,7 @@ use crate::{
             build_batch_receipt,
         },
     },
-    privacy::{
-        CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
-    },
+    privacy::CODE_SOURCE_SANITIZER_VERSION_V1,
     query::retrieval::{
         exact::{CentralExactAdmissionAuthorityV1, ExactLane},
         graph::{GraphLane, production_code_index_freshness},
@@ -904,6 +901,28 @@ struct CapturedSnapshotV1 {
     retained_bytes: Vec<Arc<[u8]>>,
 }
 
+/// A single-owner git watcher observed that one mounted worktree may have
+/// changed. The structural indexing identity prevents a delayed event from
+/// crossing worktrees; `watcher_epoch` is the monotonic frontier to stamp after
+/// one successful authoritative reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::daemon) struct GitStateMayHaveChanged {
+    identity: identity::IndexingIdentityV1,
+    watcher_epoch: u64,
+}
+
+impl GitStateMayHaveChanged {
+    pub(in crate::daemon) fn new(
+        identity: identity::IndexingIdentityV1,
+        watcher_epoch: u64,
+    ) -> Self {
+        Self {
+            identity,
+            watcher_epoch,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct CodeIndexPublishEvidenceV1 {
     pub generation_id: CodeGenerationId,
@@ -915,12 +934,18 @@ pub(super) struct CodeIndexPublishEvidenceV1 {
     pub changed_chunks: usize,
     pub reused_chunks: usize,
     pub overflow_reconciled: bool,
+    pub source_files_read: usize,
+    pub full_status_scans: usize,
+    pub head_tree_diffs: usize,
 }
 
 #[derive(Clone, Debug)]
 pub(super) struct CodeIndexNoopEvidenceV1 {
     pub snapshot_content_identity: ContentDigest,
     pub overflow_reconciled: bool,
+    pub source_files_read: usize,
+    pub full_status_scans: usize,
+    pub head_tree_diffs: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -1234,8 +1259,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// request admission must fail closed and schedule background truth.
     freshness_unknown: bool,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
-    /// Keeps the current snapshot's interned bytes alive in the shared pool.
-    retained_snapshot_bytes: Vec<Arc<[u8]>>,
+    /// Last successfully reconciled sanitized candidates and watcher frontier.
+    warm_delta: warm_delta::WarmDeltaStateV1,
     publication: DaemonCodeIndexPublicationStoreV1,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
@@ -1366,7 +1391,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             verified_against_source,
             freshness_unknown,
             byte_pool,
-            retained_snapshot_bytes: Vec::new(),
+            warm_delta: warm_delta::WarmDeltaStateV1::default(),
             publication,
             owner,
             hints,
@@ -1441,6 +1466,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         // bound to; a HEAD move under the same worktree is allowed and simply
         // records a new source revision, so the served generation is never
         // mis-attributed across identities.
+        let prior_identity = self.identity.clone();
         let resolved = identity::IndexingIdentityV1::resolve(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         if !resolved.authorizes_reuse_of(&self.identity) {
@@ -1453,7 +1479,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         // we are reconciling to; stored on return so the next query-admission
         // check compares against them.
         let sampled_metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
-        let sampled_signature = self.worktree_stat_signature().ok();
         let mut overflow_reconciled = false;
         for retry in 0..=MAX_SUPERSEDED_RECONCILE_RETRIES {
             let hints = self
@@ -1462,8 +1487,8 @@ impl CodeIndexWorktreeSchedulerV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
             overflow_reconciled |= hints.overflow;
-            let mut captured = self.capture_authoritative_snapshot()?;
-            self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
+            let captured =
+                self.capture_authoritative_snapshot(&prior_identity, &hints, retry > 0)?;
             let latest_snapshot = self
                 .publication
                 .load_active_shared()
@@ -1476,10 +1501,14 @@ impl CodeIndexWorktreeSchedulerV1 {
             if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity)
                 && unchanged_source
             {
-                self.mark_reconciled(sampled_metadata, sampled_signature);
+                self.warm_delta = captured.next_state;
+                self.mark_reconciled(sampled_metadata, Some(captured.stat_signature));
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
+                    source_files_read: captured.measurements.source_files_read,
+                    full_status_scans: captured.measurements.full_status_scans,
+                    head_tree_diffs: captured.measurements.head_tree_diffs,
                 }));
             }
 
@@ -1513,10 +1542,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                     CodeIndexInputErrorV1::NoExtractableFiles,
                 )) => {
                     self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-                    self.mark_reconciled(sampled_metadata, sampled_signature);
+                    self.warm_delta = captured.next_state;
+                    self.mark_reconciled(sampled_metadata, Some(captured.stat_signature));
                     return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                         snapshot_content_identity: captured.snapshot.content_identity,
                         overflow_reconciled,
+                        source_files_read: captured.measurements.source_files_read,
+                        full_status_scans: captured.measurements.full_status_scans,
+                        head_tree_diffs: captured.measurements.head_tree_diffs,
                     }));
                 }
                 Err(error) => return Err(error.into()),
@@ -1539,7 +1572,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             drop(generation);
             let generation = published_generation;
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
-            self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
+            self.warm_delta = captured.next_state;
+            self.mark_reconciled(sampled_metadata.clone(), Some(captured.stat_signature));
 
             // SEMANTIC: enqueue FastEmbed projection without waiting on download/index.
             if let Some(schedule) = &self.semantic_schedule {
@@ -1570,10 +1604,13 @@ impl CodeIndexWorktreeSchedulerV1 {
                         .iter()
                         .map(|file| file.file_occurrence_id.clone())
                         .collect(),
-                    reextracted_files: captured.changed_paths.len(),
+                    reextracted_files: captured.measurements.source_files_read,
                     changed_chunks: changes.added_or_changed.len() + changes.deleted.len(),
                     reused_chunks: changes.reused.len(),
                     overflow_reconciled,
+                    source_files_read: captured.measurements.source_files_read,
+                    full_status_scans: captured.measurements.full_status_scans,
+                    head_tree_diffs: captured.measurements.head_tree_diffs,
                 },
             ));
         }
@@ -1770,6 +1807,11 @@ impl CodeIndexWorktreeSchedulerV1 {
         &self.identity
     }
 
+    #[cfg(test)]
+    pub(super) const fn reconciled_watcher_epoch(&self) -> Option<u64> {
+        self.warm_delta.reconciled_watcher_epoch()
+    }
+
     pub(super) const fn last_reconciled_at_micros(&self) -> Option<i64> {
         self.last_reconciled_at_micros
     }
@@ -1918,147 +1960,6 @@ impl CodeIndexWorktreeSchedulerV1 {
 
     pub(super) fn active_generation_encoded_bytes(&self) -> Arc<AtomicU64> {
         self.publication.active_encoded_bytes()
-    }
-
-    /// Read, sanitize, intern and identify one candidate path.
-    ///
-    /// `Ok(None)` means the path is not an indexable source file (vanished,
-    /// no extension, or no language descriptor) — the sequential loop's
-    /// `continue` arms. Pure with respect to the shared byte pool: the pool
-    /// is content-addressed under its own lock, so concurrent interning
-    /// yields the same digests and the same shared buffers.
-    fn capture_candidate(
-        &self,
-        registry: &StaticLanguageRegistry,
-        logical_path: &str,
-    ) -> Result<Option<CapturedCandidateV1>, CodeIndexSchedulerErrorV1> {
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(cancelled_code_index_reconcile());
-        }
-        let absolute = self.project_root.join(logical_path);
-        if !absolute.is_file() {
-            return Ok(None);
-        }
-        let Some(extension) = absolute.extension().and_then(|value| value.to_str()) else {
-            return Ok(None);
-        };
-        let Some(descriptor) = registry.descriptor_for_extension(&extension.to_lowercase()) else {
-            return Ok(None);
-        };
-        let raw_bytes = std::fs::read(&absolute)?;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(cancelled_code_index_reconcile());
-        }
-        let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
-        let sensitivity_level = match sanitized.receipt().disposition() {
-            SanitizerDispositionV1::Accepted => SensitivityLevelV1::Public,
-            SanitizerDispositionV1::Redacted => SensitivityLevelV1::Redacted,
-            SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
-                return Err(CodeIndexSchedulerErrorV1::Privacy(
-                    "durable code source carried a non-durable sanitizer disposition".to_owned(),
-                ));
-            }
-        };
-        let receipt_id = sanitized.receipt().receipt().receipt_id().clone();
-        let (sanitized_bytes, _) = sanitized.into_parts();
-        let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
-        let occurrence = file_occurrence_id(
-            &self.repository_id,
-            &self.worktree_id,
-            logical_path,
-            &digest,
-            &receipt_id,
-        )?;
-        Ok(Some(CapturedCandidateV1 {
-            file: SanitizedCodeFileV1 {
-                file_occurrence_id: occurrence.clone(),
-                logical_path: logical_path.to_owned(),
-                language: Some(descriptor.language.clone()),
-                content_digest: digest,
-                disposition: SnapshotFileDispositionV1::Present,
-            },
-            captured: CodeIndexCapturedFileV1 {
-                file_occurrence_id: occurrence,
-                sanitized_bytes: shared.to_vec(),
-                sensitivity_level,
-            },
-            receipt_id,
-            retained: shared,
-        }))
-    }
-
-    fn capture_authoritative_snapshot(
-        &self,
-    ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(cancelled_code_index_reconcile());
-        }
-        let repository = gix::open(&self.project_root)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        // Classify committed/staged/unstaged/untracked/deleted/renamed paths
-        // truthfully from gix. Deletions drop out of the present candidate set;
-        // their tombstones flow through `changed_paths`.
-        let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
-        let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
-        if self.shutting_down.load(Ordering::Acquire) {
-            return Err(cancelled_code_index_reconcile());
-        }
-        let candidate_paths = classification.candidate_paths();
-        let changed_paths = classification.changed_paths();
-
-        let registry = StaticLanguageRegistry::new();
-        // Read + sanitize + digest is per-file pure work over independent
-        // paths, so it fans out across the reserved-width indexing pool. The
-        // candidate set is an ordered `BTreeSet`; results are collected in
-        // that same order and the lowest-index failure is the reported one,
-        // so the captured snapshot is byte-identical to the sequential sweep.
-        let candidates = candidate_paths.into_iter().collect::<Vec<_>>();
-        let outcomes = crate::code_index::parallelism::install(|| {
-            use rayon::prelude::*;
-            candidates
-                .par_iter()
-                .map(|logical_path| self.capture_candidate(&registry, logical_path))
-                .collect::<Vec<_>>()
-        });
-
-        let mut files = Vec::new();
-        let mut captured_files = Vec::new();
-        let mut sanitization_receipts = BTreeSet::new();
-        for outcome in outcomes {
-            let Some(candidate) = outcome? else {
-                continue;
-            };
-            sanitization_receipts.insert(candidate.receipt_id);
-            retained_bytes.push(candidate.retained);
-            files.push(candidate.file);
-            captured_files.push(candidate.captured);
-        }
-        files.sort_by(|left, right| {
-            (&left.logical_path, &left.file_occurrence_id)
-                .cmp(&(&right.logical_path, &right.file_occurrence_id))
-        });
-        captured_files
-            .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
-        let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
-        let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
-        Ok(CapturedSnapshotV1 {
-            snapshot: SanitizedCodeSnapshotV1 {
-                repository: self.repository_id.clone(),
-                worktree: Some(self.worktree_id.clone()),
-                reference: self.identity.head_ref().cloned(),
-                source_revision: self.identity.head_commit().cloned(),
-                sanitizer_revision: id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?,
-                sanitization_receipts,
-                content_identity,
-                captured_at: now_micros(),
-                files,
-            },
-            captured_files,
-            changed_paths,
-            retained_bytes,
-        })
     }
 }
 
@@ -2268,6 +2169,9 @@ mod registry;
 pub(crate) mod semantic_query_runtime;
 #[cfg(test)]
 mod tests;
+mod warm_delta;
+#[cfg(test)]
+mod warm_delta_tests;
 
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures

@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use tracedecay_domain::{
-    ExtractionBatchV1, ExtractionCoverageV1, ExtractionFailureV1, LanguageDescriptorV1,
-    ManifestDigest, ParseOutcomeV1, SourceSpan, ValidatedCodeFileV1, canonical_sha256,
+    CodeGenerationId, ExtractionBatchV1, ExtractionCoverageV1, ExtractionFailureV1,
+    FileOccurrenceId, LanguageDescriptorV1, ManifestDigest, ParseOutcomeV1, SourceSpan,
+    ValidatedCodeFileV1, canonical_sha256,
 };
 
 use super::{
@@ -100,7 +101,22 @@ pub(crate) fn rebind_extraction_batch(
     batch: &ExtractionBatchV1,
     file: &ReceiptBoundCodeFileV1,
 ) -> Result<ExtractionBatchV1, ExtractionFailureV1> {
-    let target_authority = file.authority();
+    rebind_extraction_batch_to(
+        authority,
+        batch,
+        file.authority(),
+        &file.validated_file().generation_id,
+        &file.validated_file().file.file_occurrence_id,
+    )
+}
+
+pub(crate) fn rebind_extraction_batch_to(
+    authority: &ReceiptBoundCodeFileAuthorityV1,
+    batch: &ExtractionBatchV1,
+    target_authority: &ReceiptBoundCodeFileAuthorityV1,
+    generation_id: &CodeGenerationId,
+    file_occurrence_id: &FileOccurrenceId,
+) -> Result<ExtractionBatchV1, ExtractionFailureV1> {
     if authority.project_id != target_authority.project_id
         || authority.repository_id != target_authority.repository_id
         || authority.logical_path != target_authority.logical_path
@@ -113,10 +129,9 @@ pub(crate) fn rebind_extraction_batch(
                     .to_owned(),
         });
     }
-    let target = file.validated_file();
     let mut rebound = batch.clone();
-    rebound.generation_id = target.generation_id.clone();
-    rebound.file_occurrence_id = target.file.file_occurrence_id.clone();
+    rebound.generation_id = generation_id.clone();
+    rebound.file_occurrence_id = file_occurrence_id.clone();
     Ok(rebound)
 }
 
