@@ -441,6 +441,13 @@ pub(super) fn code_index_search_executor(
             };
             let project_root = request.project_root;
             let source_revision = request.source_revision;
+            let source_tree = request.source_tree;
+            if source_revision.is_some() != source_tree.is_some() {
+                return code_index_search_unavailable(
+                    code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,
+                    "revision_tree_pair_required",
+                );
+            }
             let mode = request.mode;
             let deadline = request.deadline;
             let cancellation = request.cancellation;
@@ -476,6 +483,7 @@ pub(super) fn code_index_search_executor(
                 let execution_scope = scope.clone();
                 let execution_control = Arc::clone(&control);
                 let execution_source_revision = source_revision.clone();
+                let execution_source_tree = source_tree.clone();
                 let execution_request =
                     code_index_scheduler::query_runtime::QuerySearchExecutionRequestV1::new(
                         request.query,
@@ -496,6 +504,11 @@ pub(super) fn code_index_search_executor(
                                 )
                                 .await;
                         };
+                        let tree = execution_source_tree.ok_or(
+                            code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
+                                code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
+                            ),
+                        )?;
                         let control = code_index_scheduler::branch_generations::BranchGenerationReadControlV1 {
                             deadline: execution_control.deadline.clone(),
                             cancellation: execution_control.cancellation.clone(),
@@ -504,13 +517,15 @@ pub(super) fn code_index_search_executor(
                             .generations_for_revisions(
                                 &execution_scope,
                                 &revision,
+                                &tree,
                                 &revision,
+                                &tree,
                                 control,
                             )
                             .await
-                            .map_err(|_| {
+                            .map_err(|reason| {
                                 code_index_scheduler::semantic_query_runtime::QuerySemanticSearchExecutionErrorV1::Query(
-                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable,
+                                    code_index_scheduler::query_runtime::QuerySearchExecutionErrorV1::ExactGenerationUnavailable(reason),
                                 )
                             })?;
                         let query = execution_schedulers
@@ -618,6 +633,9 @@ pub(super) fn code_index_search_executor(
                             code_search::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
                             code_search::lane_reason::GENERATION_REBUILDING,
                         ),
+                        QuerySearchExecutionErrorV1::ExactGenerationUnavailable(reason) => {
+                            (reason, reason.as_str())
+                        }
                         QuerySearchExecutionErrorV1::InvalidScope(_)
                         | QuerySearchExecutionErrorV1::InvalidPolicy(_) => (
                             code_search::CodeIndexSearchUnavailableReasonV1::InvalidRequest,

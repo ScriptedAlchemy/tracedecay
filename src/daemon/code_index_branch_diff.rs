@@ -342,7 +342,9 @@ pub(super) fn code_index_branch_diff_executor(
                 .generations_for_revisions(
                     &scope,
                     &request.base_revision,
+                    &request.base_tree,
                     &request.head_revision,
+                    &request.head_tree,
                     control.clone(),
                 )
                 .await

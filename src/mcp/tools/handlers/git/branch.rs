@@ -18,6 +18,7 @@ enum BranchRouteReadErrorV1 {
 async fn run_branch_ref_read<T, F>(
     project_root: std::path::PathBuf,
     max_refs: usize,
+    after: Option<String>,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
     operation: F,
@@ -40,6 +41,7 @@ where
             &project_root,
             &crate::branch::LocalBranchReadControlV1 {
                 max_refs,
+                after,
                 deadline,
                 cancellation,
             },
@@ -74,6 +76,9 @@ fn branch_read_reason(error: &BranchRouteReadErrorV1) -> (&'static str, bool) {
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::InvalidLimit) => {
             ("invalid_request", false)
         }
+        BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::CapacityExceeded { .. }) => {
+            ("branch_read_capacity_unavailable", true)
+        }
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::Cancelled) => ("cancelled", false),
         BranchRouteReadErrorV1::Ref(LocalBranchSnapshotErrorV1::TimedOut) => ("timed_out", true),
     }
@@ -97,9 +102,15 @@ pub(crate) async fn handle_branch_list(
             message: "branch-list limit must be positive".to_owned(),
         });
     }
+    let after = args
+        .get("after")
+        .and_then(Value::as_str)
+        .filter(|after| !after.is_empty())
+        .map(str::to_owned);
     match run_branch_ref_read(
         cg.project_root().to_path_buf(),
         limit,
+        after,
         deadline,
         cancellation,
         crate::branch::local_branch_snapshots_controlled,
@@ -114,6 +125,7 @@ pub(crate) async fn handle_branch_list(
                     json!({
                         "branch": snapshot.name,
                         "source_revision": snapshot.commit,
+                        "source_tree": snapshot.tree,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -123,6 +135,7 @@ pub(crate) async fn handle_branch_list(
                 "snapshot_count": snapshots.len(),
                 "examined": page.examined,
                 "limit": limit,
+                "next_after": page.next_after,
                 "snapshots": snapshots,
             });
             Ok(generic_tool_result(
@@ -240,10 +253,11 @@ pub(crate) async fn handle_branch_search(
     let revision = match run_branch_ref_read(
         cg.project_root().to_path_buf(),
         1,
+        None,
         deadline.clone(),
         cancellation.clone(),
         move |root, control| {
-            crate::branch::local_branch_commit_controlled(root, &revision_branch, control)
+            crate::branch::local_branch_revision_controlled(root, &revision_branch, control)
         },
     )
     .await
@@ -260,7 +274,7 @@ pub(crate) async fn handle_branch_search(
             cg,
             &args,
             &branch,
-            &revision,
+            &revision.commit,
             &crate::mcp::server::CodeIndexSearchUnavailableV1 {
                 code_generation: None,
                 reason:
@@ -277,7 +291,8 @@ pub(crate) async fn handle_branch_search(
     match executor(crate::mcp::server::CodeIndexSearchRequestV1 {
         project_root: cg.project_root().to_path_buf(),
         query,
-        source_revision: Some(revision.clone()),
+        source_revision: Some(revision.commit.clone()),
+        source_tree: Some(revision.tree.clone()),
         limit,
         cursor: None,
         mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
@@ -299,7 +314,8 @@ pub(crate) async fn handle_branch_search(
                         "qualified_name": display.map(|value| value.qualified_name.as_str()),
                         "kind": display.map(|value| value.kind.as_str()),
                         "branch": branch,
-                        "source_revision": revision.as_str(),
+                        "source_revision": revision.commit.as_str(),
+                        "source_tree": revision.tree.as_str(),
                         "code_generation": complete.code_generation,
                     })
                 })
@@ -310,7 +326,8 @@ pub(crate) async fn handle_branch_search(
                 &json!({
                     "status": "complete",
                     "branch": branch,
-                    "source_revision": revision.as_str(),
+                    "source_revision": revision.commit.as_str(),
+                    "source_tree": revision.tree.as_str(),
                     "code_generation": complete.code_generation,
                     "results": results,
                 }),
@@ -318,7 +335,7 @@ pub(crate) async fn handle_branch_search(
             ))
         }
         crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(unavailable) => Ok(
-            branch_search_unavailable(cg, &args, &branch, &revision, &unavailable),
+            branch_search_unavailable(cg, &args, &branch, &revision.commit, &unavailable),
         ),
     }
 }
@@ -410,13 +427,14 @@ pub(crate) async fn handle_branch_diff(
     let (base_revision, head_revision) = match run_branch_ref_read(
         cg.project_root().to_path_buf(),
         1,
+        None,
         deadline.clone(),
         cancellation.clone(),
         move |root, control| {
             let base =
-                crate::branch::local_branch_commit_controlled(root, &resolution_base, control)?;
+                crate::branch::local_branch_revision_controlled(root, &resolution_base, control)?;
             let head =
-                crate::branch::local_branch_commit_controlled(root, &resolution_head, control)?;
+                crate::branch::local_branch_revision_controlled(root, &resolution_head, control)?;
             Ok((base, head))
         },
     )
@@ -437,8 +455,8 @@ pub(crate) async fn handle_branch_diff(
         return Ok(branch_diff_unavailable(
             cg,
             &args,
-            (&base_name, &base_revision),
-            (&head_name, &head_revision),
+            (&base_name, &base_revision.commit),
+            (&head_name, &head_revision.commit),
             &crate::mcp::server::CodeIndexBranchDiffUnavailableV1 {
                 base_generation: None,
                 head_generation: None,
@@ -449,8 +467,10 @@ pub(crate) async fn handle_branch_diff(
     };
     match executor(crate::mcp::server::CodeIndexBranchDiffRequestV1 {
         project_root: cg.project_root().to_path_buf(),
-        base_revision: base_revision.clone(),
-        head_revision: head_revision.clone(),
+        base_revision: base_revision.commit.clone(),
+        base_tree: base_revision.tree.clone(),
+        head_revision: head_revision.commit.clone(),
+        head_tree: head_revision.tree.clone(),
         file_filter: args.get("file").and_then(Value::as_str).map(str::to_owned),
         kind_filter: args.get("kind").and_then(Value::as_str).map(str::to_owned),
         limit,
@@ -499,8 +519,10 @@ pub(crate) async fn handle_branch_diff(
                     "status": "complete",
                     "base": base_name,
                     "head": head_name,
-                    "base_revision": base_revision.as_str(),
-                    "head_revision": head_revision.as_str(),
+                    "base_revision": base_revision.commit.as_str(),
+                    "base_tree": base_revision.tree.as_str(),
+                    "head_revision": head_revision.commit.as_str(),
+                    "head_tree": head_revision.tree.as_str(),
                     "base_generation": completed.base_generation,
                     "head_generation": completed.head_generation,
                     "summary": {
@@ -544,8 +566,10 @@ pub(crate) async fn handle_branch_diff(
                     "reason": partial.reason.as_str(),
                     "base": base_name,
                     "head": head_name,
-                    "base_revision": base_revision.as_str(),
-                    "head_revision": head_revision.as_str(),
+                    "base_revision": base_revision.commit.as_str(),
+                    "base_tree": base_revision.tree.as_str(),
+                    "head_revision": head_revision.commit.as_str(),
+                    "head_tree": head_revision.tree.as_str(),
                     "base_generation": partial.base_generation,
                     "head_generation": partial.head_generation,
                     "base_counts": {
@@ -575,8 +599,8 @@ pub(crate) async fn handle_branch_diff(
             Ok(branch_diff_unavailable(
                 cg,
                 &args,
-                (&base_name, &base_revision),
-                (&head_name, &head_revision),
+                (&base_name, &base_revision.commit),
+                (&head_name, &head_revision.commit),
                 &unavailable,
             ))
         }
@@ -600,6 +624,7 @@ mod tests {
         let result = run_branch_ref_read(
             std::path::PathBuf::from("/unread"),
             1,
+            None,
             None,
             None,
             |_root, _control| Ok(()),

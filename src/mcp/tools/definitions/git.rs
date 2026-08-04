@@ -185,6 +185,10 @@ pub(super) fn def_branch_list() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum local refs to return (default: 100, maximum: 128)"
+                },
+                "after": {
+                    "type": "string",
+                    "description": "Return the stable lexical page after this branch name"
                 }
             }
         }),

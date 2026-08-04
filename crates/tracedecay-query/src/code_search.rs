@@ -34,6 +34,7 @@ pub struct CodeIndexSearchRequestV1 {
     /// Exact Git commit whose published code generation must answer. `None`
     /// selects the current admitted generation.
     pub source_revision: Option<tracedecay_domain::GitOidV1>,
+    pub source_tree: Option<tracedecay_domain::GitOidV1>,
     pub limit: usize,
     pub cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub mode: CodeIndexSearchModeV1,
@@ -300,6 +301,8 @@ pub struct CodeIndexBranchDiffRequestV1 {
     pub project_root: PathBuf,
     pub base_revision: tracedecay_domain::GitOidV1,
     pub head_revision: tracedecay_domain::GitOidV1,
+    pub base_tree: tracedecay_domain::GitOidV1,
+    pub head_tree: tracedecay_domain::GitOidV1,
     pub file_filter: Option<String>,
     pub kind_filter: Option<String>,
     pub limit: usize,

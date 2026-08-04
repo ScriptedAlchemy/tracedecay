@@ -249,6 +249,8 @@ pub(in crate::daemon) enum QuerySearchExecutionErrorV1 {
     InvalidScope(String),
     #[error("no complete current code generation matches the exact admitted scope")]
     GenerationUnavailable,
+    #[error("exact generation read is unavailable: {0:?}")]
+    ExactGenerationUnavailable(tracedecay_query::code_search::CodeIndexSearchUnavailableReasonV1),
     #[error("query authority is unavailable for the exact admitted scope")]
     AuthorityUnavailable,
     #[error("query search policy is invalid: {0}")]
