@@ -12,6 +12,11 @@ use tokio::sync::{Mutex, Notify};
 use super::{DirtySet, ProjectHealth};
 use crate::daemon::maintenance::MaintenanceCoordinator;
 
+pub(super) enum WorktreeRegistration {
+    Ready,
+    Capacity,
+}
+
 /// Repository-scoped watcher state.
 ///
 /// Git metadata belongs to the repository common directory, while HEAD,
@@ -72,21 +77,21 @@ impl WatchState {
         project_root: PathBuf,
         git_dir: PathBuf,
         max_worktrees: usize,
-    ) -> bool {
+    ) -> WorktreeRegistration {
         let mut worktrees = self
             .worktrees
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if worktrees.get(&project_root) == Some(&git_dir) {
-            return false;
+            return WorktreeRegistration::Ready;
         }
-        if worktrees.len() >= max_worktrees {
-            return false;
+        if !worktrees.contains_key(&project_root) && worktrees.len() >= max_worktrees {
+            return WorktreeRegistration::Capacity;
         }
         worktrees.insert(project_root, git_dir);
         drop(worktrees);
         self.reconfigure.notify_one();
-        true
+        WorktreeRegistration::Ready
     }
 
     pub(super) fn worktree_roots(&self) -> Vec<PathBuf> {
