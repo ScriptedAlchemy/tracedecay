@@ -1121,10 +1121,6 @@ fn response_matches_command(
         | (OutputV1::PageSize { .. }, CommandV1::PageSize)
         | (OutputV1::JournalMode(_), CommandV1::JournalMode) => true,
         (OutputV1::Integrity(report), CommandV1::Integrity { check }) => report.check == *check,
-        (OutputV1::RowParity(result), CommandV1::RowParity { table }) => result.table == *table,
-        (OutputV1::FtsParity(result), CommandV1::FtsParity { table, limit, .. }) => {
-            result.table == *table && result.matches.len() <= usize::from(*limit)
-        }
         (OutputV1::SessionStoreCount(result), CommandV1::SessionStoreCount { family, table }) => {
             result.family == *family && result.table == *table
         }
@@ -1347,10 +1343,10 @@ mod tests {
 
     use tempfile::TempDir;
     use tracedecay_sqlite_parity_protocol::{
-        EffectiveJournalModeV1, FtsMatchV1, FtsParityV1, GraphFtsTableV1, GraphTableV1,
-        IntegrityCheckV1, IntegrityReportV1, JournalModeMetadataV1, JournalModeNormalizationV1,
-        MetadataV1, RowParityV1, SchemaMetadataV1, SchemaObjectKindV1, SchemaObjectV1,
-        SessionStoreCountV1, SessionStoreSchemaV1, SourceHeaderJournalModeV1, SourceJournalModeV1,
+        EffectiveJournalModeV1, IntegrityCheckV1, IntegrityReportV1, JournalModeMetadataV1,
+        JournalModeNormalizationV1, MetadataV1, SchemaMetadataV1, SchemaObjectKindV1,
+        SchemaObjectV1, SessionStoreCountV1, SessionStoreSchemaV1, SourceHeaderJournalModeV1,
+        SourceJournalModeV1,
     };
     use tracedecay_store::{
         BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreShardIdV1,
@@ -2196,30 +2192,6 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
                 }),
             ),
             (
-                CommandV1::RowParity {
-                    table: GraphTableV1::Nodes,
-                },
-                OutputV1::RowParity(RowParityV1 {
-                    table: GraphTableV1::Nodes,
-                    row_count: Some(1),
-                }),
-            ),
-            (
-                CommandV1::FtsParity {
-                    table: GraphFtsTableV1::Nodes,
-                    query: "fixture".to_owned(),
-                    limit: 1,
-                },
-                OutputV1::FtsParity(FtsParityV1 {
-                    table: GraphFtsTableV1::Nodes,
-                    matches: vec![FtsMatchV1 {
-                        rowid: 1,
-                        rank: 1.0,
-                        snippet: "fixture".to_owned(),
-                    }],
-                }),
-            ),
-            (
                 CommandV1::SessionStoreCount {
                     family: SessionStoreFamilyV1::Observation,
                     table: SessionStoreTableV1::Observations,
@@ -2279,8 +2251,6 @@ printf '{"protocol_version":1,"request_id":"%s","verified_snapshot":{"authority_
             ErrorCodeV1::RefusedLiveProfile,
             ErrorCodeV1::OpenFailed,
             ErrorCodeV1::ReadOnlyInvariant,
-            ErrorCodeV1::InvalidFtsQuery,
-            ErrorCodeV1::InvalidFtsLimit,
             ErrorCodeV1::InvalidStoreFamily,
             ErrorCodeV1::InvalidPageCursor,
             ErrorCodeV1::InvalidPageLimit,

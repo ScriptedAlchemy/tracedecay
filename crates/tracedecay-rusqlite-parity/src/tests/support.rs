@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use rusqlite::{Connection, params};
+use rusqlite::Connection;
 use tempfile::TempDir;
 use tracedecay_sqlite_parity_protocol::{
     Command, CopiedDatabase, CopiedSnapshotProvenance, DatabaseKind, Output, PROTOCOL_VERSION,
@@ -24,13 +24,6 @@ pub(super) fn fixture() -> Fixture {
             PRAGMA page_size = 4096;
             PRAGMA journal_mode = DELETE;
             PRAGMA user_version = 7;
-            CREATE TABLE nodes (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                qualified_name TEXT NOT NULL,
-                docstring TEXT,
-                signature TEXT
-            );
             CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE sanitization_receipts (
                 receipt_id TEXT PRIMARY KEY,
@@ -52,27 +45,6 @@ pub(super) fn fixture() -> Fixture {
     connection
         .execute_batch(crate::fixture_ddl::SESSION_STORE_FIXTURE_TABLES_DDL)
         .expect("create shared session-store schema");
-    connection
-        .execute_batch(
-            "            CREATE VIRTUAL TABLE nodes_fts USING fts5(
-                name, qualified_name, docstring, signature,
-                content='nodes', content_rowid='rowid'
-            );",
-        )
-        .expect("create schema");
-    connection
-        .execute(
-            "INSERT INTO nodes(id, name, qualified_name, docstring, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                "node-unicode",
-                "東京 café 🦀",
-                "crate::東京",
-                "Unicode graph node",
-                "fn 東京()"
-            ],
-        )
-        .expect("insert Unicode node");
     connection
         .execute_batch(
             "INSERT INTO sanitization_receipts VALUES ('receipt', 'v1', 'payloads', '{}');
@@ -244,9 +216,6 @@ pub(super) fn fixture() -> Fixture {
                   'commitment-2', NULL, NULL, 'unauthorized', 3);",
         )
         .expect("insert session-store fixture rows");
-    connection
-        .execute("INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild')", [])
-        .expect("build FTS index");
     drop(connection);
     Fixture {
         _directory: directory,

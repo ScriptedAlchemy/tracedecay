@@ -27,7 +27,7 @@ use super::ports::{
 
 mod projection;
 
-pub use self::projection::{CodeGraphEvidenceAdapterV1, production_code_index_freshness};
+pub use self::projection::production_code_index_freshness;
 
 /// Wording the graph lane uses when a port-emitted batch fails the shared
 /// candidate/evidence binding checks.

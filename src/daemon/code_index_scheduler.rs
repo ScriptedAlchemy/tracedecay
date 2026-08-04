@@ -34,6 +34,7 @@ use crate::{
     },
     code_index::{
         chunks::{ExtractionAdmittedCodeSearchChunkV1, content_digest},
+        graph_projection::CodeGraphEvidenceReader,
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
@@ -51,7 +52,7 @@ use crate::{
     },
     query::retrieval::{
         exact::{CentralExactAdmissionAuthorityV1, ExactLane},
-        graph::{CodeGraphEvidenceAdapterV1, GraphLane, production_code_index_freshness},
+        graph::{GraphLane, production_code_index_freshness},
         lexical::{
             CodeExactProjectionAdapterV1, CodeLexicalProjectionAdapterV1,
             CodeLexicalProjectionMetadataV1, LexicalLane,
@@ -968,7 +969,7 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
         CodeExactProjectionAdapterV1<CentralExactAdmissionAuthorityV1>,
     >,
     pub lexical: LexicalLane<CodeLexicalProjectionAdapterV1>,
-    pub graph: GraphLane<CodeGraphEvidenceAdapterV1>,
+    pub graph: GraphLane<CodeGraphEvidenceReader>,
 }
 
 impl LatestCompleteCodeIndexV1 {
@@ -1146,7 +1147,7 @@ impl LatestCompleteCodeIndexV1 {
             lexical_projection.exact_adapter(authority),
         );
         let lexical = LexicalLane::new(lexical_projection);
-        let graph = GraphLane::new(CodeGraphEvidenceAdapterV1::new(
+        let graph = GraphLane::new(CodeGraphEvidenceReader::new(
             generation_id,
             Some(self.generation.snapshot().repository.clone()),
             freshness,

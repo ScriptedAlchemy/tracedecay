@@ -1,11 +1,8 @@
 //! In-memory lifecycle and resource accounting for one canonical shard runtime.
 //!
 //! This is the runtime object published by [`super::registry::StoreRuntimeRegistry`].
-//! It owns no database handle yet; S4 attaches the persistent writer to the
-//! writer-presence guard defined here.
-//!
-//! Dead-code allowance lives on the parent `store_runtime` module until all
-//! daemon call sites consume the runtime.
+//! Physical attachments are owned by the registry; this value tracks their
+//! lifecycle and writer-presence guard.
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};

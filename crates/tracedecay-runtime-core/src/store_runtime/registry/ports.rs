@@ -4,11 +4,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracedecay_rusqlite_runtime::{
-    graph::{
-        CodeShardPhysicalLocator, GraphPhysicalAttachmentFactory, GraphRuntimePhysicalAttachment,
-    },
-    repository::{RepositoryPhysicalAttachmentFactory, RepositoryRuntimePhysicalAttachment},
+use tracedecay_rusqlite_runtime::repository::{
+    RepositoryPhysicalAttachmentFactory, RepositoryRuntimePhysicalAttachment,
 };
 use tracedecay_store::{
     AdmissionConfigV1, RuntimeMaintenanceStateV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
@@ -126,7 +123,7 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
             runtime
                 .transition(RuntimeMaintenanceStateV1::Opening)
                 .map_err(runtime_lifecycle_failure)?;
-            let mut attachment =
+            let attachment =
                 LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory);
             let physical = attachment.attach(&request, admission)?;
             publish_lifecycle_runtime(request, runtime, physical).await
@@ -170,10 +167,7 @@ async fn publish_lifecycle_runtime(
     ))
 }
 
-enum LifecyclePhysicalAttachment {
-    Graph(GraphRuntimePhysicalAttachment),
-    Repository(RepositoryRuntimePhysicalAttachment),
-}
+struct LifecyclePhysicalAttachment(RepositoryRuntimePhysicalAttachment);
 
 struct LifecycleShardRuntimeAttachment {
     repository: RepositoryPhysicalAttachmentFactory,
@@ -185,7 +179,7 @@ impl LifecycleShardRuntimeAttachment {
     }
 
     fn attach(
-        &mut self,
+        &self,
         request: &ShardRuntimeBuildRequest,
         admission: AdmissionConfigV1,
     ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
@@ -195,100 +189,49 @@ impl LifecycleShardRuntimeAttachment {
                 message: "prospective locators require explicit initialization".to_owned(),
             });
         }
-        if matches!(
-            request.binding.shard_id.scope,
-            StoreShardScopeV1::Code { .. }
-        ) {
-            let attachment = if request.locator.is_prospective() {
-                GraphPhysicalAttachmentFactory.initialize(
-                    request.binding.clone(),
-                    request.locator.verified().clone(),
-                    request.locator.path().to_path_buf(),
-                    admission,
-                )
-            } else {
-                let locator = CodeShardPhysicalLocator::from_verified_existing(
-                    request.binding.clone(),
-                    request.locator.verified().clone(),
-                    request.locator.path().to_path_buf(),
-                )
-                .map_err(|error| {
-                    StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                        operation: "prepare rusqlite graph locator",
-                        message: error.to_string(),
-                    }
-                })?;
-                GraphPhysicalAttachmentFactory.attach(&locator, admission)
-            }
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "attach rusqlite graph runtime",
-                message: error.to_string(),
-            })?;
-            Ok(LifecyclePhysicalAttachment::Graph(attachment))
+        let attachment = if request.locator.is_prospective() {
+            self.repository.initialize(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
         } else {
-            let attachment = if request.locator.is_prospective() {
-                self.repository.initialize(
-                    request.binding.clone(),
-                    request.locator.verified().clone(),
-                    request.locator.path().to_path_buf(),
-                    admission,
-                )
-            } else {
-                self.repository.attach(
-                    request.binding.clone(),
-                    request.locator.verified().clone(),
-                    request.locator.path().to_path_buf(),
-                    admission,
-                )
-            }
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "attach rusqlite repository runtime",
-                message: error.to_string(),
-            })?;
-            Ok(LifecyclePhysicalAttachment::Repository(attachment))
+            self.repository.attach(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
         }
+        .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+            operation: "attach rusqlite repository runtime",
+            message: error.to_string(),
+        })?;
+        Ok(LifecyclePhysicalAttachment(attachment))
     }
 }
 
 impl LifecyclePhysicalAttachment {
     fn as_physical(&self) -> &dyn PhysicalRuntimeAttachment {
-        match self {
-            Self::Graph(attachment) => attachment,
-            Self::Repository(attachment) => attachment,
-        }
+        &self.0
     }
 
     fn commit_initialization(&self) -> Result<(), String> {
-        match self {
-            Self::Graph(attachment) => attachment.commit_initialization(),
-            Self::Repository(attachment) => attachment.commit_initialization(),
-        }
+        self.0.commit_initialization()
     }
 
     fn abort(&self, created: bool) {
-        match self {
-            Self::Graph(attachment) if created => {
-                let _ = attachment.abort_initialization();
-            }
-            Self::Repository(attachment) if created => {
-                let _ = attachment.abort_initialization();
-            }
-            Self::Graph(attachment) => {
-                let _ = attachment.drain();
-                let _ = attachment.close_and_join();
-            }
-            Self::Repository(attachment) => {
-                let _ = attachment.drain();
-                let _ = attachment.close_and_join();
-            }
+        if created {
+            let _ = self.0.abort_initialization();
+        } else {
+            let _ = self.0.drain();
+            let _ = self.0.close_and_join();
         }
     }
 
     fn into_arc(self) -> Arc<dyn PhysicalRuntimeAttachment> {
-        match self {
-            Self::Graph(attachment) => Arc::new(attachment),
-            Self::Repository(attachment) => Arc::new(attachment),
-        }
+        Arc::new(self.0)
     }
 }
 
@@ -407,138 +350,6 @@ async fn migrate_before_publication(
         }
     }
     Ok(true)
-}
-
-impl PhysicalRuntimeAttachment for GraphRuntimePhysicalAttachment {
-    fn snapshot(&self) -> PhysicalRuntimeSnapshot {
-        let snapshot = GraphRuntimePhysicalAttachment::snapshot(self);
-        PhysicalRuntimeSnapshot {
-            healthy: snapshot.healthy,
-            writer_present: snapshot.writer_present,
-            reader_handles: snapshot.reader_handles,
-            queued_operations: snapshot.queued_operations,
-            queued_bytes: snapshot.queued_bytes,
-            wal_bytes: snapshot.wal_bytes,
-            memory_estimate_bytes: 0,
-        }
-    }
-
-    fn opened_file_identity(&self) -> Result<u64, String> {
-        Ok(GraphRuntimePhysicalAttachment::opened_file_identity(self))
-    }
-
-    fn drain(&self) -> Result<(), String> {
-        GraphRuntimePhysicalAttachment::drain(self)
-    }
-
-    fn close_and_join(&self) -> Result<(), String> {
-        GraphRuntimePhysicalAttachment::close_and_join(self)
-    }
-
-    fn exact_sql_handle(
-        &self,
-    ) -> Result<tracedecay_rusqlite_runtime::exact_sql::ExactSqlHandle, String> {
-        GraphRuntimePhysicalAttachment::exact_sql_handle(self).map_err(|error| error.to_string())
-    }
-
-    fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
-        retained_storage_page_counts(
-            GraphRuntimePhysicalAttachment::exact_sql_handle(self)
-                .map_err(|error| error.to_string())?,
-            reader_wait,
-        )
-    }
-
-    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
-        retained_storage_table_bytes(
-            GraphRuntimePhysicalAttachment::exact_sql_handle(self)
-                .map_err(|error| error.to_string())?,
-            reader_wait,
-        )
-    }
-
-    fn run_bounded_incremental_compaction(
-        &self,
-        max_pages: u32,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'_, Result<(), StoreRuntimeRegistryFailure>> {
-        Box::pin(async move {
-            GraphRuntimePhysicalAttachment::run_bounded_incremental_compaction(
-                self, max_pages, authority,
-            )
-            .await
-            .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "run bounded graph compaction",
-                message: error.to_string(),
-            })
-        })
-    }
-
-    fn run_checkpoint(
-        &self,
-        request: tracedecay_rusqlite_runtime::CheckpointRequest,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<
-        '_,
-        Result<tracedecay_rusqlite_runtime::CheckpointOutcome, StoreRuntimeRegistryFailure>,
-    > {
-        Box::pin(async move {
-            GraphRuntimePhysicalAttachment::run_checkpoint(self, request, authority)
-                .await
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "run graph checkpoint",
-                    message: error.to_string(),
-                })
-        })
-    }
-
-    fn snapshot_to(
-        &self,
-        destination: PathBuf,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<
-        '_,
-        Result<tracedecay_rusqlite_runtime::OnlineBackupReceipt, StoreRuntimeRegistryFailure>,
-    > {
-        Box::pin(async move {
-            GraphRuntimePhysicalAttachment::snapshot_to(self, destination, authority)
-                .await
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "snapshot graph database",
-                    message: error.to_string(),
-                })
-        })
-    }
-
-    fn dispatch_submit(
-        &self,
-        request: RuntimeSubmitRequestV1,
-        probe: Arc<dyn RuntimeRequestProbeV1>,
-        authority: Arc<dyn tracedecay_rusqlite_runtime::RuntimeWriteAuthority>,
-    ) -> StoreRuntimeRegistryFuture<'_, Result<RuntimeSubmitOutcomeV1, StoreRuntimeRegistryFailure>>
-    {
-        Box::pin(async move {
-            GraphRuntimePhysicalAttachment::dispatch_submit(self, request, probe, authority)
-                .await
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation: "dispatch graph submit",
-                    message: error.to_string(),
-                })
-        })
-    }
-
-    fn dispatch_read(
-        &self,
-        request: RuntimeReadRequestV1,
-        probe: &dyn RuntimeRequestProbeV1,
-    ) -> Result<RuntimeReadOutcomeV1, StoreRuntimeRegistryFailure> {
-        GraphRuntimePhysicalAttachment::dispatch_read(self, request, probe).map_err(|error| {
-            StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                operation: "dispatch graph read",
-                message: error.to_string(),
-            }
-        })
-    }
 }
 
 impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {

@@ -6,7 +6,6 @@
 
 mod closed_sql;
 mod fixture_ddl;
-mod graph;
 mod service;
 mod session;
 mod snapshot;
