@@ -74,6 +74,11 @@ pub(crate) struct WorktreeChangeClassificationV1 {
     changes: Vec<ClassifiedChangeV1>,
 }
 
+pub(crate) struct ExactPathReconciliationV1 {
+    pub(crate) paths: BTreeSet<String>,
+    pub(crate) dirty_paths: BTreeSet<String>,
+}
+
 impl WorktreeChangeClassificationV1 {
     /// Classify the current status of `repository` truthfully.
     pub(crate) fn classify(repository: &gix::Repository) -> Result<Self, ClassificationErrorV1> {
@@ -129,10 +134,26 @@ impl WorktreeChangeClassificationV1 {
     pub(crate) fn changed_paths_for(
         repository: &gix::Repository,
         exact_paths: &BTreeSet<String>,
-    ) -> Result<BTreeSet<String>, ClassificationErrorV1> {
+    ) -> Result<ExactPathReconciliationV1, ClassificationErrorV1> {
         if exact_paths.is_empty() {
-            return Ok(BTreeSet::new());
+            return Ok(ExactPathReconciliationV1 {
+                paths: BTreeSet::new(),
+                dirty_paths: BTreeSet::new(),
+            });
         }
+        let index = repository
+            .index_or_empty()
+            .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
+        let mut paths = index
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                std::str::from_utf8(entry.path(&index).as_ref())
+                    .ok()
+                    .filter(|path| exact_paths.contains(*path))
+                    .map(str::to_owned)
+            })
+            .collect::<BTreeSet<_>>();
         let patterns = exact_paths
             .iter()
             .map(|path| gix::bstr::BString::from(format!(":(literal){path}")))
@@ -146,14 +167,16 @@ impl WorktreeChangeClassificationV1 {
             .index_worktree_submodules(None)
             .into_iter(patterns)
             .map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
-        let mut changed = BTreeSet::new();
+        let mut dirty_paths = BTreeSet::new();
         for item in status {
             let item = item.map_err(|error| ClassificationErrorV1::Git(error.to_string()))?;
             if classify_item(&item).is_some() {
-                changed.insert(item.location().to_str_lossy().into_owned());
+                let path = item.location().to_str_lossy().into_owned();
+                paths.insert(path.clone());
+                dirty_paths.insert(path);
             }
         }
-        Ok(changed)
+        Ok(ExactPathReconciliationV1 { paths, dirty_paths })
     }
 
     /// Present files worth hashing and considering for (re)indexing: the

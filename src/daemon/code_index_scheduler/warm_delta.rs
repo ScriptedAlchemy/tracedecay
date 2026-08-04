@@ -22,8 +22,8 @@ use tracedecay_domain::{
 
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, CodeIndexCapturedFileV1, CodeIndexSchedulerErrorV1,
-    CodeIndexWorktreeSchedulerV1, GitStateMayHaveChanged, LanguageRegistry, PendingHintsV1,
-    StaticLanguageRegistry, file_occurrence_id, id, sha256_hex, snapshot_content_identity,
+    CodeIndexWorktreeSchedulerV1, LanguageRegistry, PendingHintsV1, StaticLanguageRegistry,
+    file_occurrence_id, id, sha256_hex, snapshot_content_identity,
 };
 use crate::privacy::{CodeSourceSanitizationV1, sanitize_code_source_bytes};
 
@@ -41,13 +41,7 @@ struct CapturedCandidateV1 {
 pub(super) struct WarmDeltaStateV1 {
     initialized: bool,
     candidates: BTreeMap<String, CapturedCandidateV1>,
-    reconciled_watcher_epoch: Option<u64>,
-}
-
-impl WarmDeltaStateV1 {
-    pub(super) const fn reconciled_watcher_epoch(&self) -> Option<u64> {
-        self.reconciled_watcher_epoch
-    }
+    dirty_paths: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -147,11 +141,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut changed_paths = BTreeSet::new();
         let paths_to_capture;
 
-        let watcher_epoch = watcher_epoch_to_reconcile(
-            hints.git_state.as_ref(),
-            &self.identity,
-            next_state.reconciled_watcher_epoch,
-        )?;
         if !next_state.initialized {
             let classification =
                 super::classification::WorktreeChangeClassificationV1::classify(&repository)
@@ -159,6 +148,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             measurements.full_status_scans = 1;
             paths_to_capture = classification.candidate_paths();
             changed_paths = paths_to_capture.clone();
+            next_state.dirty_paths = classification.changed_paths();
             next_state.candidates.clear();
         } else {
             let exact_paths = normalize_hints(&self.project_root, &hints.paths);
@@ -179,33 +169,38 @@ impl CodeIndexWorktreeSchedulerV1 {
                             )
                             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
                         measurements.full_status_scans = 1;
-                        changed_paths.extend(classification.changed_paths());
+                        let current_dirty_paths = classification.changed_paths();
+                        changed_paths.extend(next_state.dirty_paths.iter().cloned());
+                        changed_paths.extend(current_dirty_paths.iter().cloned());
+                        next_state.dirty_paths = current_dirty_paths;
                     }
                 }
             }
             if !exact_paths.is_empty() {
-                changed_paths.extend(
+                let exact =
                     super::classification::WorktreeChangeClassificationV1::changed_paths_for(
                         &repository,
                         &exact_paths,
                     )
-                    .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?,
-                );
+                    .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+                changed_paths.extend(exact.paths);
+                for path in &exact_paths {
+                    next_state.dirty_paths.remove(path);
+                }
+                next_state.dirty_paths.extend(exact.dirty_paths);
             }
-            let duplicate_watcher_only = hints.git_state.is_some()
-                && watcher_epoch.is_none()
-                && exact_paths.is_empty()
-                && !hints.overflow
-                && prior_identity.head_tree() == self.identity.head_tree();
             let needs_backstop = force_full_status
                 || hints.overflow
-                || (changed_paths.is_empty() && exact_paths.is_empty() && !duplicate_watcher_only);
+                || (changed_paths.is_empty() && exact_paths.is_empty());
             if needs_backstop && measurements.full_status_scans == 0 {
                 let classification =
                     super::classification::WorktreeChangeClassificationV1::classify(&repository)
                         .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
                 measurements.full_status_scans = 1;
-                changed_paths.extend(classification.changed_paths());
+                let current_dirty_paths = classification.changed_paths();
+                changed_paths.extend(next_state.dirty_paths.iter().cloned());
+                changed_paths.extend(current_dirty_paths.iter().cloned());
+                next_state.dirty_paths = current_dirty_paths;
             }
             paths_to_capture = changed_paths.clone();
         }
@@ -246,9 +241,6 @@ impl CodeIndexWorktreeSchedulerV1 {
             }
         }
         next_state.initialized = true;
-        if let Some(epoch) = watcher_epoch {
-            next_state.reconciled_watcher_epoch = Some(epoch);
-        }
 
         let mut files = next_state
             .candidates
@@ -301,25 +293,6 @@ fn stat_signature(candidates: &BTreeMap<String, CapturedCandidateV1>) -> String 
         buffer.push(0xff);
     }
     format!("sha256:{}", sha256_hex(&buffer))
-}
-
-fn watcher_epoch_to_reconcile(
-    event: Option<&GitStateMayHaveChanged>,
-    identity: &super::identity::IndexingIdentityV1,
-    reconciled_epoch: Option<u64>,
-) -> Result<Option<u64>, CodeIndexSchedulerErrorV1> {
-    let Some(event) = event else {
-        return Ok(None);
-    };
-    if !identity.authorizes_reuse_of(&event.identity) {
-        return Err(CodeIndexSchedulerErrorV1::Identity(
-            "git watcher event belongs to a different repository/worktree identity".to_owned(),
-        ));
-    }
-    Ok(
-        (reconciled_epoch.is_none_or(|epoch| event.watcher_epoch > epoch))
-            .then_some(event.watcher_epoch),
-    )
 }
 
 fn normalize_hints(project_root: &Path, hints: &BTreeSet<PathBuf>) -> BTreeSet<String> {

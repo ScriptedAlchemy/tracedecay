@@ -106,7 +106,7 @@ pub(crate) struct CodeIndexSchedulerMemoryStatsV1 {
     pub retained_generation_encoded_bytes: u64,
 }
 
-/// Synchronous result of routing one watcher frontier into a mounted scheduler.
+/// Typed result of routing one watcher frontier into the mounted scheduler.
 ///
 /// Watchers cannot await the registry map without risking a feedback loop with
 /// mount/shutdown. `Busy` is therefore explicit and retryable by the bounded
@@ -338,7 +338,6 @@ impl CodeIndexSchedulerRegistryV1 {
             CodeIndexCadenceTriggerV1::Overflow => 3,
             CodeIndexCadenceTriggerV1::QueryAdmission => 4,
             CodeIndexCadenceTriggerV1::BusyFollowUp => 5,
-            CodeIndexCadenceTriggerV1::GitWatcher => 6,
         }
     }
 
@@ -348,7 +347,6 @@ impl CodeIndexSchedulerRegistryV1 {
             3 => CodeIndexCadenceTriggerV1::Overflow,
             4 => CodeIndexCadenceTriggerV1::QueryAdmission,
             5 => CodeIndexCadenceTriggerV1::BusyFollowUp,
-            6 => CodeIndexCadenceTriggerV1::GitWatcher,
             _ => CodeIndexCadenceTriggerV1::Mount,
         }
     }

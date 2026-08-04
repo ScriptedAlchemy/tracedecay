@@ -1,8 +1,8 @@
 //! Daemon-owned scheduling and reconciliation for production code generations.
 //!
-//! Hook events are bounded wake-up hints only. Every run reconstructs its
-//! source snapshot from gix's HEAD-tree/index/worktree status before content
-//! digests decide whether publication is necessary.
+//! Hook events identify bounded reconciliation frontiers. Exact paths and
+//! old-to-new HEAD tree changes narrow work; gix status remains the bounded
+//! correctness backstop when no narrower authority is available.
 #![allow(dead_code)] // Plan 25 code-intelligence indexing — reconciliation surface staged
 
 use std::{
@@ -900,29 +900,6 @@ struct CapturedSnapshotV1 {
     /// them (physical sharing without identity aliasing).
     retained_bytes: Vec<Arc<[u8]>>,
 }
-
-/// A single-owner git watcher observed that one mounted worktree may have
-/// changed. The structural indexing identity prevents a delayed event from
-/// crossing worktrees; `watcher_epoch` is the monotonic frontier to stamp after
-/// one successful authoritative reconciliation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::daemon) struct GitStateMayHaveChanged {
-    identity: identity::IndexingIdentityV1,
-    watcher_epoch: u64,
-}
-
-impl GitStateMayHaveChanged {
-    pub(in crate::daemon) fn new(
-        identity: identity::IndexingIdentityV1,
-        watcher_epoch: u64,
-    ) -> Self {
-        Self {
-            identity,
-            watcher_epoch,
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub(super) struct CodeIndexPublishEvidenceV1 {
     pub generation_id: CodeGenerationId,
@@ -1259,7 +1236,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     /// request admission must fail closed and schedule background truth.
     freshness_unknown: bool,
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
-    /// Last successfully reconciled sanitized candidates and watcher frontier.
+    /// Last successfully reconciled sanitized candidate frontier.
     warm_delta: warm_delta::WarmDeltaStateV1,
     publication: DaemonCodeIndexPublicationStoreV1,
     owner: ProductionOwner,
@@ -1805,11 +1782,6 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// The exact identity this scheduler is currently bound to.
     pub fn identity(&self) -> &identity::IndexingIdentityV1 {
         &self.identity
-    }
-
-    #[cfg(test)]
-    pub(super) const fn reconciled_watcher_epoch(&self) -> Option<u64> {
-        self.warm_delta.reconciled_watcher_epoch()
     }
 
     pub(super) const fn last_reconciled_at_micros(&self) -> Option<i64> {

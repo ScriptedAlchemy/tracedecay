@@ -6,8 +6,8 @@ use tempfile::TempDir;
 use tracedecay_domain::ProjectId;
 
 use super::{
-    CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1, GitStateMayHaveChanged,
-    PendingHintsV1, SharedCodeIndexBytePoolV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1, PendingHintsV1,
+    SharedCodeIndexBytePoolV1,
 };
 
 struct GitFixture {
@@ -124,8 +124,55 @@ fn exact_hook_path_treats_pathspec_metacharacters_as_literals() {
     assert_eq!(exact.full_status_scans, 0);
 
     let backstop = published(scheduler.reconcile_now().expect("remaining dirty path"));
-    assert_eq!(backstop.source_files_read, 1);
+    assert_eq!(backstop.source_files_read, 2);
     assert_eq!(backstop.full_status_scans, 1);
+}
+
+#[test]
+fn exact_hook_reconciles_a_dirty_file_reverted_to_clean_head_content() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn value() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(&fixture, &store);
+    let baseline = published(scheduler.reconcile_now().expect("baseline"));
+
+    fixture.edit("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+    let dirty = published(scheduler.reconcile_now().expect("dirty generation"));
+    assert_ne!(
+        dirty.snapshot_content_identity,
+        baseline.snapshot_content_identity
+    );
+
+    fixture.edit("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+    let reverted = published(scheduler.reconcile_now().expect("reverted generation"));
+    assert_eq!(
+        reverted.snapshot_content_identity,
+        baseline.snapshot_content_identity
+    );
+    assert_eq!(reverted.source_files_read, 1);
+    assert_eq!(reverted.full_status_scans, 0);
+}
+
+#[test]
+fn full_status_backstop_reconciles_a_dropped_revert_event() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn value() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(&fixture, &store);
+    let baseline = published(scheduler.reconcile_now().expect("baseline"));
+
+    fixture.edit("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+    published(scheduler.reconcile_now().expect("dirty generation"));
+
+    fixture.edit("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    let reverted = published(scheduler.reconcile_now().expect("dropped-event backstop"));
+    assert_eq!(
+        reverted.snapshot_content_identity,
+        baseline.snapshot_content_identity
+    );
+    assert_eq!(reverted.source_files_read, 1);
+    assert_eq!(reverted.full_status_scans, 1);
 }
 
 /// A HEAD move has one exact old-tree -> new-tree frontier. The tree diff may
@@ -217,47 +264,4 @@ fn superseded_retry_backstop_recaptures_every_unpublished_dirty_path() {
         retry.measurements.source_files_read, 2,
         "the retry must retain neither unpublished attempt as authority"
     );
-}
-
-/// A watcher epoch is an exact reconciliation frontier. Once an empty
-/// backstop stamps it, replaying the same content-free event must not rescan
-/// status or source bytes.
-#[test]
-fn duplicate_watcher_frontier_is_a_zero_scan_noop() {
-    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
-    let store = TempDir::new().expect("store root");
-    let mut scheduler = scheduler(&fixture, &store);
-    published(scheduler.reconcile_now().expect("baseline"));
-
-    let event = GitStateMayHaveChanged::new(scheduler.identity().clone(), 9);
-    scheduler.notify_git_state(event.clone());
-    let first = match scheduler.reconcile_now().expect("watcher backstop") {
-        CodeIndexReconcileOutcomeV1::Noop(evidence) => evidence,
-        CodeIndexReconcileOutcomeV1::Published(evidence) => {
-            panic!(
-                "unchanged watcher event published {:?}",
-                evidence.generation_id
-            )
-        }
-    };
-    assert_eq!(first.full_status_scans, 1);
-    assert_eq!(first.source_files_read, 0);
-    assert_eq!(scheduler.reconciled_watcher_epoch(), Some(9));
-
-    scheduler.notify_git_state(event);
-    let duplicate = match scheduler
-        .reconcile_now()
-        .expect("duplicate watcher frontier")
-    {
-        CodeIndexReconcileOutcomeV1::Noop(evidence) => evidence,
-        CodeIndexReconcileOutcomeV1::Published(evidence) => {
-            panic!(
-                "duplicate watcher event published {:?}",
-                evidence.generation_id
-            )
-        }
-    };
-    assert_eq!(duplicate.full_status_scans, 0);
-    assert_eq!(duplicate.source_files_read, 0);
-    assert_eq!(scheduler.reconciled_watcher_epoch(), Some(9));
 }
