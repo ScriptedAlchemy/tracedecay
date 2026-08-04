@@ -215,3 +215,10 @@ fn vector_index_refresh_requires_the_identical_committed_scalar() {
         Err(GraphDbError::DurabilityUncertain { .. })
     ));
 }
+
+#[test]
+fn snapshots_can_cross_daemon_worker_boundaries() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<super::GraphSnapshot>();
+}
