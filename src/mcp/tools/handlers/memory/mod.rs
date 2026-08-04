@@ -615,7 +615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fact_feedback_without_source_keeps_legacy_mcp_history() {
+    async fn fact_feedback_without_source_keeps_default_mcp_history() {
         let (_tmp, cg, fact_id) = seeded_memory().await;
 
         handle_fact_feedback(
@@ -692,13 +692,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fact_add_accepts_request_derived_operation_as_legacy_replay() {
+    async fn fact_add_accepts_request_derived_operation_replay() {
         let (_tmp, cg) = empty_memory().await;
         let owner = active_project_memory_owner(&cg).unwrap();
         active_memory(&cg)
             .add_fact_v1(
                 AddFactRequest {
-                    content: "legacy request-derived memory write".to_owned(),
+                    content: "request-derived memory write".to_owned(),
                     category: MemoryCategory::General,
                     source: None,
                     tags: Vec::new(),
@@ -709,7 +709,7 @@ mod tests {
                 MemoryOperationContext::from_trusted_request_id(
                     &owner,
                     "add",
-                    "request.mcp.legacy-connection.first",
+                    "request.mcp.connection.first",
                     None,
                 )
                 .unwrap(),
@@ -721,7 +721,7 @@ mod tests {
             &cg,
             json!({
                 "action": "add",
-                "content": "legacy request-derived memory write",
+                "content": "request-derived memory write",
                 "__mcp_request_id": "request.mcp.reconnected.first",
             }),
             None,
