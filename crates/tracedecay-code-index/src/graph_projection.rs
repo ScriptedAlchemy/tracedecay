@@ -179,7 +179,7 @@ impl CodeGraphProjectionStore {
         repository_id: Option<RepositoryId>,
         freshness: SourceFreshness,
         cancellation: &CancellationSignal,
-    ) -> Result<CodeGraphEvidenceAdapterV1, CodeGraphProjectionError> {
+    ) -> Result<CodeGraphEvidenceReader, CodeGraphProjectionError> {
         generation
             .validate()
             .map_err(|error| CodeGraphProjectionError::Contract(error.to_string()))?;
@@ -190,7 +190,7 @@ impl CodeGraphProjectionStore {
         if current.generation != *generation {
             return Err(CodeGraphProjectionError::GenerationMismatch);
         }
-        Ok(CodeGraphEvidenceAdapterV1 {
+        Ok(CodeGraphEvidenceReader {
             generation: generation.clone(),
             repository_id,
             freshness,
@@ -247,7 +247,7 @@ impl CodeGraphProjectionPublisher for CodeGraphProjectionStore {
 }
 
 #[derive(Clone)]
-pub struct CodeGraphEvidenceAdapterV1 {
+pub struct CodeGraphEvidenceReader {
     generation: CodeGenerationId,
     repository_id: Option<RepositoryId>,
     freshness: SourceFreshness,
@@ -256,10 +256,10 @@ pub struct CodeGraphEvidenceAdapterV1 {
     cancellation: Arc<dyn GraphCancellation>,
 }
 
-impl fmt::Debug for CodeGraphEvidenceAdapterV1 {
+impl fmt::Debug for CodeGraphEvidenceReader {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("CodeGraphEvidenceAdapterV1")
+            .debug_struct("CodeGraphEvidenceReader")
             .field("generation", &self.generation)
             .field("repository_id", &self.repository_id)
             .field("freshness", &self.freshness)
@@ -268,7 +268,7 @@ impl fmt::Debug for CodeGraphEvidenceAdapterV1 {
     }
 }
 
-impl CodeGraphEvidenceAdapterV1 {
+impl CodeGraphEvidenceReader {
     pub fn new(
         generation: CodeGenerationId,
         repository_id: Option<RepositoryId>,

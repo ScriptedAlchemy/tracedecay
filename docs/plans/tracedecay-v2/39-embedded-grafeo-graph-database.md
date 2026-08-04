@@ -102,7 +102,7 @@ Keep in SQLite:
 
 **Interfaces:**
 - Consumes: `CanonicalRelationEdgeV1`, `CodeSearchChunkV1`, `GraphLaneRequest`.
-- Produces: behavior-preserving Grafeo traversal inside `CodeGraphEvidenceAdapterV1`; this is temporary direct coupling removed by Task 3.
+- Produces: behavior-preserving Grafeo traversal through the `tracedecay-code-index` graph reader.
 
 - [ ] **Step 1: Merge the current integration floor into PR487's worktree**
 
@@ -320,7 +320,7 @@ Build the replacement off to the side, validate every typed identity, then repla
 
 - [ ] **Step 3: Remove direct query-to-Grafeo coupling**
 
-`tracedecay-query` imports only the consumer-owned `CodeGraphEvidenceReadPort`. Move graph construction into `tracedecay-code-index`; graph-db performs storage/traversal. Remove all `grafeo-*` dependencies from `tracedecay-query`.
+`tracedecay-query` provides only the local `GraphEvidenceReadPort` translation for the canonical `tracedecay-code-index` graph reader. Graph construction lives in `tracedecay-code-index`; graph-db performs storage/traversal. Remove all `grafeo-*` dependencies from `tracedecay-query`.
 
 Task 3 cutover acceptance requires:
 
