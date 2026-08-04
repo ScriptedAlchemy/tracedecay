@@ -133,17 +133,6 @@ fn next_local_sequence() -> u64 {
     SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
 }
 
-fn bounded_detail(detail: Option<&str>) -> Option<String> {
-    detail
-        .filter(|value| {
-            !value.is_empty()
-                && value.len() <= 128
-                && value.trim() == *value
-                && !value.chars().any(char::is_control)
-        })
-        .map(str::to_owned)
-}
-
 fn authoritative_project_id(db: &RegisteredGlobalDb, supplied: Option<&str>) -> Option<String> {
     let bound = db.binding().shard_id.scope.project_id()?.as_str();
     match supplied {
@@ -228,8 +217,8 @@ pub async fn publish(
         return;
     };
     let units = units.max(1);
-    let Some(envelope) = activity_envelope(&project_id, family, units, bounded_detail(detail))
-    else {
+    let detail = ActivityObservedV1::bounded_detail(family.observation_label(), detail);
+    let Some(envelope) = activity_envelope(&project_id, family, units, detail.clone()) else {
         return;
     };
     let observed_at = envelope.observation_time_micros;
@@ -258,7 +247,7 @@ pub async fn publish(
             project_root: project_root.to_path_buf(),
             project_id: Some(project_id),
             units,
-            detail: bounded_detail(detail),
+            detail,
         },
     };
     let _ = live_bus().send(record);
@@ -409,6 +398,22 @@ mod tests {
             5,
             "extend the exhaustive match above when this changes"
         );
+    }
+
+    #[test]
+    fn source_owner_activity_strips_unbounded_detail_before_persistence() {
+        let detail = ActivityObservedV1::bounded_detail(
+            ActivityFamilyV1::ToolCall.observation_label(),
+            Some("external-tool-name"),
+        );
+        assert_eq!(detail, None);
+        let envelope = activity_envelope("project.activity", ActivityFamilyV1::ToolCall, 1, detail)
+            .unwrap_or_else(|| panic!("activity envelope"));
+        assert_eq!(envelope.validate(), Ok(()));
+        let ObservabilityPayloadV1::Activity(payload) = envelope.payload else {
+            panic!("activity payload");
+        };
+        assert_eq!(payload.detail, None);
     }
 
     #[tokio::test]

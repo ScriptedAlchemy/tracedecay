@@ -1135,11 +1135,13 @@ impl CodeIndexSchedulerRegistryV1 {
         Some(latest.generation.manifest().generation_id.clone())
     }
 
-    /// Exact live dashboard projection for one mounted worktree.
+    /// Exact bounded dashboard projection for one mounted worktree.
     ///
-    /// The freshness ladder runs before projection. Generation and scope fields
-    /// are copied from the durable sealed generation, never reconstructed from
-    /// the dashboard's display path.
+    /// This is a status read, not a query-admission boundary: it reports the
+    /// last scheduler execution state and never runs a freshness probe, opens
+    /// Git, scans the worktree, publishes a generation, or posts a wake.
+    /// Generation and scope fields are copied from the last sealed generation,
+    /// never reconstructed from the dashboard's display path.
     pub(in crate::daemon) async fn dashboard_freshness(
         &self,
         project_root: &Path,
@@ -1156,7 +1158,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         tokio::task::spawn_blocking(move || {
             let refreshing = reconcile_in_progress.load(Ordering::Acquire);
-            let mut scheduler = match scheduler.try_lock() {
+            let scheduler = match scheduler.try_lock() {
                 Ok(scheduler) => scheduler,
                 Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
                 Err(std::sync::TryLockError::WouldBlock) => {
@@ -1214,13 +1216,12 @@ impl CodeIndexSchedulerRegistryV1 {
                     };
                 }
             };
-            let reconciled = scheduler.ensure_fresh_for_query().is_ok();
             let verified = scheduler.verified_against_source();
-            let latest = if reconciled {
-                scheduler.latest_complete()
-            } else {
-                None
-            };
+            let stale = !verified || scheduler.freshness_window_elapsed();
+            let latest = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
             let hook_hint_count = scheduler.pending_hint_count();
             let (
                 repository_id,
@@ -1249,15 +1250,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         Some(generation.manifest().seal.sealed_at.0),
                     )
                 });
-            let staleness_state = if !reconciled {
-                "unknown"
-            } else if refreshing {
+            let staleness_state = if refreshing {
                 if latest.is_some() {
                     "refreshing"
                 } else {
                     "indexing"
                 }
-            } else if !verified {
+            } else if stale || hook_hint_count != Some(0) {
                 if latest.is_some() {
                     "stale"
                 } else {
@@ -1279,9 +1278,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 last_reconcile_micros: scheduler.last_reconciled_at_micros(),
                 staleness_state: Some(staleness_state.to_owned()),
                 hook_hint_count,
-                coverage: if !reconciled {
-                    "unknown_reconcile_failed"
-                } else if !verified {
+                coverage: if !verified {
                     "partial_unverified_restore"
                 } else if hook_hint_count.is_some() {
                     "complete"

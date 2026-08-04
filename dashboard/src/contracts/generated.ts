@@ -2771,25 +2771,9 @@ export const StoreBudgetEvaluationV1Schema = z.discriminatedUnion("state", [z.ob
 })]);
 export type StoreBudgetEvaluationV1 = z.infer<typeof StoreBudgetEvaluationV1Schema>;
 
-/** The per-store growth dimension. Growth is only ever reported over the window
-the server actually observed, and that window is named in `coverage`. */
+/** The per-store growth dimension. A status read observes present size but
+cannot create the execution-owned history required for a growth claim. */
 export const StoreGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.object({
-  coverage: z.string(),
-  measured_at: z.number().int(),
-  reason: z.string(),
-  state: z.literal("baseline"),
-  total_bytes: z.number().int(),
-}), z.object({
-  coverage: z.string(),
-  current_total_bytes: z.number().int(),
-  first_measured_at: z.number().int(),
-  first_total_bytes: z.number().int(),
-  growth_bytes: z.number().int(),
-  last_measured_at: z.number().int(),
-  sample_count: z.number().int(),
-  samples: z.array(z.lazy(() => StoreSizeWatermarkV1Schema)),
-  state: z.literal("observed"),
-}), z.object({
   reason: z.string(),
   state: z.literal("unknown"),
 })]);
@@ -2827,14 +2811,6 @@ export const StoreSizeSampleV1Schema = z.object({
   store: z.lazy(() => StoreKeyV1Schema),
 });
 export type StoreSizeSampleV1 = z.infer<typeof StoreSizeSampleV1Schema>;
-
-/** One recorded store-size watermark. */
-export const StoreSizeWatermarkV1Schema = z.object({
-  free_bytes: z.number().int(),
-  measured_at: z.number().int(),
-  total_bytes: z.number().int(),
-});
-export type StoreSizeWatermarkV1 = z.infer<typeof StoreSizeWatermarkV1Schema>;
 
 /** One store's telemetry entry. One entry per distinct store **file**, not per
 dashboard role. */
