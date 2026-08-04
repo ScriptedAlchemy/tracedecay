@@ -1,5 +1,5 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
-import type { ExplorerQueryRun, ExplorerSourceProgress } from '../../contracts/wire.ts';
+import type { ExplorerQueryRunV1, ExplorerSourceProgressV1 } from '../../contracts/generated.ts';
 
 /**
  * Whether Explorer has earned the right to say a term is absent from the index.
@@ -33,7 +33,7 @@ function units(count: number, unit: string | null): string {
  * thing to say than a source that left some units unaccounted for, so the
  * stronger statement is tested first.
  */
-function coverageBlocker(source: ExplorerSourceProgress): string | null {
+function coverageBlocker(source: ExplorerSourceProgressV1): string | null {
   const label = source.source_label;
   const { coverage } = source;
   const unit = coverage.unit;
@@ -83,7 +83,7 @@ function coverageBlocker(source: ExplorerSourceProgress): string | null {
  * evidence the surface can see, whereas finality is the coordinator's summary of
  * them — and when the two disagree the surface sides with the evidence.
  */
-export function absenceVerdict(run: ExplorerQueryRun | undefined): AbsenceVerdict {
+export function absenceVerdict(run: ExplorerQueryRunV1 | undefined): AbsenceVerdict {
   if (run === undefined) {
     return {
       confirmed: false,

@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
-  EnvelopeSchema,
+  DashboardEnvelopeV1Schema,
   ExplorerQueryRunV1Schema,
   ExplorerSourceProgressV1Schema,
   type ExplorerQueryRunV1,
   type ExplorerSourceProgressV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import {
   browseLane,
@@ -75,7 +75,7 @@ function run(over: Record<string, unknown> = {}): ExplorerQueryRunV1 {
 function answered(payload: ExplorerQueryRunV1): EnvelopeResult<ExplorerQueryRunV1> {
   return {
     outcome: 'envelope',
-    envelope: EnvelopeSchema(ExplorerQueryRunV1Schema).parse({
+    envelope: DashboardEnvelopeV1Schema(ExplorerQueryRunV1Schema).parse({
       schema_revision: 1,
       scope: { project_id: 'p', storage_mode: 'profile_sharded', store_root: '/data' },
       version: { entity_version: null, graph_version: null },

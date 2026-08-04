@@ -23,7 +23,7 @@ import { CornerDownRight } from 'lucide-react';
 import {
   StructureReadV1Schema as CallChainReadSchema,
   type CallChainMeasurementV1,
-} from '../../contracts/wire.ts';
+} from '../../contracts/generated.ts';
 import { absenceReason, useStructure } from '../../data/query/structure.ts';
 import { elideStart } from '../../ui/format.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';

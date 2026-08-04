@@ -16,20 +16,20 @@ import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import {
-  GraphNeighborsPayloadSchema,
-  type GraphNeighborsPayload,
-} from '../../contracts/wire.ts';
+  GraphNeighborsPayloadV1Schema,
+  type GraphNeighborsPayloadV1,
+} from '../../contracts/generated.ts';
 import { TRACE_BUDGET } from '../../viz/trace/model.ts';
 import { expansionTargets } from './traceNeighborhood.ts';
 
-function neighbors(id: string): GraphNeighborsPayload {
-  return GraphNeighborsPayloadSchema.parse(
+function neighbors(id: string): GraphNeighborsPayloadV1 {
+  return GraphNeighborsPayloadV1Schema.parse(
     resolveFixture(`/api/plugins/graph/node/${id}/neighbors`),
   );
 }
 
 /** First appearance across both arms, callers first — the endpoint's order. */
-function firstSeen(payload: GraphNeighborsPayload, focusId: string): string[] {
+function firstSeen(payload: GraphNeighborsPayloadV1, focusId: string): string[] {
   const ids = new Set<string>();
   for (const row of [...payload.callers, ...payload.callees]) {
     if (row.id !== focusId) ids.add(row.id);

@@ -326,6 +326,7 @@ fn capability(
             None
         },
         idempotency: IdempotencyContract::NotRequired,
+        inverse: tracedecay_tool_catalog::InverseContract::NotApplicable,
         authority_revalidation: RevalidationContract::required(vec![
             RevalidationPoint::Authority,
             RevalidationPoint::Scope,
