@@ -221,6 +221,10 @@ impl SessionRelationGraphStore {
     }
 
     pub fn memory() -> Result<Self, SessionRelationError> {
+        Self::memory_graph().map(Self::new)
+    }
+
+    pub fn memory_graph() -> Result<Arc<GraphDb>, SessionRelationError> {
         GraphDb::open(GraphDbOpenOptions {
             location: GraphDbLocation::Memory,
             expected_format: GraphFormatVersion::new(GRAPH_FORMAT_VERSION)
@@ -229,7 +233,6 @@ impl SessionRelationGraphStore {
             cancellation: Arc::new(NeverCancelled),
         })
         .map(Arc::new)
-        .map(Self::new)
         .map_err(map_graph_error)
     }
 

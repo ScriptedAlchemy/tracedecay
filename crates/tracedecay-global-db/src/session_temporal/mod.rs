@@ -14,7 +14,7 @@ mod refresh;
 mod registered_lcm_render;
 mod relation_projection;
 mod relation_receipts;
-pub(crate) use relation_projection::seed_session_relation_projection;
+pub use relation_projection::seed_session_relation_projection;
 pub(crate) use relation_receipts::apply_relation_projection;
 pub mod relations;
 pub mod render;

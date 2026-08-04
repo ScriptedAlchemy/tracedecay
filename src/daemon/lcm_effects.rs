@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_temporal_query::ports::ExecutionControl;
 
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::lcm::{
@@ -12,6 +13,7 @@ use crate::sessions::lcm::{
 
 const LCM_EFFECT_CEILING: Duration = Duration::from_secs(30);
 const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const LCM_EFFECT_WORK_LIMIT: usize = 4_096;
 
 /// Daemon-owned execution boundary for retained LCM mutations.
 ///
@@ -59,6 +61,7 @@ impl LcmEffectControl {
 
     async fn execute<T>(
         &self,
+        execution: &ExecutionControl,
         mutation: impl Future<Output = Result<T, LcmError>>,
     ) -> Result<T, LcmError> {
         self.checkpoint()?;
@@ -66,9 +69,23 @@ impl LcmEffectControl {
         loop {
             tokio::select! {
                 result = &mut mutation => return result,
-                () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => self.checkpoint()?,
+                () = tokio::time::sleep(CANCELLATION_POLL_INTERVAL) => {
+                    if let Err(error) = self.checkpoint() {
+                        execution.cancel();
+                        return Err(error);
+                    }
+                },
             }
         }
+    }
+
+    fn execution_control(&self) -> ExecutionControl {
+        let control = ExecutionControl::new(Some(self.expires_at.into_std()))
+            .with_work_limit(LCM_EFFECT_WORK_LIMIT);
+        if self.checkpoint().is_err() {
+            control.cancel();
+        }
+        control
     }
 }
 
@@ -88,11 +105,13 @@ impl DaemonLcmEffectService {
         &self,
         request: LcmCompressionRequest,
     ) -> Result<LcmCompressionResponse, LcmError> {
+        let execution = self.control.execution_control();
         let before_commit = self.control.clone();
         self.control
             .execute(
+                &execution,
                 self.db
-                    .lcm_compress_guarded(request, move || before_commit.checkpoint()),
+                    .lcm_compress_guarded(request, &execution, move || before_commit.checkpoint()),
             )
             .await
     }
@@ -101,9 +120,11 @@ impl DaemonLcmEffectService {
         &self,
         request: LcmSessionBoundaryRequest,
     ) -> Result<LcmSessionBoundaryResponse, LcmError> {
+        let execution = self.control.execution_control();
         let before_commit = self.control.clone();
         self.control
             .execute(
+                &execution,
                 self.db
                     .lcm_session_boundary_guarded(request, move || before_commit.checkpoint()),
             )
@@ -114,8 +135,11 @@ impl DaemonLcmEffectService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
-    use crate::sessions::lcm::{LcmSourceRef, LcmSummarizerMode};
+    use crate::sessions::lcm::{
+        LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmSourceRef, LcmSummarizerMode,
+    };
     use crate::sessions::{SessionMessageRecord, SessionRecord};
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
@@ -183,6 +207,13 @@ mod tests {
         }
     }
 
+    fn execution_control() -> ExecutionControl {
+        ExecutionControl::new(Some(
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        ))
+        .with_work_limit(4_096)
+    }
+
     #[tokio::test]
     async fn compression_producer_apply_read_and_rollback_stay_one_authority() {
         let harness = RegisteredGlobalDbHarness::open("lcm-compress-effect-journey").await;
@@ -206,10 +237,13 @@ mod tests {
                 .await;
         assert_eq!(service_cancelled.unwrap_err(), LcmError::Cancelled);
 
+        let cancellation_control = execution_control();
         let cancelled = db
-            .lcm_compress_guarded(compression_request("compress-session"), || {
-                Err(LcmError::Cancelled)
-            })
+            .lcm_compress_guarded(
+                compression_request("compress-session"),
+                &cancellation_control,
+                || Err(LcmError::Cancelled),
+            )
             .await;
         assert_eq!(cancelled.unwrap_err(), LcmError::Cancelled);
         let rolled_back = db
@@ -242,6 +276,40 @@ mod tests {
             "canonical historical message 1 with durable context"
         );
         assert!(!summary.summary_text.is_empty());
+
+        let read_control = execution_control();
+        let expansion = RegisteredGlobalDbSessionTemporalExecution::new(&db)
+            .render_lcm_expand(
+                LcmExpandRequest {
+                    provider: "cursor".to_string(),
+                    session_id: "compress-session".to_string(),
+                    target: LcmExpandTarget::SummaryNode {
+                        node_id: summary.node_id.clone(),
+                    },
+                    content_slice: Some(LcmContentSlice {
+                        offset: 0,
+                        limit: usize::MAX,
+                    }),
+                    source_offset: 0,
+                    source_limit: None,
+                },
+                &summary.summary_text,
+                &read_control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            expansion.summary_node.unwrap().source_refs,
+            summary.source_refs
+        );
+        assert_eq!(
+            expansion.summary_sources[0]
+                .raw_message
+                .as_ref()
+                .unwrap()
+                .store_id,
+            source_store_id
+        );
     }
 
     #[tokio::test]

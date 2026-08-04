@@ -888,48 +888,6 @@ async fn immutable_publication_rejects_redacted_deleted_and_expired_sources() {
     assert_eq!(summary_table_counts(&db).await, (0, 0));
 }
 
-#[tokio::test]
-async fn codex_auxiliary_summary_appends_successor_without_replacement() {
-    let tmp = TempDir::new().unwrap();
-    let db = registered_lcm_runtime(&tmp).await;
-    let store_ids = insert_raw_messages(&db, "codex", "session-1", &["alpha", "beta"]).await;
-    let mut draft = summary_draft(
-        "codex",
-        "session-1",
-        0,
-        "encrypted compaction placeholder",
-        store_ids
-            .iter()
-            .copied()
-            .map(|store_id| LcmSourceRef::RawMessage { store_id })
-            .collect(),
-    );
-    draft.metadata_json = Some(r#"{"source":"codex_context_compacted"}"#.to_string());
-    let original = db.lcm_insert_summary_node(draft).await.unwrap();
-
-    let successor = db
-        .publish_codex_compaction_summary_successor_for_test(
-            &original.node_id,
-            "visible Codex auxiliary summary",
-            "codex_app_server",
-            Some("gpt-test"),
-        )
-        .await
-        .expect("Codex replacement publishes an immutable successor");
-    assert_ne!(successor.node_id, original.node_id);
-    assert_eq!(successor.summary_text, "visible Codex auxiliary summary");
-    assert_eq!(summary_table_counts(&db).await.0, 2);
-    assert_eq!(
-        db.lcm_summary_successor_edges_for_test()
-            .await
-            .expect("summary successor edges"),
-        vec![(original.node_id.clone(), successor.node_id.clone())]
-    );
-    db.lcm_expand_summary_node_for_test("codex", "session-1", &original.node_id)
-        .await
-        .expect("original summary remains addressable");
-}
-
 // A boundary links sessions without changing summary authority or its
 // compatibility projection owner.
 #[tokio::test]

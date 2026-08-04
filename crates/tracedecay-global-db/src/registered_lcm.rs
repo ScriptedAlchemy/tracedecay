@@ -1,25 +1,18 @@
 use std::path::Path;
 
-use serde_json::Value as JsonValue;
-
 use tracedecay_domain::SessionId;
-use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, Rows, Value, params,
-};
-use tracedecay_sessions::compatibility::projected_content_hash;
+use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, Rows};
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
     lcm::{
-        LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
-        LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
-        LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
-        LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-        compression,
-        dag::{self, LcmSummaryPublicationPort},
+        LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
+        LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
+        LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
+        LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
+        LcmPreflightResponse, LcmRawMessage, LcmRecentSession, LcmSessionBoundaryRequest,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmStatus,
+        LcmSummaryExpansion, compression,
+        dag,
         doctor, gc, payload, query, raw, schema,
         types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
     },
@@ -27,21 +20,13 @@ use tracedecay_sessions::runtime::{
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
 
 use super::{
-    PendingCodexCompactionSummary, RegisteredGlobalDb,
+    RegisteredGlobalDb,
     registered::RegisteredGlobalDbWriterConnection,
     session_temporal::{
         seed_session_relation_projection, store::execution_control_graph_cancellation,
     },
     session_temporal_operations,
 };
-
-const CODEX_COMPACTION_SUMMARY_PROMPT: &str = concat!(
-    "Summarize the visible transcript messages that Codex compacted. ",
-    "Preserve durable user intent, implementation decisions, file/module names, ",
-    "unresolved tasks, and verification status. Return only the summary text."
-);
-const CODEX_COMPACTION_RELATION_LIMIT: usize = 4_096;
-const CODEX_COMPACTION_CANDIDATE_SCAN_LIMIT: usize = 4_096;
 
 fn check_execution(control: &ExecutionControl) -> Result<(), LcmError> {
     control.checkpoint().map_err(|error| match error {
@@ -82,121 +67,6 @@ impl Executor for RegisteredGlobalDbWriterConnection<'_> {
     async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
         RegisteredGlobalDbWriterConnection::execute_batch(self, sql).await
     }
-}
-
-async fn codex_compaction_summary_request_for_node(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-    session_id: &str,
-) -> Result<Option<LcmSummaryRequest>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT r.store_id, r.role, COALESCE(r.content, r.snippet_text, '')
-             FROM lcm_summary_sources s
-             JOIN lcm_raw_messages r
-               ON s.source_kind = 'raw_message'
-              AND CAST(s.source_id AS INTEGER) = r.store_id
-             WHERE s.node_id = ?1
-               AND r.provider = 'codex'
-               AND r.session_id = ?2
-             ORDER BY s.ordinal",
-            params![node_id, session_id],
-        )
-        .await?;
-    let mut source_messages = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let role: String = row.get(1)?;
-        let content: String = row.get(2)?;
-        source_messages.push(LcmSummarySourceMessage {
-            store_id,
-            role,
-            content,
-        });
-    }
-    let (Some(first), Some(last)) = (source_messages.first(), source_messages.last()) else {
-        return Ok(None);
-    };
-    Ok(Some(LcmSummaryRequest {
-        provider: "codex".to_string(),
-        session_id: session_id.to_string(),
-        focus_topic: Some("Codex context compaction".to_string()),
-        prompt: CODEX_COMPACTION_SUMMARY_PROMPT.to_string(),
-        source_range: LcmSummarySourceRange {
-            from_store_id: first.store_id,
-            to_store_id: last.store_id,
-        },
-        source_messages,
-        extraction_request: None,
-    }))
-}
-
-async fn codex_compaction_summary_draft(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> Result<LcmSummaryNodeDraft, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT provider, conversation_id, session_id, depth, summary_text,
-                    summary_token_count, source_token_count, source_time_start,
-                    source_time_end, expand_hint, metadata_json
-             FROM lcm_summary_nodes
-             WHERE node_id = ?1",
-            params![node_id],
-        )
-        .await?;
-    let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
-    let source_refs = summary_source_refs(conn, node_id).await?;
-    Ok(LcmSummaryNodeDraft {
-        provider: row.get(0)?,
-        conversation_id: row.get(1)?,
-        session_id: row.get(2)?,
-        depth: row.get(3)?,
-        summary_text: row.get(4)?,
-        summary_token_count: row.get(5)?,
-        source_token_count: row.get(6)?,
-        source_time_start: row.get(7)?,
-        source_time_end: row.get(8)?,
-        expand_hint: row.get(9)?,
-        metadata_json: row.get(10)?,
-        source_refs,
-    })
-}
-
-async fn summary_source_refs(
-    conn: &(impl QueryExecutor + ?Sized),
-    node_id: &str,
-) -> Result<Vec<LcmSourceRef>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT source_kind, source_id
-             FROM lcm_summary_sources
-             WHERE node_id = ?1
-             ORDER BY ordinal",
-            params![node_id],
-        )
-        .await?;
-    let mut refs = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_kind: String = row.get(0)?;
-        let source_id: String = row.get(1)?;
-        match source_kind.as_str() {
-            "raw_message" => refs.push(LcmSourceRef::RawMessage {
-                store_id: source_id.parse().map_err(|error| {
-                    LcmError::Db(format!(
-                        "invalid raw message source id '{source_id}': {error}"
-                    ))
-                })?,
-            }),
-            "summary_node" => refs.push(LcmSourceRef::SummaryNode { node_id: source_id }),
-            _ => {
-                return Err(LcmError::Db(format!(
-                    "invalid summary source kind '{source_kind}'"
-                )));
-            }
-        }
-    }
-    Ok(refs)
 }
 
 impl RegisteredGlobalDb {

@@ -812,7 +812,7 @@ async fn open_registered_test_database(
                 message: format!("{failure:?}"),
             },
         )?;
-    Ok(Arc::new(
+    let registered = Arc::new(
         RegisteredGlobalDb::migrate_and_attach(
             runtime,
             expected_binding,
@@ -820,7 +820,32 @@ async fn open_registered_test_database(
             authority,
         )
         .await?,
-    ))
+    );
+    let relation_scope = match &registered.binding().shard_id.scope {
+        tracedecay_store::StoreShardScopeV1::ProjectSessions { project_id } => {
+            crate::session_temporal::relations::SessionRelationScope::project(project_id.clone())
+        }
+        tracedecay_store::StoreShardScopeV1::ProfileSessions => {
+            crate::session_temporal::relations::SessionRelationScope::profile(
+                registered.binding().shard_id.profile_id.clone(),
+            )
+        }
+        scope => {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "bind registered global-db test relation graph".to_owned(),
+                message: format!("session test database has unsupported shard scope: {scope:?}"),
+            });
+        }
+    };
+    let relation_graph =
+        crate::session_temporal::relations::SessionRelationGraphStore::memory_graph().map_err(
+            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "open registered global-db test relation graph".to_owned(),
+                message: error.to_string(),
+            },
+        )?;
+    registered.bind_session_relation_graph(relation_scope, relation_graph)?;
+    Ok(registered)
 }
 
 #[cfg(test)]
