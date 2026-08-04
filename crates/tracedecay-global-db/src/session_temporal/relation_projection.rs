@@ -293,6 +293,25 @@ pub(crate) async fn reconstruct_session_relation_projection(
     Ok(projection)
 }
 
+pub(crate) async fn reconstruct_logical_copy_relations(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_entities: usize,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<Vec<LogicalCopyRelation>> {
+    if max_entities == 0 {
+        return Err(storage(
+            RECONSTRUCT_OPERATION,
+            SessionRelationError::BudgetExhausted,
+        ));
+    }
+    let occurrences =
+        reconstruct_occurrences(conn, session_id, generation, max_entities, &cancellation).await?;
+    let (logical_copies, _, _) = occurrence_relations(&occurrences)?;
+    Ok(logical_copies)
+}
+
 async fn reconstruct_session_context(
     scope: &SessionRelationScope,
     session_id: &SessionId,

@@ -29,6 +29,7 @@ const PARENT_RESOLVER_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
 pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
     conn: &impl QueryExecutor,
     recovery: &SessionRefreshRecoveryV1,
+    baseline_copy_count: u64,
 ) -> SessionStoreResult<Option<(SessionRefreshProgressV1, SessionTemporalProjectionBatchV1)>> {
     let (
         batch_ordinal,
@@ -42,6 +43,7 @@ pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
                 conn,
                 recovery.session_id(),
                 recovery.frozen_watermarks().active_generation(),
+                baseline_copy_count,
             )
             .await?;
             (

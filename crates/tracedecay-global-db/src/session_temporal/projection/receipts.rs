@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{CanonicalObservationEnvelopeV1, RetrievalAnchorRecord};
+use tracedecay_graph_db::NeverCancelled;
 use tracedecay_runtime_core::db::engine::{Executor, params};
 use tracedecay_store::{
     ObservationProjection, ProjectionStoreError, ProjectionStoreResult, SessionStoreResult,
@@ -11,13 +14,18 @@ use tracedecay_store::{
 use super::super::query::{
     PERSIST_OPERATION, encode_watermarks, frontier_i64, generation_i64, storage, storage_message,
 };
+use super::super::relation_projection::reconstruct_logical_copy_relations;
+use super::super::relations::{LogicalCopyRelation, SessionRelationProjection};
 use super::persist::*;
+
+const MAX_RECEIPT_COPY_ENTITIES: usize = 100_000;
 
 pub async fn validate_final_projection_receipt(
     conn: &impl Executor,
     session_id: &tracedecay_domain::SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
     watermarks: &tracedecay_store::SessionFrozenWatermarksV1,
+    relation_projection: &SessionRelationProjection,
 ) -> SessionStoreResult<()> {
     let generation_i64 = generation_i64(generation, super::super::query::ACTIVATE_OPERATION)?;
     let mut rows = conn
@@ -129,6 +137,12 @@ pub async fn validate_final_projection_receipt(
         return Err(storage_message(
             super::super::query::ACTIVATE_OPERATION,
             "candidate projection rows do not match the immutable final receipt",
+        ));
+    }
+    if copy_identity_coverage(&relation_projection.logical_copies)? != expected.copies {
+        return Err(storage_message(
+            super::super::query::ACTIVATE_OPERATION,
+            "native relation graph copies do not match the immutable final receipt",
         ));
     }
     validate_canonical_assertion_completeness(
@@ -645,7 +659,15 @@ pub(super) async fn projection_coverage(
         batch,
     )
     .await?;
-    let copies = copy_identity_coverage(conn, batch).await?;
+    let copies = reconstruct_logical_copy_relations(
+        conn,
+        batch.session_id(),
+        batch.generation(),
+        MAX_RECEIPT_COPY_ENTITIES,
+        Arc::new(NeverCancelled),
+    )
+    .await
+    .and_then(|copies| copy_identity_coverage(&copies))?;
     let assertions = digest_query_rows(
         conn,
         "SELECT json_array(assertion_id, assertion_kind, subject_anchor_id,
@@ -694,61 +716,9 @@ pub(super) async fn projection_coverage(
     })
 }
 
-async fn copy_identity_coverage(
-    conn: &impl Executor,
-    batch: &SessionTemporalProjectionBatchV1,
-) -> SessionStoreResult<(usize, String)> {
-    let mut rows = conn
-        .query(
-            "SELECT copy_count, copy_digest
-             FROM session_temporal_projection_receipts
-             WHERE session_id = ?1 AND generation = ?2
-             ORDER BY batch_ordinal DESC
-             LIMIT 1",
-            params![
-                batch.session_id().as_str(),
-                generation_i64(batch.generation(), PERSIST_OPERATION)?,
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let previous = match rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-    {
-        Some(row) => {
-            let count = usize::try_from(
-                row.get::<i64>(0)
-                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
-            )
-            .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            let digest = row
-                .get::<String>(1)
-                .map_err(|error| storage(PERSIST_OPERATION, error))?;
-            Some((count, digest))
-        }
-        None => None,
-    };
-    drop(rows);
-
-    let previous_count = previous.as_ref().map_or(0, |coverage| coverage.0);
-    let previous_digest = previous
-        .as_ref()
-        .map_or_else(|| digest_bytes(&[]), |coverage| coverage.1.clone());
-    if batch.copies().is_empty() {
-        return Ok((previous_count, previous_digest));
-    }
-
-    let count = previous_count
-        .checked_add(batch.copies().len())
-        .ok_or_else(|| storage_message(PERSIST_OPERATION, "copy receipt count overflow"))?;
-    let encoded = serde_json::to_vec(&json!({
-        "copies": sorted_json(batch.copies())?,
-        "previous_digest": previous_digest,
-    }))
-    .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    Ok((count, digest_bytes(&encoded)))
+fn copy_identity_coverage(copies: &[LogicalCopyRelation]) -> SessionStoreResult<(usize, String)> {
+    let encoded = sorted_json(copies)?;
+    Ok((encoded.len(), digest_bytes(encoded.join("\n").as_bytes())))
 }
 
 pub(super) async fn insert_projection_receipt(

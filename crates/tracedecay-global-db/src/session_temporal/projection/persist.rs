@@ -25,6 +25,7 @@ pub async fn session_temporal_projection_record_count(
     conn: &impl QueryExecutor,
     session_id: &SessionId,
     generation: tracedecay_domain::SessionProjectionGenerationV1,
+    copy_count: u64,
 ) -> SessionStoreResult<u64> {
     let mut rows = conn
         .query(
@@ -33,16 +34,11 @@ pub async fn session_temporal_projection_record_count(
                  WHERE session_id = ?1 AND generation = ?2)
               + (SELECT COUNT(*) FROM session_assertions
                  WHERE session_id = ?1 AND generation = ?2)
-              + COALESCE((
-                    SELECT copy_count
-                    FROM session_temporal_projection_receipts
-                    WHERE session_id = ?1 AND generation = ?2
-                    ORDER BY batch_ordinal DESC
-                    LIMIT 1
-                ), 0)",
+              + ?3",
             params![
                 session_id.as_str(),
                 generation_i64(generation, MATERIALIZE_REFRESH)?,
+                i64::try_from(copy_count).map_err(|error| storage(MATERIALIZE_REFRESH, error))?,
             ],
         )
         .await
@@ -827,6 +823,32 @@ pub(super) async fn validate_copy_proof(
             assertion_anchor_id,
             ..
         } => {
+            let mut source_rows = conn
+                .query(
+                    "SELECT occurrence_id
+                     FROM session_occurrences
+                     WHERE session_id = ?1
+                       AND generation = ?2
+                       AND retrieval_anchor_id = ?3
+                       AND occurrence_id != ?4
+                     ORDER BY knowledge_at DESC, occurrence_id DESC
+                     LIMIT 1",
+                    params![
+                        batch.session_id().as_str(),
+                        generation_i64(batch.generation(), PERSIST_OPERATION)?,
+                        assertion_anchor_id.as_str(),
+                        copy.occurrence_id.as_str(),
+                    ],
+                )
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let canonical_source = source_rows
+                .next()
+                .await
+                .map_err(|error| storage(PERSIST_OPERATION, error))?
+                .map(|row| row.get::<String>(0))
+                .transpose()
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
             let mut rows = conn
                 .query(
                     "SELECT anchor_json FROM retrieval_anchors WHERE anchor_id = ?1",
@@ -845,6 +867,8 @@ pub(super) async fn validate_copy_proof(
                 .and_then(|encoded| serde_json::from_str::<RetrievalAnchorRecord>(&encoded).ok())
                 .is_some_and(|anchor| {
                     assertion_anchor_id.as_str() == source_anchor_id
+                        && canonical_source.as_deref()
+                            == Some(copy.copied_from_occurrence_id.as_str())
                         && anchor.source_anchors().iter().any(|lineage| {
                             lineage.relation() == AnchorProvenanceRelationV2::CopiedFrom
                                 && lineage.anchor_id() == assertion_anchor_id

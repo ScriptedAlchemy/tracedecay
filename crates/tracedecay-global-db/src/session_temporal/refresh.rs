@@ -544,6 +544,7 @@ impl RegisteredGlobalDb {
             request.session_id(),
             binding.generation,
             &binding.watermarks,
+            &relation_projection,
         )
         .await?;
         validate_candidate_frontier(
@@ -1362,9 +1363,16 @@ async fn validate_next_progress(
             });
         }
     } else {
-        let materialized_records =
-            session_temporal_projection_record_count(conn, progress.session_id(), generation)
+        let copy_count =
+            projection_receipt_copy_count(conn, progress.session_id(), generation, batch_ordinal)
                 .await?;
+        let materialized_records = session_temporal_projection_record_count(
+            conn,
+            progress.session_id(),
+            generation,
+            copy_count,
+        )
+        .await?;
         if batch_ordinal != 0 || progress.committed_records() != materialized_records {
             return Err(SessionStoreError::InvalidStateTransition {
                 context: "initial refresh progress projection accounting",
@@ -1372,6 +1380,40 @@ async fn validate_next_progress(
         }
     }
     Ok(())
+}
+
+async fn projection_receipt_copy_count(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    batch_ordinal: u64,
+) -> SessionStoreResult<u64> {
+    let mut rows = conn
+        .query(
+            "SELECT copy_count
+             FROM session_temporal_projection_receipts
+             WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
+            params![
+                session_id.as_str(),
+                generation_i64(generation, PERSIST_REFRESH)?,
+                frontier_i64(batch_ordinal, PERSIST_REFRESH)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    let value = rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_REFRESH, error))?
+        .ok_or_else(|| {
+            storage_message(
+                PERSIST_REFRESH,
+                "refresh projection copy receipt is unavailable",
+            )
+        })?
+        .get::<i64>(0)
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    u64::try_from(value).map_err(|error| storage(PERSIST_REFRESH, error))
 }
 
 async fn insert_progress_and_binding(
@@ -1481,14 +1523,8 @@ async fn projection_receipt_item_count(
 ) -> SessionStoreResult<usize> {
     let mut rows = conn
         .query(
-            "SELECT
-                current.occurrence_count + current.copy_count + current.assertion_count
-                - COALESCE(
-                    previous.occurrence_count
-                    + previous.copy_count
-                    + previous.assertion_count,
-                    0
-                )
+            "SELECT current.occurrence_count + current.copy_count + current.assertion_count,
+                    previous.occurrence_count + previous.copy_count + previous.assertion_count
              FROM session_temporal_projection_receipts AS current
              LEFT JOIN session_temporal_projection_receipts AS previous
                ON previous.session_id = current.session_id
@@ -1514,10 +1550,26 @@ async fn projection_receipt_item_count(
             context: "refresh progress projection receipt",
         });
     };
-    let value: i64 = row
+    let current: i64 = row
         .get(0)
         .map_err(|error| storage(PERSIST_REFRESH, error))?;
-    usize::try_from(value).map_err(|error| storage(PERSIST_REFRESH, error))
+    let previous: Option<i64> = row
+        .get(1)
+        .map_err(|error| storage(PERSIST_REFRESH, error))?;
+    let delta = if batch_ordinal == 0 {
+        current
+    } else {
+        let previous = previous.ok_or(SessionStoreError::InvalidStateTransition {
+            context: "refresh progress predecessor projection receipt",
+        })?;
+        current
+            .checked_sub(previous)
+            .filter(|value| *value >= 0)
+            .ok_or(SessionStoreError::InvalidStateTransition {
+                context: "refresh progress projection receipt is non-monotonic",
+            })?
+    };
+    usize::try_from(delta).map_err(|error| storage(PERSIST_REFRESH, error))
 }
 
 async fn read_progress(

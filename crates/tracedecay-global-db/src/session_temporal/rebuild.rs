@@ -147,6 +147,7 @@ impl RegisteredGlobalDb {
             request.session_id(),
             request.generation(),
             request.snapshot().watermarks(),
+            &relation_projection,
         )
         .await?;
         validate_candidate_frontier(
