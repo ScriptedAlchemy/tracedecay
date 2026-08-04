@@ -7,7 +7,7 @@ fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
 }
 
 #[tokio::test]
-async fn directly_changed_test_file_is_dispatched_and_retains_terminal_receipt() {
+async fn directly_changed_test_file_dispatches_each_full_test_identity() {
     let _profile = crate::config::PinnedUserDataDir::new();
     let dir = tempfile::TempDir::new().unwrap();
     let project = dir.path();
@@ -21,7 +21,7 @@ async fn directly_changed_test_file_is_dispatched_and_retains_terminal_receipt()
     .unwrap();
     std::fs::write(
         project.join("tests/edited_only.rs"),
-        "#[test]\nfn edited_only_test() {\n    assert_eq!(2, 2);\n}\n",
+        "mod nested {\n    #[test]\n    fn first() {}\n\n    #[test]\n    fn second() {}\n}\n",
     )
     .unwrap();
 
@@ -57,12 +57,12 @@ async fn directly_changed_test_file_is_dispatched_and_retains_terminal_receipt()
             assert_eq!(root, expected_root);
             assert_eq!(profile, "debug");
             assert_eq!(timeout_duration, Duration::from_mins(1));
-            assert_eq!(tests, ["edited_only_test"]);
+            assert_eq!(tests, ["nested::first", "nested::second"]);
             Ok(TestRunOutput {
                 exit_code: Some(0),
-                stdout: "test edited_only_test ... ok\n".to_string(),
+                stdout: "test nested::first ... ok\ntest nested::second ... ok\n".to_string(),
                 stderr: String::new(),
-                output_bytes: 31,
+                output_bytes: 62,
             })
         },
     )
@@ -71,9 +71,13 @@ async fn directly_changed_test_file_is_dispatched_and_retains_terminal_receipt()
 
     let text = result.value["content"][0]["text"].as_str().unwrap();
     let output: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(output["dispatched_tests"], json!(["edited_only_test"]));
-    assert_eq!(output["results"][0]["test"], "edited_only_test");
-    assert_eq!(output["passed"], 1);
+    assert_eq!(
+        output["dispatched_tests"],
+        json!(["nested::first", "nested::second"])
+    );
+    assert_eq!(output["results"][0]["test"], "nested::first");
+    assert_eq!(output["results"][1]["test"], "nested::second");
+    assert_eq!(output["passed"], 2);
     assert_eq!(
         output["terminal"]["receipt"]["termination"], "completed",
         "the direct producer result must expose the terminal receipt it retained"
@@ -83,7 +87,7 @@ async fn directly_changed_test_file_is_dispatched_and_retains_terminal_receipt()
         "the producer must direct consumers to the canonical retained-result reader"
     );
     assert_eq!(
-        output["terminal"]["receipt"]["budget"]["bytes_consumed"], 31,
+        output["terminal"]["receipt"]["budget"]["bytes_consumed"], 62,
         "the terminal receipt must account for the bounded subprocess output"
     );
     assert!(
@@ -133,6 +137,39 @@ async fn non_string_changed_paths_are_rejected_before_test_selection() {
     );
 
     cg.close();
+}
+
+#[test]
+fn zero_max_tests_is_rejected_before_any_test_runner_can_start() {
+    let result = RunAffectedArgs::parse(&json!({"max_tests": 0, "format": "json"}))
+        .expect_err("zero max tests must not become an unfiltered cargo invocation");
+    let output = tool_result_body(result);
+
+    assert_eq!(output["error"]["kind"], "invalid_request");
+    assert_eq!(output["error"]["operation"], "max_tests");
+}
+
+#[test]
+fn timeout_above_the_managed_test_limit_is_rejected() {
+    let result = RunAffectedArgs::parse(&json!({
+        "timeout_secs": MAX_TEST_TIMEOUT_SECS + 1,
+        "format": "json"
+    }))
+    .expect_err("a managed test run cannot select an unbounded deadline");
+    let output = tool_result_body(result);
+
+    assert_eq!(output["error"]["kind"], "invalid_request");
+    assert_eq!(output["error"]["operation"], "timeout_secs");
+}
+
+#[test]
+fn zero_timeout_is_rejected() {
+    let result = RunAffectedArgs::parse(&json!({"timeout_secs": 0, "format": "json"}))
+        .expect_err("zero timeout must not disable the managed test deadline");
+    let output = tool_result_body(result);
+
+    assert_eq!(output["error"]["kind"], "invalid_request");
+    assert_eq!(output["error"]["operation"], "timeout_secs");
 }
 
 #[tokio::test]
@@ -196,6 +233,82 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
     cg.close();
 }
 
+#[tokio::test]
+async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("tests")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), "pub fn util() {}\n").unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"failed-runner-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tests/edited.rs"),
+        "#[test]\nfn selected_target() {}\n",
+    )
+    .unwrap();
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        project,
+        "project.mcp-affected-tests-failed-output",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+    {
+        let database = cg.dashboard_database_guard();
+        database
+            .execute_write_batch(
+                "seed failed managed test-run diagnostics schema",
+                crate::diagnostics_store::SCHEMA,
+            )
+            .await
+            .unwrap();
+    }
+
+    let vacuous = handle_run_affected_tests_with_runner(
+        &cg,
+        json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
+        None,
+        None,
+        |_root, _profile, _tests, _timeout_duration, _control| async move {
+            Ok(TestRunOutput {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                output_bytes: 0,
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert_failed_terminal(tool_result_body(vacuous));
+
+    let nonzero = handle_run_affected_tests_with_runner(
+        &cg,
+        json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
+        None,
+        None,
+        |_root, _profile, _tests, _timeout_duration, _control| async move {
+            Ok(TestRunOutput {
+                exit_code: Some(1),
+                stdout: String::new(),
+                stderr: "test harness failed".to_owned(),
+                output_bytes: 19,
+            })
+        },
+    )
+    .await
+    .unwrap();
+    assert_failed_terminal(tool_result_body(nonzero));
+
+    cg.close();
+}
+
 #[test]
 fn parses_libtest_pass_and_fail() {
     let stdout = "\
@@ -210,19 +323,29 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored
 }
 
 #[test]
-fn cargo_test_args_put_multiple_filters_after_libtest_separator() {
-    let args = cargo_test_args("debug", &["alpha".to_string(), "beta".to_string()]);
+fn cargo_test_args_use_one_exact_identity() {
+    let args = cargo_test_args("debug", "nested::alpha");
 
-    assert_eq!(args, ["test", "--no-fail-fast", "--", "alpha", "beta"]);
+    assert_eq!(
+        args,
+        ["test", "--no-fail-fast", "--", "--exact", "nested::alpha"]
+    );
 }
 
 #[test]
 fn cargo_test_args_keep_release_before_libtest_separator() {
-    let args = cargo_test_args("release", &["alpha".to_string(), "beta".to_string()]);
+    let args = cargo_test_args("release", "nested::alpha");
 
     assert_eq!(
         args,
-        ["test", "--no-fail-fast", "--release", "--", "alpha", "beta"]
+        [
+            "test",
+            "--no-fail-fast",
+            "--release",
+            "--",
+            "--exact",
+            "nested::alpha"
+        ]
     );
 }
 
@@ -230,4 +353,17 @@ fn cargo_test_args_keep_release_before_libtest_separator() {
 fn tail_handles_short_input() {
     assert_eq!(tail("hello", 100), "hello");
     assert_eq!(tail("0123456789", 4), "6789");
+}
+
+fn tool_result_body(result: ToolResult) -> Value {
+    let text = result.value["content"][0]["text"]
+        .as_str()
+        .expect("json tool result");
+    serde_json::from_str(text).expect("tool body")
+}
+
+fn assert_failed_terminal(output: Value) {
+    assert_eq!(output["error"]["kind"], "cargo");
+    assert_eq!(output["terminal"]["receipt"]["termination"], "failed");
+    assert!(output["note"].is_null());
 }
