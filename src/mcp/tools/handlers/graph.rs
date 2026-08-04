@@ -261,8 +261,8 @@ pub(super) async fn handle_search(
             cursor,
             mode: semantic_mode,
             authority: search_authority.cloned(),
-            deadline,
-            cancellation,
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
         },
     )
     .await;
@@ -303,9 +303,15 @@ pub(super) async fn handle_search(
                 output["scope_prefix_applied"] = json!(false);
             }
             if dependency_hints::should_check_ignored_dependency_hint(result_count, limit)
-                && let Some(hint) =
-                    dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix)
-                        .await?
+                && let Some(hint) = dependency_hints::ignored_dependency_hint(
+                    cg,
+                    query,
+                    limit,
+                    scope_prefix,
+                    deadline.as_ref(),
+                    cancellation.as_ref(),
+                )
+                .await?
             {
                 output["ignored_dependency_hint"] = hint;
             }
@@ -988,6 +994,8 @@ pub(super) async fn handle_find_exact_symbol(
     cg: &TraceDecay,
     args: Value,
     scope_prefix: Option<&str>,
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<ToolResult> {
     let name =
         args.get("name")
@@ -1009,6 +1017,8 @@ pub(super) async fn handle_find_exact_symbol(
             name,
             limit,
             scope_prefix,
+            deadline,
+            cancellation,
         )
         .await?;
         if !lazy_indexed_files.is_empty() {
