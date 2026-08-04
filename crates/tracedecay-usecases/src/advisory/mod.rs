@@ -104,10 +104,10 @@ pub use proximity_runtime::{
     SharedCanonicalProximityEvidenceAuthorityV1, open_pr13_proximity_runtime,
 };
 pub use runtime::{
-    Pr13AdvisoryContributionsV1, Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1,
-    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryDaemonRegistrationV1,
-    Pr13AdvisoryProviderAuthoritiesV1, Pr13AdvisoryProviderStateV1, Pr13AdvisoryProviderV1,
-    Pr13AdvisoryRuntime, Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest, Pr13AdvisoryContributionsV1,
+    Pr13AdvisoryDaemonRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
+    Pr13AdvisoryProviderStateV1, Pr13AdvisoryProviderV1, Pr13AdvisoryRuntime,
+    Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
     open_pr13_advisory_daemon_registration,
 };
 
