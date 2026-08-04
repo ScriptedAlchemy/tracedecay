@@ -334,42 +334,6 @@ pub trait RuntimeHealthDoctorPort: Send + Sync {
 
 // --- Operational runtime authorities (StorageRuntime family) ----------------
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteListenerReadV1 {
-    Serving,
-    Disabled,
-    Degraded,
-}
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RemoteAuthorityReadV1 {
-    Available,
-    Partial,
-    Unavailable,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum RemoteOperationalReadV1 {
-    Observed {
-        listener: RemoteListenerReadV1,
-        authority: RemoteAuthorityReadV1,
-        pending_spool_items: u64,
-        quarantined_spool_items: u64,
-        replay_coverage_complete: bool,
-        backup_verified: bool,
-        failover_in_progress: bool,
-        recovery_required: bool,
-        coverage: DoctorCoverageCompletenessV1,
-    },
-    Unconfigured,
-    Unsupported,
-    Denied,
-    Unavailable,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ProfileAuthorityReadV1 {
@@ -384,106 +348,13 @@ pub enum ProfileAuthorityReadV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperationalAuditReadV1 {
-    pub remote: RemoteOperationalReadV1,
     pub profile_authority: ProfileAuthorityReadV1,
 }
 
 pub fn operational_audit_findings(
     read: &OperationalAuditReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
-    Ok(vec![
-        remote_operational_finding(&read.remote)?,
-        profile_authority_finding(&read.profile_authority)?,
-    ])
-}
-
-fn remote_operational_finding(
-    read: &RemoteOperationalReadV1,
-) -> Result<DoctorFindingV1, ApplicationContractError> {
-    let family = DoctorFindingFamilyV1::StorageRuntime;
-    match read {
-        RemoteOperationalReadV1::Observed {
-            listener,
-            authority,
-            quarantined_spool_items,
-            replay_coverage_complete,
-            backup_verified,
-            failover_in_progress,
-            recovery_required,
-            coverage,
-            ..
-        } if *recovery_required || *quarantined_spool_items > 0 => source_finding(
-            family,
-            DoctorEvidenceStateV1::Degraded,
-            "remote.operational.recovery-required",
-            *coverage,
-            "remote HTTPS authority or spool requires recovery",
-            Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
-        ),
-        RemoteOperationalReadV1::Observed {
-            listener: RemoteListenerReadV1::Serving,
-            authority: RemoteAuthorityReadV1::Available,
-            replay_coverage_complete: true,
-            backup_verified: true,
-            failover_in_progress: false,
-            coverage,
-            ..
-        } => clean_finding(
-            family,
-            "remote.operational.ready",
-            *coverage,
-            "remote HTTPS listener, authority, spool, replay, and backup are ready",
-        ),
-        RemoteOperationalReadV1::Observed {
-            coverage,
-            listener,
-            authority,
-            replay_coverage_complete,
-            backup_verified,
-            failover_in_progress,
-            ..
-        } => {
-            let _ = (
-                listener,
-                authority,
-                replay_coverage_complete,
-                backup_verified,
-                failover_in_progress,
-            );
-            source_finding(
-                family,
-                DoctorEvidenceStateV1::Degraded,
-                "remote.operational.partial",
-                *coverage,
-                "remote HTTPS listener, authority, spool, replay, or backup is incomplete",
-                Some(action_remediation(operations::RUNTIME_RECOVER_DAEMON)?),
-            )
-        }
-        RemoteOperationalReadV1::Unconfigured => unobservable_finding(
-            family,
-            DoctorEvidenceStateV1::Absent,
-            "remote.operational.unconfigured",
-            "optional remote HTTPS capability is unconfigured",
-        ),
-        RemoteOperationalReadV1::Unsupported => unobservable_finding(
-            family,
-            DoctorEvidenceStateV1::Unsupported,
-            "remote.operational.unsupported",
-            "remote HTTPS capability is unsupported on this platform",
-        ),
-        RemoteOperationalReadV1::Denied => unobservable_finding(
-            family,
-            DoctorEvidenceStateV1::Denied,
-            "remote.operational.denied",
-            "remote operational authority read was denied",
-        ),
-        RemoteOperationalReadV1::Unavailable => unobservable_finding(
-            family,
-            DoctorEvidenceStateV1::Unknown,
-            "remote.operational.unavailable",
-            "remote operational authority is unavailable",
-        ),
-    }
+    Ok(vec![profile_authority_finding(&read.profile_authority)?])
 }
 
 fn profile_authority_finding(

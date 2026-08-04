@@ -431,8 +431,6 @@ WORKLOADS = (
     Workload("payload-stress", "transport-dispatch", WorkloadKind.PAYLOAD, "tracedecay_context", _payload, API),
     Workload("concurrency-burst", "transport-dispatch", WorkloadKind.CONCURRENCY, "tracedecay_search", _search, API, DigestSemantics.UNORDERED_JSON),
     Workload("hook-delivery", "hook-delivery", WorkloadKind.PAYLOAD, "tracedecay_hook_dispatch", _hook, (CrateLane.HOOKS, CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED)),
-    Workload("remote-capture", "remote-capture", WorkloadKind.SESSION, "tracedecay_remote_capture", _remote, (CrateLane.CAPTURE, CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED), is_remote=True),
-    Workload("remote-recovery", "remote-recovery", WorkloadKind.SESSION, "tracedecay_remote_recovery", _remote, (CrateLane.CAPTURE, CrateLane.RUSQLITE_RUNTIME, CrateLane.APPLICATION, CrateLane.API, CrateLane.INTEGRATED), is_remote=True),
 )
 
 

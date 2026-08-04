@@ -341,7 +341,5 @@ placeholder baseline.
   deletion; cleanup beyond the exact safe worktree removal above; autonomous
   scope expansion; generic Git execution; rebase, amend, force-push, push,
   remote mutation, or any GitHub mutation.
-- Remote multi-machine authority, replay, backup, restore, or failover, owned
-  by [Plan 28](28-remote-multi-machine-shared-brain.md) in PR16.
 - Persistent task graphs, execution planning, or agent scheduling, owned by
   later delivery slices.

@@ -43,8 +43,8 @@ use tracedecay_application::doctor::{
     HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
     LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
     ObservabilityStateV1, OperationalAuditDoctorPort, OperationalAuditReadV1,
-    ProfileAuthorityReadV1, RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    RuntimeLivenessV1, StorageDoctorPort,
+    ProfileAuthorityReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorPort,
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -1323,7 +1323,7 @@ pub struct DoctorKernelInputsV1 {
     pub configuration: ConfigurationAuthorityReadV1,
     /// Daemon/runtime health read (`StorageRuntime` family).
     pub runtime: RuntimeHealthReadV1,
-    /// Remote HTTPS and exact registered-profile operational authority.
+    /// Exact registered-profile operational authority.
     pub operational_audit: OperationalAuditReadV1,
     /// Host/agent integration conformance read (Advisory family).
     pub host: HostIntegrationReadV1,
@@ -1351,7 +1351,6 @@ impl DoctorKernelInputsV1 {
             configuration: ConfigurationAuthorityReadV1::Unknown,
             runtime: RuntimeHealthReadV1::Unknown,
             operational_audit: OperationalAuditReadV1 {
-                remote: RemoteOperationalReadV1::Unavailable,
                 profile_authority: ProfileAuthorityReadV1::Unavailable,
             },
             host: HostIntegrationReadV1::Unknown,
@@ -1461,7 +1460,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
     profile_root: PathBuf,
     host_home: Option<PathBuf>,
-    remote_operational: RemoteOperationalReadV1,
     retention: crate::config::RetentionConfig,
     schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     diagnostic_broker: Arc<tokio::sync::Mutex<tracedecay_lsp::analyzer::broker::DiagnosticBroker>>,
@@ -1478,7 +1476,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let project_sessions = Arc::clone(&project_sessions);
         let profile_root = profile_root.clone();
         let host_home = host_home.clone();
-        let remote_operational = remote_operational.clone();
         let retention = retention.clone();
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
@@ -1662,7 +1659,6 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                     temporal_ok,
                 }),
                 operational_audit: OperationalAuditReadV1 {
-                    remote: remote_operational,
                     profile_authority: ProfileAuthorityReadV1::Observed {
                         registry_attached: registry.writer_connection().is_ok(),
                         profile_sessions_attached: profile_sessions.writer_connection().is_ok(),

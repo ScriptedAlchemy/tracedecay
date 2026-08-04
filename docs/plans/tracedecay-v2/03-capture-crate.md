@@ -122,8 +122,8 @@ scaffold or declaration requirements.
   lineage and never rewrite prior evidence.
 - Replayable external sources persist bounded operations, receipts, and
   frontiers, never a raw-content spool. Plan 27 owns refresh durability and the
-  bounded local non-replayable host-admission spool; Plan 28 owns remote offline
-  capture/replay. Neither spool defines source identity or substitutes its
+  bounded local non-replayable host-admission spool. Neither spool defines
+  source identity or substitutes its
   receipt for a source revision.
 
 ## Ownership and regression evidence
@@ -191,4 +191,4 @@ does not require reconstruction.
   evidence, while explicit provider corrections/deletes retain lineage.
 - Architecture tests prove no replayable-source content spool, second
   sanitizer, network scheduler, lifecycle/UI implementation, scope resolver,
-  or remote outbox.
+  or network outbox.
