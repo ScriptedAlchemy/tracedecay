@@ -10,10 +10,32 @@ const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
 /// into an unbounded daemon job by selecting an arbitrarily distant deadline.
 pub(super) const MAX_TEST_TIMEOUT_SECS: u64 = DEFAULT_TEST_TIMEOUT_SECS;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TestProfile {
+    Debug,
+    Release,
+}
+
+impl TestProfile {
+    fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
+        match args.get("profile") {
+            None => Ok(Self::Debug),
+            Some(Value::String(profile)) if profile == "debug" => Ok(Self::Debug),
+            Some(Value::String(profile)) if profile == "release" => Ok(Self::Release),
+            Some(_) => Err(error_result(
+                args,
+                "invalid_request",
+                "profile",
+                "`profile` must be `debug` or `release`",
+            )),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct RunAffectedArgs {
     pub(super) explicit_paths: Option<Vec<String>>,
-    pub(super) profile: String,
+    pub(super) profile: TestProfile,
     pub(super) timeout_secs: u64,
     pub(super) max_tests: usize,
 }
@@ -46,11 +68,7 @@ impl RunAffectedArgs {
             }
             None => None,
         };
-        let profile = args
-            .get("profile")
-            .and_then(Value::as_str)
-            .unwrap_or("debug")
-            .to_owned();
+        let profile = TestProfile::parse(args)?;
         let timeout_secs = bounded_positive_u64(
             args,
             "timeout_secs",

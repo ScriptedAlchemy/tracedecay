@@ -16,11 +16,13 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
+use super::test_request::TestProfile;
+
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERMINATION_GRACE: Duration = Duration::from_millis(500);
 const MAX_TEST_RUN_OUTPUT_BYTES: u64 = 128 * 1024;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct TestRunOutput {
     pub(super) exit_code: Option<i32>,
     pub(super) stdout: String,
@@ -33,28 +35,110 @@ pub(super) enum TestRunFailure {
     Spawn(String),
     Cancelled {
         output_bytes: u64,
+        partial: Option<TestRunOutput>,
     },
     Timeout {
         output_bytes: u64,
+        partial: Option<TestRunOutput>,
     },
     OutputLimit {
         stream: TestRunStream,
         output_bytes: u64,
+        partial: Option<TestRunOutput>,
     },
     Read {
         output_bytes: u64,
+        partial: Option<TestRunOutput>,
     },
     Harness {
         exit_code: Option<i32>,
         output_bytes: u64,
+        partial: Option<TestRunOutput>,
     },
     NoMatch {
         test_identity: String,
         output_bytes: u64,
+        partial: Option<TestRunOutput>,
     },
     InvalidIdentity {
         test_identity: String,
     },
+}
+
+impl TestRunFailure {
+    fn with_partial_output(
+        self,
+        mut stdout: String,
+        mut stderr: String,
+        output_bytes: u64,
+    ) -> Self {
+        let combine = |partial: Option<TestRunOutput>| {
+            let partial = partial.unwrap_or(TestRunOutput {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                output_bytes,
+            });
+            stdout.push_str(&partial.stdout);
+            stderr.push_str(&partial.stderr);
+            TestRunOutput {
+                exit_code: partial.exit_code,
+                stdout,
+                stderr,
+                output_bytes,
+            }
+        };
+        match self {
+            Self::Cancelled { partial, .. } => Self::Cancelled {
+                output_bytes,
+                partial: Some(combine(partial)),
+            },
+            Self::Timeout { partial, .. } => Self::Timeout {
+                output_bytes,
+                partial: Some(combine(partial)),
+            },
+            Self::OutputLimit {
+                stream, partial, ..
+            } => Self::OutputLimit {
+                stream,
+                output_bytes,
+                partial: Some(combine(partial)),
+            },
+            Self::Read { partial, .. } => Self::Read {
+                output_bytes,
+                partial: Some(combine(partial)),
+            },
+            Self::Harness {
+                exit_code, partial, ..
+            } => Self::Harness {
+                exit_code,
+                output_bytes,
+                partial: Some(combine(partial)),
+            },
+            Self::NoMatch {
+                test_identity,
+                partial,
+                ..
+            } => Self::NoMatch {
+                test_identity,
+                output_bytes,
+                partial: Some(combine(partial)),
+            },
+            failure @ (Self::Spawn(_) | Self::InvalidIdentity { .. }) => failure,
+        }
+    }
+
+    pub(super) fn partial_output(&self) -> Option<&TestRunOutput> {
+        match self {
+            Self::Cancelled { partial, .. }
+            | Self::Timeout { partial, .. }
+            | Self::OutputLimit { partial, .. }
+            | Self::Read { partial, .. }
+            | Self::Harness { partial, .. }
+            | Self::NoMatch { partial, .. } => partial.as_ref(),
+            Self::Spawn(_) | Self::InvalidIdentity { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,21 +256,21 @@ impl TestRunControl {
 
 pub(super) async fn run_cargo_tests(
     project_root: PathBuf,
-    profile: String,
+    profile: TestProfile,
     test_names: Vec<String>,
     timeout: Duration,
     control: TestRunControl,
 ) -> Result<TestRunOutput, TestRunFailure> {
     tokio::task::spawn_blocking(move || {
-        run_selected_cargo_tests(&project_root, &profile, &test_names, timeout, control)
+        run_selected_cargo_tests(&project_root, profile, &test_names, timeout, control)
     })
     .await
     .map_err(|_| TestRunFailure::Spawn("cargo test runner task ended unexpectedly".to_owned()))?
 }
 
-pub(super) fn cargo_test_args(profile: &str, test_identity: &str) -> Vec<String> {
+pub(super) fn cargo_test_args(profile: TestProfile, test_identity: &str) -> Vec<String> {
     let mut args = vec!["test".to_string(), "--no-fail-fast".to_string()];
-    if profile == "release" {
+    if profile == TestProfile::Release {
         args.push("--release".to_string());
     }
     args.extend([
@@ -197,7 +281,7 @@ pub(super) fn cargo_test_args(profile: &str, test_identity: &str) -> Vec<String>
     args
 }
 
-fn cargo_test_command(project_root: &Path, profile: &str, test_identity: &str) -> Command {
+fn cargo_test_command(project_root: &Path, profile: TestProfile, test_identity: &str) -> Command {
     let mut command = Command::new("cargo");
     command
         .current_dir(project_root)
@@ -207,7 +291,7 @@ fn cargo_test_command(project_root: &Path, profile: &str, test_identity: &str) -
 
 fn run_selected_cargo_tests(
     project_root: &Path,
-    profile: &str,
+    profile: TestProfile,
     test_names: &[String],
     timeout: Duration,
     control: TestRunControl,
@@ -216,49 +300,90 @@ fn run_selected_cargo_tests(
         return Err(TestRunFailure::NoMatch {
             test_identity: "<none>".to_owned(),
             output_bytes: control.output_bytes(),
+            partial: None,
         });
     }
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         return Err(TestRunFailure::Timeout {
             output_bytes: control.output_bytes(),
+            partial: None,
         });
     };
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let mut exit_code = Some(0);
     for test_identity in test_names {
-        validate_test_identity(test_identity)?;
+        if let Err(failure) = validate_test_identity(test_identity) {
+            return Err(failure.with_partial_output(stdout, stderr, control.output_bytes()));
+        }
         if control.cancelled.load(Ordering::Acquire) {
             return Err(TestRunFailure::Cancelled {
                 output_bytes: control.output_bytes(),
+                partial: Some(TestRunOutput {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    output_bytes: control.output_bytes(),
+                }),
             });
         }
         let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
             return Err(TestRunFailure::Timeout {
                 output_bytes: control.output_bytes(),
+                partial: Some(TestRunOutput {
+                    exit_code,
+                    stdout,
+                    stderr,
+                    output_bytes: control.output_bytes(),
+                }),
             });
         };
         let mut command = cargo_test_command(project_root, profile, test_identity);
-        let output = run_bounded_test_command(&mut command, remaining, control.clone())?;
-        if output.exit_code != Some(0) {
-            return Err(TestRunFailure::Harness {
-                exit_code: output.exit_code,
-                output_bytes: control.output_bytes(),
-            });
-        }
-        if !parse_libtest_output(&output.stdout)
-            .iter()
-            .any(|(observed, _)| observed == test_identity)
-        {
-            return Err(TestRunFailure::NoMatch {
-                test_identity: test_identity.clone(),
-                output_bytes: control.output_bytes(),
-            });
-        }
+        let output = match run_bounded_test_command(&mut command, remaining, control.clone()) {
+            Ok(output) => output,
+            Err(failure) => {
+                return Err(failure.with_partial_output(stdout, stderr, control.output_bytes()));
+            }
+        };
+        let observed = parse_libtest_output(&output.stdout)
+            .into_iter()
+            .find(|(observed, _)| observed == test_identity);
         stdout.push_str(&output.stdout);
         stderr.push_str(&output.stderr);
+        if observed.is_none() {
+            let failure = if output.exit_code == Some(0) {
+                TestRunFailure::NoMatch {
+                    test_identity: test_identity.clone(),
+                    output_bytes: control.output_bytes(),
+                    partial: None,
+                }
+            } else {
+                TestRunFailure::Harness {
+                    exit_code: output.exit_code,
+                    output_bytes: control.output_bytes(),
+                    partial: None,
+                }
+            };
+            return Err(failure.with_partial_output(stdout, stderr, control.output_bytes()));
+        }
+        if output.exit_code.is_none() {
+            return Err(TestRunFailure::Harness {
+                exit_code: None,
+                output_bytes: control.output_bytes(),
+                partial: Some(TestRunOutput {
+                    exit_code: None,
+                    stdout,
+                    stderr,
+                    output_bytes: control.output_bytes(),
+                }),
+            });
+        }
+        if output.exit_code != Some(0) {
+            exit_code = output.exit_code;
+        }
     }
     Ok(TestRunOutput {
-        exit_code: Some(0),
+        exit_code,
         stdout,
         stderr,
         output_bytes: control.output_bytes(),
@@ -267,8 +392,10 @@ fn run_selected_cargo_tests(
 
 fn validate_test_identity(test_identity: &str) -> Result<(), TestRunFailure> {
     if test_identity.trim().is_empty()
+        || test_identity.trim() != test_identity
         || test_identity.starts_with('-')
         || test_identity.contains('\0')
+        || test_identity.chars().any(char::is_whitespace)
     {
         return Err(TestRunFailure::InvalidIdentity {
             test_identity: test_identity.to_owned(),
@@ -294,6 +421,12 @@ fn run_bounded_test_command(
     if timeout.is_zero() {
         return Err(TestRunFailure::Timeout {
             output_bytes: control.output_bytes(),
+            partial: Some(TestRunOutput {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                output_bytes: control.output_bytes(),
+            }),
         });
     }
     configure_command(command);
@@ -323,6 +456,12 @@ fn run_bounded_test_command(
     let stdout = join_reader(stdout_reader);
     let stderr = join_reader(stderr_reader);
     let output_bytes = control.output_bytes();
+    let partial = TestRunOutput {
+        exit_code: None,
+        stdout: stdout.text(),
+        stderr: stderr.text(),
+        output_bytes,
+    };
 
     match outcome {
         ProcessOutcome::Completed(status) => {
@@ -330,28 +469,39 @@ fn run_bounded_test_command(
                 return Err(TestRunFailure::OutputLimit {
                     stream,
                     output_bytes,
+                    partial: Some(partial),
                 });
             }
-            let Some(stdout) = stdout.into_captured() else {
-                return Err(TestRunFailure::Read { output_bytes });
-            };
-            let Some(stderr) = stderr.into_captured() else {
-                return Err(TestRunFailure::Read { output_bytes });
-            };
+            if !stdout.is_captured() || !stderr.is_captured() {
+                return Err(TestRunFailure::Read {
+                    output_bytes,
+                    partial: Some(partial),
+                });
+            }
             Ok(TestRunOutput {
                 exit_code: status.code(),
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                stdout: partial.stdout,
+                stderr: partial.stderr,
                 output_bytes,
             })
         }
-        ProcessOutcome::Cancelled => Err(TestRunFailure::Cancelled { output_bytes }),
-        ProcessOutcome::TimedOut => Err(TestRunFailure::Timeout { output_bytes }),
+        ProcessOutcome::Cancelled => Err(TestRunFailure::Cancelled {
+            output_bytes,
+            partial: Some(partial),
+        }),
+        ProcessOutcome::TimedOut => Err(TestRunFailure::Timeout {
+            output_bytes,
+            partial: Some(partial),
+        }),
         ProcessOutcome::OutputLimit(stream) => Err(TestRunFailure::OutputLimit {
             stream,
             output_bytes,
+            partial: Some(partial),
         }),
-        ProcessOutcome::ReadFailure => Err(TestRunFailure::Read { output_bytes }),
+        ProcessOutcome::ReadFailure => Err(TestRunFailure::Read {
+            output_bytes,
+            partial: Some(partial),
+        }),
     }
 }
 
@@ -416,16 +566,23 @@ fn terminate_and_reap(child: &mut Child, process_group: u32) {
 
 enum StreamCapture {
     Captured(Vec<u8>),
-    Exceeded,
-    ReadFailure,
+    Exceeded(Vec<u8>),
+    ReadFailure(Vec<u8>),
 }
 
 impl StreamCapture {
-    fn into_captured(self) -> Option<Vec<u8>> {
+    fn is_captured(&self) -> bool {
         match self {
-            Self::Captured(bytes) => Some(bytes),
-            Self::Exceeded | Self::ReadFailure => None,
+            Self::Captured(_) => true,
+            Self::Exceeded(_) | Self::ReadFailure(_) => false,
         }
+    }
+
+    fn text(&self) -> String {
+        let bytes = match self {
+            Self::Captured(bytes) | Self::Exceeded(bytes) | Self::ReadFailure(bytes) => bytes,
+        };
+        String::from_utf8_lossy(bytes).into_owned()
     }
 }
 
@@ -439,13 +596,13 @@ fn read_bounded(
     loop {
         let read = match reader.read(&mut chunk) {
             Ok(read) => read,
-            Err(_) => return StreamCapture::ReadFailure,
+            Err(_) => return StreamCapture::ReadFailure(output),
         };
         if read == 0 {
             return StreamCapture::Captured(output);
         }
         if !control.reserve_output(stream, read) {
-            return StreamCapture::Exceeded;
+            return StreamCapture::Exceeded(output);
         }
         output.extend_from_slice(&chunk[..read]);
     }
@@ -454,7 +611,7 @@ fn read_bounded(
 fn join_reader(reader: Option<thread::JoinHandle<StreamCapture>>) -> StreamCapture {
     reader
         .and_then(|reader| reader.join().ok())
-        .unwrap_or(StreamCapture::ReadFailure)
+        .unwrap_or(StreamCapture::ReadFailure(Vec::new()))
 }
 
 #[derive(Clone, Copy)]
@@ -518,7 +675,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        MAX_TEST_RUN_OUTPUT_BYTES, TestRunControl, TestRunFailure, TestRunStream,
+        MAX_TEST_RUN_OUTPUT_BYTES, TestProfile, TestRunControl, TestRunFailure, TestRunStream,
         run_bounded_test_command, run_cargo_tests,
     };
 
@@ -592,7 +749,7 @@ mod tests {
 
         let output = run_cargo_tests(
             temp.path().to_path_buf(),
-            "debug".to_owned(),
+            TestProfile::Debug,
             vec![
                 "tests::selected_one".to_owned(),
                 "tests::selected_two".to_owned(),
@@ -607,6 +764,41 @@ mod tests {
         assert!(output.stdout.contains("test tests::selected_one ... ok"));
         assert!(output.stdout.contains("test tests::selected_two ... ok"));
         assert!(!output.stdout.contains("tests::excluded"));
+    }
+
+    #[tokio::test]
+    async fn cargo_runner_reports_passing_and_failing_exact_tests() {
+        let temp = tempfile::TempDir::new().expect("temp");
+        fs::create_dir_all(temp.path().join("src")).expect("source directory");
+        fs::write(
+            temp.path().join("Cargo.toml"),
+            "[package]\nname = \"failing-exact-runner-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest");
+        fs::write(
+            temp.path().join("src/lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn passes() {}\n\n    #[test]\n    fn fails() { panic!(\"expected failure\"); }\n}\n",
+        )
+        .expect("source");
+
+        let output = run_cargo_tests(
+            temp.path().to_path_buf(),
+            TestProfile::Debug,
+            vec!["tests::passes".to_owned(), "tests::fails".to_owned()],
+            Duration::from_secs(10),
+            TestRunControl::default(),
+        )
+        .await
+        .expect("the runner must retain an observed failing test result");
+
+        assert_eq!(output.exit_code, Some(101));
+        assert_eq!(
+            super::parse_libtest_output(&output.stdout),
+            vec![
+                ("tests::passes".to_owned(), true),
+                ("tests::fails".to_owned(), false)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -626,7 +818,7 @@ mod tests {
 
         let result = run_cargo_tests(
             temp.path().to_path_buf(),
-            "debug".to_owned(),
+            TestProfile::Debug,
             vec!["tests::missing".to_owned()],
             Duration::from_secs(10),
             TestRunControl::default(),
@@ -643,7 +835,7 @@ mod tests {
     async fn cargo_runner_rejects_option_like_test_identity_before_spawning() {
         let result = run_cargo_tests(
             PathBuf::from("/no/such/project"),
-            "debug".to_owned(),
+            TestProfile::Debug,
             vec!["--nocapture".to_owned()],
             Duration::from_secs(10),
             TestRunControl::default(),
@@ -670,6 +862,7 @@ mod tests {
         let Err(TestRunFailure::OutputLimit {
             stream: TestRunStream::Stdout,
             output_bytes,
+            ..
         }) = result
         else {
             panic!("test process must terminate when stdout exceeds its bound");

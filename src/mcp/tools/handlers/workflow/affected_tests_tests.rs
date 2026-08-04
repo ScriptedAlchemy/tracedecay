@@ -55,7 +55,7 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
         None,
         move |root, profile, tests, timeout_duration, _control| async move {
             assert_eq!(root, expected_root);
-            assert_eq!(profile, "debug");
+            assert_eq!(profile, TestProfile::Debug);
             assert_eq!(timeout_duration, Duration::from_mins(1));
             assert_eq!(tests, ["nested::first", "nested::second"]);
             Ok(TestRunOutput {
@@ -90,6 +90,14 @@ async fn directly_changed_test_file_dispatches_each_full_test_identity() {
         output["terminal"]["receipt"]["budget"]["bytes_consumed"], 62,
         "the terminal receipt must account for the bounded subprocess output"
     );
+    let receipt = &output["terminal"]["receipt"];
+    let started_at = receipt["started_at"].as_i64().unwrap();
+    let ended_at = receipt["ended_at"].as_i64().unwrap();
+    assert!(
+        started_at > 1_577_836_800_000_000,
+        "the receipt must use the canonical application wall clock"
+    );
+    assert!(ended_at >= started_at);
     assert!(
         output["terminal"]["operation_id"]
             .as_str()
@@ -172,6 +180,16 @@ fn zero_timeout_is_rejected() {
     assert_eq!(output["error"]["operation"], "timeout_secs");
 }
 
+#[test]
+fn unsupported_profile_is_rejected_before_test_selection() {
+    let result = RunAffectedArgs::parse(&json!({"profile": "bench", "format": "json"}))
+        .expect_err("an unsupported profile must not silently become a debug test run");
+    let output = tool_result_body(result);
+
+    assert_eq!(output["error"]["kind"], "invalid_request");
+    assert_eq!(output["error"]["operation"], "profile");
+}
+
 #[tokio::test]
 async fn timed_out_test_runner_returns_a_terminal_receipt() {
     let _profile = crate::config::PinnedUserDataDir::new();
@@ -215,7 +233,10 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
         None,
         None,
         |_root, _profile, _tests, _timeout_duration, _control| async move {
-            Err(TestRunFailure::Timeout { output_bytes: 17 })
+            Err(TestRunFailure::Timeout {
+                output_bytes: 17,
+                partial: None,
+            })
         },
     )
     .await
@@ -229,6 +250,74 @@ async fn timed_out_test_runner_returns_a_terminal_receipt() {
         output["terminal"]["receipt"]["budget"]["bytes_consumed"],
         17
     );
+
+    cg.close();
+}
+
+#[tokio::test]
+async fn cancellation_retains_results_completed_before_the_later_test() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("tests")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), "pub fn util() {}\n").unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"partial-cancelled-runner-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tests/edited.rs"),
+        "#[test]\nfn first() {}\n\n#[test]\nfn second() {}\n",
+    )
+    .unwrap();
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        project,
+        "project.mcp-affected-tests-partial-cancel",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+    {
+        let database = cg.dashboard_database_guard();
+        database
+            .execute_write_batch(
+                "seed partial cancelled managed test-run schema",
+                crate::diagnostics_store::SCHEMA,
+            )
+            .await
+            .unwrap();
+    }
+
+    let result = handle_run_affected_tests_with_runner(
+        &cg,
+        json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
+        None,
+        None,
+        |_root, _profile, _tests, _timeout_duration, _control| async move {
+            Err(TestRunFailure::Cancelled {
+                output_bytes: 20,
+                partial: Some(TestRunOutput {
+                    exit_code: Some(0),
+                    stdout: "test first ... ok\n".to_owned(),
+                    stderr: String::new(),
+                    output_bytes: 20,
+                }),
+            })
+        },
+    )
+    .await
+    .unwrap();
+    let output = tool_result_body(result);
+
+    assert_eq!(output["error"]["kind"], "cargo");
+    assert_eq!(output["terminal"]["receipt"]["termination"], "cancelled");
+    assert_eq!(output["passed"], 1);
+    assert_eq!(output["failed"], 0);
+    assert_eq!(output["results"][0]["test"], "first");
+    assert_eq!(output["results"][0]["passed"], true);
 
     cg.close();
 }
@@ -309,6 +398,73 @@ async fn vacuous_or_nonzero_test_output_is_a_failed_terminal() {
     cg.close();
 }
 
+#[tokio::test]
+async fn reported_passing_and_failing_tests_complete_with_observed_results() {
+    let _profile = crate::config::PinnedUserDataDir::new();
+    let dir = tempfile::TempDir::new().unwrap();
+    let project = dir.path();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("tests")).unwrap();
+    std::fs::write(project.join("src/lib.rs"), "pub fn util() {}\n").unwrap();
+    std::fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"failing-test-result-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project.join("tests/edited.rs"),
+        "#[test]\nfn passing_target() {}\n\n#[test]\nfn failing_target() {}\n",
+    )
+    .unwrap();
+
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        project,
+        "project.mcp-affected-tests-failing-result",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+    {
+        let database = cg.dashboard_database_guard();
+        database
+            .execute_write_batch(
+                "seed failing managed test-run result schema",
+                crate::diagnostics_store::SCHEMA,
+            )
+            .await
+            .unwrap();
+    }
+
+    let result = handle_run_affected_tests_with_runner(
+        &cg,
+        json!({"changed_paths": ["tests/edited.rs"], "format": "json"}),
+        None,
+        None,
+        |_root, _profile, _tests, _timeout_duration, _control| async move {
+            Ok(TestRunOutput {
+                exit_code: Some(101),
+                stdout: "test passing_target ... ok\ntest failing_target ... FAILED\n".to_owned(),
+                stderr: "test result: FAILED\n".to_owned(),
+                output_bytes: 76,
+            })
+        },
+    )
+    .await
+    .unwrap();
+    let output = tool_result_body(result);
+
+    assert_eq!(output["terminal"]["receipt"]["termination"], "completed");
+    assert_eq!(output["exit_code"], 101);
+    assert_eq!(output["passed"], 1);
+    assert_eq!(output["failed"], 1);
+    assert_eq!(output["results"][0]["test"], "passing_target");
+    assert_eq!(output["results"][0]["passed"], true);
+    assert_eq!(output["results"][1]["test"], "failing_target");
+    assert_eq!(output["results"][1]["passed"], false);
+
+    cg.close();
+}
+
 #[test]
 fn parses_libtest_pass_and_fail() {
     let stdout = "\
@@ -324,7 +480,7 @@ test result: FAILED. 1 passed; 1 failed; 1 ignored
 
 #[test]
 fn cargo_test_args_use_one_exact_identity() {
-    let args = cargo_test_args("debug", "nested::alpha");
+    let args = cargo_test_args(TestProfile::Debug, "nested::alpha");
 
     assert_eq!(
         args,
@@ -334,7 +490,7 @@ fn cargo_test_args_use_one_exact_identity() {
 
 #[test]
 fn cargo_test_args_keep_release_before_libtest_separator() {
-    let args = cargo_test_args("release", "nested::alpha");
+    let args = cargo_test_args(TestProfile::Release, "nested::alpha");
 
     assert_eq!(
         args,
