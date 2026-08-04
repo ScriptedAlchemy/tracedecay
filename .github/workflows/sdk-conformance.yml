@@ -13,10 +13,8 @@ on:
       - "sdks/**"
       - "scripts/check-sdk-codegen.sh"
       - "scripts/check-sdk-publish-workflow.py"
-      - "scripts/require-exact-test.sh"
       - "scripts/test-check-sdk-publish-workflow.py"
       - "src/application_surface.rs"
-      - "tests/sdk_conformance_non_vacuity_test.sh"
   push:
     branches: [master]
 
@@ -73,6 +71,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -85,15 +85,12 @@ jobs:
       - run: npm run build
         working-directory: dashboard
       - run: cargo build --bin tracedecay
-      - name: Verify ignored conformance anti-vacuity
-        run: tests/sdk_conformance_non_vacuity_test.sh
       - run: >-
-          REQUIRE_EXACT_TEST_COUNT=nonzero
-          scripts/require-exact-test.sh
-          cargo test --manifest-path crates/tracedecay-sdk/Cargo.toml
+          cargo nextest run
+          --manifest-path crates/tracedecay-sdk/Cargo.toml
           --test production_daemon
-          --
-          --ignored
+          --run-ignored all
+          --no-tests=fail
       - run: npm ci
         working-directory: sdks/typescript
       - run: npm run test:installed
