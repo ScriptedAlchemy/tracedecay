@@ -330,7 +330,7 @@ pub(crate) fn advisory_cycle_invocation_result(
     let authority = AuthorityReceipt::from_context(context, policy, ended_at)
         .map_err(|_| advisory_cycle_contract_problem())?;
 
-    let (termination, coverage, omissions, page, payload) = match outcome {
+    let (mut termination, mut coverage, mut omissions, mut page, mut payload) = match outcome {
         AdvisoryCycleOutcome::Completed {
             cycle,
             contributions: _,
@@ -449,6 +449,32 @@ pub(crate) fn advisory_cycle_invocation_result(
             )
         }
     };
+    let rechecked_termination = if cancellation.is_cancelled() {
+        Some((OperationTermination::Cancelled, OmissionReason::Cancelled))
+    } else if deadline.is_elapsed_at(ended_at) {
+        Some((OperationTermination::TimedOut, OmissionReason::TimedOut))
+    } else {
+        match context.admission_at(ended_at) {
+            RequestAdmission::Cancelled => {
+                Some((OperationTermination::Cancelled, OmissionReason::Cancelled))
+            }
+            RequestAdmission::TimedOut => {
+                Some((OperationTermination::TimedOut, OmissionReason::TimedOut))
+            }
+            RequestAdmission::Admitted => None,
+        }
+    };
+    if let Some((rechecked, omission_reason)) = rechecked_termination {
+        termination = rechecked;
+        coverage = incomplete_advisory_cycle_coverage();
+        omissions = vec![Omission {
+            domain: EvidenceDomain::Diagnostic,
+            count: 1,
+            reason: omission_reason,
+        }];
+        page = empty_advisory_cycle_page()?;
+        payload = None;
+    }
     let cancellation = match termination {
         OperationTermination::Cancelled => Some(CancellationObservation {
             stage: CancellationStage::DuringRead,
