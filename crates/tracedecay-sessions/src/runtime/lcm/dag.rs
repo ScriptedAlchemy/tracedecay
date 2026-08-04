@@ -213,24 +213,26 @@ pub async fn load_uncondensed_summary_nodes(
         .await?;
     let mut nodes = Vec::new();
     while let Some(row) = rows.next().await? {
+        let node = LcmSummaryNode {
+            node_id: row.get(0)?,
+            provider: row.get(1)?,
+            conversation_id: row.get(2)?,
+            session_id: row.get(3)?,
+            depth: row.get(4)?,
+            summary_text: row.get(5)?,
+            summary_hash: row.get(6)?,
+            summary_token_count: row.get(7)?,
+            source_token_count: row.get(8)?,
+            source_time_start: row.get(9)?,
+            source_time_end: row.get(10)?,
+            expand_hint: row.get(11)?,
+            metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
+            source_refs: Vec::new(),
+        };
+        verify_summary_content(&node.summary_text, &node.summary_hash)?;
         nodes.push(LcmUncondensedSummaryNode {
-            node: LcmSummaryNode {
-                node_id: row.get(0)?,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
+            node,
             first_source_store_id: row.get(14)?,
         });
     }
@@ -289,7 +291,7 @@ async fn load_summary_node_by_id(
     let mut rows = conn.query(&sql, params![node_id]).await?;
     let row = rows.next().await?.ok_or(LcmError::SummaryNodeNotFound)?;
     let source_refs = load_summary_source_refs(conn, node_id).await?;
-    Ok(LcmSummaryNode {
+    let node = LcmSummaryNode {
         node_id: row.get(0)?,
         provider: row.get(1)?,
         conversation_id: row.get(2)?,
@@ -305,7 +307,11 @@ async fn load_summary_node_by_id(
         metadata_json: row.get(12)?,
         created_at: row.get(13)?,
         source_refs,
-    })
+    };
+    if include_content {
+        verify_summary_content(&node.summary_text, &node.summary_hash)?;
+    }
+    Ok(node)
 }
 
 async fn load_summary_source_refs(
@@ -368,7 +374,11 @@ async fn load_raw_messages_by_store_ids(
         .await?;
     let mut out = BTreeMap::new();
     while let Some(row) = rows.next().await? {
-        let raw = raw::raw_message_from_row(&row)?;
+        let raw = if include_content {
+            raw::verified_raw_message_from_row(&row)?
+        } else {
+            raw::raw_message_from_row(&row)?
+        };
         out.insert(raw.store_id, raw);
     }
     Ok(out)
@@ -411,26 +421,27 @@ async fn load_summary_nodes_by_ids(
     let mut nodes = BTreeMap::new();
     while let Some(row) = node_rows.next().await? {
         let node_id: String = row.get(0)?;
-        nodes.insert(
-            node_id.clone(),
-            LcmSummaryNode {
-                node_id,
-                provider: row.get(1)?,
-                conversation_id: row.get(2)?,
-                session_id: row.get(3)?,
-                depth: row.get(4)?,
-                summary_text: row.get(5)?,
-                summary_hash: row.get(6)?,
-                summary_token_count: row.get(7)?,
-                source_token_count: row.get(8)?,
-                source_time_start: row.get(9)?,
-                source_time_end: row.get(10)?,
-                expand_hint: row.get(11)?,
-                metadata_json: row.get(12)?,
-                created_at: row.get(13)?,
-                source_refs: Vec::new(),
-            },
-        );
+        let node = LcmSummaryNode {
+            node_id: node_id.clone(),
+            provider: row.get(1)?,
+            conversation_id: row.get(2)?,
+            session_id: row.get(3)?,
+            depth: row.get(4)?,
+            summary_text: row.get(5)?,
+            summary_hash: row.get(6)?,
+            summary_token_count: row.get(7)?,
+            source_token_count: row.get(8)?,
+            source_time_start: row.get(9)?,
+            source_time_end: row.get(10)?,
+            expand_hint: row.get(11)?,
+            metadata_json: row.get(12)?,
+            created_at: row.get(13)?,
+            source_refs: Vec::new(),
+        };
+        if include_content {
+            verify_summary_content(&node.summary_text, &node.summary_hash)?;
+        }
+        nodes.insert(node_id, node);
     }
     let source_sql = format!(
         "SELECT node_id, source_kind, source_id
@@ -449,6 +460,16 @@ async fn load_summary_nodes_by_ids(
         }
     }
     Ok(nodes)
+}
+
+pub(crate) fn verify_summary_content(
+    summary_text: &str,
+    summary_hash: &str,
+) -> Result<(), LcmError> {
+    if projected_content_hash(summary_text) != summary_hash {
+        return Err(LcmError::PayloadIntegrityMismatch);
+    }
+    Ok(())
 }
 
 fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef, LcmError> {
