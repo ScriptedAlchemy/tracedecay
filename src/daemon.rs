@@ -1639,7 +1639,6 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
 
     let (listener, bound_endpoint) = BrokerListener::bind(authority.endpoint()).await?;
     authority.publish_endpoint(&bound_endpoint)?;
-    set_owner_only_permissions(&socket_path, 0o600)?;
     log_daemon_event(
         "daemon_listening",
         &[("endpoint", bound_endpoint.to_string())],
