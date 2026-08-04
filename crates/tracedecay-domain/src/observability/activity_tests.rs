@@ -52,17 +52,7 @@ fn activity_detail_is_a_finite_safe_vocabulary() {
 #[test]
 fn session_ingest_producer_keeps_only_canonical_provider_ids() {
     for provider in [
-        "claude",
-        "codex",
-        "cursor",
-        "hermes",
-        "kiro",
-        "kimi_code",
-        "opencode",
-        "cline",
-        "roo-code",
-        "kilo",
-        "vibe",
+        "claude", "codex", "cursor", "hermes", "kiro", "cline", "roo-code", "kilo", "vibe",
     ] {
         assert_eq!(
             ActivityObservedV1::bounded_detail("session_ingest", Some(provider)),
@@ -71,7 +61,14 @@ fn session_ingest_producer_keeps_only_canonical_provider_ids() {
         );
     }
 
-    for untrusted_detail in ["kimi", "unknown-provider", "provider/session-42"] {
+    for untrusted_detail in [
+        "all",
+        "kimi",
+        "kimi_code",
+        "opencode",
+        "unknown-provider",
+        "provider/session-42",
+    ] {
         assert_eq!(
             ActivityObservedV1::bounded_detail("session_ingest", Some(untrusted_detail)),
             None,

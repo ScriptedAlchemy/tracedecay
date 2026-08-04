@@ -123,6 +123,9 @@ pub struct RuntimeRegistryAggregateSnapshot {
     pub eviction_eligible: u32,
     pub writer_present: u32,
     pub physical_reader_handles: u64,
+    pub general_reader_waiters: u64,
+    pub health_reader_waiters: u64,
+    pub writer_busy_events: u64,
     pub queued_operations: u64,
     pub queued_bytes: u64,
     pub total_leases: u64,
@@ -140,6 +143,9 @@ pub struct RuntimeRegistryShardSnapshot {
     pub health: String,
     pub writer_present: bool,
     pub physical_reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
+    pub writer_busy_events: u64,
     pub queued_operations: u32,
     pub queued_bytes: u64,
     pub total_leases: u64,
@@ -303,6 +309,7 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            readers health   {readers_health}\n\
            runtime shards    {runtime_shards} mounted ({runtime_omitted} omitted)\n\
            runtime queue     {runtime_queue}\n\
+           runtime contention {runtime_contention}\n\
            runtime wal       {runtime_wal}\n\
         ",
         ver = snap.tracedecay_version,
@@ -356,6 +363,12 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
             "{} ops / {}",
             d.runtime_registry.aggregate.queued_operations,
             bytes_human(d.runtime_registry.aggregate.queued_bytes)
+        ),
+        runtime_contention = format!(
+            "writer busy {}, readers waiting general {} / health {}",
+            d.runtime_registry.aggregate.writer_busy_events,
+            d.runtime_registry.aggregate.general_reader_waiters,
+            d.runtime_registry.aggregate.health_reader_waiters,
         ),
         runtime_wal = bytes_human(d.runtime_registry.aggregate.wal_bytes),
     )
@@ -531,6 +544,9 @@ impl RuntimeRegistrySnapshot {
                 eviction_eligible: aggregate.eviction_eligible,
                 writer_present: aggregate.writer_present,
                 physical_reader_handles: aggregate.physical_reader_handles,
+                general_reader_waiters: aggregate.general_reader_waiters,
+                health_reader_waiters: aggregate.health_reader_waiters,
+                writer_busy_events: aggregate.writer_busy_events,
                 queued_operations: aggregate.queued_operations,
                 queued_bytes: aggregate.queued_bytes,
                 total_leases: aggregate.total_leases,
@@ -555,6 +571,9 @@ impl RuntimeRegistryShardSnapshot {
             health: runtime_health_label(telemetry.health).to_string(),
             writer_present: telemetry.writer_present,
             physical_reader_handles: telemetry.physical_reader_handles,
+            general_reader_waiters: telemetry.general_reader_waiters,
+            health_reader_waiters: telemetry.health_reader_waiters,
+            writer_busy_events: telemetry.writer_busy_events,
             queued_operations: telemetry.queued_operations,
             queued_bytes: telemetry.queued_bytes,
             total_leases: u64::from(telemetry.leases.general_readers)

@@ -23,7 +23,6 @@ import {
   createClient,
   type OperationRequestOptions,
 } from "../src/client";
-import { SERVER_OPERATIONS } from "../src/server-operations";
 
 type RequestHandler = (
   request: IncomingMessage,
@@ -259,7 +258,7 @@ describe("canonical JSON Schema decoding", () => {
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes typed Work methods and fail-closed base discovery", () => {
+  it("publishes typed Work and Workflow methods from canonical bindings", () => {
     expectTypeOf<
       Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0]
     >().toEqualTypeOf<{ readonly page_size: number }>();
@@ -270,23 +269,11 @@ describe("TraceDecayClient generated operation bindings", () => {
       token: "sdk-secret",
     });
 
-    const callableOperations = new Set<string>(
-      OPERATIONS.map((operation) => operation.operation),
-    );
-    expect(SERVER_OPERATIONS.length).toBeGreaterThan(0);
-    expect(
-      SERVER_OPERATIONS.every(
-        (operation) =>
-          operation.sdkAvailability === "unavailable" &&
-          operation.disposition === "schema_unavailable" &&
-          !callableOperations.has(operation.operation),
-      ),
-    ).toBe(true);
-    expect(SERVER_OPERATIONS.map((operation) => operation.operation)).toContain(
-      "git_status",
+    expect(new Set(OPERATIONS.map((operation) => operation.operation)).size).toBe(
+      OPERATIONS.length,
     );
     expect("health_read" in client.operations).toBe(false);
-    // @ts-expect-error Base routes have no canonical schema bodies yet.
+    // @ts-expect-error Operations without a canonical SDK binding stay absent.
     void client.operations.health_read;
   });
 
@@ -340,7 +327,7 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
-  it("publishes all mounted Work routes as executable operations", () => {
+  it("publishes all mounted Work and Workflow routes as executable operations", () => {
     const available: string[] = OPERATIONS.map((operation) => operation.operation);
     const unavailable = (
       UNAVAILABLE_OPERATIONS as readonly { readonly operation: string }[]
@@ -365,6 +352,11 @@ describe("TraceDecayClient generated operation bindings", () => {
         "work_admit_execution",
         "work_attach_runtime_evidence",
         "work_accept_task",
+        "workflow_register_definition",
+        "workflow_activate_definition",
+        "workflow_execute_fan_out",
+        "workflow_handoff_issue",
+        "workflow_handoff_redeem",
       ]),
     );
     expect(
@@ -379,16 +371,12 @@ describe("TraceDecayClient generated operation bindings", () => {
       "multi_root_scope_set_compare_and_swap",
       "multi_root_execute",
     ];
-    const serverOperations: string[] = SERVER_OPERATIONS.map(
-      (operation) => operation.operation,
-    );
     const clientOperations = createClient({
       baseUrl: "http://127.0.0.1:43123",
       projectId: "project.sdk",
       token: "sdk-secret",
     }).operations;
     for (const operation of quarantined) {
-      expect(serverOperations).not.toContain(operation);
       expect(available).not.toContain(operation);
       expect(unavailable).not.toContain(operation);
       expect(operation in clientOperations).toBe(false);
@@ -410,6 +398,8 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(descriptor?.operationId).toBe("operation.work.attempt_finish");
     expect(descriptor?.route).toBe("/application/work/attempt/finish");
     expect(descriptor?.method).toBe("POST");
+    expect(descriptor?.effect).toBe("administrative");
+    expect(descriptor?.idempotency).toBe("required");
     expect(descriptor?.bindingId).toBe("binding.http.work.attempt_finish");
     expect(descriptor?.requestSchema).toEqual({
       schemaId: "schema.work.attempt_finish.request",

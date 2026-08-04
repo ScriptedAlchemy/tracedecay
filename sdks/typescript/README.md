@@ -3,11 +3,10 @@
 `@tracedecay/sdk` provides generated TypeScript contracts and a strict client
 for TraceDecay's public application API.
 
-The generated callable surface includes every Work operation admitted by the
-canonical executable binding registry plus the cancellation/resumable-stream
-lifecycle. Base application routes without canonical executable schema bodies
-remain in `SERVER_OPERATIONS` for discovery with `schema_unavailable`; they
-are not exposed as partially typed methods.
+The generated callable surface includes every Work and Workflow operation
+admitted by the canonical executable binding registry plus the
+cancellation/resumable-stream lifecycle. Only the canonical executable binding
+registry determines whether an operation is available to the SDK.
 
 ## Requirements
 

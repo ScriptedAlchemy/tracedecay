@@ -97,7 +97,10 @@ pub struct ShardRuntimeTelemetry {
     pub queued_bytes: u64,
     pub writer_present: bool,
     pub physical_reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
     pub leases: ShardRuntimeLeaseCounts,
+    pub writer_busy_events: u64,
     pub wal_bytes: u64,
     pub wal_budget: WalBudgetV1,
     pub memory_estimate_bytes: u64,
@@ -168,6 +171,9 @@ pub struct RuntimeTelemetryAggregate {
     pub eviction_eligible: u32,
     pub writer_present: u32,
     pub physical_reader_handles: u64,
+    pub general_reader_waiters: u64,
+    pub health_reader_waiters: u64,
+    pub writer_busy_events: u64,
     pub queued_operations: u64,
     pub queued_bytes: u64,
     pub general_reader_leases: u64,
@@ -199,6 +205,15 @@ impl RuntimeTelemetryAggregate {
         self.physical_reader_handles = self
             .physical_reader_handles
             .saturating_add(u64::from(entry.physical.reader_handles));
+        self.general_reader_waiters = self
+            .general_reader_waiters
+            .saturating_add(u64::from(entry.physical.general_reader_waiters));
+        self.health_reader_waiters = self
+            .health_reader_waiters
+            .saturating_add(u64::from(entry.physical.health_reader_waiters));
+        self.writer_busy_events = self
+            .writer_busy_events
+            .saturating_add(entry.physical.writer_busy_events);
         self.queued_operations = self
             .queued_operations
             .saturating_add(u64::from(health.queued_operations));
@@ -300,7 +315,10 @@ fn project_shard(
         queued_bytes: health.queued_bytes,
         writer_present: health.writer_present,
         physical_reader_handles: entry.physical.reader_handles,
+        general_reader_waiters: entry.physical.general_reader_waiters,
+        health_reader_waiters: entry.physical.health_reader_waiters,
         leases: ShardRuntimeLeaseCounts::from_health(health),
+        writer_busy_events: entry.physical.writer_busy_events,
         wal_bytes: health.wal_bytes,
         wal_budget: admission.wal.clone(),
         memory_estimate_bytes: health.memory_estimate_bytes,
@@ -453,6 +471,34 @@ mod tests {
             projection.global_queue_budget_bytes,
             inventory.admission.global_queue_max_bytes
         );
+    }
+
+    #[test]
+    fn projection_preserves_passive_writer_and_reader_contention() {
+        let health = fixture_health("project.contention", 1, RuntimeMaintenanceStateV1::Ready);
+        let projection =
+            project_runtime_telemetry(&inventory(vec![RuntimeRegistryInventoryEntry {
+                health,
+                eviction: ShardRuntimeEvictionEligibility {
+                    idle_for: Duration::ZERO,
+                    blockers: vec![],
+                },
+                physical: PhysicalRuntimeSnapshot {
+                    reader_handles: 3,
+                    general_reader_waiters: 5,
+                    health_reader_waiters: 2,
+                    writer_busy_events: 7,
+                    ..PhysicalRuntimeSnapshot::default()
+                },
+            }]));
+
+        let shard = projection.shards.first().unwrap();
+        assert_eq!(shard.general_reader_waiters, 5);
+        assert_eq!(shard.health_reader_waiters, 2);
+        assert_eq!(shard.writer_busy_events, 7);
+        assert_eq!(projection.aggregate.general_reader_waiters, 5);
+        assert_eq!(projection.aggregate.health_reader_waiters, 2);
+        assert_eq!(projection.aggregate.writer_busy_events, 7);
     }
 
     #[test]
