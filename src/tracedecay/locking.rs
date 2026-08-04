@@ -146,7 +146,7 @@ pub(super) struct ActiveSyncLockGuard {
 }
 
 pub(super) struct ActiveSyncLease {
-    _locks: ActiveSyncLockGuard,
+    locks: ActiveSyncLockGuard,
     dirty_markers: Vec<(PathBuf, MarkerIdentity)>,
 }
 
@@ -183,7 +183,7 @@ impl super::TraceDecay {
             })?;
         }
         Ok(ActiveSyncLease {
-            _locks: locks,
+            locks,
             dirty_markers: paths
                 .into_iter()
                 .map(|path| (path, MarkerIdentity::Epoch(epoch.clone())))
@@ -196,6 +196,11 @@ impl ActiveSyncLease {
     /// Marks the operation clean while both active and legacy locks remain
     /// held. Drop without commit intentionally leaves every dirty marker.
     pub(super) fn commit(self) -> Result<()> {
+        drop(self.commit_holding_locks()?);
+        Ok(())
+    }
+
+    pub(super) fn commit_holding_locks(self) -> Result<ActiveSyncLockGuard> {
         // Validate every marker before mutating any of them. A changed epoch
         // fails closed and leaves recovery evidence in place.
         for (path, expected) in &self.dirty_markers {
@@ -216,7 +221,7 @@ impl ActiveSyncLease {
                 message: format!("could not clear dirty marker '{}': {error}", path.display()),
             })?;
         }
-        Ok(())
+        Ok(self.locks)
     }
 }
 
@@ -506,6 +511,28 @@ mod tests {
 
         drop(guard);
         assert!(try_acquire_sync_lock_at(&path).is_ok());
+    }
+
+    #[test]
+    fn committed_lease_can_retain_sync_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join("sync.lock");
+        let dirty_path = dir.path().join("dirty");
+        let epoch = next_epoch();
+        write_dirty_sentinel_for_epoch(&dirty_path, &epoch).unwrap();
+        let lease = ActiveSyncLease {
+            locks: ActiveSyncLockGuard {
+                _active: try_acquire_sync_lock_at(&lock_path).unwrap(),
+                _legacy: None,
+            },
+            dirty_markers: vec![(dirty_path.clone(), MarkerIdentity::Epoch(epoch))],
+        };
+
+        let locks = lease.commit_holding_locks().unwrap();
+        assert!(!dirty_path.exists());
+        assert!(try_acquire_sync_lock_at(&lock_path).is_err());
+        drop(locks);
+        assert!(try_acquire_sync_lock_at(&lock_path).is_ok());
     }
 
     #[test]

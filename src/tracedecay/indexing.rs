@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 
 use crate::config::brand_env;
+use crate::db::migrations::FULL_REINDEX_REQUIRED_KEY;
 use crate::errors::Result;
 use crate::resolution::ReferenceResolver;
 use crate::sync;
@@ -221,17 +222,26 @@ impl TraceDecay {
         self.index_all_with_progress_verbose(on_file, |_| {}).await
     }
 
-    pub(super) async fn index_all_with_progress_holding_lock<F>(
+    pub(super) async fn index_all_for_migration_with_progress<F>(
         &self,
         on_file: F,
-        locks: ActiveSyncLockGuard,
+        locks: Option<ActiveSyncLockGuard>,
     ) -> Result<IndexResult>
     where
         F: Fn(usize, usize, &str),
     {
-        let sync_lease = self.begin_active_sync_with_locks(locks)?;
-        self.index_all_with_progress_verbose_under_lease(on_file, |_| {}, sync_lease)
-            .await
+        let sync_lease = match locks {
+            Some(locks) => self.begin_active_sync_with_locks(locks)?,
+            None => self.begin_active_sync()?,
+        };
+        let (result, sync_lease) = self
+            .index_all_with_progress_verbose_under_lease(on_file, |_| {}, sync_lease)
+            .await?;
+        let locks = sync_lease.commit_holding_locks()?;
+        self.db.set_metadata(FULL_REINDEX_REQUIRED_KEY, "0").await?;
+        self.db.checkpoint().await?;
+        drop(locks);
+        Ok(result)
     }
 
     /// Like `index_all_with_progress()`, but also calls `on_verbose` after
@@ -246,8 +256,11 @@ impl TraceDecay {
         V: Fn(&str),
     {
         let sync_lease = self.begin_active_sync()?;
-        self.index_all_with_progress_verbose_under_lease(on_file, on_verbose, sync_lease)
-            .await
+        let (result, sync_lease) = self
+            .index_all_with_progress_verbose_under_lease(on_file, on_verbose, sync_lease)
+            .await?;
+        sync_lease.commit()?;
+        Ok(result)
     }
 
     async fn index_all_with_progress_verbose_under_lease<F, V>(
@@ -255,7 +268,7 @@ impl TraceDecay {
         on_file: F,
         on_verbose: V,
         sync_lease: ActiveSyncLease,
-    ) -> Result<IndexResult>
+    ) -> Result<(IndexResult, ActiveSyncLease)>
     where
         F: Fn(usize, usize, &str),
         V: Fn(&str),
@@ -405,8 +418,7 @@ impl TraceDecay {
             "non-empty index completed in zero milliseconds"
         );
         self.db.checkpoint().await?;
-        sync_lease.commit()?;
-        Ok(result)
+        Ok((result, sync_lease))
     }
 
     /// Performs an incremental sync: detects changed, new, and removed files

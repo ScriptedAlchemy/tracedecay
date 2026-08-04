@@ -544,14 +544,8 @@ impl TraceDecay {
             let on_file = |current, total, file: &str| {
                 eprintln!("[tracedecay] re-indexing [{current}/{total}] {file}");
             };
-            match recovery_lock.take() {
-                Some(lock) => {
-                    ts.index_all_with_progress_holding_lock(on_file, lock)
-                        .await?
-                }
-                None => ts.index_all_with_progress(on_file).await?,
-            };
-            ts.db.set_metadata(FULL_REINDEX_REQUIRED_KEY, "0").await?;
+            ts.index_all_for_migration_with_progress(on_file, recovery_lock.take())
+                .await?;
             eprintln!("[tracedecay] re-index complete.");
         }
         drop(recovery_lock);
