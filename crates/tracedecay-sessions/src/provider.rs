@@ -13,16 +13,20 @@ pub enum SessionProvider {
     RooCode,
     Kilo,
     Kiro,
+    Kimi,
+    OpenCode,
     Hermes,
 }
 
 impl SessionProvider {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 11] = [
         Self::Claude,
         Self::Codex,
         Self::Cursor,
         Self::Hermes,
         Self::Kiro,
+        Self::Kimi,
+        Self::OpenCode,
         Self::Cline,
         Self::RooCode,
         Self::Kilo,
@@ -39,6 +43,8 @@ impl SessionProvider {
             Self::RooCode => "roo-code",
             Self::Kilo => "kilo",
             Self::Kiro => "kiro",
+            Self::Kimi => "kimi",
+            Self::OpenCode => "opencode",
             Self::Hermes => "hermes",
         }
     }
@@ -53,6 +59,8 @@ impl SessionProvider {
             "roo-code" => Some(Self::RooCode),
             "kilo" => Some(Self::Kilo),
             "kiro" => Some(Self::Kiro),
+            "kimi" => Some(Self::Kimi),
+            "opencode" => Some(Self::OpenCode),
             "hermes" => Some(Self::Hermes),
             _ => None,
         }
@@ -74,11 +82,12 @@ impl SessionProvider {
 }
 
 pub const MESSAGE_SEARCH_PROVIDER_IDS: &[&str] = &[
-    "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "hermes",
+    "all", "cursor", "claude", "codex", "vibe", "cline", "roo-code", "kilo", "kiro", "kimi",
+    "opencode", "hermes",
 ];
 
 pub const EXPECTED_MESSAGE_SEARCH_PROVIDER: &str =
-    "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, or hermes";
+    "all, cursor, claude, codex, vibe, cline, roo-code, kilo, kiro, kimi, opencode, or hermes";
 
 /// Decodes the workspace path used by Kiro's `workspace-sessions` directory.
 ///
@@ -149,13 +158,25 @@ impl ProviderScope {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{ProviderScope, SessionProvider, decode_kiro_workspace_path};
+    use super::{
+        MESSAGE_SEARCH_PROVIDER_IDS, ProviderScope, SessionProvider, decode_kiro_workspace_path,
+    };
 
     #[test]
     fn provider_ids_round_trip() {
         for provider in SessionProvider::ALL {
             assert_eq!(SessionProvider::parse(provider.id()), Some(provider));
         }
+    }
+
+    #[test]
+    fn final_host_set_includes_kimi_and_opencode() {
+        let provider_ids = SessionProvider::ALL.map(SessionProvider::id);
+
+        assert!(provider_ids.contains(&"kimi"));
+        assert!(provider_ids.contains(&"opencode"));
+        assert!(MESSAGE_SEARCH_PROVIDER_IDS.contains(&"kimi"));
+        assert!(MESSAGE_SEARCH_PROVIDER_IDS.contains(&"opencode"));
     }
 
     #[test]
