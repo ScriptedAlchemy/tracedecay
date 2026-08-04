@@ -117,7 +117,7 @@ pub(crate) struct NativeIndexLock {
 
 pub(crate) struct PreparedIndexMutation {
     base_index_checksum: ManifestDigest,
-    candidate_index: Vec<u8>,
+    candidate_index: tempfile::TempPath,
 }
 
 pub(crate) struct PreparedIndexCommit {
@@ -767,11 +767,21 @@ impl FixedGitIndexRunner {
         if preview.candidate_index_tree.as_ref() != Some(&candidate_tree) {
             return Err(NativeGitIndexError::CandidateTreeMismatch);
         }
-        let candidate_index = std::fs::read(&candidate_index)
+        let candidate_bytes = std::fs::read(&candidate_index)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        let index_parent = self
+            .index_path
+            .parent()
+            .ok_or_else(|| NativeGitIndexError::Io("index path has no parent".to_owned()))?;
+        let mut durable_candidate = tempfile::NamedTempFile::new_in(index_parent)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        durable_candidate
+            .write_all(&candidate_bytes)
+            .and_then(|()| durable_candidate.as_file().sync_all())
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
         Ok(PreparedIndexMutation {
             base_index_checksum,
-            candidate_index,
+            candidate_index: durable_candidate.into_temp_path(),
         })
     }
 
@@ -789,12 +799,20 @@ impl FixedGitIndexRunner {
         {
             return Err(NativeGitIndexError::StaleRepositoryState);
         }
-        lock.file
-            .rewind()
-            .and_then(|()| lock.file.set_len(0))
-            .and_then(|()| lock.file.write_all(&prepared.candidate_index))
-            .and_then(|()| lock.file.sync_all())
+        #[cfg(unix)]
+        std::fs::rename(&prepared.candidate_index, &lock.path)
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        #[cfg(not(unix))]
+        {
+            let candidate_index = std::fs::read(&prepared.candidate_index)
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+            lock.file
+                .rewind()
+                .and_then(|()| lock.file.set_len(0))
+                .and_then(|()| lock.file.write_all(&candidate_index))
+                .and_then(|()| lock.file.sync_all())
+                .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        }
         // rename either publishes atomically or reports failure without
         // changing the destination. Durability becomes ambiguous only after a
         // successful rename when syncing the parent directory fails.
