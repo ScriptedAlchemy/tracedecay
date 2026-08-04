@@ -412,14 +412,6 @@ provider execution authority and never weakens Plan 36's prohibition on
 automatic rebase or force-push.
 Standard Git and other forges remain supported when the preview is absent.
 
-### PR16: remote authority
-
-Unsaved overlays and proximity computation remain on the node that owns the
-live workspace. Durable feedback, GitHub, CI, stack, and delivery state passes
-through Plan 28's fenced shard authority. Authority loss returns
-partial/unavailable and cannot create a local writer, replicate overlay
-content, or present stale cache as current.
-
 ### PR17: task evidence and workflow composition
 
 Plan 24 may call one feedback-cycle evidence retriever rooted at exact

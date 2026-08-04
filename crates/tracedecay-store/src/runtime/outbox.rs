@@ -119,7 +119,6 @@ pub enum RepositoryEffectV1 {
     RegisterProject,
     PublishObservation,
     PublishWorkflowTask,
-    PublishRemoteCommand,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

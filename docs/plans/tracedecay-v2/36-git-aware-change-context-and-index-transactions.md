@@ -351,5 +351,3 @@ acceptance gate.
   PR11 operations and exact `apply_native_integration`.
 - Automated semantic conflict resolution, autonomous integration loops,
   provider/GitHub writes, remote publication, or history rewriting.
-- Remote multi-machine authority and failover, owned by
-  [Plan 28](28-remote-multi-machine-shared-brain.md) in PR16.

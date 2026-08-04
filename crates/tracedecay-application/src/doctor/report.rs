@@ -299,7 +299,7 @@ impl<'a> DoctorReportComposerV1<'a> {
         self
     }
 
-    /// Wire Remote HTTPS and exact registered-profile operational authority.
+    /// Wire exact registered-profile operational authority.
     #[must_use]
     pub fn with_operational_audit(mut self, port: &'a dyn OperationalAuditDoctorPort) -> Self {
         self.operational_audit = Some(port);
@@ -430,23 +430,11 @@ impl<'a> DoctorReportComposerV1<'a> {
         }
         if let Some(port) = self.operational_audit {
             let read = port.operational_audit(context).await;
-            use super::sources::{
-                ProfileAuthorityReadV1 as Profile, RemoteOperationalReadV1 as Remote,
-            };
-            consultations.push(match (&read.remote, &read.profile_authority) {
-                (Remote::Observed { .. }, _) | (_, Profile::Observed { .. }) => {
-                    DoctorFamilyConsultationV1::Consulted
-                }
-                (Remote::Denied, _) | (_, Profile::Denied) => {
-                    unavailable(DoctorFamilyUnavailableReasonV1::Denied)
-                }
-                (Remote::Unsupported, _) => {
-                    unavailable(DoctorFamilyUnavailableReasonV1::Unsupported)
-                }
-                (Remote::Unconfigured, _) => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
-                (Remote::Unavailable, Profile::Unavailable) => {
-                    unavailable(DoctorFamilyUnavailableReasonV1::Unknown)
-                }
+            use super::sources::ProfileAuthorityReadV1 as Profile;
+            consultations.push(match &read.profile_authority {
+                Profile::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+                Profile::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+                Profile::Unavailable => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
             });
             for finding in operational_audit_findings(&read)? {
                 entries.push(DoctorReportEntryV1::new(finding, None)?);
