@@ -36,31 +36,35 @@ pub fn normalize_observation(
         CanonicalObservationRelationsV1::new(SessionId::new(session_id).map_err(|_| invalid())?);
 
     match role {
-        "user" | "assistant" | "tool" | "_system_prompt" => {
+        "user" | "assistant" | "system" | "tool" | "_system_prompt" => {
             let content = native
                 .get("content")
                 .filter(|value| !content_is_empty(value))
                 .cloned();
             if let Some(content) = &content {
-                facts.push(CanonicalObservationFactV1::Message {
-                    role: canonical_role(role)?,
-                    content: content.clone(),
-                    model: native
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    timestamp: timestamp_secs(native.get("timestamp")),
-                });
                 append_reasoning(&mut facts, content);
-                if content_text(content).is_some_and(|text| text.starts_with(COMPACTION_PREFIX)) {
-                    facts.push(CanonicalObservationFactV1::Compaction {
-                        summary: Some(content.clone()),
-                        input_tokens: None,
-                        output_tokens: None,
+                if let Some(message_content) = message_content(content) {
+                    facts.push(CanonicalObservationFactV1::Message {
+                        role: canonical_role(role)?,
+                        content: message_content.clone(),
+                        model: native
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        timestamp: timestamp_secs(native.get("timestamp")),
                     });
-                    facts.push(CanonicalObservationFactV1::Boundary {
-                        boundary_kind: CanonicalBoundaryKindV1::CompactionBoundary,
-                    });
+                    if content_text(&message_content)
+                        .is_some_and(|text| text.starts_with(COMPACTION_PREFIX))
+                    {
+                        facts.push(CanonicalObservationFactV1::Compaction {
+                            summary: Some(message_content),
+                            input_tokens: None,
+                            output_tokens: None,
+                        });
+                        facts.push(CanonicalObservationFactV1::Boundary {
+                            boundary_kind: CanonicalBoundaryKindV1::CompactionBoundary,
+                        });
+                    }
                 }
             }
             append_tool_calls(&mut facts, native, &stable_record_id)?;
@@ -70,7 +74,8 @@ pub fn normalize_observation(
             }
             relations = relations.with_message_id(stable_record_id.clone());
         }
-        "_usage" | "_checkpoint" => facts.push(CanonicalObservationFactV1::Unknown {
+        "_usage" => append_usage(&mut facts, native),
+        "_checkpoint" => facts.push(CanonicalObservationFactV1::Unknown {
             native_kind: role.to_owned(),
             state: CanonicalUnknownStateV1::Unsupported,
         }),
@@ -114,6 +119,84 @@ fn append_reasoning(facts: &mut Vec<CanonicalObservationFactV1>, content: &Value
                 .cloned(),
         });
     }
+}
+
+fn message_content(content: &Value) -> Option<Value> {
+    let Value::Array(items) = content else {
+        return (!content_is_empty(content)).then(|| content.clone());
+    };
+    let visible = items
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) != Some("think"))
+        .cloned()
+        .collect::<Vec<_>>();
+    (!visible.is_empty()).then(|| Value::Array(visible))
+}
+
+fn append_usage(facts: &mut Vec<CanonicalObservationFactV1>, native: &Value) {
+    let usage = native
+        .get("usage")
+        .or_else(|| native.get("content"))
+        .filter(|value| value.is_object())
+        .unwrap_or(native);
+    let input_tokens = canonical_u64(
+        usage
+            .get("input_tokens")
+            .or_else(|| usage.get("prompt_tokens")),
+    );
+    let output_tokens = canonical_u64(
+        usage
+            .get("output_tokens")
+            .or_else(|| usage.get("completion_tokens")),
+    );
+    let cache_read_tokens = canonical_u64(
+        usage
+            .get("cache_read_input_tokens")
+            .or_else(|| usage.get("cached_input_tokens"))
+            .or_else(|| usage.get("cache_read_tokens")),
+    );
+    let cache_write_tokens = canonical_u64(
+        usage
+            .get("cache_creation_input_tokens")
+            .or_else(|| usage.get("cache_write_input_tokens"))
+            .or_else(|| usage.get("cache_write_tokens")),
+    );
+    let reasoning_tokens = canonical_u64(
+        usage
+            .get("reasoning_tokens")
+            .or_else(|| usage.get("reasoning_output_tokens")),
+    );
+    if [
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+    ]
+    .iter()
+    .all(Option::is_none)
+    {
+        facts.push(CanonicalObservationFactV1::Unknown {
+            native_kind: "_usage".to_owned(),
+            state: CanonicalUnknownStateV1::Malformed,
+        });
+        return;
+    }
+    facts.push(CanonicalObservationFactV1::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+    });
+}
+
+fn canonical_u64(value: Option<&Value>) -> Option<u64> {
+    value.and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+    })
 }
 
 fn append_tool_calls(
@@ -197,8 +280,8 @@ fn canonical_role(role: &str) -> Result<CanonicalMessageRoleV1, ObservationRecor
     match role {
         "user" => Ok(CanonicalMessageRoleV1::User),
         "assistant" => Ok(CanonicalMessageRoleV1::Assistant),
+        "system" | "_system_prompt" => Ok(CanonicalMessageRoleV1::System),
         "tool" => Ok(CanonicalMessageRoleV1::Tool),
-        "_system_prompt" => Ok(CanonicalMessageRoleV1::System),
         _ => Err(invalid()),
     }
 }
@@ -313,5 +396,86 @@ mod tests {
                 .iter()
                 .any(|fact| matches!(fact, CanonicalObservationFactV1::ToolInvocation { .. }))
         );
+    }
+
+    #[test]
+    fn reasoning_is_not_duplicated_into_message_content() {
+        let range = ObservationSourceRangeV1::new(30, 40).unwrap();
+        let envelope = normalize_observation(
+            &json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "think", "think": "private chain"},
+                    {"type": "text", "text": "public answer"}
+                ]
+            }),
+            "session",
+            native_record_id("session", range).unwrap(),
+            range,
+        )
+        .unwrap();
+
+        let message = envelope.facts().iter().find_map(|fact| match fact {
+            CanonicalObservationFactV1::Message { content, .. } => Some(content),
+            _ => None,
+        });
+        assert_eq!(
+            message,
+            Some(&json!([{"type": "text", "text": "public answer"}]))
+        );
+        assert!(envelope.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Reasoning {
+                content: Some(content),
+                ..
+            } if content == "private chain"
+        )));
+    }
+
+    #[test]
+    fn native_system_and_usage_records_keep_supported_semantics() {
+        let system_range = ObservationSourceRangeV1::new(40, 50).unwrap();
+        let system = normalize_observation(
+            &json!({"role": "system", "content": "instructions"}),
+            "session",
+            native_record_id("session", system_range).unwrap(),
+            system_range,
+        )
+        .unwrap();
+        assert!(system.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Message {
+                role: tracedecay_domain::CanonicalMessageRoleV1::System,
+                ..
+            }
+        )));
+
+        let usage_range = ObservationSourceRangeV1::new(50, 60).unwrap();
+        let usage = normalize_observation(
+            &json!({
+                "role": "_usage",
+                "usage": {
+                    "input_tokens": 11,
+                    "output_tokens": 7,
+                    "cache_read_input_tokens": 3,
+                    "cache_creation_input_tokens": 2,
+                    "reasoning_tokens": 5
+                }
+            }),
+            "session",
+            native_record_id("session", usage_range).unwrap(),
+            usage_range,
+        )
+        .unwrap();
+        assert!(usage.facts().iter().any(|fact| matches!(
+            fact,
+            CanonicalObservationFactV1::Usage {
+                input_tokens: Some(11),
+                output_tokens: Some(7),
+                cache_read_tokens: Some(3),
+                cache_write_tokens: Some(2),
+                reasoning_tokens: Some(5)
+            }
+        )));
     }
 }

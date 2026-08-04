@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use md5::{Digest, Md5};
 use serde::Deserialize;
@@ -11,10 +12,11 @@ use tracedecay_domain::{
 use tracedecay_runtime_core::privacy::{
     ObservationRecordParseErrorV1, parse_normalized_observation_record_v1,
 };
-use tracedecay_store::observation::ObservationCoverageReason;
+use tracedecay_store::{ParseOffset, observation::ObservationCoverageReason};
 
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
+use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
 use crate::runtime::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, admit_jsonl_observations,
 };
@@ -24,13 +26,19 @@ use crate::runtime::snapshot_observation::{
 };
 use crate::runtime::source::{
     FileDiscoveryReport, TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult,
-    bound_path_list,
+    bound_path_list, canonical_framed_sha256,
 };
 
 const PROVIDER: &str = "kimi";
 const MAX_SESSION_FILES: usize = 512;
+const MAX_DISCOVERY_CANDIDATES: usize = 4_096;
 const MAX_DISCOVERY_FAILURE_EVIDENCE: usize = 16;
+const MAX_DISCOVERY_INPUT_BYTES: u64 =
+    MAX_SNAPSHOT_METADATA_BYTES + ((MAX_DISCOVERY_CANDIDATES as u64 + 1) * 4 * 1024);
+const MAX_DISCOVERY_UNITS: usize = MAX_DISCOVERY_CANDIDATES * 2;
+const KIMI_DISCOVERY_FRONTIER_KEY: &str = "host-frontier://kimi/discovery/v1";
 
+#[derive(Clone)]
 pub struct KimiSource {
     share_dir: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
@@ -54,7 +62,7 @@ enum KimiDiscoveryFailureKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KimiDiscoveryFailure {
     kind: KimiDiscoveryFailureKind,
-    path: PathBuf,
+    source_digest: String,
     error_kind: io::ErrorKind,
 }
 
@@ -65,12 +73,22 @@ struct KimiDiscoveryReport {
 }
 
 impl KimiDiscoveryReport {
-    fn record_failure(&mut self, kind: KimiDiscoveryFailureKind, path: PathBuf, error: &io::Error) {
+    fn record_failure(
+        &mut self,
+        kind: KimiDiscoveryFailureKind,
+        path: &Path,
+        error: &io::Error,
+        budget: &mut HostScanBudget,
+    ) {
         self.failure_count = self.failure_count.saturating_add(1);
+        budget.mark_unavailable();
         if self.failures.len() < MAX_DISCOVERY_FAILURE_EVIDENCE {
             self.failures.push(KimiDiscoveryFailure {
                 kind,
-                path,
+                source_digest: canonical_framed_sha256(
+                    b"tracedecay.kimi.discovery-source.v1",
+                    &[path.as_os_str().as_encoded_bytes()],
+                ),
                 error_kind: error.kind(),
             });
         }
@@ -92,6 +110,13 @@ struct KimiWorkDir {
 
 fn local_kaos() -> String {
     "local".to_owned()
+}
+
+fn charge_discovered_path(budget: &mut HostScanBudget, path: &Path) -> bool {
+    let bytes = u64::try_from(path.as_os_str().as_encoded_bytes().len())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    budget.try_charge_input(bytes)
 }
 
 impl KimiSource {
@@ -117,24 +142,24 @@ impl KimiSource {
         &self,
         project_root: &Path,
         bounds: TranscriptDiscoveryBounds,
-    ) -> TranscriptIngestResult<KimiDiscoveryReport> {
-        let Some(metadata) = self.metadata()? else {
-            return Ok(KimiDiscoveryReport {
-                files: bound_path_list(Vec::new(), bounds),
-                failures: Vec::new(),
-                failure_count: 0,
-            });
-        };
-        let matcher =
-            TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref());
-        let limit = bounds.max_files.min(MAX_SESSION_FILES);
-        let mut paths = Vec::with_capacity(limit.saturating_add(1));
+        mut budget: HostScanBudget,
+    ) -> TranscriptIngestResult<(KimiDiscoveryReport, HostScanBudget)> {
         let mut discovery = KimiDiscoveryReport {
             files: bound_path_list(Vec::new(), bounds),
             failures: Vec::new(),
             failure_count: 0,
         };
+        let Some(metadata) = self.metadata(&mut budget)? else {
+            return Ok((discovery, budget));
+        };
+        let matcher =
+            TranscriptScopeMatcher::for_scope(project_root, self.user_registered_roots.as_deref());
+        let limit = bounds.max_files.min(MAX_DISCOVERY_CANDIDATES);
+        let mut paths = Vec::with_capacity(limit.saturating_add(1));
         'work_dirs: for work_dir in metadata.work_dirs {
+            if !budget.try_charge_unit() {
+                break;
+            }
             if !matcher.accepts(Some(&work_dir.path)) {
                 continue;
             }
@@ -144,14 +169,15 @@ impl KimiSource {
                 Err(error) => {
                     discovery.record_failure(
                         KimiDiscoveryFailureKind::DirectoryUnavailable,
-                        sessions_dir,
+                        &sessions_dir,
                         &error,
+                        &mut budget,
                     );
                     continue;
                 }
             };
             for entry in entries {
-                if paths.len() > limit {
+                if paths.len() > limit || !budget.try_charge_unit() {
                     break 'work_dirs;
                 }
                 let entry = match entry {
@@ -159,8 +185,9 @@ impl KimiSource {
                     Err(error) => {
                         discovery.record_failure(
                             KimiDiscoveryFailureKind::DirectoryEntryUnavailable,
-                            sessions_dir.clone(),
+                            &sessions_dir,
                             &error,
+                            &mut budget,
                         );
                         continue;
                     }
@@ -171,8 +198,9 @@ impl KimiSource {
                     Err(error) => {
                         discovery.record_failure(
                             KimiDiscoveryFailureKind::EntryTypeUnavailable,
-                            path,
+                            &path,
                             &error,
+                            &mut budget,
                         );
                         continue;
                     }
@@ -183,18 +211,29 @@ impl KimiSource {
                 if file_type.is_file()
                     && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
                 {
+                    if !charge_discovered_path(&mut budget, &path) {
+                        break 'work_dirs;
+                    }
                     paths.push(path);
                 } else if file_type.is_dir() {
                     let context = path.join("context.jsonl");
                     match std::fs::symlink_metadata(&context) {
-                        Ok(metadata) if metadata.is_file() => paths.push(context),
+                        Ok(metadata) if metadata.is_file() => {
+                            if !charge_discovered_path(&mut budget, &context) {
+                                break 'work_dirs;
+                            }
+                            paths.push(context);
+                        }
                         Ok(_) => {}
                         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => discovery.record_failure(
-                            KimiDiscoveryFailureKind::ContextMetadataUnavailable,
-                            context,
-                            &error,
-                        ),
+                        Err(error) => {
+                            discovery.record_failure(
+                                KimiDiscoveryFailureKind::ContextMetadataUnavailable,
+                                &context,
+                                &error,
+                                &mut budget,
+                            );
+                        }
                     }
                 }
             }
@@ -207,15 +246,37 @@ impl KimiSource {
                 ..bounds
             },
         );
-        Ok(discovery)
+        Ok((discovery, budget))
     }
 
-    fn metadata(&self) -> TranscriptIngestResult<Option<KimiMetadata>> {
-        let Some(text) = read_snapshot_text_bounded(
-            PROVIDER,
-            &self.share_dir.join("kimi.json"),
-            MAX_SNAPSHOT_METADATA_BYTES,
-        )?
+    fn metadata(
+        &self,
+        budget: &mut HostScanBudget,
+    ) -> TranscriptIngestResult<Option<KimiMetadata>> {
+        let path = self.share_dir.join("kimi.json");
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(TranscriptIngestError::ScanIo {
+                    operation: "stat Kimi metadata",
+                    path,
+                    source,
+                });
+            }
+        };
+        if metadata.len() > MAX_SNAPSHOT_METADATA_BYTES {
+            return Err(TranscriptIngestError::NonDurableRecord {
+                provider: PROVIDER,
+                offset: 0,
+                end_offset: metadata.len(),
+                reason: "Kimi metadata exceeds provider byte bound",
+            });
+        }
+        if !budget.try_charge_input(metadata.len()) {
+            return Ok(None);
+        }
+        let Some(text) = read_snapshot_text_bounded(PROVIDER, &path, MAX_SNAPSHOT_METADATA_BYTES)?
         else {
             return Ok(None);
         };
@@ -249,16 +310,30 @@ pub async fn capture_kimi_observations(
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<KimiCaptureOutcome> {
-    let discovery = source.discover(
-        project_root,
-        TranscriptDiscoveryBounds::from_discovered_units(MAX_SESSION_FILES),
-    )?;
+    let scan_budget = HostScanBudget::new(
+        MAX_DISCOVERY_INPUT_BYTES,
+        MAX_DISCOVERY_UNITS,
+        Instant::now() + HOST_SCAN_WINDOW,
+        cancellation.clone(),
+    );
+    let owned_source = source.clone();
+    let owned_project_root = project_root.to_path_buf();
+    let discovered = tokio::task::spawn_blocking(move || {
+        owned_source.discover(
+            &owned_project_root,
+            TranscriptDiscoveryBounds::from_discovered_units(MAX_DISCOVERY_CANDIDATES),
+            scan_budget,
+        )
+    })
+    .await
+    .map_err(|_| TranscriptIngestError::BlockingScanTaskFailed { provider: PROVIDER })??;
+    let (discovery, scan_budget) = discovered;
     for failure in &discovery.failures {
         tracing::warn!(
             provider = PROVIDER,
             failure_kind = ?failure.kind,
             error_kind = ?failure.error_kind,
-            path = %failure.path.display(),
+            source_digest = failure.source_digest,
             "Kimi session discovery is incomplete"
         );
     }
@@ -270,18 +345,49 @@ pub async fn capture_kimi_observations(
             "additional Kimi discovery failures were bounded"
         );
     }
+    let discovery_truncated = discovery.files.is_truncated();
+    let frontier = facade
+        .get_parse_offset(&scope, KIMI_DISCOVERY_FRONTIER_KEY)
+        .await
+        .map_err(|outcome| {
+            crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
+        })?
+        .unwrap_or_default();
+    let mut scheduled_paths = discovery.files.paths;
+    scheduled_paths.sort();
+    scheduled_paths.dedup();
+    if !scheduled_paths.is_empty() {
+        let start =
+            usize::try_from(frontier.byte_offset).unwrap_or(usize::MAX) % scheduled_paths.len();
+        scheduled_paths.rotate_left(start);
+    }
+    let unscheduled_files = scheduled_paths.len().saturating_sub(MAX_SESSION_FILES);
+    scheduled_paths.truncate(MAX_SESSION_FILES);
     let mut outcome = KimiCaptureOutcome {
-        deferred: discovery.files.is_truncated() || discovery.failure_count > 0,
+        deferred: discovery_truncated
+            || unscheduled_files > 0
+            || discovery.failure_count > 0
+            || scan_budget.evidence().is_deferred(),
         discovery_failures: discovery.failure_count,
         ..KimiCaptureOutcome::default()
     };
     let mut remaining = max_new_bytes.unwrap_or(u64::MAX);
-    for path in discovery.files.paths {
+    let mut processed = 0_usize;
+    for path in scheduled_paths {
         if cancellation.is_cancelled() || remaining == 0 {
             outcome.deferred = true;
             break;
         }
-        let session_id = kimi_session_id(&path)?;
+        let session_id = match kimi_session_id(&path) {
+            Ok(session_id) => session_id,
+            Err(_) => {
+                warn_isolated_source(&path, "invalid_source_identity");
+                outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
+                outcome.deferred = true;
+                processed = processed.saturating_add(1);
+                continue;
+            }
+        };
         let provider = ProviderId::new(PROVIDER).map_err(|_| invalid_frame())?;
         let session = SessionId::new(&session_id).map_err(|_| invalid_frame())?;
         let source_identity = ObservationSourceIdentityV1::for_provider(provider, session)
@@ -332,14 +438,66 @@ pub async fn capture_kimi_observations(
                 }
             },
         )
-        .await?;
+        .await;
+        let progress = match progress {
+            Ok(progress) => progress,
+            Err(error) if isolatable_source_error(&error) => {
+                warn_isolated_source(&path, "source_unavailable");
+                outcome.discovery_failures = outcome.discovery_failures.saturating_add(1);
+                outcome.deferred = true;
+                processed = processed.saturating_add(1);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         outcome.bytes_consumed = outcome
             .bytes_consumed
             .saturating_add(progress.bytes_consumed);
         outcome.deferred |= progress.source_deferred;
         remaining = remaining.saturating_sub(progress.bytes_consumed);
+        processed = processed.saturating_add(1);
+    }
+    if processed > 0 {
+        facade
+            .advance_parse_offset(
+                &scope,
+                KIMI_DISCOVERY_FRONTIER_KEY,
+                ParseOffset {
+                    byte_offset: frontier
+                        .byte_offset
+                        .saturating_add(u64::try_from(processed).unwrap_or(u64::MAX)),
+                    mtime: 0,
+                    file_id: 1,
+                },
+            )
+            .await
+            .map_err(|outcome| {
+                crate::runtime::snapshot_observation::host_admission_error(PROVIDER, outcome)
+            })?;
     }
     Ok(outcome)
+}
+
+fn isolatable_source_error(error: &TranscriptIngestError) -> bool {
+    matches!(
+        error,
+        TranscriptIngestError::ScanIo { .. }
+            | TranscriptIngestError::ScanGenerationChanged { .. }
+            | TranscriptIngestError::NonDurableRecord { .. }
+            | TranscriptIngestError::InvalidSourceIdentity { .. }
+    )
+}
+
+fn warn_isolated_source(path: &Path, failure_kind: &'static str) {
+    tracing::warn!(
+        provider = PROVIDER,
+        failure_kind,
+        source_digest = canonical_framed_sha256(
+            b"tracedecay.kimi.session-source.v1",
+            &[path.as_os_str().as_encoded_bytes()],
+        ),
+        "Kimi session source was isolated"
+    );
 }
 
 fn kimi_session_id(path: &Path) -> TranscriptIngestResult<String> {
@@ -367,13 +525,24 @@ const fn invalid_frame() -> TranscriptIngestError {
 mod tests {
     use md5::{Digest, Md5};
     use serde_json::json;
+    use std::time::Instant;
     use tracedecay_domain::ObservationScopeV1;
 
     use crate::admission::test_support::MemoryHostAdmission;
     use crate::observation::ObservationCancellation;
+    use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
     use crate::runtime::source::TranscriptDiscoveryBounds;
 
     use super::{KimiSource, capture_kimi_observations};
+
+    fn discovery_budget() -> HostScanBudget {
+        HostScanBudget::new(
+            super::MAX_DISCOVERY_INPUT_BYTES,
+            super::MAX_DISCOVERY_UNITS,
+            Instant::now() + HOST_SCAN_WINDOW,
+            ObservationCancellation::default(),
+        )
+    }
 
     fn fixture() -> (
         tempfile::TempDir,
@@ -551,20 +720,81 @@ mod tests {
                     max_files: 1,
                     ..TranscriptDiscoveryBounds::default_walk()
                 },
+                discovery_budget(),
             )
-            .unwrap();
+            .unwrap()
+            .0;
         assert_eq!(report.files.paths.len(), 1);
         assert!(report.files.is_truncated());
         assert!(
             source
                 .discover(
                     &project.join("unregistered"),
-                    TranscriptDiscoveryBounds::default_walk()
+                    TranscriptDiscoveryBounds::default_walk(),
+                    discovery_budget(),
                 )
                 .unwrap()
+                .0
                 .files
                 .paths
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn durable_discovery_frontier_reaches_files_beyond_first_window() {
+        let (_temp, project, first, source) = fixture();
+        if first.exists() {
+            std::fs::remove_file(first).unwrap();
+        }
+        let sessions = source.share_dir.join("sessions").join(format!(
+            "{:x}",
+            Md5::digest(project.to_string_lossy().as_bytes())
+        ));
+        for ordinal in 0..=super::MAX_SESSION_FILES {
+            let transcript = sessions
+                .join(format!("session-{ordinal:04}"))
+                .join("context.jsonl");
+            std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+            std::fs::write(
+                transcript,
+                json!({"role": "user", "content": format!("message-{ordinal:04}")}).to_string()
+                    + "\n",
+            )
+            .unwrap();
+        }
+        let admission = MemoryHostAdmission::default();
+
+        let first = capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert!(first.deferred);
+        assert_eq!(admission.observations().len(), super::MAX_SESSION_FILES);
+
+        capture_kimi_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(admission.observations().len(), super::MAX_SESSION_FILES + 1);
+        assert!(admission.observations().iter().any(|stored| {
+            stored
+                .observation()
+                .payload()
+                .to_string()
+                .contains("message-0512")
+        }));
     }
 }

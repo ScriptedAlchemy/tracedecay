@@ -66,6 +66,10 @@ impl TranscriptCatchUpFailure {
         Self::new(provider, "discovery", "source_discovery_partial", true)
     }
 
+    pub(super) const fn source_scan_partial(provider: &'static str, retryable: bool) -> Self {
+        Self::new(provider, "scan", "source_scan_partial", retryable)
+    }
+
     /// Mutable session ingestion requires a retained daemon registry mount.
     /// Compatibility callers without that mount must fail before touching the
     /// legacy database or any provider source.
@@ -289,6 +293,9 @@ pub fn classify_transcript_ingest_failure(
         source::TranscriptIngestError::ScanIo { .. } => ("transcript_source_io_failed", true),
         source::TranscriptIngestError::ScanGenerationChanged { .. } => {
             ("transcript_source_generation_changed", true)
+        }
+        source::TranscriptIngestError::BlockingScanTaskFailed { .. } => {
+            ("transcript_blocking_scan_failed", true)
         }
         source::TranscriptIngestError::Privacy(_) => ("transcript_privacy_rejected", false),
         source::TranscriptIngestError::NonDurableRecord { .. } => unreachable!(),
