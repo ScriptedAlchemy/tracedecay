@@ -35,7 +35,7 @@ tracked_ignored=$(git ls-files --cached --ignored --exclude-standard)
 if [[ -n $tracked_ignored ]]; then
   echo "release PR integrity: tracked files must not also be ignored:" >&2
   printf '%s\n' "$tracked_ignored" >&2
-  echo "Remove the matching ignore rule before release-plz copies the repository." >&2
+  echo "Remove the matching ignore rule before release automation copies the repository." >&2
   exit 1
 fi
 
@@ -44,7 +44,7 @@ destructive_metadata=()
 while IFS=$'\t' read -r status path _; do
   [[ -n ${status:-} ]] || continue
   case "$path" in
-    CHANGELOG.md | Cargo.lock | Cargo.toml)
+    .release-please-manifest.json | CHANGELOG.md | Cargo.lock | Cargo.toml | version.txt)
       if [[ $status != M ]]; then
         destructive_metadata+=("$status $path")
       fi
@@ -60,7 +60,7 @@ if ((${#destructive_metadata[@]})); then
 fi
 
 if ((${#unexpected[@]})) && [[ $allow_extra_files != true ]]; then
-  echo "release PR integrity: release PR contains changes outside CHANGELOG.md, Cargo.lock, and Cargo.toml:" >&2
+  echo "release PR integrity: release PR contains changes outside release metadata files:" >&2
   printf '  %s\n' "${unexpected[@]}" >&2
   echo "Apply the release-extra-files-approved label only after reviewing every listed path." >&2
   exit 1

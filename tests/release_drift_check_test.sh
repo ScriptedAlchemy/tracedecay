@@ -49,4 +49,4 @@ set -e
 
 [[ "$ahead_status" -eq 1 ]]
 [[ "$ahead_output" == *"release drift detected: local Cargo.toml version 0.0.34 is ahead of GitHub release v0.0.33"* ]]
-[[ "$ahead_output" == *"Reset the unpublished release bump so release-plz can recreate it, or create GitHub release v0.0.34 manually before merging more release changes."* ]]
+[[ "$ahead_output" == *"Reset the unpublished release bump so release automation can recreate it, or create GitHub release v0.0.34 manually before merging more release changes."* ]]

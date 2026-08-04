@@ -66,7 +66,7 @@ jobs:
 
   release-version-drift:
     name: Release Version Drift
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')
+    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-please--')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -80,6 +80,9 @@ jobs:
 
       - name: Test release workflow contract
         run: bash tests/release_workflow_contract_test.sh
+
+      - name: Test GitHub release installer
+        run: bash tests/install_script_test.sh
 
       - name: Test local dogfood command contract
         run: bash tests/dogfood_command_test.sh
