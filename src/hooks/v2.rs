@@ -152,6 +152,60 @@ pub(crate) fn publish_daemon_bindings(
     Ok(())
 }
 
+/// Publishes a structurally valid daemon binding for an isolated hook-adapter
+/// test. Production publication remains [`publish_daemon_bindings`]; tests use
+/// this narrow helper to exercise the same file subscriber and bounded daemon
+/// admission path without opening a project graph.
+#[cfg(test)]
+pub(crate) fn publish_test_binding(
+    project_root: &Path,
+    host: HookHostV1,
+) -> Result<(), tracedecay_hooks::HookConfigurationPublicationError> {
+    let layout = super::store_layout::layout(project_root)
+        .ok_or(tracedecay_hooks::HookConfigurationPublicationError::Unavailable)?;
+    std::fs::create_dir_all(&layout.data_root)
+        .map_err(|_| tracedecay_hooks::HookConfigurationPublicationError::Unavailable)?;
+    let now = now_utc();
+    let capabilities = [
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
+        tracedecay_hooks::HookEventFamily::PromptBoundary,
+        tracedecay_hooks::HookEventFamily::ToolLifecycle,
+        tracedecay_hooks::HookEventFamily::SavedEdit,
+        tracedecay_hooks::HookEventFamily::TestLifecycle,
+    ]
+    .into_iter()
+    .map(|family| tracedecay_hooks::HookCapabilityV1 {
+        family,
+        support: tracedecay_hooks::stock_event_support(host, family),
+    })
+    .collect();
+    let snapshot = HookConfigurationSnapshotV1 {
+        schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
+        revision: 1,
+        published_at: now,
+        expires_at: UtcMicros(now.0.saturating_add(60 * 1_000_000)),
+        binding: HookScopeBindingV1 {
+            host,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: 1,
+            binding_token: [4; 32],
+            capabilities,
+        },
+    };
+    let writer = tracedecay_hooks::HookConfigurationFileWriterV1::new(
+        tracedecay_hooks::hook_configuration_path(&layout.data_root, host),
+    );
+    match tracedecay_hooks::HookConfigurationPublisherV1::new(writer).publish(snapshot)? {
+        tracedecay_hooks::HookConfigurationPublicationOutcomeV1::Published
+        | tracedecay_hooks::HookConfigurationPublicationOutcomeV1::Duplicate => Ok(()),
+        tracedecay_hooks::HookConfigurationPublicationOutcomeV1::StaleRejected => {
+            Err(tracedecay_hooks::HookConfigurationPublicationError::Unavailable)
+        }
+    }
+}
+
 fn binding_identity_from_scope(
     scope: &ResolvedScope,
     binding_revision: u64,

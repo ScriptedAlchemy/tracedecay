@@ -15,8 +15,9 @@ use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
     event_cwd_from_parsed, event_project_root, event_project_root_from_json,
-    event_project_root_or_process_cwd, event_session_id, read_hook_event, record_hook_invoked,
-    record_hook_invoked_parsed, rel_under_root, research_block_reason,
+    event_project_root_or_process_cwd, event_project_root_with_identity_from_json,
+    event_session_id, read_hook_event, record_hook_invoked, record_hook_invoked_parsed,
+    rel_under_root, research_block_reason,
 };
 
 /// Largest transcript tail the Kiro `userPromptSubmit` hook will read per call.
@@ -137,25 +138,28 @@ fn collect_strings<'a>(value: &'a Value, out: &mut Vec<&'a str>) {
 /// follow-up work is daemon-owned and cannot delay the host callback.
 pub async fn hook_kiro_prompt_submit() -> i32 {
     let event = read_hook_event!();
-    let root = event_project_root_from_json(&event);
+    if let Some(response) = kiro_prompt_submit_response(&event).await {
+        println!("{response}");
+    }
+    0
+}
+
+async fn kiro_prompt_submit_response(event: &str) -> Option<String> {
+    let root = event_project_root_with_identity_from_json(event).await;
     let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+        record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", event);
+    match root.as_deref() {
+        Some(root) => super::v2::dispatch(
             tracedecay_hooks::HookHostV1::Kiro,
-            &event,
+            event,
             root,
             Some(&hook_telemetry),
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!("{guidance}");
-        }
-        return 0;
+        .flatten(),
+        None => None,
     }
-    0
 }
 
 /// Kiro `postToolUse` hook handler used to keep the graph fresh after writes.
@@ -348,6 +352,55 @@ fn kiro_project_root(event_json: &str) -> Option<PathBuf> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn prompt_submit_admits_the_native_boundary_within_hook_budget() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_kiro_prompt_admission".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        crate::hooks::v2::publish_test_binding(&project_root, tracedecay_hooks::HookHostV1::Kiro)
+            .unwrap();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "hook_v2_admit",
+            "status": "accepted",
+            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+            "orchestration": null,
+            "ready_guidance": null,
+            "feedback_notice": null,
+            "reason": null,
+        })]);
+        let event = serde_json::json!({
+            "hook_event_name": "userPromptSubmit",
+            "session_id": "kiro-prompt-session",
+            "cwd": project_root,
+            "prompt": "find the active symbol",
+        })
+        .to_string();
+
+        let started = std::time::Instant::now();
+        assert_eq!(kiro_prompt_submit_response(&event).await, None);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "native prompt admission exceeded the bounded hook path"
+        );
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some(project_root.as_path()));
+        assert_eq!(calls[0].1["action"], "hook_v2_admit");
+        assert_eq!(calls[0].1["native_session_id"], "kiro-prompt-session");
+        assert_eq!(
+            calls[0].1["envelope"]["producer"],
+            serde_json::json!(tracedecay_hooks::HookHostV1::Kiro)
+        );
+    }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]

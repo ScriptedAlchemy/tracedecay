@@ -426,26 +426,33 @@ pub async fn hook_stop() {
         }
         Err(_) => String::new(),
     };
-    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    println!("{}", claude_stop_response_for_event(&event).await);
+}
+
+/// Runs Claude's native stop boundary through Hook V2 and returns the exact
+/// host response. Keeping this separate from stdin I/O makes the admitted
+/// boundary the single production path for both the command adapter and tests.
+async fn claude_stop_response_for_event(event: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(event).unwrap_or(Value::Null);
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
-        record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", &event, &parsed);
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+        record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", event, &parsed);
+    let guidance = match root.as_deref() {
+        Some(root) => super::v2::dispatch(
             tracedecay_hooks::HookHostV1::ClaudeCode,
-            &event,
+            event,
             root,
             Some(&hook_telemetry),
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!("{}", codex_additional_context_json("Stop", &guidance));
-        }
-        return;
-    }
-    println!("{}", serde_json::json!({}));
+        .flatten(),
+        None => None,
+    };
+    guidance.map_or_else(
+        || serde_json::json!({}).to_string(),
+        |guidance| codex_additional_context_json("Stop", &guidance),
+    )
 }
 
 /// Incrementally ingests one live projectless Claude session into the profile
@@ -874,6 +881,65 @@ mod tests {
         assert!(
             bogus_context.contains("no project index found"),
             "an unindexed project-like cwd must still emit the real nudge: {bogus_context}"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_admits_the_native_boundary_within_hook_budget() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_claude_stop_admission".to_string(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        crate::hooks::v2::publish_test_binding(
+            &project_root,
+            tracedecay_hooks::HookHostV1::ClaudeCode,
+        )
+        .unwrap();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "hook_v2_admit",
+            "status": "accepted",
+            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
+            "orchestration": null,
+            "ready_guidance": null,
+            "feedback_notice": null,
+            "reason": null,
+        })]);
+        let event = serde_json::json!({
+            "hook_event_name": "Stop",
+            "session_id": "claude-stop-session",
+            "transcript_path": project_root.join("session.jsonl"),
+            "cwd": project_root,
+            "prompt_id": "claude-stop-prompt",
+            "permission_mode": "acceptEdits",
+            "stop_hook_active": false,
+            "last_assistant_message": "done",
+            "background_tasks": [],
+            "session_crons": [],
+        })
+        .to_string();
+
+        let started = std::time::Instant::now();
+        let response = claude_stop_response_for_event(&event).await;
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "native stop admission exceeded the bounded hook path"
+        );
+        assert_eq!(response, serde_json::json!({}).to_string());
+        let calls = daemon.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some(project_root.as_path()));
+        assert_eq!(calls[0].1["action"], "hook_v2_admit");
+        assert_eq!(calls[0].1["native_session_id"], "claude-stop-session");
+        assert_eq!(
+            calls[0].1["envelope"]["producer"],
+            serde_json::json!(tracedecay_hooks::HookHostV1::ClaudeCode)
         );
     }
 }
