@@ -364,7 +364,6 @@ mod tests {
     use tracedecay_domain::{
         BrainId, LocatorDigest, ProjectId, RepositoryId, UserProfileId, WorktreeId,
     };
-    use tracedecay_rusqlite_runtime::graph::fixtures::create_graph_fixture_database_v1;
     use tracedecay_store::{
         CodeShardScopeV1, RuntimeMaintenanceStateV1, StoreIncarnationV1, StoreShardIdV1,
         StoreShardScopeV1, VerifiedStoreLocatorV1,
@@ -509,8 +508,8 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let profile_path = temporary.path().join("profile.db");
         let code_path = temporary.path().join("code.db");
-        create_graph_fixture_database_v1(&profile_path).unwrap();
-        create_graph_fixture_database_v1(&code_path).unwrap();
+        rusqlite::Connection::open(&profile_path).unwrap();
+        rusqlite::Connection::open(&code_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let code_path = code_path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();
@@ -602,8 +601,8 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let profile_path = temporary.path().join("profile.db");
         let code_path = temporary.path().join("code.db");
-        create_graph_fixture_database_v1(&profile_path).unwrap();
-        create_graph_fixture_database_v1(&code_path).unwrap();
+        rusqlite::Connection::open(&profile_path).unwrap();
+        rusqlite::Connection::open(&code_path).unwrap();
         let profile_path = profile_path.canonicalize().unwrap();
         let code_path = code_path.canonicalize().unwrap();
         let opened_file_identity = crate::db::sqlite_generation_identity(&code_path).unwrap();

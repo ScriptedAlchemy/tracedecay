@@ -510,7 +510,7 @@ mod tests {
         let path = temporary.path().join("runtime.db");
         rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        let (registry, profile, code, authority) = mount_graph(path.clone()).await;
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         let old_runtime_identity = code.runtime_identity();
         let authority_token = authority.token().to_owned();
         drop(code);
@@ -572,10 +572,10 @@ mod tests {
     #[tokio::test]
     async fn destructive_reservation_atomically_rejects_open_begin() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        let (registry, profile, code, authority) = mount_graph(path.clone()).await;
+        let (registry, profile, code, authority) = mount_code_runtime(path.clone()).await;
         drop(code);
 
         let reservation = registry
@@ -608,10 +608,10 @@ mod tests {
     #[tokio::test]
     async fn failed_destructive_close_releases_reservation_for_retry() {
         let temporary = tempfile::tempdir().unwrap();
-        let path = temporary.path().join("graph.db");
-        create_graph_fixture_database_v1(&path).unwrap();
+        let path = temporary.path().join("runtime.db");
+        rusqlite::Connection::open(&path).unwrap();
         let path = path.canonicalize().unwrap();
-        let (registry, profile, code, _authority) = mount_graph(path.clone()).await;
+        let (registry, profile, code, _authority) = mount_code_runtime(path.clone()).await;
         let target =
             super::super::DestructiveMaintenanceTarget::new(temporary.path(), [path]).unwrap();
 
@@ -637,11 +637,11 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let reserved_path = temporary.path().join("reserved.db");
         let unrelated_path = temporary.path().join("unrelated.db");
-        create_graph_fixture_database_v1(&reserved_path).unwrap();
-        create_graph_fixture_database_v1(&unrelated_path).unwrap();
+        rusqlite::Connection::open(&reserved_path).unwrap();
+        rusqlite::Connection::open(&unrelated_path).unwrap();
         let reserved_path = reserved_path.canonicalize().unwrap();
         let unrelated_path = unrelated_path.canonicalize().unwrap();
-        let (registry, profile, code, _authority) = mount_graph(reserved_path.clone()).await;
+        let (registry, profile, code, _authority) = mount_code_runtime(reserved_path.clone()).await;
         drop(code);
         let reservation = registry
             .begin_destructive_maintenance(
