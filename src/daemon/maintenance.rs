@@ -222,15 +222,6 @@ impl MaintenanceCoordinator {
         .status()
     }
 
-    pub(super) async fn shutdown(&self) -> ShutdownStatus {
-        self.shutdown_until(
-            tokio::time::Instant::now()
-                + super::DAEMON_CLIENT_DRAIN_DEADLINE
-                + super::DAEMON_TASK_ABORT_DEADLINE,
-        )
-        .await
-    }
-
     pub(super) fn cancel(&self) {
         self.cancellation.cancel();
         self.wake.notify_waiters();

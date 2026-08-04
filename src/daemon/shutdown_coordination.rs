@@ -127,6 +127,17 @@ impl ShutdownReceipt {
             unfinished: vec![name],
         }
     }
+
+    pub(super) fn timed_out(deadline: Instant, name: &'static str) -> Self {
+        Self {
+            deadline,
+            owners: vec![ShutdownOwnerReceipt {
+                name,
+                status: ShutdownStatus::TimedOut,
+            }],
+            unfinished: vec![name],
+        }
+    }
 }
 
 #[cfg(test)]

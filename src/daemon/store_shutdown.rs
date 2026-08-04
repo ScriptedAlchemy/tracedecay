@@ -98,7 +98,7 @@ where
                 .checked_sub(DAEMON_TASK_ABORT_DEADLINE)
                 .unwrap_or(deadline)
         } else {
-            deadline
+            now
         };
     let mut joins = tokio::task::JoinSet::new();
     let mut pending = HashMap::new();
@@ -170,10 +170,11 @@ where
 }
 
 impl StoreAdministration {
-    pub(super) async fn track_project_server_retirement(&self, task: tokio::task::JoinHandle<()>) {
-        let mut retirements = self.project_server_retirements.lock().await;
-        retirements.retain(|retirement| !retirement.is_finished());
-        retirements.push(task);
+    pub(super) async fn track_project_server_retirement(
+        &self,
+        task: tokio::task::JoinHandle<ShutdownStatus>,
+    ) {
+        self.project_server_retirements.lock().await.push(task);
     }
 
     #[cfg(any(test, feature = "test-transport"))]
@@ -208,7 +209,7 @@ impl StoreAdministration {
                         Some(retirement_abort),
                         async move {
                             match retirement.await {
-                                Ok(()) => ShutdownTaskStatus::Clean,
+                                Ok(status) => status,
                                 Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
                             }
                         },
@@ -218,8 +219,23 @@ impl StoreAdministration {
         .await
     }
 
-    pub(super) async fn shutdown_host_admission_replay(&self) {
-        self.profile_host_admission_replay.shutdown().await;
+    pub(super) async fn shutdown_host_admission_replay_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> ShutdownStatus {
+        self.profile_host_admission_replay
+            .shutdown_until(deadline)
+            .await
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    pub(super) async fn shutdown_host_admission_replay(&self) -> ShutdownStatus {
+        self.shutdown_host_admission_replay_until(
+            tokio::time::Instant::now()
+                + super::DAEMON_CLIENT_DRAIN_DEADLINE
+                + super::DAEMON_TASK_ABORT_DEADLINE,
+        )
+        .await
     }
 
     pub(super) fn cancel_host_admission_replay(&self) {
@@ -275,8 +291,9 @@ mod tests {
     #[tokio::test]
     async fn retirement_join_preserves_typed_request_drain_failure() {
         let administration = StoreAdministration::default();
-        let retirement =
-            tokio::spawn(async { Err::<(), String>("project request drain timed out".to_owned()) });
+        let retirement = tokio::spawn(async {
+            ShutdownTaskStatus::Failed("project request drain timed out".to_owned())
+        });
         *administration.project_server_retirements.lock().await = vec![retirement];
 
         let receipt = administration
@@ -302,7 +319,7 @@ mod tests {
         let retirement = tokio::spawn(async move {
             let _dropped = Dropped(task_dropped);
             task_started.notify_one();
-            std::future::pending::<()>().await;
+            std::future::pending::<ShutdownTaskStatus>().await
         });
         started.notified().await;
         *administration.project_server_retirements.lock().await = vec![retirement];
@@ -318,6 +335,40 @@ mod tests {
             receipt.outcomes,
             [super::ShutdownTaskOutcome {
                 owner: "project_server_retirement[0]".to_string(),
+                status: ShutdownTaskStatus::TimedOut,
+            }]
+        );
+        assert!(dropped.load(Ordering::Acquire));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sub_abort_reserve_deadline_aborts_immediately_and_preserves_join_time() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let task = tokio::spawn(async move {
+            let _dropped = Dropped(task_dropped);
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        let abort = task.abort_handle();
+        let started = tokio::time::Instant::now();
+
+        let receipt = super::join_shutdown_tasks_until(
+            started + Duration::from_secs(1),
+            [("short-budget-owner".to_owned(), Some(abort), async move {
+                match task.await {
+                    Ok(()) => ShutdownTaskStatus::Clean,
+                    Err(error) => ShutdownTaskStatus::Failed(error.to_string()),
+                }
+            })],
+        )
+        .await;
+
+        assert_eq!(tokio::time::Instant::now(), started);
+        assert_eq!(
+            receipt.outcomes,
+            [super::ShutdownTaskOutcome {
+                owner: "short-budget-owner".to_owned(),
                 status: ShutdownTaskStatus::TimedOut,
             }]
         );
