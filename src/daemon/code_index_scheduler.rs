@@ -1,8 +1,8 @@
 //! Daemon-owned scheduling and reconciliation for production code generations.
 //!
-//! Hook events are bounded wake-up hints only. Every run reconstructs its
-//! source snapshot from gix's HEAD-tree/index/worktree status before content
-//! digests decide whether publication is necessary.
+//! Hook and watcher events identify bounded reconciliation frontiers. Exact
+//! paths and old-to-new HEAD tree changes narrow work; gix status remains the
+//! bounded correctness backstop when no narrower authority is available.
 #![allow(dead_code)] // Plan 25 code-intelligence indexing — reconciliation surface staged
 
 use std::{
@@ -862,6 +862,7 @@ impl CodeChunkProjectionSink for DaemonProjectionSinkV1 {
 struct PendingHintsV1 {
     paths: BTreeSet<PathBuf>,
     overflow: bool,
+    git_state: Option<GitStateMayHaveChanged>,
 }
 
 impl PendingHintsV1 {
@@ -879,8 +880,40 @@ impl PendingHintsV1 {
         self.overflow = true;
     }
 
+    fn git_state(&mut self, event: GitStateMayHaveChanged) {
+        let replace = self.git_state.as_ref().is_none_or(|pending| {
+            event.identity.authorizes_reuse_of(&pending.identity)
+                && event.watcher_epoch > pending.watcher_epoch
+        });
+        if replace {
+            self.git_state = Some(event);
+        }
+    }
+
     fn take(&mut self) -> Self {
         std::mem::take(self)
+    }
+}
+
+/// A single-owner git watcher observed that one mounted worktree may have
+/// changed. The structural indexing identity prevents a delayed event from
+/// crossing worktrees; `watcher_epoch` is the monotonic frontier to stamp after
+/// one successful authoritative reconciliation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::daemon) struct GitStateMayHaveChanged {
+    identity: identity::IndexingIdentityV1,
+    watcher_epoch: u64,
+}
+
+impl GitStateMayHaveChanged {
+    pub(in crate::daemon) fn new(
+        identity: identity::IndexingIdentityV1,
+        watcher_epoch: u64,
+    ) -> Self {
+        Self {
+            identity,
+            watcher_epoch,
+        }
     }
 }
 
@@ -1409,6 +1442,15 @@ impl CodeIndexWorktreeSchedulerV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .overflow();
+        DaemonCodeIndexControlV1::advance(&self.epoch);
+        self.wake.notify_one();
+    }
+
+    pub(in crate::daemon) fn notify_git_state(&self, event: GitStateMayHaveChanged) {
+        self.hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .git_state(event);
         DaemonCodeIndexControlV1::advance(&self.epoch);
         self.wake.notify_one();
     }
@@ -2260,7 +2302,6 @@ mod memory_tests;
 mod overlay_ephemerality_tests;
 #[cfg(test)]
 mod tests;
-
 mod activation;
 mod cadence;
 mod classification;
@@ -2282,5 +2323,6 @@ pub(crate) use cadence::{
     newly_eligible_percentile,
 };
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
+pub(in crate::daemon) use registry::GitStateChangeRequestV1;
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
 pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;
