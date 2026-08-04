@@ -59,6 +59,15 @@ impl DaemonShutdownReceipt {
         }
     }
 
+    fn preparation_timed_out(deadline: tokio::time::Instant) -> Self {
+        Self {
+            in_flight: ShutdownStatus::TimedOut,
+            clients: ShutdownStatus::TimedOut,
+            background: ShutdownReceipt::timed_out(deadline, "shutdown_prepare"),
+            project_servers: ShutdownTaskReceipt::timed_out("project_server_shutdown"),
+        }
+    }
+
     pub(super) fn is_retryable(&self) -> bool {
         matches!(self.in_flight, ShutdownStatus::TimedOut)
             || matches!(self.clients, ShutdownStatus::TimedOut)
@@ -95,7 +104,12 @@ where
             let coordinator_attempt = Arc::clone(&attempt);
             tokio::spawn(async move {
                 let runner = tokio::spawn(async move {
-                    run_daemon_shutdown(runner_lifecycle, prepare.await, shutdown_deadline).await
+                    match tokio::time::timeout_at(shutdown_deadline, prepare).await {
+                        Ok(plan) => {
+                            run_daemon_shutdown(runner_lifecycle, plan, shutdown_deadline).await
+                        }
+                        Err(_) => DaemonShutdownReceipt::preparation_timed_out(shutdown_deadline),
+                    }
                 });
                 let receipt = match runner.await {
                     Ok(receipt) => receipt,
@@ -399,5 +413,65 @@ mod tests {
         assert_eq!(cancellations.load(Ordering::Acquire), 2);
         assert!(retry.background.unfinished().is_empty());
         assert!(retry.project_servers.is_clean());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contended_prepare_lock_times_out_with_retryable_receipt() {
+        struct Dropped(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let lifecycle = DaemonLifecycle::default();
+        let prepare_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let held_lock = prepare_lock.lock().await;
+        let prepare_started = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+
+        let first_lifecycle = lifecycle.clone();
+        let first_lock = Arc::clone(&prepare_lock);
+        let first_started = Arc::clone(&prepare_started);
+        let first_dropped = Arc::clone(&dropped);
+        let first = tokio::spawn(async move {
+            coordinate_daemon_shutdown(&first_lifecycle, deadline, async move {
+                let _dropped = Dropped(first_dropped);
+                first_started.notify_one();
+                let _lock = first_lock.lock().await;
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                    ShutdownTaskReceipt::default()
+                })
+            })
+            .await
+        });
+        prepare_started.notified().await;
+
+        tokio::time::advance(tokio::time::Duration::from_secs(1)).await;
+        let receipt = first.await.expect("shutdown prepare timeout receipt");
+
+        assert!(receipt.is_retryable());
+        assert_eq!(receipt.in_flight, ShutdownStatus::TimedOut);
+        assert_eq!(receipt.clients, ShutdownStatus::TimedOut);
+        assert!(matches!(
+            receipt.background.owners.as_slice(),
+            [owner] if owner.name == "shutdown_prepare"
+                && owner.status == ShutdownStatus::TimedOut
+        ));
+        assert_eq!(receipt.project_servers.status(), ShutdownStatus::TimedOut,);
+        assert!(dropped.load(Ordering::Acquire));
+
+        drop(held_lock);
+        let retry_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let retry = coordinate_daemon_shutdown(&lifecycle, retry_deadline, async {
+            DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                ShutdownTaskReceipt::default()
+            })
+        })
+        .await;
+
+        assert!(!retry.is_retryable());
     }
 }

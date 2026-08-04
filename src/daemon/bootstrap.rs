@@ -147,10 +147,10 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 },
                 async {},
             ),
-            shutdown_coordination::ShutdownOwner::new(
+            shutdown_coordination::ShutdownOwner::with_deadline_status(
                 "maintenance",
                 move || maintenance_cancel.cancel(),
-                async move { maintenance_join.shutdown().await },
+                move |deadline| async move { maintenance_join.shutdown_until(deadline).await },
             ),
             shutdown_coordination::ShutdownOwner::with_deadline_result(
                 "http_application",
@@ -162,10 +162,14 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
                 move || project_open_cancel.cancel(),
                 move |deadline| async move { project_open.shutdown_until(deadline).await.status() },
             ),
-            shutdown_coordination::ShutdownOwner::new(
+            shutdown_coordination::ShutdownOwner::with_deadline_status(
                 "host_admission_replay",
                 move || replay_cancel.cancel_host_admission_replay(),
-                async move { replay_join.shutdown_host_admission_replay().await },
+                move |deadline| async move {
+                    replay_join
+                        .shutdown_host_admission_replay_until(deadline)
+                        .await
+                },
             ),
         ],
         vec![shutdown_coordination::ShutdownOwner::new(
