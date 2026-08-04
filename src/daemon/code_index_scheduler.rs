@@ -1778,6 +1778,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.verified_against_source
     }
 
+    /// Whether the last execution-owned source observation is older than the
+    /// configured freshness window. This only inspects scheduler state; it does
+    /// not reopen Git, scan the worktree, enqueue a wake, or mutate a watermark.
+    pub(super) fn freshness_window_elapsed(&self) -> bool {
+        self.last_reconciled_at.elapsed() >= self.policy.staleness_threshold
+    }
+
     pub(super) fn pending_hint_count(&self) -> Option<u64> {
         let hints = self
             .hints

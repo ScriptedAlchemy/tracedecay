@@ -2400,6 +2400,41 @@ async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
     assert_eq!(projected.coverage, "complete");
 }
 
+/// A dashboard status view reports the last execution-owned scheduler state; it
+/// must not run the freshness ladder, wake a worker, or publish an out-of-band
+/// source change merely because an operator opened the view.
+#[tokio::test]
+async fn dashboard_freshness_does_not_reconcile_an_out_of_band_change() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() { println!(\"v1\"); }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(
+            test_project_id(),
+            fixture.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount daemon-owned scheduler");
+    let initial = wait_for_initial_generation(&registry, fixture.path()).await;
+
+    fixture.edit("src/main.rs", "fn main() { println!(\"v2\"); }\n");
+    git(fixture.path(), &["commit", "-qam", "out-of-band"]);
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted scheduler projection");
+
+    assert_eq!(
+        projected.latest_generation_id.as_deref(),
+        Some(initial.as_str()),
+        "a status read must not publish the changed source generation"
+    );
+    registry.shutdown().await;
+}
+
 #[test]
 fn restart_restores_complete_generation_and_content_noop() {
     let fixture = GitFixture::new(&[(
