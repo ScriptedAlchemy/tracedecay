@@ -531,8 +531,13 @@ where
         {
             let transaction = session_store.open_write_transaction().await?;
             let writer_started = std::time::Instant::now();
-            super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
-                .await?;
+            let current = super::read_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY)
+                .await?
+                .unwrap_or(0);
+            if current == watermark {
+                super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
+                    .await?;
+            }
             GitCorrelationWriteTxn::commit(transaction).await?;
             stats.observe_writer_hold(writer_started);
         }
