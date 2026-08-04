@@ -13,6 +13,7 @@ use crate::resolution::ReferenceResolver;
 use crate::sync;
 use crate::types::*;
 
+use super::locking::{ActiveSyncLease, ActiveSyncLockGuard};
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
 
 /// Convert any backslash in a *relative* project-root-relative path to a
@@ -220,6 +221,19 @@ impl TraceDecay {
         self.index_all_with_progress_verbose(on_file, |_| {}).await
     }
 
+    pub(super) async fn index_all_with_progress_holding_lock<F>(
+        &self,
+        on_file: F,
+        locks: ActiveSyncLockGuard,
+    ) -> Result<IndexResult>
+    where
+        F: Fn(usize, usize, &str),
+    {
+        let sync_lease = self.begin_active_sync_with_locks(locks)?;
+        self.index_all_with_progress_verbose_under_lease(on_file, |_| {}, sync_lease)
+            .await
+    }
+
     /// Like `index_all_with_progress()`, but also calls `on_verbose` after
     /// each phase completes with a diagnostic summary line.
     pub async fn index_all_with_progress_verbose<F, V>(
@@ -231,13 +245,27 @@ impl TraceDecay {
         F: Fn(usize, usize, &str),
         V: Fn(&str),
     {
+        let sync_lease = self.begin_active_sync()?;
+        self.index_all_with_progress_verbose_under_lease(on_file, on_verbose, sync_lease)
+            .await
+    }
+
+    async fn index_all_with_progress_verbose_under_lease<F, V>(
+        &self,
+        on_file: F,
+        on_verbose: V,
+        sync_lease: ActiveSyncLease,
+    ) -> Result<IndexResult>
+    where
+        F: Fn(usize, usize, &str),
+        V: Fn(&str),
+    {
         debug_assert!(self.project_root.exists(), "project root does not exist");
         debug_assert!(
             self.project_root.is_dir(),
             "project root is not a directory"
         );
         self.ensure_branch_writable("full index")?;
-        let sync_lease = self.begin_active_sync()?;
         let start = Instant::now();
 
         // 1. Clear existing data and enter bulk-load mode

@@ -564,7 +564,7 @@ async fn dirty_open_checks_integrity_before_writable_migration()
 }
 
 #[tokio::test]
-async fn dirty_open_releases_recovery_lock_before_migration_reindex()
+async fn dirty_open_reuses_recovery_lock_for_migration_reindex()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
     let project_root = dir.path().join("repo");

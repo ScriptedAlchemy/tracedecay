@@ -160,6 +160,13 @@ impl super::TraceDecay {
 
     pub(super) fn begin_active_sync(&self) -> Result<ActiveSyncLease> {
         let locks = self.try_acquire_active_sync_lock()?;
+        self.begin_active_sync_with_locks(locks)
+    }
+
+    pub(super) fn begin_active_sync_with_locks(
+        &self,
+        locks: ActiveSyncLockGuard,
+    ) -> Result<ActiveSyncLease> {
         let epoch = next_epoch();
         let mut paths = vec![self.active_graph_layout.dirty_path.clone()];
         if self.active_graph_layout.dirty_path != self.store_layout.dirty_path {

@@ -404,7 +404,7 @@ impl TraceDecay {
         // it cannot race that writer or clear its sentinel. Preflight through
         // the read-only connection before Database::open applies writable
         // pragmas or migrations to a potentially damaged recovery set.
-        let recovery_lock = if crashed {
+        let mut recovery_lock = if crashed {
             Some(try_acquire_graph_sync_locks(
                 &active_graph_layout.sync_lock_path,
                 &store_layout.sync_lock_path,
@@ -487,8 +487,10 @@ impl TraceDecay {
         if crashed {
             match db.quick_check().await {
                 Ok(true) => {
-                    clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
-                    clear_dirty_sentinel_at(&store_layout.dirty_path);
+                    if !migrated {
+                        clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
+                        clear_dirty_sentinel_at(&store_layout.dirty_path);
+                    }
                 }
                 Ok(false) => {
                     db.close();
@@ -518,7 +520,6 @@ impl TraceDecay {
                 }
             }
         }
-        drop(recovery_lock);
 
         let ts = Self {
             db,
@@ -536,12 +537,19 @@ impl TraceDecay {
 
         if migrated {
             eprintln!("[tracedecay] schema changed — performing full re-index…");
-            ts.index_all_with_progress(|current, total, file| {
+            let on_file = |current, total, file: &str| {
                 eprintln!("[tracedecay] re-indexing [{current}/{total}] {file}");
-            })
-            .await?;
+            };
+            match recovery_lock.take() {
+                Some(lock) => {
+                    ts.index_all_with_progress_holding_lock(on_file, lock)
+                        .await?
+                }
+                None => ts.index_all_with_progress(on_file).await?,
+            };
             eprintln!("[tracedecay] re-index complete.");
         }
+        drop(recovery_lock);
 
         ts.register_project_store_in_global_registry().await;
         Ok(ts)
