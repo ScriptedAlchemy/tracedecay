@@ -11,11 +11,13 @@ use std::sync::{OnceLock, atomic};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracedecay_application::{
-    ObservabilityApplicationV1, ObservabilityHorizonV1, ObservabilityQueryV1, now_micros,
+    ApplicationContractError, ObservabilityApplicationV1, ObservabilityHorizonV1,
+    ObservabilityQueryV1, now_micros,
 };
 use tracedecay_domain::{
-    ActivityObservedV1, CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
-    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, canonical_sha256,
+    ActivityObservedV1, CoverageStateV1, McpDispatchObservedV1, ObservabilityEnvelopeV1,
+    ObservabilityPayloadV1, ObservabilityRetentionClassV1, ObservabilityTerminalResultV1,
+    canonical_sha256,
 };
 
 use crate::observability::RegisteredObservabilityPortV1;
@@ -25,6 +27,8 @@ const BUS_CAPACITY: usize = 1024;
 const RETAINED_ACTIVITY_CAPACITY: usize = 5_000;
 const ACTIVITY_EVENT_KIND: &str = "activity.observed.v1";
 const ACTIVITY_SCHEMA_VERSION: u32 = 1;
+const MCP_DISPATCH_EVENT_KIND: &str = "mcp.dispatch.observed.v1";
+const MCP_DISPATCH_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -133,6 +137,16 @@ fn next_local_sequence() -> u64 {
     SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
 }
 
+fn mcp_dispatch_boot_id() -> &'static str {
+    static BOOT: OnceLock<String> = OnceLock::new();
+    BOOT.get_or_init(|| format!("mcp-dispatch-{}-{}", std::process::id(), now_micros().0))
+}
+
+fn next_mcp_dispatch_sequence() -> u64 {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    SEQUENCE.fetch_add(1, atomic::Ordering::Relaxed)
+}
+
 fn authoritative_project_id(db: &RegisteredGlobalDb, supplied: Option<&str>) -> Option<String> {
     let bound = db.binding().shard_id.scope.project_id()?.as_str();
     match supplied {
@@ -194,6 +208,75 @@ fn activity_envelope(
             detail,
         }),
     })
+}
+
+fn mcp_dispatch_envelope(
+    project_id: &str,
+    observation: McpDispatchObservedV1,
+) -> Result<ObservabilityEnvelopeV1, ApplicationContractError> {
+    let observed_at = now_micros().0;
+    let producer_sequence = next_mcp_dispatch_sequence();
+    let event_id = canonical_sha256(&(
+        "tracedecay.mcp.dispatch.observed.v1",
+        mcp_dispatch_boot_id(),
+        producer_sequence,
+        project_id,
+        &observation,
+    ))
+    .map_err(|error| ApplicationContractError::Domain(error.to_string()))?;
+    let event_id = format!("mcp-dispatch:{}", event_id.as_str());
+    Ok(ObservabilityEnvelopeV1 {
+        event_id: event_id.clone(),
+        event_kind: MCP_DISPATCH_EVENT_KIND.to_owned(),
+        schema_revision: MCP_DISPATCH_SCHEMA_VERSION,
+        idempotency_key: event_id.clone(),
+        trace_id: event_id,
+        scope_ref: project_id.to_owned(),
+        capability: "mcp".to_owned(),
+        operation: "dispatch".to_owned(),
+        event_time_micros: observed_at,
+        observation_time_micros: observed_at,
+        valid_from_micros: Some(observed_at),
+        valid_until_micros: None,
+        quantity: Some(1.0),
+        unit: Some("dispatches".to_owned()),
+        terminal_result: Some(observation.terminal_result()),
+        producer_revision: "mcp-dispatch-observer.v1".to_owned(),
+        configuration_revision: "registered-project-session.v1".to_owned(),
+        policy_revision: "mcp-dispatch-deadline.v1".to_owned(),
+        watermark: format!(
+            "{boot_id}:{producer_sequence}",
+            boot_id = mcp_dispatch_boot_id()
+        ),
+        coverage: CoverageStateV1::Known,
+        sampling_probability: None,
+        retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+        emitted_count: 1,
+        delayed_count: 0,
+        dropped_count: 0,
+        process_boot_id: mcp_dispatch_boot_id().to_owned(),
+        producer_sequence,
+        payload: ObservabilityPayloadV1::McpDispatch(observation),
+    })
+}
+
+/// Records one fixed-shape MCP dispatch receipt through the project-bound
+/// observability authority. The caller receives a typed storage failure and
+/// must not change the already-determined MCP terminal response because
+/// telemetry persistence failed.
+pub async fn record_mcp_dispatch(
+    db: &RegisteredGlobalDb,
+    observation: McpDispatchObservedV1,
+) -> Result<String, ApplicationContractError> {
+    let project_id =
+        authoritative_project_id(db, None).ok_or(ApplicationContractError::Inconsistent {
+            field: "mcp_dispatch_observability.project_scope",
+        })?;
+    let envelope = mcp_dispatch_envelope(&project_id, observation)?;
+    let port = RegisteredObservabilityPortV1::new(db);
+    ObservabilityApplicationV1::new(port, port)
+        .record(envelope)
+        .await
 }
 
 pub fn enabled(db: Option<&RegisteredGlobalDb>) -> bool {
@@ -344,6 +427,7 @@ pub async fn replay_after(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use tracedecay_application::ObservabilityQueryPort;
 
     #[test]
     fn family_stream_names_are_distinct_and_stable() {
@@ -464,6 +548,66 @@ mod tests {
                 .expect("profile root")
                 .join("dashboard-events-v1.jsonl")
                 .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_dispatch_receipt_uses_the_bound_project_observability_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project");
+        let project_id =
+            tracedecay_domain::ProjectId::new("project.mcp.dispatch").expect("project id");
+        let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::project(
+            tracedecay_runtime_core::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered runtime");
+        let db = runtime
+            .project_database()
+            .expect("project observation database");
+        let observation = McpDispatchObservedV1 {
+            route_admission_micros: 4,
+            handler_micros: 16,
+            result_materialization_micros: 3,
+            total_micros: 23,
+            deadline: tracedecay_domain::McpDispatchDeadlineV1::Enforced,
+            cancellation: tracedecay_domain::McpDispatchCancellationV1::NotRequested,
+            terminal: tracedecay_domain::McpDispatchTerminalV1::Completed,
+        };
+
+        let cursor = record_mcp_dispatch(db, observation.clone())
+            .await
+            .expect("record MCP dispatch");
+        assert!(cursor.starts_with("analytics:"));
+
+        let port = RegisteredObservabilityPortV1::new(db);
+        let page = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: project_id.to_string(),
+                event_kinds: vec![MCP_DISPATCH_EVENT_KIND.to_owned()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 0,
+                    until_micros: i64::MAX,
+                },
+                after_watermark: None,
+                limit: 10,
+            })
+            .await
+            .expect("query MCP dispatch");
+        assert_eq!(page.events.len(), 1);
+        let event = &page.events[0];
+        assert_eq!(event.scope_ref, project_id.as_str());
+        assert_eq!(event.capability, "mcp");
+        assert_eq!(event.operation, "dispatch");
+        assert_eq!(
+            event.terminal_result,
+            Some(ObservabilityTerminalResultV1::Succeeded)
+        );
+        assert_eq!(
+            event.payload,
+            ObservabilityPayloadV1::McpDispatch(observation)
         );
     }
 }

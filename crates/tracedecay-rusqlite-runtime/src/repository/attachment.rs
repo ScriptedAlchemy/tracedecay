@@ -328,8 +328,11 @@ pub struct RepositoryRuntimePhysicalSnapshot {
     pub healthy: bool,
     pub writer_present: bool,
     pub reader_handles: u32,
+    pub general_reader_waiters: u16,
+    pub health_reader_waiters: u16,
     pub queued_operations: u32,
     pub queued_bytes: u64,
+    pub writer_busy_events: u64,
     pub wal_bytes: u64,
 }
 
@@ -419,12 +422,17 @@ impl RepositoryRuntimePhysicalAttachment {
             healthy: writer.is_none_or(|writer| writer.state() != WriterState::Faulted),
             writer_present: writer.is_some(),
             reader_handles,
+            general_reader_waiters: readers.map_or(0, |snapshot| snapshot.waiting_general),
+            health_reader_waiters: readers.map_or(0, |snapshot| snapshot.waiting_health),
             queued_operations: writer_telemetry
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.queue.queued_operations),
             queued_bytes: writer_telemetry
                 .as_ref()
                 .map_or(0, |snapshot| snapshot.queue.queued_bytes),
+            writer_busy_events: writer_telemetry
+                .as_ref()
+                .map_or(0, |snapshot| snapshot.busy_events),
             wal_bytes: wal_bytes(&state.database_path),
         }
     }
@@ -961,6 +969,9 @@ mod tests {
         let snapshot = attachment.snapshot();
         assert!(!snapshot.writer_present);
         assert!(snapshot.reader_handles > 0);
+        assert_eq!(snapshot.general_reader_waiters, 0);
+        assert_eq!(snapshot.health_reader_waiters, 0);
+        assert_eq!(snapshot.writer_busy_events, 0);
         let handle = attachment.exact_sql_handle().unwrap();
         let rows = handle
             .query(
