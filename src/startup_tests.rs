@@ -36,6 +36,7 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         no_heal: false,
         no_reinstall: false,
         lifecycle_lease_token: None,
+        previous_daemon_state: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Uninstall {
         agent: Some("kiro".to_string()),
@@ -101,6 +102,7 @@ fn agent_install_maintenance_is_selective() {
             no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
+            previous_daemon_state: None,
         }
     ));
     // Also skip for uninstall (about to remove configs) and doctor (a

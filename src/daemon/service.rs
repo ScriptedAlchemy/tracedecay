@@ -1,10 +1,11 @@
-use std::fmt::Write;
+use std::fmt::{self, Write};
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
 use crate::errors::{Result, TraceDecayError};
 
@@ -40,6 +41,35 @@ impl DaemonServiceState {
 
     fn is_enabled(self) -> bool {
         matches!(self, Self::RunningEnabled | Self::StoppedEnabled)
+    }
+}
+
+impl fmt::Display for DaemonServiceState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Missing => "missing",
+            Self::RunningEnabled => "running-enabled",
+            Self::RunningDisabled => "running-disabled",
+            Self::StoppedEnabled => "stopped-enabled",
+            Self::StoppedDisabled => "stopped-disabled",
+            Self::Masked => "masked",
+        })
+    }
+}
+
+impl FromStr for DaemonServiceState {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "missing" => Ok(Self::Missing),
+            "running-enabled" => Ok(Self::RunningEnabled),
+            "running-disabled" => Ok(Self::RunningDisabled),
+            "stopped-enabled" => Ok(Self::StoppedEnabled),
+            "stopped-disabled" => Ok(Self::StoppedDisabled),
+            "masked" => Ok(Self::Masked),
+            _ => Err(format!("unknown daemon service state '{value}'")),
+        }
     }
 }
 

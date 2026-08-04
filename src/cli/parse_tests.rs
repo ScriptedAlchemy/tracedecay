@@ -298,6 +298,7 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: true,
             no_reinstall: false,
             lifecycle_lease_token: None,
+            previous_daemon_state: None,
         })
     ));
     assert!(matches!(
@@ -306,6 +307,7 @@ fn update_and_post_update_parse_no_heal_flag() {
             no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
+            previous_daemon_state: None,
         })
     ));
 }
@@ -362,6 +364,22 @@ fn upgrade_update_and_post_update_parse_no_reinstall_flag() {
             no_heal: false,
             no_reinstall: true,
             lifecycle_lease_token: None,
+            previous_daemon_state: None,
+        })
+    ));
+
+    let inherited_state = Cli::try_parse_from([
+        "tracedecay",
+        "post-update",
+        "--previous-daemon-state",
+        "running-enabled",
+    ])
+    .expect("post-update should accept the daemon state handed off by update");
+    assert!(matches!(
+        inherited_state.command,
+        Some(Commands::PostUpdate {
+            previous_daemon_state: Some(tracedecay::daemon::DaemonServiceState::RunningEnabled),
+            ..
         })
     ));
 
