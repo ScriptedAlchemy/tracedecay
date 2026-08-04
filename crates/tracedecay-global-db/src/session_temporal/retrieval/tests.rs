@@ -943,9 +943,11 @@ impl HostAdmissionTestRuntimeV1 {
              ) VALUES (
                 'session-snapshot', 1, 'occurrence-claude', 'observation-claude',
                 0, 'source-claude', 'user', 1, '{\"kind\":\"unknown\"}',
-                '{\"authority\":\"canonical\",\"evidence_class\":\"observed\",
+                '{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
                   \"source_anchor_id\":\"source-claude\",
-                  \"sanitization_receipt\":{\"receipt_id\":\"receipt-1\"}}',
+                  \"sanitization_receipt\":{
+                    \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
+                  }}',
                 'snippet', 'index'
              );
              INSERT INTO session_summary_nodes (
@@ -953,7 +955,8 @@ impl HostAdmissionTestRuntimeV1 {
                 source_horizon_json, publication_json, created_at
              ) VALUES (
                 'summary-provider', 'session-snapshot', 'anchor-summary-provider',
-                'summary', 'summary', '{}', NULL, 1
+                'summary', 'summary',
+                '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );
              INSERT INTO session_summary_sources (
                 summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
@@ -963,7 +966,7 @@ impl HostAdmissionTestRuntimeV1 {
                 source_horizon_json, reason, checked_at
              ) VALUES (
                 'session-snapshot', 1, 'summary-provider', 'available',
-                '{}', NULL, 1
+                '{\"knowledge_through\":1,\"valid_through\":null}', NULL, 1
              );",
         )
         .await

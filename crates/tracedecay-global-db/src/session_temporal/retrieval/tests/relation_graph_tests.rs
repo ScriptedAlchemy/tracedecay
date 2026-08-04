@@ -113,13 +113,28 @@ async fn copy_lineage_comes_from_grafeo_when_sql_relation_disagrees() {
                  valid_time_json, evidence_json, snippet_text, index_text
              ) VALUES
                  ('session-b', 1, '{target_value}', 'observation-shared', 2,
-                  'graph-target-anchor', 'user', 6, '{{\"kind\":\"unknown\"}}', '{{}}',
+                  'graph-target-anchor', 'user', 6, '{{\"kind\":\"unknown\"}}',
+                  '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
+                    \"source_anchor_id\":\"graph-target-anchor\",
+                    \"sanitization_receipt\":{{
+                      \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
+                    }}}}',
                   'target', 'target'),
                  ('session-b', 1, '{graph_source_value}', 'observation-shared', 3,
-                  'graph-source-anchor', 'user', 5, '{{\"kind\":\"unknown\"}}', '{{}}',
+                  'graph-source-anchor', 'user', 5, '{{\"kind\":\"unknown\"}}',
+                  '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
+                    \"source_anchor_id\":\"graph-source-anchor\",
+                    \"sanitization_receipt\":{{
+                      \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
+                    }}}}',
                   'graph', 'graph'),
                  ('session-b', 1, '{sql_source_value}', 'observation-shared', 4,
-                  'sql-source-anchor', 'user', 4, '{{\"kind\":\"unknown\"}}', '{{}}',
+                  'sql-source-anchor', 'user', 4, '{{\"kind\":\"unknown\"}}',
+                  '{{\"authority\":\"canonical_observation\",\"evidence_class\":\"observed\",
+                    \"source_anchor_id\":\"sql-source-anchor\",
+                    \"sanitization_receipt\":{{
+                      \"receipt_id\":\"receipt-1\",\"sanitizer_version\":\"fixture\"
+                    }}}}',
                   'sql', 'sql');
              INSERT INTO session_logical_copy_edges (
                  session_id, generation, occurrence_id, copied_from_occurrence_id,
