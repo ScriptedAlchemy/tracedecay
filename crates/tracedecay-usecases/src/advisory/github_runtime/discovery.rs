@@ -44,6 +44,12 @@ impl GitHubDiscoveryControlV1 {
     }
 }
 
+impl Drop for GitHubDiscoveryControlV1 {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 /// One pull request whose provider head is exactly the requested immutable
 /// commit. Repository identity comes from the fixed REST route, not response
 /// prose or the caller's current branch.
@@ -501,5 +507,13 @@ mod tests {
         let second = found(8, "cccccccccccccccccccccccccccccccccccccccc");
         let third = found(9, "dddddddddddddddddddddddddddddddddddddddd");
         assert_eq!(discovery_consensus(&first, &second, Some(&third)), None);
+    }
+
+    #[test]
+    fn dropping_discovery_owner_cancels_retained_blocking_clones() {
+        let owner = GitHubDiscoveryControlV1::bounded(Instant::now() + Duration::from_secs(15));
+        let retained = owner.clone();
+        drop(owner);
+        assert!(retained.remaining().is_none());
     }
 }
