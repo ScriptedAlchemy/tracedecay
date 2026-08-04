@@ -407,7 +407,7 @@ impl NativeGitIntelligence {
             degradations.insert(GitDegradationV1::SparseCheckout);
         }
 
-        let split_index = std::fs::read_dir(git_dir).is_ok_and(|entries| {
+        let split_index = std::fs::read_dir(&git_dir).is_ok_and(|entries| {
             entries.filter_map(Result::ok).any(|entry| {
                 entry
                     .file_name()
