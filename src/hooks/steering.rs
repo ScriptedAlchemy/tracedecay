@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+#[cfg(test)]
 use serde_json::Value;
 
 use super::now_unix_secs;
@@ -41,6 +42,7 @@ pub(super) fn append_tracedecay_bootstrap_context(s: &mut String) {
     );
 }
 
+#[cfg(test)]
 pub(super) const COMPACTION_CONTEXT_RECOVERY_HINT: &str = "Context was just compacted. If important prior-session context seems missing, query TraceDecay session context before assuming the compacted summary is complete. Start with `tracedecay_message_search` or `tracedecay_lcm_expand_query`; use `tracedecay_lcm_describe` and `tracedecay_lcm_expand` when you need the summary DAG sources.";
 
 /// Builds the Cursor `sessionStart` `additional_context` text.
@@ -203,6 +205,7 @@ pub(super) fn append_context_block(context: &mut String, block: &str) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn append_context_recovery_hint(context: &mut String) {
     if !context.is_empty() && !context.ends_with('\n') {
         context.push('\n');
@@ -211,6 +214,7 @@ pub(super) fn append_context_recovery_hint(context: &mut String) {
     context.push('\n');
 }
 
+#[cfg(test)]
 pub(super) fn session_start_from_compaction(event_json: &str) -> bool {
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return false;
@@ -221,6 +225,7 @@ pub(super) fn session_start_from_compaction(event_json: &str) -> bool {
         .any(matches_compaction_source)
 }
 
+#[cfg(test)]
 fn matches_compaction_source(value: &str) -> bool {
     let normalized = value
         .chars()

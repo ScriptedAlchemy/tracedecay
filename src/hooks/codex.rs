@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+#[cfg(test)]
 use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 
 use super::claude::is_code_research_prompt;
@@ -80,6 +81,7 @@ pub async fn hook_codex_session_start() -> i32 {
     0
 }
 
+#[cfg(test)]
 fn codex_session_start_hook_event(parsed: &Value) -> Option<DaemonHookEvent> {
     event_cwd_from_parsed(parsed).map(|cwd| DaemonHookEvent::session_start(HookAgent::Codex, cwd))
 }
@@ -339,6 +341,7 @@ pub async fn hook_codex_stop() -> i32 {
     0
 }
 
+#[cfg(test)]
 async fn finalize_codex_user_session(
     project_root: Option<&Path>,
     session_id: Option<String>,

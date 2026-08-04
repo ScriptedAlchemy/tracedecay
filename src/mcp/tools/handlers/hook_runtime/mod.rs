@@ -30,7 +30,7 @@ pub(crate) use admission::{
 pub(crate) use errors::structured_hook_error_data;
 pub(crate) use hermes::replay_projectless_hermes_host_admission;
 
-use admission::hook_v2_admit;
+use admission::{hook_v2_admit, hook_v2_profile_admit};
 use context_scout::{
     ContextScoutReadSurfaceV1, hook_v2_cancel, hook_v2_delivery_receipt, hook_v2_feedback,
     hook_v2_feedback_notice_delivery, hook_v2_scout_prepare, hook_v2_scout_read, hook_v2_status,
@@ -164,15 +164,25 @@ pub(crate) async fn handle_projectless_hook_runtime(
             )
             .await?
         }
+        "hook_v2_profile_admit" => hook_v2_profile_admit(
+            &args,
+            action,
+            profile_root,
+            session_authorities.profile_identity.ok_or_else(|| {
+                config_error("authenticated profile identity is unavailable for Hook V2 admission")
+            })?,
+        )?,
         _ => unreachable!("projectless hook action validated above"),
     };
     Ok(tool_json(None, &args, &output))
 }
 
 fn projectless_action_allowed(action: &str, args: &Value) -> bool {
-    matches!(action, "user_review" | "hermes_receipt")
-        || (action == "ingest_transcript"
-            && args.get("user_scope").and_then(Value::as_bool) == Some(true))
+    matches!(
+        action,
+        "user_review" | "hermes_receipt" | "hook_v2_profile_admit"
+    ) || (action == "ingest_transcript"
+        && args.get("user_scope").and_then(Value::as_bool) == Some(true))
 }
 
 fn required_value(args: &Value, key: &str) -> Result<Value> {

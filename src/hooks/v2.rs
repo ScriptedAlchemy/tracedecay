@@ -438,6 +438,80 @@ pub(crate) async fn dispatch(
     dispatch_decoded(prepared, project_root, started, &admission, &delivery).await
 }
 
+/// Dispatches a native event through its exact project binding when one is
+/// known, or through the authenticated daemon profile when the host has no
+/// project identity. Both paths send only the closed V2 event material.
+pub(crate) async fn dispatch_for_scope(
+    host: HookHostV1,
+    event_json: &str,
+    project_root: Option<&Path>,
+    telemetry: Option<&HookTimingSpan>,
+) -> HookV2Dispatch {
+    match project_root {
+        Some(project_root) => dispatch(host, event_json, project_root, telemetry).await,
+        None => dispatch_profile_scoped(host, event_json, telemetry).await,
+    }
+}
+
+async fn dispatch_profile_scoped(
+    host: HookHostV1,
+    event_json: &str,
+    telemetry: Option<&HookTimingSpan>,
+) -> HookV2Dispatch {
+    let started = Instant::now();
+    let decoded = match tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()) {
+        Ok(decoded) => decoded,
+        Err(
+            NativeHookDecodeError::UnsupportedNativeEvent
+            | NativeHookDecodeError::UnsupportedNativeFamily,
+        ) => return HookV2Dispatch::NotApplicable,
+        Err(_) => return unavailable(),
+    };
+    let fields = serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
+    let Some(material) = native_material(&fields, decoded.family(), now_utc()) else {
+        return unavailable();
+    };
+    let Some((_, timeout)) = admission_window_after_elapsed(elapsed_us(started)) else {
+        return unavailable();
+    };
+    let response = tokio::time::timeout(
+        timeout,
+        super::daemon_hook_action(
+            None,
+            serde_json::json!({
+                "action": "hook_v2_profile_admit",
+                "admission": tracedecay_hooks::ProfileScopedNativeHookAdmissionV1 {
+                    decoded,
+                    material,
+                },
+            }),
+            telemetry,
+        ),
+    )
+    .await;
+    let Ok(Ok(response)) = response else {
+        return unavailable();
+    };
+    let accepted = response.get("action").and_then(serde_json::Value::as_str)
+        == Some("hook_v2_profile_admit")
+        && matches!(
+            response.get("status").and_then(serde_json::Value::as_str),
+            Some("accepted" | "exact_duplicate")
+        )
+        && response
+            .get("disposition")
+            .and_then(serde_json::Value::as_str)
+            == Some("accepted");
+    if accepted {
+        HookV2Dispatch::Handled {
+            guidance: None,
+            disposition: HookTransportDispositionV1::Accepted,
+        }
+    } else {
+        unavailable()
+    }
+}
+
 pub(crate) async fn dispatch_opencode_tool_after(
     event_json: &str,
     project_root: &Path,

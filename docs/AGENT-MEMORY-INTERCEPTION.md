@@ -150,10 +150,10 @@ comment in `src/hooks/cursor.rs::hook_cursor_before_submit_prompt`):
 | `stop` / `sessionEnd` / `afterAgentResponse` | none | Observation only — good for **storage** side-effects, not recall |
 | `preCompact` | none | Observation only |
 
-So for Cursor: **recall** must ride on `sessionStart.additional_context`
-(best-effort), an always-applied rule file (reliable), or model-initiated MCP
-tool calls (reliable but discretionary). **Storage** interception rides on
-`stop`/`sessionEnd`/transcript ingest — which TraceDecay already does.
+So for Cursor: **recall** may be returned as immediate daemon guidance on a
+native lifecycle admission, an always-applied rule file, or model-initiated
+MCP tool calls. **Storage** and transcript processing are daemon-owned work;
+the hook adapter never performs them locally.
 
 ---
 
@@ -184,18 +184,15 @@ Writes the Cursor projection of the shared plugin bundle
 
 What the hooks currently do (all fail-open):
 
-- `sessionStart` (`hook_cursor_session_start`) — catch-up transcript ingest,
-  then emits `additional_context` built by `build_cursor_session_context`
-  (`src/hooks/steering.rs`): **index status + skill list + tokens-saved
-  counter. No facts.** Sets `TRACEDECAY_PROJECT_ROOT` env.
-- `beforeSubmitPrompt` — hot transcript ingest only; emits
-  `{"continue": true}` (no context possible, see §2.3).
-- `postToolUse` — tool-routing hints via `additional_context`
-  (`cursor_post_tool_use_decision`).
-- `stop`/`sessionEnd`/`preCompact` — transcript ingest into the LCM store,
-  pre-compaction summary nodes. This is the **storage-side raw material**:
-  every Cursor session ends up searchable via `tracedecay_message_search` and
-  becomes evidence for the session_reflector.
+- `sessionStart`, `afterFileEdit`, and `stop` submit their content-free native
+  event boundary to the daemon-owned V2 admission route. Immediate daemon
+  guidance is returned in Cursor's output shape; an unavailable daemon returns
+  the host's empty/fail-open response. `sessionStart` also sets
+  `TRACEDECAY_PROJECT_ROOT` when a registered workspace is resolved.
+- `beforeSubmitPrompt` and `postToolUse` are passive legacy surfaces; they do
+  not read transcripts, memory, or hint state.
+- `preCompact` submits only the bounded daemon compaction event. The daemon,
+  not the hook process, owns any transcript, LCM, review, or indexing work.
 
 ### 3.2 `tracedecay install --agent codex` (`crates/tracedecay-agent-hosts/src/agents/codex.rs`)
 
@@ -325,32 +322,12 @@ Implementation pointers: `src/hooks/codex.rs`, `src/hooks/cursor.rs`,
 change; hook hashes change → users re-trust via `/hooks` (already documented
 in the Codex plugin README).
 
-### B. Cursor session-start injection + a materialized memory rule
+### B. Rejected: hook-local Cursor injection and materialized memory
 
-Per-prompt injection is impossible in Cursor (§2.3), so combine the two
-channels that exist:
-
-1. **`sessionStart.additional_context`** — extend
-   `build_cursor_session_context` / `cursor_session_context_for_root`
-   (`src/hooks/steering.rs`, `src/hooks/cursor.rs`) with the same top-K fact
-   block as design A.
-   Cheap, but treat as best-effort given the open forum bugs about dropped
-   `additional_context`.
-2. **Materialized always-applied memory rule** — generate
-   `~/.cursor/plugins/local/tracedecay/rules/tracedecay-memory.mdc`
-   (`alwaysApply: true`) from the fact store: a "Project memory (generated —
-   curate via tracedecay_fact_store / dashboard)" section listing top-K
-   high-trust facts with ids. This is the *reliable* channel per Cursor's own
-   guidance. Refresh triggers: `workspaceOpen`/`sessionStart` hooks (rewrite
-   if stale > N minutes — hooks already have write access to the plugin dir)
-   and/or a scheduler task. Keep it small (facts are one-liners; cap ~1–2 KB)
-   and deterministic (sorted) so diffs are reviewable.
-
-Implementation pointers: add the managed rule to the Cursor projection in
-`crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs` / `crates/tracedecay-agent-hosts/src/agents/cursor.rs`, refresh it from
-`hook_cursor_workspace_open` (`src/hooks/cursor.rs`), and mark it managed the
-same way generated skills are marked (`managed_skill_format.rs`) so uninstall
-and doctor checks cover it.
+Per-prompt injection is impossible in Cursor (§2.3). Do not compensate with
+hook-local transcript reads, fact retrieval, or generated rules: native Cursor
+events submit to daemon-owned V2 admission, and the hook process must return
+the host's fail-open response when that admission is unavailable.
 
 ### C. Rule/skill text: make storage proactive
 
@@ -371,10 +348,10 @@ half pointed at TraceDecay.
 
 ### D. Enable the reflection loop (sidecar-equivalent storage)
 
-session_reflector is the background sidecar analog: transcripts (both agents,
-already ingested by the hooks) → evidence-cited fact operations → model-managed
-apply policy → store, with dashboard inspection/telemetry. The work is
-activation, not construction:
+session_reflector is the background sidecar analog: daemon-owned transcript
+processing → evidence-cited fact operations → model-managed apply policy →
+store, with dashboard inspection/telemetry. The work is activation, not
+construction:
 
 - Surface a one-command enable (`tracedecay automation enable
   session-reflector`) that picks a backend and uses model-managed memory apply
@@ -407,9 +384,9 @@ With `features.memories = true`, Codex builds a parallel memory in
    already-consolidated knowledge on day one.
 
 For Cursor: native Memories can't be intercepted or exported; the only lever
-is the Settings toggle. Once B+C are live, recommend users disable "Generate
-Memories" to keep one memory system (document in `KIRO-INTEGRATION.md`-style
-agent doc; can't be automated).
+is the Settings toggle. If a daemon-owned memory workflow is adopted, recommend
+users disable "Generate Memories" to keep one memory system (document in
+`KIRO-INTEGRATION.md`-style agent doc; can't be automated).
 
 ### F. Materialized `AGENTS.md` / memory-file generation
 
@@ -439,14 +416,12 @@ alongside D and reusing the managed-file conventions from the skill overlay.
 
 ---
 
-## 6. Recommended sequence
+## 6. Historical recommended sequence
 
-1. **A + B1** (hook-based injection, both agents) — one PR across `src/hooks/`
-   + `src/memory/retrieval.rs` helpers; measurable via existing hook
-   analytics.
-2. **B2 + C** (materialized Cursor memory rule + proactive storage wording) —
-   one PR in `crates/tracedecay-agent-hosts/src/agents/plugin_bundle.rs`, `crates/tracedecay-agent-hosts/src/agents/cursor.rs`, and plugin
-   rule/skill text (shared skill text under `plugin/skills/`).
+1. **A** (daemon-owned memory and recovery work) — preserve the daemon as the
+   sole authority; hooks may only submit bounded native admissions.
+2. **C** (proactive storage wording) — update user-facing rule and skill text
+   without introducing a hook-local persistence path.
 3. **D** (reflector enablement UX) — config/doctor/dashboard nudge.
 4. **E** (coexistence policy + optional Codex-memories harvest importer).
 5. **F** (generalized AGENTS.md materialization across all 15 agent
