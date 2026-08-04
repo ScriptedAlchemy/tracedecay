@@ -672,7 +672,9 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     });
     writer_held.notified().await;
 
-    engine.spawn_project_server_warmup(handshake, initialize_request);
+    engine
+        .spawn_project_server_warmup(handshake, initialize_request)
+        .await;
     engine.lifecycle.begin_draining();
     let idle_while_writer_held = tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
@@ -1100,6 +1102,30 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         tokio::time::timeout(tokio::time::Duration::from_secs(2), &mut tools_list_task),
     );
 
+    let direct_tool = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "tracedecay_status",
+            "arguments": {"format": "json"}
+        }
+    });
+    let direct_tool_engine = engine.clone();
+    let direct_tool_handshake = handshake.clone();
+    let mut direct_tool_task = tokio::spawn(async move {
+        daemon_round_trip(direct_tool_engine, &direct_tool_handshake, direct_tool).await
+    });
+    let direct_tool_before_warmup = tokio::time::timeout(
+        super::CONTENDED_PROJECT_OPEN_GRACE + tokio::time::Duration::from_millis(250),
+        &mut direct_tool_task,
+    )
+    .await;
+    assert!(
+        direct_tool_before_warmup.is_err(),
+        "a same-route tool call must wait for initialize warmup"
+    );
+
     release_writer.send(()).expect("signal writer gate release");
     blocker.await.expect("writer gate blocker task");
     if initialize_within_bound.is_err() {
@@ -1108,6 +1134,18 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     if tools_list_within_bound.is_err() {
         let _ = tools_list_task.await;
     }
+    let direct_tool_responses = tokio::time::timeout(PHASE_TIMEOUT, &mut direct_tool_task)
+        .await
+        .expect("same-route tool call timed out after warmup")
+        .expect("direct tool client task");
+    let direct_tool_response = direct_tool_responses
+        .iter()
+        .find(|response| response["id"] == json!(3))
+        .expect("direct tool response");
+    assert!(
+        direct_tool_response.get("result").is_some(),
+        "{direct_tool_response}"
+    );
 
     let initialize_responses = initialize_within_bound
         .expect("initialize must not wait for project writer gate")

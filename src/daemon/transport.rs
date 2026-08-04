@@ -3,7 +3,9 @@ use std::fmt;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 #[cfg(unix)]
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -203,12 +205,57 @@ pub enum BrokerListener {
     Tcp(tokio::net::TcpListener),
 }
 
+#[cfg(unix)]
+fn ensure_private_socket_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::metadata(parent).map_err(|error| {
+        config_error(format!(
+            "failed to inspect daemon socket directory '{}': {error}",
+            parent.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(config_error(format!(
+            "daemon socket parent '{}' is not a directory",
+            parent.display()
+        )));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(config_error(format!(
+            "refusing to publish daemon socket '{}' outside a private directory: '{}' has mode {mode:04o}; restrict it to 0700",
+            path.display(),
+            parent.display(),
+        )));
+    }
+    Ok(())
+}
+
 impl BrokerListener {
     pub async fn bind(endpoint: &DaemonEndpoint) -> Result<(Self, DaemonEndpoint)> {
         match endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => {
+                ensure_private_socket_parent(path)?;
                 let listener = tokio::net::UnixListener::bind(path)?;
+                if let Err(error) =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                {
+                    drop(listener);
+                    let cleanup = match std::fs::remove_file(path) {
+                        Ok(()) => String::new(),
+                        Err(cleanup_error) => {
+                            format!("; cleanup also failed: {cleanup_error}")
+                        }
+                    };
+                    return Err(config_error(format!(
+                        "failed to restrict permissions on daemon socket '{}': {error}{cleanup}",
+                        path.display(),
+                    )));
+                }
                 Ok((Self::Unix(listener), endpoint.clone()))
             }
             DaemonEndpoint::Loopback(address) => {
@@ -242,7 +289,39 @@ pub fn default_loopback_endpoint() -> DaemonEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_is_owner_only_when_bind_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = directory.path().join("daemon.sock");
+        let endpoint = DaemonEndpoint::Unix(path.clone());
+
+        let (_listener, _) = BrokerListener::bind(&endpoint).await.unwrap();
+
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_rejects_public_parent_before_publishing_socket() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = directory.path().join("daemon.sock");
+        let endpoint = DaemonEndpoint::Unix(path.clone());
+
+        let Err(error) = BrokerListener::bind(&endpoint).await else {
+            panic!("public socket parent must be rejected");
+        };
+
+        assert!(error.to_string().contains("private directory"), "{error}");
+        assert!(!path.exists());
+    }
 
     #[test]
     fn loopback_endpoint_round_trips_and_rejects_remote_addresses() {

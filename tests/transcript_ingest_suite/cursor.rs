@@ -264,7 +264,7 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
             tmp.path().join("summary-workspace"),
         ),
     ];
-    let _daemon = spawn_tracedecay_daemon(&home);
+    let daemon = spawn_tracedecay_daemon(&home);
 
     let event = serde_json::json!({
         "hook_event_name": "preCompact",
@@ -280,6 +280,7 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     let outcome = cursor_pre_compact_via_daemon(&event.to_string()).await;
     assert_eq!(outcome.status, "ok", "{}", outcome.reason);
     assert_eq!(outcome.summary_nodes_created, 1);
+    drop(daemon);
 
     let db = open_project_session_db(&project).await.unwrap();
     let node_id = outcome
