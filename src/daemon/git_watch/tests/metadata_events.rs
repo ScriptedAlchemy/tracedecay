@@ -6,6 +6,23 @@ use notify::event::EventAttributes;
 
 use super::*;
 
+fn isolated_owner_repo() -> (
+    tempfile::TempDir,
+    crate::config::PinnedUserDataDir,
+    std::path::PathBuf,
+) {
+    let pin = crate::config::PinnedUserDataDir::new();
+    let profile_root = crate::storage::default_profile_root().expect("isolated profile root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+            .expect("secure isolated profile root");
+    }
+    let repo = temp_repo();
+    (repo, pin, profile_root)
+}
+
 #[tokio::test]
 async fn source_file_edit_triggers_no_sync() {
     let repo = temp_repo();
@@ -115,6 +132,24 @@ async fn capacity_overflow_uses_one_shared_scheduler_for_every_project() {
         watcher.inner.overflow_task.lock().await.is_some(),
         "all overflow projects must share one scheduler"
     );
+    tokio::time::timeout(TEST_READY_TIMEOUT, async {
+        loop {
+            let mut covered = true;
+            for repo in [repo_b.path(), repo_c.path()] {
+                let health = watcher.health_value(Some(repo)).await;
+                covered &= health["coverage"] == "degraded_poll"
+                    && health["last_heartbeat"]
+                        .as_u64()
+                        .is_some_and(|beat| beat > 0);
+            }
+            if covered {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the shared overflow scheduler must poll every retained project");
     watcher.shutdown().await;
 }
 
@@ -156,9 +191,8 @@ async fn startup_inventory_registers_existing_linked_worktrees() {
         ],
     );
     let watcher = GitWatcher::new(fast_watch_config());
-    let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
-        return;
-    };
+    watcher.ensure_watching(repo.path()).await;
+    let state = ready_registered_state(&watcher, repo.path()).await;
 
     assert!(
         state.roots().await.contains(&linked),
@@ -202,17 +236,219 @@ async fn first_linked_worktree_is_discovered_from_the_common_parent_event() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn gc_retry_timer_preserves_gc_only_work_without_backstop() {
-    let state = test_watch_state("/repo");
-    state
-        .schedule_retry(DirtyPlan::gc(), Duration::from_secs(1))
-        .await;
+async fn failed_gc_execution_requeues_gc_eligibility() {
+    let repo = temp_repo();
+    let watcher = GitWatcher::new(fast_watch_config());
+    let state = test_watch_state(repo.path());
+    let common = crate::worktree::git_common_dir(repo.path()).expect("git common dir");
 
-    tokio::time::advance(Duration::from_secs(1)).await;
+    execute_plan(&watcher.inner, &state, &common, DirtyPlan::gc()).await;
+
+    tokio::time::advance(SYNC_RETRY_INITIAL).await;
     let plan = state
         .take_due_retry()
         .await
-        .expect("GC retry must survive until the timer fires");
+        .expect("failed GC without a retained graph must remain retry eligible");
     assert!(plan.gc_eligible);
     assert!(!plan.dirty && plan.branches.is_empty());
+}
+
+#[tokio::test]
+async fn backstop_inventory_recovers_a_linked_worktree_missed_by_notify() {
+    let repo = temp_repo();
+    let parent = tempfile::tempdir().unwrap();
+    let linked = parent.path().join("backstop-linked-worktree");
+    let watcher = GitWatcher::new(fast_watch_config());
+    watcher.ensure_watching(repo.path()).await;
+    let state = ready_registered_state(&watcher, repo.path()).await;
+    let task = state.task.lock().await.take().expect("watch task");
+    task.abort();
+    let _ = task.await;
+
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/backstop-inventory",
+            linked.to_str().expect("linked path"),
+        ],
+    );
+    assert!(!state.roots().await.contains(&linked));
+
+    let mut last_gc = Some(Instant::now());
+    backstop::tick(&watcher, &mut last_gc, Duration::from_hours(24)).await;
+
+    assert!(
+        state.roots().await.contains(&linked),
+        "the production backstop must inventory worktrees even when no notify task survives"
+    );
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn deferred_worktree_tracking_retries_to_a_synchronized_store() {
+    let (repo, _pin, profile_root) = isolated_owner_repo();
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "deferred worktree tracking test",
+    )
+    .expect("fixture lifecycle authority");
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "deferred worktree tracking test",
+    )
+    .expect("fixture database authority");
+    let owner = TraceDecay::init_with_exclusive_maintenance(
+        repo.path(),
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: None,
+        },
+        &lifecycle,
+    )
+    .await
+    .expect("initialize retained owner graph");
+    owner.index_all().await.expect("index owner graph");
+    let linked_parent = tempfile::tempdir().unwrap();
+    let worktree = linked_parent.path().join("deferred-worktree");
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/deferred",
+            worktree.to_str().expect("linked path"),
+        ],
+    );
+    let data_root = owner.store_layout().data_root.clone();
+    let sync_lock = crate::tracedecay::try_acquire_sync_lock_at(&data_root.join("sync.lock"))
+        .expect("hold the owner store sync lock");
+
+    let outcome = owner
+        .track_worktree_branch(&worktree, "feature/deferred")
+        .await
+        .expect("deferred tracking outcome");
+    assert_eq!(outcome, crate::branch::BranchAddOutcome::Deferred);
+    assert!(
+        crate::branch_meta::load_branch_meta(&data_root)
+            .is_none_or(|meta| !meta.is_tracked("feature/deferred")),
+        "Deferred must not publish a completed branch receipt"
+    );
+
+    drop(sync_lock);
+    std::fs::write(
+        worktree.join("deferred_retry.rs"),
+        "pub fn deferred_retry_symbol() {}\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-m", "deferred retry"]);
+
+    assert_eq!(
+        owner
+            .track_worktree_branch(&worktree, "feature/deferred")
+            .await
+            .expect("retry tracking"),
+        crate::branch::BranchAddOutcome::Added
+    );
+    let meta =
+        crate::branch_meta::load_branch_meta(&data_root).expect("retry publishes branch metadata");
+    let database = data_root.join(&meta.branches["feature/deferred"].db_file);
+    assert_eq!(
+        rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = 'deferred_retry_symbol'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn linked_head_advance_syncs_through_the_retained_owner_graph() {
+    let (repo, _pin, profile_root) = isolated_owner_repo();
+    let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "linked owner graph test",
+    )
+    .expect("fixture lifecycle authority");
+    let _database_scope = crate::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "linked owner graph test",
+    )
+    .expect("fixture database authority");
+    let owner = TraceDecay::init_with_exclusive_maintenance(
+        repo.path(),
+        crate::tracedecay::TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: None,
+        },
+        &lifecycle,
+    )
+    .await
+    .expect("initialize retained owner graph");
+    owner.index_all().await.expect("index owner graph");
+    let linked_parent = tempfile::tempdir().unwrap();
+    let worktree = linked_parent.path().join("owner-worktree");
+    git(
+        repo.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/owner-refresh",
+            worktree.to_str().expect("linked path"),
+        ],
+    );
+    assert_eq!(
+        owner
+            .track_worktree_branch(&worktree, "feature/owner-refresh")
+            .await
+            .expect("initial worktree tracking"),
+        crate::branch::BranchAddOutcome::Added
+    );
+
+    std::fs::write(
+        worktree.join("owner_refresh.rs"),
+        "pub fn owner_refresh_symbol() {}\n",
+    )
+    .unwrap();
+    git(&worktree, &["add", "."]);
+    git(&worktree, &["commit", "-m", "owner refresh"]);
+
+    assert_eq!(
+        owner
+            .track_worktree_branch(&worktree, "feature/owner-refresh")
+            .await
+            .expect("owner-graph catch-up"),
+        crate::branch::BranchAddOutcome::AlreadyTracked
+    );
+    let data_root = owner.store_layout().data_root.clone();
+    let meta = crate::branch_meta::load_branch_meta(&data_root).expect("linked branch metadata");
+    let database = data_root.join(&meta.branches["feature/owner-refresh"].db_file);
+    assert_eq!(
+        rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = 'owner_refresh_symbol'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
 }

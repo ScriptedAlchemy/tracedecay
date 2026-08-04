@@ -487,9 +487,9 @@ fn currently_watch_limited(repo: &Path) -> bool {
     let Some(common) = crate::worktree::git_common_dir(repo) else {
         return false;
     };
-    let Ok(mut probe) = notify::recommended_watcher(|_res: notify::Result<notify::Event>| {})
-    else {
-        return false;
+    let mut probe = match notify::recommended_watcher(|_res: notify::Result<notify::Event>| {}) {
+        Ok(probe) => probe,
+        Err(error) => return is_watch_limit_error(&error),
     };
     matches!(install_watches(&mut probe, &common), Err(e) if is_watch_limit_error(&e))
 }
@@ -531,7 +531,7 @@ async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Ar
             );
             None
         }
-        Err(_) => panic!("watch task must reach debounce_loop"),
+        Err(error) => panic!("watch task must reach debounce_loop: {error}"),
     }
 }
 
@@ -594,7 +594,7 @@ async fn removed_worktree_snapshot_root_is_pruned() {
     let repo = temp_repo();
     let state = test_watch_state(repo.path());
     let removed = repo.path().join("removed-linked-worktree");
-    state.snapshot_roots.lock().await.insert(removed);
+    state.register_snapshot_root(&removed).await;
 
     state.prune_missing_roots().await;
 

@@ -16,6 +16,8 @@ use super::generation::{GenerationGate, SYNC_RETRY_MAX};
 #[derive(Default)]
 pub(super) struct ProjectHealth {
     pub(super) last_heartbeat: AtomicU64,
+    last_sync: AtomicU64,
+    degraded: AtomicBool,
 }
 
 impl ProjectHealth {
@@ -28,6 +30,28 @@ impl ProjectHealth {
         let heartbeat = self.last_heartbeat.load(Ordering::Relaxed);
         heartbeat == 0 || super::now_secs().saturating_sub(heartbeat) > super::HEARTBEAT_STALE_SECS
     }
+
+    pub(super) fn mark_synced(&self) {
+        self.last_sync.store(super::now_secs(), Ordering::Relaxed);
+    }
+
+    pub(super) fn set_degraded(&self, degraded: bool) {
+        self.degraded.store(degraded, Ordering::Relaxed);
+    }
+
+    pub(super) fn snapshot(&self) -> ProjectHealthSnapshot {
+        ProjectHealthSnapshot {
+            last_heartbeat: self.last_heartbeat.load(Ordering::Relaxed),
+            last_sync: self.last_sync.load(Ordering::Relaxed),
+            degraded: self.degraded.load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub(super) struct ProjectHealthSnapshot {
+    pub(super) last_heartbeat: u64,
+    pub(super) last_sync: u64,
+    pub(super) degraded: bool,
 }
 
 /// Per-project watch state shared between the debounce task and the coordinator.
@@ -110,9 +134,9 @@ impl WatchState {
         roots
     }
 
-    pub(super) async fn register_snapshot_root(&self, root: &Path) {
+    pub(super) async fn register_snapshot_root(&self, root: &Path) -> bool {
         let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        self.snapshot_roots.lock().await.insert(canonical);
+        self.snapshot_roots.lock().await.insert(canonical)
     }
 
     pub(super) async fn prune_missing_roots(&self) {
@@ -258,6 +282,17 @@ impl DirtyPlan {
             branches: HashSet::new(),
             new_worktrees: HashSet::new(),
             gc_eligible: true,
+            worktree_removed: false,
+            reconcile_metadata: false,
+        }
+    }
+
+    pub(super) fn worktrees(new_worktrees: HashSet<String>) -> Self {
+        Self {
+            dirty: false,
+            branches: HashSet::new(),
+            new_worktrees,
+            gc_eligible: false,
             worktree_removed: false,
             reconcile_metadata: false,
         }

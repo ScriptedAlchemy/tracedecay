@@ -41,17 +41,17 @@ impl SnapshotGeneration {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum GenerationErrorKind {
-    RepositoryUnavailable,
-    HeadUnavailable,
-    CommitUnavailable,
+    Repository,
+    Head,
+    Commit,
 }
 
 impl GenerationErrorKind {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
-            Self::RepositoryUnavailable => "repository_unavailable",
-            Self::HeadUnavailable => "head_unavailable",
-            Self::CommitUnavailable => "commit_unavailable",
+            Self::Repository => "repository_unavailable",
+            Self::Head => "head_unavailable",
+            Self::Commit => "commit_unavailable",
         }
     }
 }
@@ -87,39 +87,23 @@ impl fmt::Display for GenerationError {
 
 pub(super) fn snapshot_generation(root: &Path) -> Result<SnapshotGeneration, GenerationError> {
     let canonical = root.canonicalize().map_err(|error| {
-        GenerationError::new(
-            GenerationErrorKind::RepositoryUnavailable,
-            root,
-            error.to_string(),
-        )
+        GenerationError::new(GenerationErrorKind::Repository, root, error.to_string())
     })?;
     let repository = gix::discover(&canonical).map_err(|error| {
         GenerationError::new(
-            GenerationErrorKind::RepositoryUnavailable,
+            GenerationErrorKind::Repository,
             &canonical,
             error.to_string(),
         )
     })?;
     let head = repository.rev_parse_single("HEAD").map_err(|error| {
-        GenerationError::new(
-            GenerationErrorKind::HeadUnavailable,
-            &canonical,
-            error.to_string(),
-        )
+        GenerationError::new(GenerationErrorKind::Head, &canonical, error.to_string())
     })?;
     let object = head.object().map_err(|error| {
-        GenerationError::new(
-            GenerationErrorKind::CommitUnavailable,
-            &canonical,
-            error.to_string(),
-        )
+        GenerationError::new(GenerationErrorKind::Commit, &canonical, error.to_string())
     })?;
     let commit = object.peel_to_commit().map_err(|error| {
-        GenerationError::new(
-            GenerationErrorKind::CommitUnavailable,
-            &canonical,
-            error.to_string(),
-        )
+        GenerationError::new(GenerationErrorKind::Commit, &canonical, error.to_string())
     })?;
 
     Ok(SnapshotGeneration {

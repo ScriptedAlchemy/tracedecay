@@ -101,6 +101,7 @@ pub(super) async fn execute_plan(
                     .await
                 {
                     Ok(true) => {
+                        state.health.mark_synced();
                         log_daemon_event(
                             "git_watch_synced",
                             &[
@@ -379,6 +380,7 @@ pub(super) async fn sync_snapshot(
     if synced {
         match record_success_if_current(&state.sync_gates, generation.clone(), root).await {
             Ok(true) => {
+                state.health.mark_synced();
                 let branch = generation
                     .branch
                     .clone()

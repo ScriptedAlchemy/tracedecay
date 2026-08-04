@@ -23,7 +23,8 @@
 //!   first — no busy polling.
 //! * A single daemon-wide [`Semaphore`] (`max_concurrent_syncs`) gates every
 //!   sync. Per-store single-flight is already provided by the existing sync
-//!   lock; `SyncLock` errors are treated as success (a peer synced).
+//!   lock; deferred lock contention remains retryable and never publishes a
+//!   false successful generation.
 //! * The [`backstop`] timer covers projects whose watcher heartbeat is
 //!   stale/absent, and runs branch-store GC on a daily cadence.
 
@@ -54,10 +55,12 @@ mod generation;
 mod planner;
 #[cfg(test)]
 use generation::{
-    GenerationDecision, ReservationError, SYNC_RETRY_INITIAL, SnapshotGeneration,
+    GenerationDecision, GenerationGate, ReservationError, SYNC_RETRY_INITIAL, SnapshotGeneration,
     snapshot_generation,
 };
 use planner::execute_plan;
+#[cfg(test)]
+use state::DirtySet;
 #[cfg(test)]
 use state::ProjectHealth;
 use state::{DirtyPlan, WatchState};
@@ -229,7 +232,12 @@ impl GitWatcher {
             common_dir,
             self.inner.maintenance.clone(),
         ));
-        register_linked_snapshot_roots(&state).await;
+        let linked_worktrees = inventory_linked_snapshot_roots(&state).await;
+        if !linked_worktrees.is_empty() {
+            state
+                .schedule_retry(DirtyPlan::worktrees(linked_worktrees), Duration::ZERO)
+                .await;
+        }
         projects.insert(key.clone(), Arc::clone(&state));
         drop(projects);
 
@@ -259,7 +267,13 @@ impl GitWatcher {
             self.inner.maintenance.clone(),
             Some(Arc::clone(&self.inner.overflow_wake)),
         ));
-        register_linked_snapshot_roots(&state).await;
+        state.health.set_degraded(true);
+        let linked_worktrees = inventory_linked_snapshot_roots(&state).await;
+        if !linked_worktrees.is_empty() {
+            state
+                .schedule_retry(DirtyPlan::worktrees(linked_worktrees), Duration::ZERO)
+                .await;
+        }
         degraded.insert(key.clone(), Arc::clone(&state));
         drop(degraded);
 
@@ -316,17 +330,95 @@ impl GitWatcher {
             }
         }
     }
+
+    pub(super) async fn health_value(&self, project_root: Option<&Path>) -> serde_json::Value {
+        if !self.inner.enabled {
+            return serde_json::json!({
+                "status": "disabled",
+                "coverage": null,
+                "reason": "auto_watch_disabled",
+            });
+        }
+        let Some(project_root) = project_root else {
+            return serde_json::json!({
+                "status": "unavailable",
+                "coverage": null,
+                "reason": "project_path_missing",
+            });
+        };
+        let canonical = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let key = crate::worktree::git_common_dir(&canonical).unwrap_or_else(|| canonical.clone());
+        let active = self.inner.projects.lock().await.get(&key).cloned();
+        let (state, capacity_degraded) = match active {
+            Some(state) => (Some(state), false),
+            None => (
+                self.inner.degraded_projects.lock().await.get(&key).cloned(),
+                true,
+            ),
+        };
+        let Some(state) = state else {
+            return serde_json::json!({
+                "status": "unavailable",
+                "coverage": null,
+                "reason": "project_not_registered",
+                "watch_identity": key,
+            });
+        };
+        let snapshot = state.health.snapshot();
+        let heartbeat_stale = state.health.heartbeat_stale();
+        let heartbeat_pending = snapshot.last_heartbeat == 0;
+        let degraded =
+            capacity_degraded || snapshot.degraded || (heartbeat_stale && !heartbeat_pending);
+        serde_json::json!({
+            "status": if degraded {
+                "degraded"
+            } else if heartbeat_pending {
+                "starting"
+            } else {
+                "healthy"
+            },
+            "coverage": if capacity_degraded || snapshot.degraded {
+                "degraded_poll"
+            } else {
+                "active"
+            },
+            "reason": if capacity_degraded {
+                Some("watch_capacity_reached")
+            } else if snapshot.degraded {
+                Some("watcher_unavailable")
+            } else if heartbeat_pending {
+                Some("heartbeat_pending")
+            } else if heartbeat_stale {
+                Some("heartbeat_stale")
+            } else {
+                None
+            },
+            "watch_identity": key,
+            "project_root": canonical,
+            "snapshot_roots": state.roots().await,
+            "last_heartbeat": snapshot.last_heartbeat,
+            "last_sync": snapshot.last_sync,
+            "heartbeat_stale": heartbeat_stale,
+            "retry_pending": state.retry_deadline().await.is_some(),
+        })
+    }
 }
 
-async fn register_linked_snapshot_roots(state: &WatchState) {
+async fn inventory_linked_snapshot_roots(state: &WatchState) -> std::collections::HashSet<String> {
     let Some(common) = state.common_dir.as_deref() else {
-        return;
+        return std::collections::HashSet::new();
     };
+    let mut new_worktrees = std::collections::HashSet::new();
     for name in store_maintenance::linked_worktree_names(common) {
-        if let Some((root, _branch)) = store_maintenance::resolve_worktree(common, &name) {
-            state.register_snapshot_root(&root).await;
+        if let Some((root, _branch)) = store_maintenance::resolve_worktree(common, &name)
+            && state.register_snapshot_root(&root).await
+        {
+            new_worktrees.insert(name);
         }
     }
+    new_worktrees
 }
 
 #[cfg(test)]
@@ -401,6 +493,7 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let Some(common_dir) = state.common_dir.clone() else {
         // Not a resolvable git repo (yet). Degrade to polling so a later `git
         // init` / clone is still eventually covered.
+        state.health.set_degraded(true);
         degraded_poll_loop(&inner, &state).await;
         return;
     };
@@ -417,6 +510,7 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     let mut watcher = match watcher {
         Ok(w) => w,
         Err(e) => {
+            state.health.set_degraded(true);
             log_daemon_event(
                 "git_watch_degraded",
                 &[
@@ -431,6 +525,7 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
     };
 
     if let Err(e) = install_watches(&mut watcher, &common_dir) {
+        state.health.set_degraded(true);
         log_daemon_event(
             "git_watch_degraded",
             &[
@@ -443,6 +538,7 @@ async fn project_task(inner: Arc<GitWatcherInner>, state: Arc<WatchState>) {
         return;
     }
 
+    state.health.set_degraded(false);
     state.health.beat();
 
     Box::pin(debounce_loop(&inner, &state, &common_dir, &mut watcher)).await;
@@ -809,7 +905,11 @@ mod backstop {
         }
     }
 
-    async fn tick(watcher: &GitWatcher, last_gc: &mut Option<Instant>, gc_period: Duration) {
+    pub(super) async fn tick(
+        watcher: &GitWatcher,
+        last_gc: &mut Option<Instant>,
+        gc_period: Duration,
+    ) {
         let interval_secs = watcher
             .inner
             .config
@@ -841,6 +941,20 @@ mod backstop {
         let mut gc_retry_needed = false;
 
         for (_watch_identity, state) in &entries {
+            let linked_worktrees = inventory_linked_snapshot_roots(state).await;
+            if !linked_worktrees.is_empty() {
+                let common = state
+                    .common_dir
+                    .as_deref()
+                    .unwrap_or(state.project_root.as_path());
+                execute_plan(
+                    &watcher.inner,
+                    state,
+                    common,
+                    DirtyPlan::worktrees(linked_worktrees),
+                )
+                .await;
+            }
             for root in state.roots().await {
                 let retained_graph = retained_project_graph(&watcher.inner, &root).await;
                 let store_stale = match retained_graph.as_deref() {

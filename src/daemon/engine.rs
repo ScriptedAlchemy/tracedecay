@@ -164,6 +164,13 @@ impl DaemonEngine {
         self
     }
 
+    pub(super) async fn git_watcher_health(
+        &self,
+        project_root: Option<&Path>,
+    ) -> serde_json::Value {
+        self.git_watcher.health_value(project_root).await
+    }
+
     pub(super) fn with_maintenance_coordinator(
         mut self,
         coordinator: maintenance::MaintenanceCoordinator,
