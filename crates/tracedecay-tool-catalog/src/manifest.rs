@@ -408,6 +408,7 @@ pub enum TerminalState {
     Cancelled,
     TimedOut,
     Failed,
+    Unavailable,
     EffectUnknown,
     Partial,
 }

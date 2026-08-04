@@ -145,6 +145,10 @@ fn incomplete_read_projection(
             (ContextCoverage::Unavailable, ContextProducerState::TimedOut)
         }
         OperationTermination::Failed => (ContextCoverage::Failed, ContextProducerState::Failed),
+        OperationTermination::Unavailable => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Unavailable,
+        ),
         OperationTermination::EffectUnknown => (
             ContextCoverage::Unavailable,
             ContextProducerState::Unavailable,
@@ -2358,6 +2362,11 @@ fn test_run_projection(
         OperationTermination::Failed => {
             (ContextCoverage::Failed, ContextProducerState::Failed, false)
         }
+        OperationTermination::Unavailable => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Unavailable,
+            false,
+        ),
         OperationTermination::EffectUnknown => (
             ContextCoverage::Unavailable,
             ContextProducerState::Unavailable,

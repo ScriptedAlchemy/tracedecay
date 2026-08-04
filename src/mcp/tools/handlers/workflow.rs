@@ -604,12 +604,11 @@ where
     let run_args = RunAffectedArgs::parse(&args);
     let project_root = cg.project_root().to_path_buf();
 
-    // 1) Resolve changed paths — explicit list, or fall back to `git diff`.
-    let changed_paths =
-        match resolve_changed_paths(&args, &project_root, run_args.explicit_paths).await {
-            Ok(paths) => paths,
-            Err(result) => return Ok(result),
-        };
+    // The caller's manifest is the authority for the affected-test scope.
+    let changed_paths = match resolve_changed_paths(&args, run_args.explicit_paths) {
+        Ok(paths) => paths,
+        Err(result) => return Ok(result),
+    };
     if changed_paths.is_empty() {
         return Ok(empty_result(&args, "no changed files detected"));
     }
@@ -937,16 +936,18 @@ fn test_run_contract_error(error: impl std::fmt::Display) -> TraceDecayError {
     }
 }
 
-async fn resolve_changed_paths(
+fn resolve_changed_paths(
     args: &Value,
-    project_root: &Path,
     explicit_paths: Option<Vec<String>>,
 ) -> std::result::Result<Vec<String>, ToolResult> {
     match explicit_paths {
         Some(paths) => Ok(paths),
-        None => git_changed_paths(project_root)
-            .await
-            .map_err(|message| error_result(args, "git", "diff", &message)),
+        None => Err(error_result(
+            args,
+            "invalid_request",
+            "changed_paths",
+            "`changed_paths` is required and must explicitly scope the affected-test run",
+        )),
     }
 }
 
@@ -1163,28 +1164,6 @@ fn tail(s: &str, n: usize) -> String {
         start += 1;
     }
     s[start..].to_string()
-}
-
-/// Returns files changed in the working tree relative to HEAD (`git diff
-/// --name-only HEAD`).
-async fn git_changed_paths(
-    project_root: &std::path::Path,
-) -> std::result::Result<Vec<String>, String> {
-    let output = Command::new(crate::git::git_program())
-        .args(["diff", "--name-only", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .await
-        .map_err(|e| format!("failed to spawn git diff: {e}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git diff failed: {}", stderr.trim()));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect())
 }
 
 /// Parses libtest stdout for `test <name> ... ok` / `... FAILED` lines.

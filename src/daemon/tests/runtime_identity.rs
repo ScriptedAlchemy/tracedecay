@@ -71,6 +71,85 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
         linked_graph.db().retained_runtime().runtime_identity(),
         "linked worktree facades must share one physical store runtime"
     );
+    assert_eq!(
+        primary_graph
+            .db()
+            .retained_runtime()
+            .publication()
+            .publication_id,
+        linked_graph
+            .db()
+            .retained_runtime()
+            .publication()
+            .publication_id,
+        "linked worktrees must share one registry publication, not merely one facade slot"
+    );
+    assert!(
+        matches!(
+            primary_graph
+                .db()
+                .retained_runtime()
+                .binding()
+                .shard_id
+                .scope,
+            tracedecay_store::StoreShardScopeV1::Project { .. }
+        ),
+        "the mutable graph writer must be owned by project identity; worktree identity is snapshot provenance"
+    );
+
+    primary_graph
+        .db()
+        .execute_write_batch(
+            "seed linked-worktree writer queue",
+            "CREATE TABLE linked_writer_queue(value INTEGER NOT NULL);
+             INSERT INTO linked_writer_queue(value) VALUES (0);",
+        )
+        .await
+        .expect("seed writer queue");
+    let held = primary_graph
+        .db()
+        .begin_write_transaction("hold linked-worktree writer")
+        .await
+        .expect("hold canonical writer");
+    held.execute("UPDATE linked_writer_queue SET value = 1", ())
+        .await
+        .expect("update held transaction");
+
+    let waiting_database = linked_graph.db().clone();
+    let waiting = tokio::spawn(async move {
+        let transaction = waiting_database
+            .begin_write_transaction("cancel queued linked-worktree writer")
+            .await?;
+        drop(transaction);
+        Ok::<(), crate::errors::TraceDecayError>(())
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !waiting.is_finished(),
+        "the second linked-worktree write must queue on the canonical writer lane"
+    );
+    waiting.abort();
+    match waiting.await {
+        Err(error) => assert!(
+            error.is_cancelled(),
+            "queued write cancellation must be terminal"
+        ),
+        Ok(_) => panic!("queued write must be cancelled"),
+    }
+    drop(held);
+    let recovered = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        linked_graph
+            .db()
+            .begin_write_transaction("write after linked-worktree cancellation"),
+    )
+    .await
+    .expect("canonical writer lane must recover within the shutdown budget")
+    .expect("writer after cancellation");
+    recovered
+        .commit()
+        .await
+        .expect("commit after queued cancellation");
     let primary_key =
         ProjectServerKey::from_open_project(&primary_graph, &primary_handshake).unwrap();
     {
@@ -102,5 +181,7 @@ async fn concurrent_same_identity_worktrees_keep_exact_server_and_scheduler_bind
             .is_none(),
         "linked route must not acquire a second enrollment marker"
     );
-    engine.shutdown_all().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.shutdown_all())
+        .await
+        .expect("linked-worktree shutdown must remain bounded");
 }
