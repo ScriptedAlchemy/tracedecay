@@ -172,7 +172,7 @@ pub(super) async fn ensure_registered_project_route(
 /// existing store is required to be present on disk, so an ambient directory
 /// (a bare `$HOME`, a checkout whose store really is gone) is still rejected
 /// and no path-derived authority is minted here.
-fn durable_enrollment_resolves_existing_store(
+pub(super) fn durable_enrollment_resolves_existing_store(
     store_administration: &StoreAdministration,
     project_path: &Path,
 ) -> bool {

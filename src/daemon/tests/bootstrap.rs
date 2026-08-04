@@ -414,7 +414,7 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn same_identity_worktree_and_primary_register_one_project_authority() {
+async fn linked_route_reuses_primary_authority_while_shadow_writer_is_held() {
     let home = TempDir::new().expect("isolated home");
     let root = home.path().canonicalize().expect("canonical home");
     let primary = root.join("primary");
@@ -456,10 +456,30 @@ async fn same_identity_worktree_and_primary_register_one_project_authority() {
         .project_server(&primary_handshake)
         .await
         .expect("primary project must open");
-    let linked_server = engine
-        .project_server(&linked_handshake)
-        .await
-        .expect("linked worktree must reuse the primary authority");
+
+    let blocker_administration = engine.store_administration.clone();
+    let writer_held = Arc::new(tokio::sync::Notify::new());
+    let writer_held_by_blocker = Arc::clone(&writer_held);
+    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
+    let blocker = tokio::spawn(async move {
+        blocker_administration
+            .with_writer(|| async move {
+                writer_held_by_blocker.notify_one();
+                writer_release.await.expect("release shadow writer");
+            })
+            .await;
+    });
+    writer_held.notified().await;
+
+    let linked_server = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        engine.project_server(&linked_handshake),
+    )
+    .await
+    .expect("linked worktree must not wait on shadow writer administration")
+    .expect("linked worktree must reuse the primary authority without shadow admission");
+    release_writer.send(()).expect("release shadow writer");
+    blocker.await.expect("shadow writer blocker joins");
 
     assert!(
         Arc::ptr_eq(&primary_server, &linked_server),
