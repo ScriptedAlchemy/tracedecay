@@ -29,7 +29,16 @@ pub struct PrAutotrackTask {
 impl PrAutotrackTask {
     pub async fn shutdown(self) {
         self.cancellation.cancel();
-        let _ = self.task.await;
+        if let Err(error) = self.task.await {
+            log_daemon_event(
+                "pr_autotrack",
+                &[
+                    ("action", "shutdown".to_string()),
+                    ("outcome", "task_join_failed".to_string()),
+                    ("reason", error.to_string()),
+                ],
+            );
+        }
     }
 }
 
