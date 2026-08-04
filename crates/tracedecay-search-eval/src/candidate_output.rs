@@ -2642,6 +2642,7 @@ fn publish_corpus_with_scale(
         worktree: None,
         reference: None,
         source_revision: None,
+        source_tree: None,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.candidate.v1")?],
         content_identity: id(&canonical_sha256(&(
@@ -3118,6 +3119,7 @@ fn prove_cancellation(
         worktree: None,
         reference: None,
         source_revision: None,
+        source_tree: None,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.candidate.v1")?,
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.cancel")?],
         content_identity: content_digest(&bytes),

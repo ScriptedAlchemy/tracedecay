@@ -2189,6 +2189,7 @@ mod tests {
                 worktree: None,
                 reference: None,
                 source_revision: None,
+                source_tree: None,
                 sanitizer_revision: id("sanitizer.v1"),
                 sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.fixture")],
                 content_identity: content_digest(bytes),

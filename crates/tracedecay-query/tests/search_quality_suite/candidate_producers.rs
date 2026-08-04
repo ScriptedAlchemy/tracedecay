@@ -252,6 +252,7 @@ fn admitted_rust_chunk(
             worktree: None,
             reference: None,
             source_revision: None,
+            source_tree: None,
             sanitizer_revision: sanitizer_revision.clone(),
             sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.fixture")],
             content_identity: content_digest(source.as_bytes()),

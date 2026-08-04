@@ -544,6 +544,7 @@ mod tests {
                 worktree,
                 reference: None,
                 source_revision: None,
+                source_tree: None,
                 sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
                 sanitization_receipts: vec![
                     SanitizationReceiptId::new("receipt.fixture").expect("valid id"),
@@ -692,6 +693,7 @@ mod tests {
                     worktree: None,
                     reference: None,
                     source_revision: None,
+                    source_tree: None,
                     sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid id"),
                     sanitization_receipts: vec![
                         SanitizationReceiptId::new("receipt.fixture").expect("valid id"),

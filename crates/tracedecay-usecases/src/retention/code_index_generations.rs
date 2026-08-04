@@ -26,6 +26,7 @@ use tracedecay_code_index::production::SEALED_GENERATION_FORMAT_REVISION_V1;
 use tracedecay_domain::{CodeGenerationId, UtcMicros, canonical_sha256};
 
 pub const DEFAULT_SUPERSEDED_GENERATION_FLOOR: usize = 3;
+pub const MAX_DURABLE_GENERATION_INDEX_ENTRIES_V1: usize = 256;
 
 /// How long a code-index scope root must have been untouched before it can be
 /// classified as stranded and collected. A worktree can be unmounted, moved, or
@@ -71,6 +72,23 @@ struct SealedGenerationSealMetadataV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct DurableGenerationIndexEntryV1 {
+    pub generation_id: String,
+    pub repository: String,
+    pub worktree: Option<String>,
+    pub source_reference: Option<String>,
+    pub snapshot_content_identity: String,
+    pub sealed_at_micros: i64,
+    pub generation_file: String,
+    pub state_digest: String,
+    /// Present only for a clean native-Git snapshot captured by the index run.
+    pub source_revision: Option<String>,
+    /// Exact commit-tree identity paired with `source_revision`.
+    pub source_tree: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DurablePublicationPointerV1 {
     pub generation_id: String,
     pub snapshot_content_identity: String,
@@ -78,6 +96,10 @@ pub struct DurablePublicationPointerV1 {
     pub sealed_at_micros: i64,
     pub generation_file: String,
     pub state_digest: String,
+    /// Bounded content-addressed lookup authority, oldest first.
+    pub generation_index: Vec<DurableGenerationIndexEntryV1>,
+    /// True after an older entry was evicted at the durable capacity bound.
+    pub generation_index_truncated: bool,
 }
 
 #[derive(Debug, Error)]
@@ -2074,6 +2096,8 @@ mod tests {
             sealed_at_micros: i64::try_from(count - 1).expect("fixture sequence fits i64"),
             generation_file: active.file.clone(),
             state_digest: active.state_digest.clone(),
+            generation_index: Vec::new(),
+            generation_index_truncated: false,
         };
         std::fs::write(
             store.path().join(ACTIVE_POINTER_FILE),

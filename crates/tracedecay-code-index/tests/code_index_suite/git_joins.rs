@@ -53,6 +53,7 @@ fn generation(
         worktree: Some(id("worktree.fixture")),
         reference: Some(id("ref.main")),
         source_revision: Some(id("commit.fixture")),
+        source_tree: Some(id("tree.fixture")),
         sanitizer_revision: id("sanitizer.v1"),
         sanitization_receipts: vec![id("receipt.fixture")],
         content_identity: content('f'),
