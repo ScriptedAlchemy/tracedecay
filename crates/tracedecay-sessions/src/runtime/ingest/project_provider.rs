@@ -10,7 +10,7 @@ use crate::runtime::shared::TranscriptIngestStats;
 use crate::runtime::source::{TranscriptDiscoveryBounds, TranscriptSource};
 use crate::runtime::{
     SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
-    hermes, kiro, vibe,
+    hermes, kimi, kiro, opencode, vibe,
 };
 
 use super::failure::{
@@ -21,6 +21,8 @@ use super::failure::{
 pub(super) const PROJECT_CATCH_UP_PROVIDERS: &[SessionProvider] = &[
     SessionProvider::Codex,
     SessionProvider::Kiro,
+    SessionProvider::Kimi,
+    SessionProvider::OpenCode,
     SessionProvider::Cline,
     SessionProvider::RooCode,
     SessionProvider::Kilo,
@@ -58,6 +60,8 @@ impl<'a> ProjectProviderRun<'a> {
             match self.candidate {
                 SessionProvider::Codex => self.run_codex().await,
                 SessionProvider::Kiro => self.run_kiro().await,
+                SessionProvider::Kimi => self.run_kimi().await,
+                SessionProvider::OpenCode => self.run_opencode().await,
                 SessionProvider::Cline | SessionProvider::RooCode | SessionProvider::Kilo => {
                     self.run_cline_like().await
                 }
@@ -148,6 +152,67 @@ impl<'a> ProjectProviderRun<'a> {
                     "observation",
                     &error,
                     "project Kiro observation catch-up failed",
+                ),
+                0,
+            ),
+        }
+    }
+
+    async fn run_kimi(self) -> ProviderRunOutcome {
+        let Some(source) = kimi::KimiSource::new() else {
+            return ProviderRunOutcome::skipped();
+        };
+        match kimi::capture_kimi_observations(
+            self.facade,
+            &source,
+            self.project_root,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                TranscriptIngestStats::default(),
+                outcome.bytes_consumed,
+                outcome.deferred,
+            ),
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "kimi",
+                    "observation",
+                    &error,
+                    "project Kimi observation catch-up failed",
+                ),
+                0,
+            ),
+        }
+    }
+
+    async fn run_opencode(self) -> ProviderRunOutcome {
+        let Some(source) = opencode::OpenCodeSource::new_for_project(self.project_root) else {
+            return ProviderRunOutcome::skipped();
+        };
+        match opencode::capture_opencode_observations(
+            self.facade,
+            &source,
+            self.scope.clone(),
+            Some(self.max_new_bytes),
+            self.cancellation,
+        )
+        .await
+        {
+            Ok(outcome) => ProviderRunOutcome::bounded(
+                outcome.stats,
+                outcome.bytes_consumed,
+                outcome.deferred_by_byte_cap,
+            ),
+            Err(error) => ProviderRunOutcome::failed(
+                warn_transcript_catch_up_failure(
+                    "opencode",
+                    "observation",
+                    &error,
+                    "project OpenCode observation catch-up failed",
                 ),
                 0,
             ),
@@ -360,7 +425,25 @@ async fn ingest_project_claude_observations(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_CODEX_SOURCE_FAILURES_PER_PASS, codex_source_failure_saturates_pass};
+    use crate::runtime::SessionProvider;
+
+    use super::{
+        MAX_CODEX_SOURCE_FAILURES_PER_PASS, PROJECT_CATCH_UP_PROVIDERS,
+        codex_source_failure_saturates_pass,
+    };
+
+    #[test]
+    fn project_catch_up_schedules_every_final_host() {
+        for provider in [
+            SessionProvider::Claude,
+            SessionProvider::Codex,
+            SessionProvider::Cursor,
+            SessionProvider::Kimi,
+            SessionProvider::OpenCode,
+        ] {
+            assert!(PROJECT_CATCH_UP_PROVIDERS.contains(&provider));
+        }
+    }
 
     #[test]
     fn codex_source_failures_bound_each_provider_pass() {

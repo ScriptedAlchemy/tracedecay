@@ -202,13 +202,11 @@ pub(crate) async fn handle_status(
                                 })
                             });
                         // `session_ingest` stays cursor-scoped so it keeps matching the
-                        // doctor-owned `cursor_session_ingest` signal, but a stalled
-                        // backlog on any provider still starves recall, so the warning
-                        // is measured across every tracked transcript.
-                        if let Some(warning) =
-                            stalled_session_ingest_warning(db, cg.project_root()).await
-                        {
-                            output["session_ingest_warning"] = json!(warning);
+                        // doctor-owned signal. Historical catch-up is measured across
+                        // providers and remains explicitly partial while the retained
+                        // daemon authority drains its bounded backlog.
+                        if let Some(catch_up) = historical_session_catch_up(db).await {
+                            output["session_history_catch_up"] = catch_up;
                         }
                     }
                     Err(error) => {
@@ -260,34 +258,35 @@ pub(crate) async fn handle_status(
     ))
 }
 
-/// Warns when any provider's transcript backlog has outgrown what automatic
-/// catch-up drains, so recall gaps are reported instead of read as healthy.
-async fn stalled_session_ingest_warning(
-    db: &RegisteredGlobalDb,
-    project_root: &Path,
-) -> Option<String> {
-    const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+/// Reports daemon-owned historical warming when any provider's backlog exceeds
+/// the ordinary catch-up threshold, so partial recall is never read as current.
+async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
     match db.session_ingest_health_for_provider(None).await {
-        Ok(ingest) => (ingest.max_transcript_pending_bytes > THRESHOLD)
-            .then(|| session_ingest_warning(&ingest, project_root)),
-        Err(error) => Some(format!(
-            "session transcript ingest backlog could not be measured across providers: {error}"
-        )),
+        Ok(ingest) => historical_session_catch_up_state(&ingest),
+        Err(error) => Some(json!({
+            "status": "unavailable",
+            "coverage": "unknown",
+            "authority": "daemon",
+            "reason": "historical_backlog_measurement_failed",
+            "message": error,
+        })),
     }
 }
 
-fn session_ingest_warning(ingest: &SessionIngestHealth, project_root: &Path) -> String {
-    format!(
-        "session transcript ingest looks stalled: a transcript has {} \
-         un-ingested bytes ({} total across {} transcript(s)), exceeding \
-         the automatic catch-up warning threshold — session recall is missing \
-         those turns. Run `tracedecay sessions ingest --project-path {}` \
-         to drain the backlog manually.",
-        ingest.max_transcript_pending_bytes,
-        ingest.pending_bytes,
-        ingest.pending_transcripts,
-        project_root.display()
-    )
+fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
+    const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
+    (ingest.max_transcript_pending_bytes > THRESHOLD).then(|| {
+        json!({
+            "status": "warming",
+            "coverage": "partial",
+            "authority": "daemon",
+            "reason": "historical_transcript_backlog",
+            "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
+            "pending_bytes": ingest.pending_bytes,
+            "pending_transcripts": ingest.pending_transcripts,
+            "message": "Historical session recall is partially available while the daemon continues bounded background catch-up.",
+        })
+    })
 }
 
 fn render_status_md(value: &Value) -> String {
@@ -332,6 +331,30 @@ fn render_status_md(value: &Value) -> String {
         }
     }
     md.render()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::global_db::SessionIngestHealth;
+
+    use super::historical_session_catch_up_state;
+
+    #[test]
+    fn historical_backlog_is_typed_daemon_owned_warming() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth {
+            pending_transcripts: 2,
+            pending_bytes: 12_000_000,
+            max_transcript_pending_bytes:
+                crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES + 1,
+            ..SessionIngestHealth::default()
+        })
+        .expect("backlog exceeds threshold");
+
+        assert_eq!(state["status"], "warming");
+        assert_eq!(state["coverage"], "partial");
+        assert_eq!(state["authority"], "daemon");
+        assert!(!state.to_string().contains("sessions ingest"));
+    }
 }
 fn active_project_context(
     cg: &TraceDecay,
