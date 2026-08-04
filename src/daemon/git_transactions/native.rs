@@ -262,36 +262,35 @@ impl NativeGitIndexPreviewAssembler {
         snapshot_digest: &ManifestDigest,
         runner: &FixedGitIndexRunner,
     ) -> Result<Vec<ValidatedIndexPatch>, GitIndexTransactionPortError> {
-        let scope = match operation {
-            GitIndexTransactionOperationV1::StageHunks => GitDiffScopeV1::WorkingTree,
-            GitIndexTransactionOperationV1::UnstageHunks => GitDiffScopeV1::Staged,
+        let (scope, direction) = match operation {
+            GitIndexTransactionOperationV1::StageHunks => (
+                GitDiffScopeV1::WorkingTree,
+                tracedecay_domain::HunkDirectionV1::WorkingTreeToIndex,
+            ),
+            GitIndexTransactionOperationV1::UnstageHunks => (
+                GitDiffScopeV1::Staged,
+                tracedecay_domain::HunkDirectionV1::IndexToHead,
+            ),
             GitIndexTransactionOperationV1::CommitIndex => return Ok(Vec::new()),
         };
-        let current_refs = self
-            .read_authority()
-            .hunk_refs(&scope, preview_id, snapshot_digest)
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let mut current_hunks = Vec::with_capacity(selected_hunks.len());
-        for requested in selected_hunks {
-            let requested_digest = requested
-                .compute_digest()
+        for hunk in selected_hunks {
+            hunk.compute_digest()
                 .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-            let current = current_refs
-                .iter()
-                .find(|reference| {
-                    reference
-                        .compute_digest()
-                        .is_ok_and(|digest| digest == requested_digest)
-                })
-                .ok_or(GitIndexTransactionPortError::StalePreview)?;
-            if current != requested {
+            if hunk.repository != self.repository_id
+                || hunk.worktree != self.worktree_id
+                || hunk.direction != direction
+                || hunk.preview_id != preview_id
+                || &hunk.snapshot_digest != snapshot_digest
+            {
                 return Err(GitIndexTransactionPortError::StalePreview);
             }
-            current_hunks.push(current.clone());
         }
-        let patches = extract_patches(runner, &scope, &current_hunks)?
+        runner
+            .verify_hunks(&selected_hunks.iter().collect::<Vec<_>>())
+            .map_err(map_native_error)?;
+        let patches = extract_patches(runner, &scope, selected_hunks)?
             .into_iter()
-            .zip(current_hunks)
+            .zip(selected_hunks.iter().cloned())
             .map(|(bytes, hunk)| ValidatedIndexPatch::new(hunk, bytes).map_err(map_native_error))
             .collect::<Result<Vec<_>, _>>()?;
         let mut keyed = patches
@@ -2358,7 +2357,7 @@ mod tests {
     }
 
     #[test]
-    fn hunk_freshness_process_count_is_independent_of_selected_file_count() {
+    fn hunk_materialization_process_count_is_independent_of_selected_file_count() {
         let (directory, assembler, runner) = repository_fixture();
         for file in 1..8 {
             fs::write(
@@ -2390,18 +2389,25 @@ mod tests {
             )
             .expect("current hunk refs");
         assert_eq!(hunks.len(), 8, "fixture has one hunk per changed file");
-        let one = runner
-            .verify_hunks_for_test(&[&hunks[0]])
-            .expect("verify one hunk");
-        let all = hunks.iter().collect::<Vec<_>>();
-        let many = runner
-            .verify_hunks_for_test(&all)
-            .expect("verify all hunks");
-
-        assert_eq!(one, 3, "stage freshness is three batched Git reads");
+        let materialize = |hunks: &[tracedecay_domain::HunkRefV1]| {
+            runner.reset_spawned_command_count();
+            assembler
+                .materialize_selected_patches(
+                    GitIndexTransactionOperationV1::StageHunks,
+                    "git-index-preview.batched-freshness",
+                    hunks,
+                    &snapshot_digest,
+                    &runner,
+                )
+                .expect("materialize hunks");
+            runner.spawned_command_count()
+        };
+        let one_process_count = materialize(&hunks[..1]);
+        let many_process_count = materialize(&hunks);
+        assert_eq!(one_process_count, 4);
         assert_eq!(
-            many, one,
-            "freshness process count must not scale with hunk or file count"
+            many_process_count, one_process_count,
+            "materialization process count must not scale with hunk or file count"
         );
     }
 
@@ -2622,9 +2628,6 @@ mod tests {
         );
     }
 
-    /// Portable stand-in for macOS `/tmp` → `/private/tmp`: capture through a
-    /// symlink alias must mint the same snapshot the daemon recaptures from
-    /// the canonical root. Exact CAS stays strict — content drift still fails.
     #[cfg(unix)]
     #[test]
     fn snapshot_capture_agrees_across_symlink_repository_root_aliases() {
@@ -2670,9 +2673,6 @@ mod tests {
             "fixture must exercise a non-canonical alias path"
         );
 
-        // Daemon-mounted assembler stores the canonical root; caller snapshot
-        // arrived via the alias. Recapture must compare equal without loosening
-        // PartialEq.
         let daemon_assembler = NativeGitIndexPreviewAssembler::new(
             directory.path().canonicalize().expect("canonical root"),
             project_id,

@@ -189,14 +189,21 @@ impl FixedGitIndexRunner {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn verify_hunks_for_test(
+    pub(crate) fn verify_hunks(
         &self,
         hunks: &[&tracedecay_domain::HunkRefV1],
-    ) -> Result<usize, NativeGitIndexError> {
+    ) -> Result<(), NativeGitIndexError> {
+        self.process.verify_hunks(&self.repository_root, hunks)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reset_spawned_command_count(&self) {
         self.process.reset_spawned_command_count();
-        self.process.verify_hunks(&self.repository_root, hunks)?;
-        Ok(self.process.spawned_command_count())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn spawned_command_count(&self) -> usize {
+        self.process.spawned_command_count()
     }
 
     pub(crate) fn diff_patch<I, P>(
@@ -712,8 +719,7 @@ impl FixedGitIndexRunner {
         if expected != actual? {
             return Err(NativeGitIndexError::PatchDoesNotMatchHunk);
         }
-        self.process.verify_hunks(
-            &self.repository_root,
+        self.verify_hunks(
             &patches
                 .iter()
                 .map(ValidatedIndexPatch::hunk)
