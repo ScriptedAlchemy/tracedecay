@@ -25,20 +25,7 @@ use crate::sessions::{
 
 const UNIX_TIMESTAMP_MILLIS_THRESHOLD: i64 = 1_000_000_000_000;
 
-/// Scopes a `tracedecay_message_search` to the agent transcripts of one
-/// workflow run, mirroring `GitScopeFilter` as a search-only concern. The run's
-/// messages are the messages of its agents (rows in `workflow_agents`); see
-/// [`GlobalDb::search_session_messages_workflow_scoped`] for the EXISTS
-/// pushdown. Serializes so the applied filter echoes cleanly into the payload.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct WorkflowScopeFilter {
-    /// The `wf_*` run whose agents' messages to keep.
-    pub run_id: String,
-    /// When set, narrows the scope to just this one agent of the run
-    /// (matched on `workflow_agents.agent_label`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_label: Option<String>,
-}
+pub use tracedecay_sessions::runtime::workflow_index::WorkflowScopeFilter;
 
 /// Total savings + call count for a project (or all projects when `project` is None).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -290,14 +277,7 @@ pub struct ParseOffset {
     pub file_id: u64,
 }
 
-/// One transcript session plus its parsed messages, for multi-session batch
-/// upserts from SQLite-backed stores where a single store file holds every
-/// session (e.g. Hermes `state.db`).
-#[derive(Debug, Clone)]
-pub struct TranscriptBatch {
-    pub session: SessionRecord,
-    pub messages: Vec<SessionMessageRecord>,
-}
+pub use tracedecay_sessions::runtime::hermes::TranscriptBatch;
 
 /// Whether a transcript batch writes the full dual store (LCM raw + searchable
 /// projection) or only the `session_messages` projection.
@@ -1443,7 +1423,7 @@ impl GlobalDb {
     pub async fn run_structured_backfill(&self) -> Option<u64> {
         crate::sessions::transcript_backfill::backfill_structured_rows(self)
             .await
-            .map(|stats| stats.inserted)
+            .map(|stats| stats.inserted())
     }
 
     /// Transcript-ingest backlog for the session store backing this DB.

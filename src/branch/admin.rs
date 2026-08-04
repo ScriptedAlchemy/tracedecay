@@ -496,32 +496,6 @@ fn acquire_branch_add_lock_blocking_with(
     )
 }
 
-fn branch_db_family_paths(db_path: &Path) -> [PathBuf; 3] {
-    let mut wal = db_path.to_path_buf();
-    wal.set_extension("db-wal");
-    let mut shm = db_path.to_path_buf();
-    shm.set_extension("db-shm");
-    [db_path.to_path_buf(), wal, shm]
-}
-
-pub(super) fn remove_branch_db_files_checked(db_path: &Path) -> crate::errors::Result<()> {
-    for path in branch_db_family_paths(db_path) {
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(crate::errors::TraceDecayError::Config {
-                    message: format!(
-                        "failed to delete branch store file '{}': {error}",
-                        path.display()
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
 pub(super) fn select_orphan_dbs(
     tracedecay_dir: &Path,
     referenced: &std::collections::HashSet<PathBuf>,

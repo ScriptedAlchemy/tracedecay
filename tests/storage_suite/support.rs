@@ -28,9 +28,11 @@ pub static HOME_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new
 fn template_hash(name: &str, builder_fingerprint: &[u8]) -> u64 {
     let unsafe_fast = std::env::var(tracedecay::db::SQLITE_UNSAFE_FAST_ENV).unwrap_or_default();
     let mut hash = 0xcbf29ce484222325_u64;
-    for byte in include_bytes!("../../src/db/migrations.rs")
+    for byte in include_bytes!("../../crates/tracedecay-runtime-core/src/db/migrations.rs")
         .iter()
-        .chain(include_bytes!("../../src/db/connection.rs"))
+        .chain(include_bytes!(
+            "../../crates/tracedecay-runtime-core/src/db/connection.rs"
+        ))
         .chain(name.as_bytes())
         .chain(unsafe_fast.as_bytes())
         .chain(builder_fingerprint)

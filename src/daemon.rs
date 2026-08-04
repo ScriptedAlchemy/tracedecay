@@ -224,33 +224,9 @@ impl HookAgent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HookRouteMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HookTerminalReceipt {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub turn_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript_watermark: Option<String>,
-}
+pub use tracedecay_agent_hosts::automation::host_receipts::{
+    HookRouteMetadata, HookTerminalReceipt,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonHookEvent {

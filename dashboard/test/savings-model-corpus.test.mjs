@@ -23,7 +23,7 @@ const pricing = await importBundledModule(pricingPath);
 function loadBundledTable() {
   const fallbackPath = path.resolve(
     process.cwd(),
-    "../src/dashboard/model_prices_fallback.json",
+    "../crates/tracedecay-dashboard-api/src/model_prices_fallback.json",
   );
   const parsed = JSON.parse(readFileSync(fallbackPath, "utf8"));
   const table = {};

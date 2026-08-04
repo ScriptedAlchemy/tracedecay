@@ -1,0 +1,163 @@
+use std::collections::BTreeSet;
+use std::path::Path;
+
+use crate::analytics::{UsageKind, infer_usage_events};
+use crate::errors::Result;
+use crate::ports::AnalyticsEventRecord;
+
+use super::{
+    SkillUsageAction, SkillUsageEvent, SkillUsageRecord, ledger_skill_id, load_skill_usage_ledger,
+    save_skill_usage_ledger,
+};
+
+pub async fn ingest_analytics_events(
+    profile_root: &Path,
+    events: &[AnalyticsEventRecord],
+) -> Result<Vec<SkillUsageRecord>> {
+    let mut ledger = load_skill_usage_ledger(profile_root).await?;
+    let mut touched = Vec::new();
+    let mut seen = BTreeSet::new();
+    for event in events {
+        if should_skip_analytics_event(event) {
+            continue;
+        }
+        for usage in skill_usage_events_from_analytics(event) {
+            if usage.kind != UsageKind::Skill {
+                continue;
+            }
+            let action = analytics_action(event);
+            let skill_id = ledger_skill_id(&usage.name)?;
+            let dedupe = analytics_import_key(event, &skill_id, action);
+            if !seen.insert(dedupe.clone()) {
+                continue;
+            }
+            if !ledger.imported_analytics_events.insert(dedupe) {
+                continue;
+            }
+            let record = ledger
+                .records
+                .entry(skill_id.clone())
+                .or_insert_with(|| SkillUsageRecord::new(skill_id, event.timestamp));
+            record.record(&SkillUsageEvent {
+                skill_name: usage.name,
+                action,
+                timestamp: event.timestamp,
+                target: Some(event.provider.clone()),
+            });
+            touched.push(record.clone());
+        }
+    }
+    if !touched.is_empty() {
+        save_skill_usage_ledger(profile_root, &ledger).await?;
+    }
+    Ok(touched)
+}
+
+pub async fn ingest_project_analytics_events(
+    profile_root: &Path,
+    project_root: &Path,
+    limit: usize,
+) -> Result<Vec<SkillUsageRecord>> {
+    let events = crate::ports::project_analytics_events(project_root, limit).await?;
+    ingest_analytics_events(profile_root, &events).await
+}
+
+fn skill_usage_events_from_analytics(
+    event: &AnalyticsEventRecord,
+) -> Vec<crate::analytics::UsageEvent> {
+    let mut events = infer_usage_events(
+        event.tool_name.as_deref(),
+        event.metadata_json.as_deref(),
+        None,
+    );
+    if let Some(skill_name) = event.skill_name.as_deref() {
+        events.extend(infer_usage_events(
+            None,
+            Some(&serde_json::json!({ "skill": skill_name }).to_string()),
+            None,
+        ));
+    }
+    events
+}
+
+fn analytics_import_key(
+    event: &AnalyticsEventRecord,
+    skill_id: &str,
+    action: SkillUsageAction,
+) -> String {
+    if let Some(request_id) = analytics_request_id(event) {
+        return analytics_import_key_for_request(
+            &event.project_id,
+            &event.provider,
+            &request_id,
+            skill_id,
+            action,
+        );
+    }
+    format!(
+        "{}:{}:{}:{}:{:?}",
+        event.project_id, event.provider, event.id, skill_id, action
+    )
+}
+
+pub fn analytics_import_key_for_request(
+    project_id: &str,
+    provider: &str,
+    request_id: &str,
+    skill_id: &str,
+    action: SkillUsageAction,
+) -> String {
+    format!("{project_id}:{provider}:request:{request_id}:{skill_id}:{action:?}")
+}
+
+fn should_skip_analytics_event(event: &AnalyticsEventRecord) -> bool {
+    event.event_kind == "mcp_tool_call"
+        && event
+            .tool_name
+            .as_deref()
+            .is_some_and(crate::analytics::is_skill_view_tool)
+        && event.outcome.as_deref().is_some_and(|outcome| {
+            !matches!(
+                outcome.to_ascii_lowercase().as_str(),
+                "success" | "ok" | "succeeded"
+            )
+        })
+}
+
+fn analytics_request_id(event: &AnalyticsEventRecord) -> Option<String> {
+    let metadata =
+        serde_json::from_str::<serde_json::Value>(event.metadata_json.as_deref()?).ok()?;
+    metadata
+        .get("request_id")
+        .or_else(|| metadata.pointer("/metadata/request_id"))
+        .or_else(|| metadata.pointer("/runtime/request_id"))
+        .or_else(|| metadata.pointer("/function/request_id"))
+        .and_then(request_id_value)
+        .map(|request_id| request_id.trim().to_string())
+        .filter(|request_id| !request_id.is_empty())
+}
+
+fn analytics_action(event: &AnalyticsEventRecord) -> SkillUsageAction {
+    match event.event_kind.as_str() {
+        "tool" | "mcp_tool_call"
+            if event
+                .tool_name
+                .as_deref()
+                .is_some_and(crate::analytics::is_skill_view_tool) =>
+        {
+            SkillUsageAction::View
+        }
+        "skill_patch" | "skill_update" | "skill" if event.outcome.as_deref() == Some("patched") => {
+            SkillUsageAction::Patch
+        }
+        _ => SkillUsageAction::Use,
+    }
+}
+
+fn request_id_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}

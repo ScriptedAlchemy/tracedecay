@@ -1,0 +1,64 @@
+[package]
+name = "tracedecay-code-index"
+version = "0.1.0"
+publish = false
+edition = "2024"
+license = "MIT"
+description = "In-process structural code search for TraceDecay"
+
+[features]
+default = ["full"]
+lite = ["tracedecay-code-extraction/lite"]
+medium = ["tracedecay-code-extraction/medium"]
+full = ["tracedecay-code-extraction/full"]
+lang-dart = ["tracedecay-code-extraction/lang-dart"]
+lang-pascal = ["tracedecay-code-extraction/lang-pascal"]
+lang-php = ["tracedecay-code-extraction/lang-php"]
+lang-ruby = ["tracedecay-code-extraction/lang-ruby"]
+lang-bash = ["tracedecay-code-extraction/lang-bash"]
+lang-protobuf = ["tracedecay-code-extraction/lang-protobuf"]
+lang-powershell = ["tracedecay-code-extraction/lang-powershell"]
+lang-nix = ["tracedecay-code-extraction/lang-nix"]
+lang-vbnet = ["tracedecay-code-extraction/lang-vbnet"]
+lang-lua = ["tracedecay-code-extraction/lang-lua"]
+lang-zig = ["tracedecay-code-extraction/lang-zig"]
+lang-objc = ["tracedecay-code-extraction/lang-objc"]
+lang-perl = ["tracedecay-code-extraction/lang-perl"]
+lang-batch = ["tracedecay-code-extraction/lang-batch"]
+lang-fortran = ["tracedecay-code-extraction/lang-fortran"]
+lang-cobol = ["tracedecay-code-extraction/lang-cobol"]
+lang-msbasic2 = ["tracedecay-code-extraction/lang-msbasic2"]
+lang-gwbasic = ["tracedecay-code-extraction/lang-gwbasic"]
+lang-qbasic = ["tracedecay-code-extraction/lang-qbasic"]
+lang-dockerfile = ["tracedecay-code-extraction/lang-dockerfile"]
+lang-glsl = ["tracedecay-code-extraction/lang-glsl"]
+lang-wgsl = ["tracedecay-code-extraction/lang-wgsl"]
+lang-hlsl = ["tracedecay-code-extraction/lang-hlsl"]
+lang-metal = ["tracedecay-code-extraction/lang-metal"]
+lang-markdown = ["tracedecay-code-extraction/lang-markdown"]
+lang-r = ["tracedecay-code-extraction/lang-r"]
+lang-sql = ["tracedecay-code-extraction/lang-sql"]
+lang-julia = ["tracedecay-code-extraction/lang-julia"]
+lang-haskell = ["tracedecay-code-extraction/lang-haskell"]
+lang-ocaml = ["tracedecay-code-extraction/lang-ocaml"]
+lang-clojure = ["tracedecay-code-extraction/lang-clojure"]
+lang-erlang = ["tracedecay-code-extraction/lang-erlang"]
+lang-elixir = ["tracedecay-code-extraction/lang-elixir"]
+lang-fsharp = ["tracedecay-code-extraction/lang-fsharp"]
+lang-quint = ["tracedecay-code-extraction/lang-quint"]
+lang-toml = ["tracedecay-code-extraction/lang-toml"]
+lang-lean = ["tracedecay-code-extraction/lang-lean"]
+
+[dependencies]
+# In-process structural-search engine. ast-grep-core is generic over a
+# tree-sitter `Language`; we wire TraceDecay's bundled grammars (via
+# `tracedecay-code-extraction::ts_provider`) into its `Language` trait, so no
+# extra grammar crates are pulled in and no external `ast-grep` binary is
+# required. Pinned to tree-sitter ^0.26.3, ABI-compatible with the 0.26
+# grammars this workspace builds.
+ast-grep-core = "0.44"
+ignore = "0.4"
+tracedecay-code-extraction = { path = "../tracedecay-code-extraction", default-features = false }
+
+[dev-dependencies]
+tempfile = "3"

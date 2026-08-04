@@ -18,13 +18,14 @@ fn read_repo_file(relative: &str) -> String {
 }
 
 fn cli_fallback_prompt_source() -> String {
-    let source = read_repo_file("src/agents/mod.rs");
+    let source = read_repo_file("crates/tracedecay-agent-hosts/src/agents/mod.rs");
     let start = source
         .find("cli_fallback_args_invocation_lit")
-        .expect("cli_fallback_args_invocation_lit in src/agents/mod.rs");
+        .expect("cli_fallback_args_invocation_lit in agent-hosts");
     let end = source
         .find("pub(crate) const CLI_FALLBACK_PROMPT_RULES")
-        .expect("CLI_FALLBACK_PROMPT_RULES in src/agents/mod.rs");
+        .or_else(|| source.find("pub const CLI_FALLBACK_PROMPT_RULES"))
+        .expect("CLI_FALLBACK_PROMPT_RULES in agent-hosts");
     source[start..end].to_string()
 }
 
@@ -44,7 +45,7 @@ fn prompt_rules_teach_the_json_args_contract() {
         !rules.contains("<name> --key value"),
         "prompt rules must not lead with the per-key grammar"
     );
-    let source = read_repo_file("src/agents/mod.rs");
+    let source = read_repo_file("crates/tracedecay-agent-hosts/src/agents/mod.rs");
     assert!(
         source.contains("never invent per-key flags or enum values from memory"),
         "CLI fallback prompt rules must prohibit guessed flags and enum values"

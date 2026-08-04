@@ -1,7 +1,3 @@
-//! Dashboard-owned LSP diagnostics support.
+//! Compatibility facade for LSP diagnostics owned by `tracedecay-lsp`.
 
-pub mod activity;
-pub mod adapters;
-pub mod broker;
-pub mod client;
-pub mod settings;
+pub use tracedecay_lsp::{activity, adapters, broker, client, settings};

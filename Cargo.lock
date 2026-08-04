@@ -4685,6 +4685,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4859,10 +4860,8 @@ name = "tracedecay"
 version = "0.0.68"
 dependencies = [
  "amari-holographic",
- "ast-grep-core",
  "axum 0.8.9",
  "bincode",
- "cc",
  "clap",
  "criterion",
  "crossterm",
@@ -4896,20 +4895,233 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tiktoken-rs",
- "tokensave-large-treesitters",
- "tokensave-medium-treesitters",
  "tokio",
  "toml",
  "tower 0.5.3",
+ "tracedecay-agent-hosts",
+ "tracedecay-automation",
+ "tracedecay-capture",
+ "tracedecay-code-extraction",
+ "tracedecay-code-index",
+ "tracedecay-dashboard-api",
+ "tracedecay-domain",
+ "tracedecay-jsonrpc",
+ "tracedecay-lsp",
+ "tracedecay-migrate",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-usecases",
  "tracing",
  "tree-sitter",
- "tree-sitter-hlsl",
  "tree-sitter-language",
  "ureq",
  "url",
  "walkdir",
  "webpki-roots 1.0.7",
  "zip",
+]
+
+[[package]]
+name = "tracedecay-agent-hosts"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "fs2",
+ "getrandom 0.2.17",
+ "hex",
+ "libsql",
+ "regex",
+ "rustls 0.23.38",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracedecay-automation",
+ "tracedecay-lsp",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracing",
+ "url",
+ "webpki-roots 1.0.7",
+]
+
+[[package]]
+name = "tracedecay-automation"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "tracedecay-capture"
+version = "0.1.0"
+
+[[package]]
+name = "tracedecay-code-extraction"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tokensave-large-treesitters",
+ "tokensave-medium-treesitters",
+ "tracedecay-domain",
+ "tree-sitter",
+ "tree-sitter-hlsl",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tracedecay-code-index"
+version = "0.1.0"
+dependencies = [
+ "ast-grep-core",
+ "ignore",
+ "tempfile",
+ "tracedecay-code-extraction",
+]
+
+[[package]]
+name = "tracedecay-dashboard-api"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "dirs",
+ "glob",
+ "libsql",
+ "open",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tiktoken-rs",
+ "tokio",
+ "tokio-stream",
+ "tower 0.5.3",
+ "tracedecay-agent-hosts",
+ "tracedecay-automation",
+ "tracedecay-code-index",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+ "tracedecay-usecases",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
+name = "tracedecay-domain"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha2",
+]
+
+[[package]]
+name = "tracedecay-jsonrpc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tracedecay-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "tracedecay-migrate"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "fs2",
+ "gix",
+ "hex",
+ "libsql",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracedecay-runtime-core",
+ "tracedecay-sessions",
+]
+
+[[package]]
+name = "tracedecay-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "amari-holographic",
+ "bincode",
+ "dirs",
+ "fs2",
+ "getrandom 0.2.17",
+ "gix",
+ "glob",
+ "hex",
+ "libsql",
+ "reflink-copy",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracedecay-automation",
+ "tracedecay-capture",
+ "tracedecay-code-extraction",
+ "tracedecay-domain",
+ "tracedecay-lsp",
+ "tree-sitter",
+]
+
+[[package]]
+name = "tracedecay-sessions"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "filetime",
+ "gix",
+ "hex",
+ "libsql",
+ "rayon",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tracedecay-runtime-core",
+ "tracing",
+]
+
+[[package]]
+name = "tracedecay-usecases"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "libsql",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+ "tracedecay-automation",
+ "tracedecay-runtime-core",
 ]
 
 [[package]]
