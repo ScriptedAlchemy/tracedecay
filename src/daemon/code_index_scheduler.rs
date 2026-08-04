@@ -2267,8 +2267,8 @@ mod overlay_ephemerality_tests;
 mod tests;
 
 mod activation;
-mod cadence;
 pub(super) mod branch_generations;
+mod cadence;
 mod classification;
 pub(crate) mod identity;
 pub(in crate::daemon) mod queries;

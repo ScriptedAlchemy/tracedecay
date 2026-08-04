@@ -12,13 +12,13 @@ use super::{
 };
 
 #[derive(Clone)]
-pub(super) struct BranchGenerationReadControlV1 {
+pub(in crate::daemon) struct BranchGenerationReadControlV1 {
     pub deadline: Option<tracedecay_application::Deadline>,
     pub cancellation: Option<tracedecay_application::CancellationSignal>,
 }
 
 impl BranchGenerationReadControlV1 {
-    pub(super) fn termination(&self) -> Option<CodeIndexSearchUnavailableReasonV1> {
+    pub(in crate::daemon) fn termination(&self) -> Option<CodeIndexSearchUnavailableReasonV1> {
         if self
             .cancellation
             .as_ref()
@@ -35,9 +35,9 @@ impl BranchGenerationReadControlV1 {
     }
 }
 
-pub(super) struct BranchGenerationPairV1 {
-    pub base: LatestCompleteCodeIndexV1,
-    pub head: LatestCompleteCodeIndexV1,
+pub(in crate::daemon) struct BranchGenerationPairV1 {
+    pub(in crate::daemon) base: LatestCompleteCodeIndexV1,
+    pub(in crate::daemon) head: LatestCompleteCodeIndexV1,
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
@@ -140,7 +140,7 @@ fn valid_sealed_generation_path(
 }
 
 impl CodeIndexSchedulerRegistryV1 {
-    pub(super) async fn generations_for_revisions(
+    pub(in crate::daemon) async fn generations_for_revisions(
         &self,
         scope: &tracedecay_application::ResolvedScope,
         base_revision: &GitOidV1,
@@ -190,5 +190,149 @@ impl CodeIndexSchedulerRegistryV1 {
         }))
         .await
         .map_err(|_| CodeIndexSearchUnavailableReasonV1::Internal)?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use tempfile::TempDir;
+    use tracedecay_application::ResolvedScope;
+    use tracedecay_domain::{GitOidV1, ProjectId};
+
+    use super::*;
+    use crate::daemon::code_index_branch_diff::{diff_symbols, generation_symbols};
+    use crate::daemon::code_index_scheduler::{
+        CodeIndexWorktreeSchedulerV1, SharedCodeIndexBytePoolV1, scoped_code_index_store_root,
+    };
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git fixture command failed: {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git output")
+            .trim()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn mounted_store_diffs_two_clean_exact_commit_generations() {
+        let project = TempDir::new().expect("project");
+        let store = TempDir::new().expect("store");
+        git(project.path(), &["init", "-q", "-b", "main"]);
+        git(project.path(), &["config", "user.name", "TraceDecay Test"]);
+        git(
+            project.path(),
+            &["config", "user.email", "tracedecay@example.invalid"],
+        );
+        std::fs::create_dir_all(project.path().join("src")).expect("source directory");
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn exact_branch_value() -> usize { 1 }\n",
+        )
+        .expect("base source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "base"]);
+        let base_revision =
+            GitOidV1::new(git(project.path(), &["rev-parse", "HEAD"])).expect("base revision");
+        let project_id = ProjectId::new("project.branch-generation-diff").expect("project id");
+        let canonical_project = project.path().canonicalize().expect("canonical project");
+        let scoped_store = scoped_code_index_store_root(store.path(), &canonical_project);
+        let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+            project_id.clone(),
+            &canonical_project,
+            scoped_store,
+            Arc::new(SharedCodeIndexBytePoolV1::default()),
+        )
+        .expect("open scheduler");
+        scheduler.reconcile_now().expect("publish base generation");
+
+        std::fs::write(
+            project.path().join("src/lib.rs"),
+            "pub fn exact_branch_value() -> usize { 2 }\n",
+        )
+        .expect("head source");
+        git(project.path(), &["add", "."]);
+        git(project.path(), &["commit", "-qm", "head"]);
+        let head_revision =
+            GitOidV1::new(git(project.path(), &["rev-parse", "HEAD"])).expect("head revision");
+        scheduler.reconcile_now().expect("publish head generation");
+        drop(scheduler);
+
+        let registry = CodeIndexSchedulerRegistryV1::new(1);
+        registry
+            .mount_worktree(
+                project_id.clone(),
+                &canonical_project,
+                store.path().to_path_buf(),
+                None,
+            )
+            .await
+            .expect("mount sealed store");
+        let identity = super::super::identity::IndexingIdentityV1::resolve(&canonical_project)
+            .expect("indexing identity");
+        let scope = ResolvedScope::new(
+            project_id,
+            identity.repository_id().clone(),
+            identity.worktree_id().clone(),
+            identity.head_ref().cloned(),
+        )
+        .expect("resolved scope");
+        let control = BranchGenerationReadControlV1 {
+            deadline: None,
+            cancellation: None,
+        };
+        let pair = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match registry
+                    .generations_for_revisions(
+                        &scope,
+                        &base_revision,
+                        &head_revision,
+                        control.clone(),
+                    )
+                    .await
+                {
+                    Err(CodeIndexSearchUnavailableReasonV1::CapacityUnavailable) => {
+                        tokio::task::yield_now().await;
+                    }
+                    result => break result,
+                }
+            }
+        })
+        .await
+        .expect("bounded exact-generation read")
+        .expect("both clean commit generations");
+        let base =
+            generation_symbols(pair.base.generation(), None, None, &control).expect("base symbols");
+        let head =
+            generation_symbols(pair.head.generation(), None, None, &control).expect("head symbols");
+        let completed = diff_symbols(
+            pair.base.generation().manifest().generation_id.as_str(),
+            base,
+            pair.head.generation().manifest().generation_id.as_str(),
+            head,
+        );
+
+        assert!(completed.added.is_empty());
+        assert!(completed.removed.is_empty());
+        assert_eq!(completed.changed.len(), 1);
+        assert_eq!(
+            completed.changed[0].head.qualified_name,
+            "crate::exact_branch_value"
+        );
+        assert_ne!(
+            completed.changed[0].base.content_digest,
+            completed.changed[0].head.content_digest
+        );
     }
 }
