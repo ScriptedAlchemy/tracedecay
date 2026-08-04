@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use serde_json::Value as JsonValue;
@@ -37,6 +38,58 @@ impl RegisteredGlobalDb {
         // and runs off maintenance, so it admits against the unreserved slice
         // of the reader lane rather than competing with interactive queries.
         let reader = self.read_connection().background();
+        let mut observed_providers = BTreeSet::new();
+        let mut provider_rows = reader
+            .query(
+                "SELECT DISTINCT provider
+                 FROM sessions
+                 WHERE provider IS NOT NULL AND provider != ''
+                   AND (?1 IS NULL OR provider = ?1)
+                 ORDER BY provider",
+                tracedecay_runtime_core::db::engine::params![provider],
+            )
+            .await
+            .map_err(|error| format!("failed to query session ingest providers: {error}"))?;
+        while let Some(row) = provider_rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read session ingest provider: {error}"))?
+        {
+            observed_providers.insert(
+                row.get::<String>(0)
+                    .map_err(|error| format!("failed to decode session provider: {error}"))?,
+            );
+        }
+        drop(provider_rows);
+        let mut frontier_rows = reader
+            .query(
+                "SELECT file_path
+                 FROM parse_offsets
+                 WHERE file_path LIKE 'host-frontier://%/%'
+                 ORDER BY file_path",
+                (),
+            )
+            .await
+            .map_err(|error| format!("failed to query host ingest frontiers: {error}"))?;
+        while let Some(row) = frontier_rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read host ingest frontier: {error}"))?
+        {
+            let key = row
+                .get::<String>(0)
+                .map_err(|error| format!("failed to decode host ingest frontier: {error}"))?;
+            if let Some(provider_name) = key
+                .strip_prefix("host-frontier://")
+                .and_then(|suffix| suffix.split('/').next())
+                .filter(|provider_name| !provider_name.is_empty())
+                && provider.is_none_or(|selected| selected == provider_name)
+            {
+                observed_providers.insert(provider_name.to_owned());
+            }
+        }
+        drop(frontier_rows);
+        health.observed_providers = observed_providers.into_iter().collect();
         let mut after_path = String::new();
         loop {
             let mut rows = reader
@@ -867,15 +920,40 @@ mod tests {
             )
             .await
             .unwrap();
+        for frontier in [
+            "host-frontier://kimi/discovery/v1",
+            "host-frontier://opencode/sql-rowid/v1",
+        ] {
+            database
+                .set_parse_offset(
+                    frontier,
+                    ParseOffset {
+                        byte_offset: 1,
+                        mtime: 0,
+                        file_id: 1,
+                    },
+                )
+                .await
+                .unwrap();
+        }
 
         let runtime_surface = database.cursor_session_ingest_health().await.unwrap();
         let status_surface = database.cursor_session_ingest_health().await.unwrap();
+        let all_providers = database
+            .session_ingest_health_for_provider(None)
+            .await
+            .unwrap();
 
         assert_eq!(runtime_surface, status_surface);
+        assert_eq!(runtime_surface.observed_providers, ["cursor"]);
         assert_eq!(runtime_surface.tracked_transcripts, 1);
         assert_eq!(runtime_surface.pending_transcripts, 1);
         assert_eq!(runtime_surface.pending_bytes, 6);
         assert_eq!(runtime_surface.max_transcript_pending_bytes, 6);
         assert_eq!(runtime_surface.last_ingest_unix, Some(100));
+        assert_eq!(
+            all_providers.observed_providers,
+            ["claude", "cursor", "kimi", "opencode"]
+        );
     }
 }

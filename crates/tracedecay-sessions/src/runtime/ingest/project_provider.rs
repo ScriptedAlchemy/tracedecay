@@ -208,11 +208,22 @@ impl<'a> ProjectProviderRun<'a> {
         )
         .await
         {
-            Ok(outcome) => ProviderRunOutcome::bounded(
-                outcome.stats,
-                outcome.bytes_consumed,
-                outcome.deferred_by_byte_cap,
-            ),
+            Ok(outcome) => {
+                let mut run = ProviderRunOutcome::bounded(
+                    outcome.stats,
+                    outcome.bytes_consumed,
+                    outcome.deferred_by_byte_cap
+                        || outcome.scan_cancelled
+                        || outcome.scan_input_bound_reached,
+                );
+                if outcome.scan_non_durable_units > 0 || outcome.scan_unavailable_units > 0 {
+                    run.add_failure(TranscriptCatchUpFailure::source_scan_partial(
+                        "opencode",
+                        outcome.scan_unavailable_units > 0,
+                    ));
+                }
+                run
+            }
             Err(error) => ProviderRunOutcome::failed(
                 warn_transcript_catch_up_failure(
                     "opencode",
