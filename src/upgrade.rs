@@ -1,8 +1,8 @@
 //! Self-update for the tracedecay binary.
 //!
-//! Cargo installs upgrade through crates.io first. Other direct installs use
-//! GitHub release assets, extracting the binary and replacing the running
-//! executable using `self_replace`.
+//! Direct installs use GitHub release assets, extracting the binary and
+//! replacing the running executable using `self_replace`. Homebrew installs
+//! continue to delegate to Homebrew.
 //! Beta and stable are separate channels — a beta build only sees beta
 //! releases and vice versa.
 
@@ -14,8 +14,6 @@ use std::time::{Duration, Instant};
 use crate::cloud::{self, InstallMethod};
 use crate::errors::{Result, TraceDecayError};
 use crate::user_config::UserConfig;
-
-mod crates_io;
 
 const GITHUB_REPO: &str = "ScriptedAlchemy/tracedecay";
 
@@ -288,72 +286,21 @@ fn classify_upgrade<'a>(current: &str, latest: &'a str) -> UpgradeStatus<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum UpgradeSource {
-    CratesIo,
+    Homebrew,
     GitHubRelease,
 }
 
 fn upgrade_source_for(method: &InstallMethod) -> UpgradeSource {
     match method {
-        InstallMethod::Cargo => UpgradeSource::CratesIo,
-        InstallMethod::Brew | InstallMethod::Scoop | InstallMethod::Unknown => {
+        InstallMethod::Brew => UpgradeSource::Homebrew,
+        InstallMethod::Cargo | InstallMethod::Scoop | InstallMethod::Unknown => {
             UpgradeSource::GitHubRelease
         }
     }
 }
 
-impl UpgradeSource {
-    fn check_label(self) -> &'static str {
-        match self {
-            UpgradeSource::CratesIo => "crates.io",
-            UpgradeSource::GitHubRelease => "GitHub releases",
-        }
-    }
-
-    fn upgrade_suffix(self) -> &'static str {
-        match self {
-            UpgradeSource::CratesIo => " via crates.io",
-            UpgradeSource::GitHubRelease => "",
-        }
-    }
-}
-
-fn cargo_install_command(version: &str) -> (&'static str, Vec<String>) {
-    (
-        "cargo",
-        vec![
-            "install".to_string(),
-            "tracedecay".to_string(),
-            "--version".to_string(),
-            version.to_string(),
-            "--locked".to_string(),
-            "--force".to_string(),
-        ],
-    )
-}
-
-fn perform_cargo_upgrade(version: &str) -> Result<()> {
-    let (program, args) = cargo_install_command(version);
-    eprintln!("Delegating upgrade to Cargo: {program} {}", args.join(" "));
-    let status = std::process::Command::new(program)
-        .args(&args)
-        .status()
-        .map_err(io_err("failed to run cargo install"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("cargo install failed with status: {status}"),
-        })
-    }
-}
-
-fn latest_upgrade_version(source: UpgradeSource, is_beta: bool) -> Result<String> {
-    match source {
-        UpgradeSource::CratesIo => crates_io::fetch_latest_version(is_beta),
-        UpgradeSource::GitHubRelease => {
-            cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
-        }
-    }
+fn latest_upgrade_version(is_beta: bool) -> Result<String> {
+    cloud::fetch_latest_version().ok_or_else(|| github_latest_unavailable_error(is_beta))
 }
 
 fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
@@ -368,33 +315,21 @@ fn github_latest_unavailable_error(is_beta: bool) -> TraceDecayError {
 }
 
 fn install_upgrade_version(
-    source: UpgradeSource,
     latest: &str,
     is_beta: bool,
     method: &InstallMethod,
 ) -> Result<Option<PathBuf>> {
-    match source {
-        UpgradeSource::CratesIo => {
-            perform_cargo_upgrade(latest)?;
-            // Cargo replaces the binary in `$CARGO_HOME/bin` in place, so the
-            // PATH lookup in `which_tracedecay()` finds the new binary.
-            Ok(None)
-        }
-        UpgradeSource::GitHubRelease => {
-            let asset_url = preflight_asset_check(latest, is_beta)?;
-            perform_upgrade(latest, &asset_url, method)
-        }
-    }
+    let asset_url = preflight_asset_check(latest, is_beta)?;
+    perform_upgrade(latest, &asset_url, method)
 }
 
 fn run_versioned_upgrade(
     current: &str,
     is_beta: bool,
     method: &InstallMethod,
-    source: UpgradeSource,
 ) -> Result<UpgradeOutcome> {
-    eprintln!("Checking {}...", source.check_label());
-    let latest = latest_upgrade_version(source, is_beta)?;
+    eprintln!("Checking GitHub releases...");
+    let latest = latest_upgrade_version(is_beta)?;
     let latest = match classify_upgrade(current, &latest) {
         UpgradeStatus::AlreadyCurrent => {
             eprintln!("\x1b[32m✔\x1b[0m Already up to date (v{current}).");
@@ -403,11 +338,8 @@ fn run_versioned_upgrade(
         UpgradeStatus::UpgradeAvailable(latest) => latest,
     };
 
-    eprintln!(
-        "Upgrading v{current} → v{latest}{}...",
-        source.upgrade_suffix()
-    );
-    let binary = install_upgrade_version(source, latest, is_beta, method)?;
+    eprintln!("Upgrading v{current} → v{latest}...");
+    let binary = install_upgrade_version(latest, is_beta, method)?;
     record_previous_version();
     eprintln!("\x1b[32m✔\x1b[0m Successfully upgraded to v{latest}!");
     Ok(UpgradeOutcome::Installed { binary })
@@ -952,22 +884,9 @@ pub fn run_upgrade() -> Result<UpgradeOutcome> {
     };
     eprintln!("Current version: v{current} ({channel} channel{method_suffix})");
 
-    if matches!(method, InstallMethod::Brew) {
-        return run_brew_upgrade();
-    }
-
     match upgrade_source_for(&method) {
-        UpgradeSource::CratesIo => {
-            run_versioned_upgrade(current, is_beta, &method, UpgradeSource::CratesIo).or_else(|error| {
-                eprintln!(
-                    "  \x1b[33mwarning:\x1b[0m crates.io update failed: {error}; falling back to GitHub releases"
-                );
-                run_versioned_upgrade(current, is_beta, &method, UpgradeSource::GitHubRelease)
-            })
-        }
-        UpgradeSource::GitHubRelease => {
-            run_versioned_upgrade(current, is_beta, &method, UpgradeSource::GitHubRelease)
-        }
+        UpgradeSource::Homebrew => run_brew_upgrade(),
+        UpgradeSource::GitHubRelease => run_versioned_upgrade(current, is_beta, &method),
     }
 }
 
@@ -1113,15 +1032,15 @@ mod tests {
     }
 
     #[test]
-    fn cargo_installs_prefer_crates_io_pipeline() {
+    fn cargo_installs_use_github_release_pipeline() {
         assert_eq!(
             upgrade_source_for(&InstallMethod::Cargo),
-            UpgradeSource::CratesIo
+            UpgradeSource::GitHubRelease
         );
     }
 
     #[test]
-    fn non_cargo_installs_use_github_release_pipeline() {
+    fn direct_installs_use_github_release_pipeline() {
         assert_eq!(
             upgrade_source_for(&InstallMethod::Scoop),
             UpgradeSource::GitHubRelease
@@ -1133,20 +1052,10 @@ mod tests {
     }
 
     #[test]
-    fn cargo_install_command_pins_requested_version() {
-        let (program, args) = cargo_install_command("0.0.18");
-
-        assert_eq!(program, "cargo");
+    fn homebrew_installs_keep_the_package_manager_pipeline() {
         assert_eq!(
-            args,
-            vec![
-                "install".to_string(),
-                "tracedecay".to_string(),
-                "--version".to_string(),
-                "0.0.18".to_string(),
-                "--locked".to_string(),
-                "--force".to_string()
-            ]
+            upgrade_source_for(&InstallMethod::Brew),
+            UpgradeSource::Homebrew
         );
     }
 

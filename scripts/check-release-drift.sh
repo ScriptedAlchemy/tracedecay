@@ -6,7 +6,7 @@ usage() {
 Usage: scripts/check-release-drift.sh [--repo PATH] [--release-version VERSION]
 
 Fails when Cargo.toml differs from the latest non-prerelease GitHub release
-tag. That state means a release-plz version bump reached master without the
+tag. That state means a release automation version bump reached master without the
 GitHub tag/release completing.
 
 --registry-version remains an alias for --release-version.
@@ -94,7 +94,7 @@ case "$comparison" in
     ;;
   ahead)
     echo "release drift detected: local Cargo.toml version $local_version is ahead of GitHub release v$release_version" >&2
-    echo "Reset the unpublished release bump so release-plz can recreate it, or create GitHub release v$local_version manually before merging more release changes." >&2
+    echo "Reset the unpublished release bump so release automation can recreate it, or create GitHub release v$local_version manually before merging more release changes." >&2
     exit 1
     ;;
   behind)

@@ -20,7 +20,14 @@ new_repo() {
   printf '[package]\nname = "fixture"\nversion = "0.1.0"\n' >"$fixture/repo/Cargo.toml"
   printf 'version = 3\n' >"$fixture/repo/Cargo.lock"
   printf '# Changelog\n' >"$fixture/repo/CHANGELOG.md"
-  git -C "$fixture/repo" add Cargo.toml Cargo.lock CHANGELOG.md
+  printf '0.1.0\n' >"$fixture/repo/version.txt"
+  printf '{".":"0.1.0"}\n' >"$fixture/repo/.release-please-manifest.json"
+  git -C "$fixture/repo" add \
+    .release-please-manifest.json \
+    Cargo.toml \
+    Cargo.lock \
+    CHANGELOG.md \
+    version.txt
   git -C "$fixture/repo" commit -qm "initial"
 }
 
@@ -37,6 +44,8 @@ new_repo
 base=$(git -C "$fixture/repo" rev-parse HEAD)
 printf '\n## 0.2.0\n' >>"$fixture/repo/CHANGELOG.md"
 printf '[package]\nname = "fixture"\nversion = "0.2.0"\n' >"$fixture/repo/Cargo.toml"
+printf '0.2.0\n' >"$fixture/repo/version.txt"
+printf '{".":"0.2.0"}\n' >"$fixture/repo/.release-please-manifest.json"
 commit_all "release"
 head=$(git -C "$fixture/repo" rev-parse HEAD)
 run_guard "$base" "$head"
