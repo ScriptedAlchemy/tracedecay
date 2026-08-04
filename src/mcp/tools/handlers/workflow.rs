@@ -11,8 +11,6 @@ use std::time::Duration;
 
 use futures_util::stream::{self, StreamExt};
 use serde_json::{Value, json};
-use tokio::process::Command;
-use tokio::time::timeout;
 use tracedecay_application::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
     OperationReceipt, OperationTermination,
@@ -36,6 +34,12 @@ use crate::types::Node;
 use super::super::ToolResult;
 use super::super::render;
 use super::support::{generic_tool_result, rendered_tool_result, unique_file_paths};
+
+mod test_runner;
+
+use test_runner::{
+    TestRunControl, TestRunFailure, TestRunOutput, cargo_test_args, run_cargo_tests,
+};
 
 /// Maximum tests we'll allow `cargo test` to receive in one call. A loose
 /// cap — libtest filters are passed as positional args so very long lists
@@ -107,14 +111,33 @@ struct RunAffectedArgs {
 }
 
 impl RunAffectedArgs {
-    fn parse(args: &Value) -> Self {
-        let explicit_paths = args.get("changed_paths").and_then(|v| {
-            v.as_array().map(|arr| {
-                arr.iter()
-                    .filter_map(|x| x.as_str().map(String::from))
-                    .collect()
-            })
-        });
+    fn parse(args: &Value) -> std::result::Result<Self, ToolResult> {
+        let explicit_paths = match args.get("changed_paths") {
+            Some(Value::Array(paths)) => {
+                let mut parsed = Vec::with_capacity(paths.len());
+                for path in paths {
+                    let Some(path) = path.as_str() else {
+                        return Err(error_result(
+                            args,
+                            "invalid_request",
+                            "changed_paths",
+                            "`changed_paths` must contain only project-relative string paths",
+                        ));
+                    };
+                    parsed.push(path.to_owned());
+                }
+                Some(parsed)
+            }
+            Some(_) => {
+                return Err(error_result(
+                    args,
+                    "invalid_request",
+                    "changed_paths",
+                    "`changed_paths` must be an array of project-relative string paths",
+                ));
+            }
+            None => None,
+        };
         let profile = args
             .get("profile")
             .and_then(|v| v.as_str())
@@ -129,12 +152,12 @@ impl RunAffectedArgs {
             .and_then(serde_json::Value::as_u64)
             .map_or(100_usize, |v| (v as usize).min(MAX_TESTS_HARD_CAP));
 
-        Self {
+        Ok(Self {
             explicit_paths,
             profile,
             timeout_secs,
             max_tests,
-        }
+        })
     }
 }
 
@@ -559,37 +582,6 @@ pub(super) async fn handle_run_affected_tests(
     .await
 }
 
-#[derive(Debug)]
-struct TestRunOutput {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-}
-
-#[derive(Debug)]
-enum TestRunFailure {
-    Spawn(String),
-    Timeout,
-}
-
-async fn run_cargo_tests(
-    project_root: PathBuf,
-    profile: String,
-    test_names: Vec<String>,
-    timeout_duration: Duration,
-) -> std::result::Result<TestRunOutput, TestRunFailure> {
-    let mut cmd = cargo_test_command(&project_root, &profile, &test_names);
-    match timeout(timeout_duration, cmd.output()).await {
-        Ok(Ok(output)) => Ok(TestRunOutput {
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }),
-        Ok(Err(error)) => Err(TestRunFailure::Spawn(error.to_string())),
-        Err(_) => Err(TestRunFailure::Timeout),
-    }
-}
-
 async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     cg: &TraceDecay,
     args: Value,
@@ -598,10 +590,13 @@ async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     runner: Runner,
 ) -> Result<ToolResult>
 where
-    Runner: FnOnce(PathBuf, String, Vec<String>, Duration) -> RunFuture,
+    Runner: FnOnce(PathBuf, String, Vec<String>, Duration, TestRunControl) -> RunFuture,
     RunFuture: Future<Output = std::result::Result<TestRunOutput, TestRunFailure>>,
 {
-    let run_args = RunAffectedArgs::parse(&args);
+    let run_args = match RunAffectedArgs::parse(&args) {
+        Ok(run_args) => run_args,
+        Err(result) => return Ok(result),
+    };
     let project_root = cg.project_root().to_path_buf();
 
     // The caller's manifest is the authority for the affected-test scope.
@@ -646,11 +641,13 @@ where
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
+    let control = TestRunControl::default();
     let run = runner(
         project_root.clone(),
         run_args.profile,
         test_names.clone(),
         Duration::from_secs(run_args.timeout_secs),
+        control.clone(),
     );
     tokio::pin!(run);
     let cancellation = wait_for_test_run_cancellation(emitter.clone(), cancellation);
@@ -658,46 +655,103 @@ where
     let run_result = tokio::select! {
         result = &mut run => result,
         () = &mut cancellation => {
-            finish_test_run(
-                &emitter,
-                started_at,
-                &effective_deadline,
-                OperationTermination::Cancelled,
-            )
-            .await?;
-            return Ok(error_result(&args, "cargo", "test", "cargo test cancelled"));
+            control.cancel();
+            (&mut run).await
         }
     };
     let output = match run_result {
         Ok(output) => output,
         Err(TestRunFailure::Spawn(error)) => {
-            finish_test_run(
+            let receipt = finish_test_run(
                 &emitter,
                 started_at,
                 &effective_deadline,
                 OperationTermination::Failed,
+                0,
             )
             .await?;
-            return Ok(error_result(
+            return Ok(managed_test_error_result(
                 &args,
                 "cargo",
                 "test",
                 &format!("failed to spawn cargo test: {error}"),
+                &emitter,
+                receipt,
             ));
         }
-        Err(TestRunFailure::Timeout) => {
-            finish_test_run(
+        Err(TestRunFailure::Cancelled { output_bytes }) => {
+            let receipt = finish_test_run(
+                &emitter,
+                started_at,
+                &effective_deadline,
+                OperationTermination::Cancelled,
+                output_bytes,
+            )
+            .await?;
+            return Ok(managed_test_error_result(
+                &args,
+                "cargo",
+                "test",
+                "cargo test cancelled",
+                &emitter,
+                receipt,
+            ));
+        }
+        Err(TestRunFailure::Timeout { output_bytes }) => {
+            let receipt = finish_test_run(
                 &emitter,
                 started_at,
                 &effective_deadline,
                 OperationTermination::TimedOut,
+                output_bytes,
             )
             .await?;
-            return Ok(error_result(
+            return Ok(managed_test_error_result(
                 &args,
                 "cargo",
                 "test",
                 &format!("cargo test timed out after {}s", run_args.timeout_secs),
+                &emitter,
+                receipt,
+            ));
+        }
+        Err(TestRunFailure::OutputLimit {
+            stream,
+            output_bytes,
+        }) => {
+            let receipt = finish_test_run(
+                &emitter,
+                started_at,
+                &effective_deadline,
+                OperationTermination::Failed,
+                output_bytes,
+            )
+            .await?;
+            return Ok(managed_test_error_result(
+                &args,
+                "cargo",
+                "test",
+                &format!("cargo test {stream} exceeded its output bound"),
+                &emitter,
+                receipt,
+            ));
+        }
+        Err(TestRunFailure::Read { output_bytes, .. }) => {
+            let receipt = finish_test_run(
+                &emitter,
+                started_at,
+                &effective_deadline,
+                OperationTermination::Failed,
+                output_bytes,
+            )
+            .await?;
+            return Ok(managed_test_error_result(
+                &args,
+                "cargo",
+                "test",
+                "cargo test output could not be read",
+                &emitter,
+                receipt,
             ));
         }
     };
@@ -713,11 +767,12 @@ where
         .progress(results.len() as u64, Some(test_names.len() as u64))
         .await
         .map_err(test_run_event_error)?;
-    finish_test_run(
+    let receipt = finish_test_run(
         &emitter,
         started_at,
         &effective_deadline,
         OperationTermination::Completed,
+        output.output_bytes,
     )
     .await?;
 
@@ -730,6 +785,7 @@ where
         &selected_targets,
         &output.stderr,
         &output.stdout,
+        managed_test_terminal(&emitter, &receipt),
     );
 
     Ok(generic_tool_result(
@@ -882,7 +938,8 @@ async fn finish_test_run(
     started_at: UtcMicros,
     effective_deadline: &Deadline,
     termination: OperationTermination,
-) -> Result<()> {
+    bytes_consumed: u64,
+) -> Result<OperationReceipt> {
     let ended_at = test_run_now();
     let elapsed_micros = ended_at.0.saturating_sub(started_at.0) as u64;
     let cancellation = matches!(
@@ -900,16 +957,16 @@ async fn finish_test_run(
         cancellation,
         budget: OperationBudgetUsage {
             units_consumed: 1,
-            bytes_consumed: 0,
+            bytes_consumed,
             elapsed_micros,
         },
         termination,
     };
     emitter
-        .terminal(receipt)
+        .terminal(receipt.clone())
         .await
         .map_err(test_run_event_error)?;
-    Ok(())
+    Ok(receipt)
 }
 
 fn test_run_now() -> UtcMicros {
@@ -1064,26 +1121,6 @@ fn select_test_targets(
     (selected_targets, test_names, truncated)
 }
 
-fn cargo_test_command(project_root: &Path, profile: &str, test_names: &[String]) -> Command {
-    let mut cmd = Command::new("cargo");
-    cmd.current_dir(project_root)
-        .args(cargo_test_args(profile, test_names));
-    cmd.kill_on_drop(true);
-    cmd
-}
-
-fn cargo_test_args(profile: &str, test_names: &[String]) -> Vec<String> {
-    let mut args = vec!["test".to_string(), "--no-fail-fast".to_string()];
-    if profile == "release" {
-        args.push("--release".to_string());
-    }
-    args.push("--".to_string());
-    for name in test_names {
-        args.push(name.clone());
-    }
-    args
-}
-
 fn run_affected_tests_body(
     exit_code: Option<i32>,
     results: &[(String, bool)],
@@ -1092,6 +1129,7 @@ fn run_affected_tests_body(
     selected_targets: &[TestTarget],
     stderr: &str,
     stdout: &str,
+    terminal: Value,
 ) -> Value {
     let passed = results.iter().filter(|(_, ok)| *ok).count();
     let failed = results.iter().filter(|(_, ok)| !*ok).count();
@@ -1115,6 +1153,15 @@ fn run_affected_tests_body(
             .collect::<Vec<_>>(),
         "stderr_tail": tail(stderr, 2000),
         "stdout_tail": tail(stdout, 2000),
+        "terminal": terminal,
+    })
+}
+
+fn managed_test_terminal(emitter: &OperationEmitter, receipt: &OperationReceipt) -> Value {
+    json!({
+        "operation_id": emitter.binding().operation_id().to_string(),
+        "result_tool": "tracedecay_test_results",
+        "receipt": receipt,
     })
 }
 
@@ -1150,6 +1197,28 @@ fn error_result(args: &Value, kind: &str, operation: &str, message: &str) -> Too
             "operation": operation,
             "message": message,
         }
+    });
+    generic_tool_result(None, args, &value, vec![])
+}
+
+fn managed_test_error_result(
+    args: &Value,
+    kind: &str,
+    operation: &str,
+    message: &str,
+    emitter: &OperationEmitter,
+    receipt: OperationReceipt,
+) -> ToolResult {
+    let value = json!({
+        "passed": 0,
+        "failed": 0,
+        "results": [],
+        "error": {
+            "kind": kind,
+            "operation": operation,
+            "message": message,
+        },
+        "terminal": managed_test_terminal(emitter, &receipt),
     });
     generic_tool_result(None, args, &value, vec![])
 }
@@ -1197,121 +1266,5 @@ fn parse_libtest_output(stdout: &str) -> Vec<(String, bool)> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
-mod tests {
-    use super::*;
-
-    #[allow(dead_code)]
-    fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
-        fn assert_send<T: Send>(_: T) {}
-        assert_send(begin_test_run(cg, &[], deadline, None));
-    }
-
-    #[tokio::test]
-    async fn directly_changed_test_file_is_dispatched_without_toolchain_execution() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let dir = tempfile::TempDir::new().unwrap();
-        let project = dir.path();
-        std::fs::create_dir_all(project.join("src")).unwrap();
-        std::fs::create_dir_all(project.join("tests")).unwrap();
-        std::fs::write(project.join("src/lib.rs"), "pub fn util() -> u32 { 1 }\n").unwrap();
-        std::fs::write(
-            project.join("Cargo.toml"),
-            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
-        std::fs::write(
-            project.join("tests/edited_only.rs"),
-            "#[test]\nfn edited_only_test() {\n    assert_eq!(2, 2);\n}\n",
-        )
-        .unwrap();
-
-        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
-            project,
-            "project.mcp-affected-tests",
-        )
-        .await
-        .unwrap();
-        cg.index_all().await.unwrap();
-        {
-            let database = cg.dashboard_database_guard();
-            database
-                .execute_write_batch(
-                    "seed managed test-run diagnostics schema",
-                    crate::diagnostics_store::SCHEMA,
-                )
-                .await
-                .unwrap();
-        }
-        let expected_root = project.to_path_buf();
-        let result = handle_run_affected_tests_with_runner(
-            &cg,
-            json!({
-                "changed_paths": ["tests/edited_only.rs"],
-                "timeout_secs": 60,
-                "max_tests": 5,
-                "format": "json"
-            }),
-            None,
-            None,
-            move |root, profile, tests, timeout_duration| async move {
-                assert_eq!(root, expected_root);
-                assert_eq!(profile, "debug");
-                assert_eq!(timeout_duration, Duration::from_mins(1));
-                assert_eq!(tests, ["edited_only_test"]);
-                Ok(TestRunOutput {
-                    exit_code: Some(0),
-                    stdout: "test edited_only_test ... ok\n".to_string(),
-                    stderr: String::new(),
-                })
-            },
-        )
-        .await
-        .unwrap();
-
-        let text = result.value["content"][0]["text"].as_str().unwrap();
-        let output: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(output["dispatched_tests"], json!(["edited_only_test"]));
-        assert_eq!(output["results"][0]["test"], "edited_only_test");
-        assert_eq!(output["passed"], 1);
-
-        cg.checkpoint().await.unwrap();
-        cg.close();
-    }
-
-    #[test]
-    fn parses_libtest_pass_and_fail() {
-        let stdout = "\
-running 3 tests
-test foo ... ok
-test bar ... FAILED
-test baz ... ignored
-test result: FAILED. 1 passed; 1 failed; 1 ignored
-";
-        let results = parse_libtest_output(stdout);
-        assert_eq!(results, vec![("foo".into(), true), ("bar".into(), false)]);
-    }
-
-    #[test]
-    fn cargo_test_args_put_multiple_filters_after_libtest_separator() {
-        let args = cargo_test_args("debug", &["alpha".to_string(), "beta".to_string()]);
-
-        assert_eq!(args, ["test", "--no-fail-fast", "--", "alpha", "beta"]);
-    }
-
-    #[test]
-    fn cargo_test_args_keep_release_before_libtest_separator() {
-        let args = cargo_test_args("release", &["alpha".to_string(), "beta".to_string()]);
-
-        assert_eq!(
-            args,
-            ["test", "--no-fail-fast", "--release", "--", "alpha", "beta"]
-        );
-    }
-
-    #[test]
-    fn tail_handles_short_input() {
-        assert_eq!(tail("hello", 100), "hello");
-        assert_eq!(tail("0123456789", 4), "6789");
-    }
-}
+#[path = "workflow/affected_tests_tests.rs"]
+mod affected_tests_tests;
