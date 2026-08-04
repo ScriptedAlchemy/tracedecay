@@ -757,7 +757,8 @@ pub(super) const TABLES: &[Table] = &[
         [
             column("session_id", "TEXT", true, None, 1),
             column("generation", "INTEGER", true, None, 2),
-            column("project_id", "TEXT", true, None, 0),
+            column("scope_kind", "TEXT", true, None, 0),
+            column("scope_id", "TEXT", true, None, 0),
             column("expected_graph_watermark", "TEXT", true, None, 0),
             column("state", "TEXT", true, None, 0),
             column("graph_watermark", "TEXT", false, None, 0),
