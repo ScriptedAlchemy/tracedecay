@@ -74,6 +74,18 @@ const REGISTRY_SCHEMA: &str = "
         PRIMARY KEY (store_id, artifact_kind, relpath),
         FOREIGN KEY(store_id) REFERENCES store_instances(store_id) ON DELETE CASCADE
     );
+    CREATE TABLE IF NOT EXISTS remote_deletion_tombstones (
+        profile_id TEXT NOT NULL,
+        target_kind TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        tombstone_id TEXT NOT NULL,
+        recorded_at_micros INTEGER NOT NULL,
+        PRIMARY KEY (profile_id, target_kind, project_id),
+        CHECK (
+            (target_kind = 'account' AND project_id = '')
+            OR (target_kind = 'project' AND project_id <> '')
+        )
+    );
     CREATE INDEX IF NOT EXISTS idx_project_aliases_project_id
         ON project_aliases(project_id);
     CREATE INDEX IF NOT EXISTS idx_store_instances_project_id

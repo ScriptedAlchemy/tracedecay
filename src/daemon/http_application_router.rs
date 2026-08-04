@@ -32,6 +32,7 @@ pub(super) fn install_http_application_cold_resolver(
     registry: &http_application::DaemonHttpApplicationRegistry,
     store_administration: StoreAdministration,
 ) -> Result<()> {
+    registry.install_remote_deletion_administration(store_administration.clone())?;
     registry.install_resolver(move |project_id| {
         let store_administration = store_administration.clone();
         async move {

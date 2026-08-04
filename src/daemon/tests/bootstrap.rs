@@ -312,6 +312,50 @@ async fn enrollment_marker_without_a_store_is_still_rejected() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn remote_project_deletion_removes_only_its_profile_shard_and_fences_replay() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("repository");
+    std::fs::create_dir_all(&project).expect("create repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_remote_deleted");
+    // This fixture is intentionally a durable non-SQLite payload: deletion
+    // must remove the exact profile shard without attempting any operator
+    // profile path, while the retained marker must fence replay afterwards.
+    std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+    std::fs::write(layout.data_root.join("payload.txt"), "remote payload")
+        .expect("write isolated profile payload");
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote project deletion");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let receipt = engine
+        .store_administration
+        .execute_remote_deletion(
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_remote_deleted".to_owned()),
+            "tombstone.remote-deleted".to_owned(),
+        )
+        .await
+        .expect("delete isolated remote project");
+    assert_eq!(receipt.removed_project_count, 1);
+    assert!(!layout.data_root.exists(), "exact profile shard is removed");
+    assert!(project.exists(), "source checkout is never removed");
+
+    let error = engine
+        .ensure_registered_project_route(&project, false)
+        .await
+        .expect_err("retained enrollment marker must be fenced by the tombstone");
+    assert!(matches!(
+        error,
+        TraceDecayError::ProjectRoute { ref reason_code, retryable: false, .. }
+            if reason_code == "remote_deleted"
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
     let home = TempDir::new().expect("isolated home");
     let profile_root = home.path().join(".tracedecay");

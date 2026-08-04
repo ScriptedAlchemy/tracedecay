@@ -2,7 +2,10 @@
 use std::sync::Arc;
 
 #[cfg(test)]
-use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
+use super::{
+    AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb, RemoteDeletionTarget,
+    RemoteDeletionTombstone,
+};
 
 pub mod harness;
 
@@ -131,6 +134,69 @@ async fn git_common_dir_aliases_share_one_project_and_store_authority() {
                 .is_none()
         );
     }
+}
+
+#[tokio::test]
+async fn remote_deletion_tombstone_is_idempotent_and_fences_project_replay() {
+    let harness = RegisteredGlobalDbHarness::open("remote-deletion-tombstone").await;
+    let first = RemoteDeletionTombstone {
+        target: RemoteDeletionTarget::Project,
+        profile_id: "profile.remote-deletion".to_owned(),
+        project_id: Some("proj.remote-deletion".to_owned()),
+        tombstone_id: "tombstone.first".to_owned(),
+        recorded_at_micros: 100,
+    };
+    let recorded = harness
+        .registered
+        .record_remote_deletion_tombstone(first.clone())
+        .await
+        .expect("record project deletion tombstone");
+    assert_eq!(recorded, first);
+
+    let replay = harness
+        .registered
+        .record_remote_deletion_tombstone(RemoteDeletionTombstone {
+            tombstone_id: "tombstone.replayed".to_owned(),
+            recorded_at_micros: 200,
+            ..first.clone()
+        })
+        .await
+        .expect("replay project deletion tombstone");
+    assert_eq!(replay, first);
+
+    let fenced = harness
+        .registered
+        .remote_deletion_tombstone_for_project("profile.remote-deletion", "proj.remote-deletion")
+        .await
+        .expect("read replay fence");
+    assert_eq!(fenced, Some(first));
+}
+
+#[tokio::test]
+async fn account_remote_deletion_tombstone_fences_every_project_in_its_profile() {
+    let harness = RegisteredGlobalDbHarness::open("remote-account-deletion-tombstone").await;
+    let account = RemoteDeletionTombstone {
+        target: RemoteDeletionTarget::Account,
+        profile_id: "profile.remote-account-deletion".to_owned(),
+        project_id: None,
+        tombstone_id: "tombstone.account".to_owned(),
+        recorded_at_micros: 100,
+    };
+    harness
+        .registered
+        .record_remote_deletion_tombstone(account.clone())
+        .await
+        .expect("record account deletion tombstone");
+
+    let fenced = harness
+        .registered
+        .remote_deletion_tombstone_for_project(
+            "profile.remote-account-deletion",
+            "proj.any-project",
+        )
+        .await
+        .expect("read account replay fence");
+    assert_eq!(fenced, Some(account));
 }
 
 #[tokio::test]

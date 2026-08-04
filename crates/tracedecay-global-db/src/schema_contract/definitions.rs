@@ -222,6 +222,17 @@ pub(super) const TABLES: &[Table] = &[
         ]
     ),
     table!(
+        "remote_deletion_tombstones",
+        [
+            column("profile_id", "TEXT", true, None, 1),
+            column("target_kind", "TEXT", true, None, 2),
+            column("project_id", "TEXT", true, None, 3),
+            column("tombstone_id", "TEXT", true, None, 0),
+            column("recorded_at_micros", "INTEGER", true, None, 0),
+        ],
+        []
+    ),
+    table!(
         "observation_repository_provenance",
         [
             column("observation_id", "TEXT", false, None, 1),
@@ -1740,6 +1751,7 @@ pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     "store_instances",
     "graph_scopes",
     "store_artifacts",
+    "remote_deletion_tombstones",
 ];
 
 pub(super) const OBSERVATIONS_TABLE_NAME: &str = "observations";

@@ -19,7 +19,7 @@ use axum::http::header::{AUTHORIZATION, ORIGIN};
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, post};
 use constant_time_eq::constant_time_eq;
 use tokio::sync::{Mutex, Semaphore, oneshot};
 use tokio::task::JoinHandle;
@@ -73,6 +73,7 @@ pub(super) struct DaemonHttpApplicationRegistry {
     resolver: Arc<SyncRwLock<Option<ProjectRouterResolver>>>,
     resolver_admission: Arc<Semaphore>,
     active: Arc<AtomicBool>,
+    remote_deletion_administration: Arc<SyncRwLock<Option<super::StoreAdministration>>>,
 }
 
 impl Default for DaemonHttpApplicationRegistry {
@@ -82,6 +83,7 @@ impl Default for DaemonHttpApplicationRegistry {
             resolver: Arc::new(SyncRwLock::new(None)),
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
             active: Arc::new(AtomicBool::new(false)),
+            remote_deletion_administration: Arc::new(SyncRwLock::new(None)),
         }
     }
 }
@@ -116,6 +118,36 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
+    pub(super) fn install_remote_deletion_administration(
+        &self,
+        administration: super::StoreAdministration,
+    ) -> Result<()> {
+        let mut slot =
+            self.remote_deletion_administration
+                .write()
+                .map_err(|_| TraceDecayError::Config {
+                    message: "daemon remote deletion administration lock is poisoned".to_owned(),
+                })?;
+        if slot.is_some() {
+            return Err(TraceDecayError::Config {
+                message: "daemon remote deletion administration is already installed".to_owned(),
+            });
+        }
+        *slot = Some(administration);
+        Ok(())
+    }
+
+    pub(super) fn remote_deletion_administration(
+        &self,
+    ) -> Result<Option<super::StoreAdministration>> {
+        self.remote_deletion_administration
+            .read()
+            .map(|slot| slot.clone())
+            .map_err(|_| TraceDecayError::Config {
+                message: "daemon remote deletion administration lock is poisoned".to_owned(),
+            })
+    }
+
     async fn resolve(&self, project_id: &str) -> Option<Router> {
         let project_id = ProjectId::new(project_id.to_owned()).ok()?;
         if let Some(router) = self.routers.lock().await.get(project_id.as_str()) {
@@ -138,6 +170,10 @@ impl DaemonHttpApplicationRegistry {
 
     fn router(self) -> Router {
         Router::new()
+            .route(
+                "/remote/deletion",
+                post(super::remote_deletion::dispatch_remote_deletion),
+            )
             .route(
                 "/projects/{project_id}/application/{*tail}",
                 any(dispatch_project_application),
