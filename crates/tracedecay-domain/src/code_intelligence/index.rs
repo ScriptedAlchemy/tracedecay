@@ -14,7 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::id::{
     CommitId, ManifestDigest, PrivacyDomainId, ProjectId, RefId, RepositoryId, RetrievalAnchorId,
-    SanitizationReceiptId, WorktreeId,
+    SanitizationReceiptId, TreeId, WorktreeId,
 };
 use crate::research::time::UtcMicros;
 use crate::research::{DomainError, canonical_sha256};
@@ -37,6 +37,7 @@ pub struct SanitizedCodeSnapshotV1 {
     pub worktree: Option<WorktreeId>,
     pub reference: Option<RefId>,
     pub source_revision: Option<CommitId>,
+    pub source_tree: Option<TreeId>,
     pub sanitizer_revision: SanitizerRevision,
     pub sanitization_receipts: Vec<SanitizationReceiptId>,
     pub content_identity: ContentDigest,
@@ -55,6 +56,22 @@ impl SanitizedCodeSnapshotV1 {
         }
         if let Some(source_revision) = &self.source_revision {
             source_revision.validate()?;
+        }
+        if let Some(source_tree) = &self.source_tree {
+            source_tree.validate()?;
+        }
+        match (&self.source_revision, &self.source_tree) {
+            (Some(_), Some(_)) | (None, None) => {}
+            (Some(_), None) => {
+                return Err(DomainError::UnknownReference {
+                    field: "snapshot source tree",
+                });
+            }
+            (None, Some(_)) => {
+                return Err(DomainError::UnknownReference {
+                    field: "snapshot source revision",
+                });
+            }
         }
         self.sanitizer_revision.validate()?;
         self.content_identity.validate()?;
@@ -668,6 +685,7 @@ mod tests {
             worktree: Some(id("worktree.fixture")),
             reference: Some(id("ref.main")),
             source_revision: Some(id("commit.abc123")),
+            source_tree: Some(id("tree.abc123")),
             sanitizer_revision: id("sanitizer.v1"),
             sanitization_receipts: vec![id("receipt.a"), id("receipt.b")],
             content_identity: id(&digest('a')),
@@ -689,6 +707,27 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn clean_snapshot_requires_commit_and_tree_as_one_exact_identity() {
+        let mut missing_tree = snapshot();
+        missing_tree.source_tree = None;
+        assert!(matches!(
+            missing_tree.validate(),
+            Err(DomainError::UnknownReference {
+                field: "snapshot source tree"
+            })
+        ));
+
+        let mut missing_commit = snapshot();
+        missing_commit.source_revision = None;
+        assert!(matches!(
+            missing_commit.validate(),
+            Err(DomainError::UnknownReference {
+                field: "snapshot source revision"
+            })
+        ));
     }
 
     fn generation_manifest() -> CodeGenerationManifestV1 {

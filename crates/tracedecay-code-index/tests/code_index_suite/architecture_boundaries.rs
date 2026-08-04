@@ -76,6 +76,7 @@ fn indexer_entry_and_exit_are_only_the_intake_and_projection_ports() {
         worktree: Some(id::<WorktreeId>("worktree.boundary")),
         reference: Some(id::<RefId>("refs/heads/main")),
         source_revision: Some(id::<CommitId>("commit.boundary")),
+        source_tree: Some(id("tree.boundary")),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.boundary")],
         content_identity: tracedecay_code_index::chunks::content_digest(source),

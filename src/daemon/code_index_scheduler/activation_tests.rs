@@ -19,11 +19,18 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tracedecay_domain::{CodeGenerationId, ProjectId, SanitizerRevision};
+use tracedecay_application::ResolvedScope;
+use tracedecay_domain::{
+    AuthorizationRevision, CodeGenerationId, ComponentRevision, ExactAdmissionRuleRevision,
+    PrincipalId, ProjectId, QueryNormalizationRevision, RelationEdgeKindV1, RetrievalCursorKeyId,
+    SanitizerRevision, ScoreDomainId,
+};
+use tracedecay_query::retrieval::QueryAuthorityV1;
+use tracedecay_query::retrieval::fusion::RetrievalCursorKeyringV1;
 
 use super::{
-    CodeIndexReconcileOutcomeV1, CodeIndexWorktreeSchedulerV1, DaemonCodeIndexPublicationStoreV1,
-    SharedCodeIndexBytePoolV1,
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    DaemonCodeIndexPublicationStoreV1, SharedCodeIndexBytePoolV1,
 };
 use crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1;
 
@@ -91,6 +98,175 @@ fn publication_store(store_root: &Path) -> DaemonCodeIndexPublicationStoreV1 {
         SanitizerRevision::new(CODE_SOURCE_SANITIZER_VERSION_V1).expect("sanitizer revision"),
     )
     .expect("open publication store")
+}
+
+fn search_request(query: &str) -> super::query_runtime::QuerySearchExecutionRequestV1 {
+    super::query_runtime::QuerySearchExecutionRequestV1::new(
+        query,
+        super::query_runtime::QuerySearchExecutionPolicyV1 {
+            principal: PrincipalId::new("principal.activation-journey").expect("principal"),
+            authorization_revision: AuthorizationRevision::new("authorization.activation-journey")
+                .expect("authorization"),
+            sanitizer_revision: SanitizerRevision::new(
+                tracedecay_query::retrieval::QUERY_SANITIZER_REVISION_V1,
+            )
+            .expect("query sanitizer"),
+            normalization_revision: QueryNormalizationRevision::new(
+                tracedecay_query::retrieval::QUERY_NORMALIZATION_REVISION_V1,
+            )
+            .expect("query normalization"),
+            exact_rule_revision: ExactAdmissionRuleRevision::new(
+                tracedecay_query::retrieval::QUERY_EXACT_RULE_REVISION_V1,
+            )
+            .expect("exact rule"),
+            lexical_profile_revision: ComponentRevision::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_PROFILE_REVISION_V1,
+            )
+            .expect("lexical profile"),
+            lexical_score_domain: ScoreDomainId::new(
+                tracedecay_query::retrieval::QUERY_LEXICAL_SCORE_DOMAIN_V1,
+            )
+            .expect("lexical score domain"),
+            fuzzy_budget: tracedecay_query::retrieval::lexical::MAX_FUZZY_TERM_EXPANSIONS_V1,
+            graph_edge_kinds: vec![RelationEdgeKindV1::Calls],
+            graph_max_depth: 1,
+            page_size: 10,
+            cursor: None,
+        },
+    )
+}
+
+async fn mount_query_authority(
+    registry: &CodeIndexSchedulerRegistryV1,
+    project: &Path,
+    scope: &ResolvedScope,
+    latest: &super::LatestCompleteCodeIndexV1,
+) {
+    let (_, accepted, _) =
+        crate::application::semantic_runtime::bundled_query_authority().expect("bundled authority");
+    let keyring = RetrievalCursorKeyringV1::new(
+        latest.generation().manifest().privacy_domain.clone(),
+        RetrievalCursorKeyId::new("retrieval-key.activation-journey").expect("cursor key"),
+        1,
+        vec![11_u8; 32],
+        60_000_000,
+    )
+    .expect("cursor keyring");
+    let authority = Arc::new(
+        QueryAuthorityV1::new(
+            accepted.profile().clone(),
+            accepted.diversity().clone(),
+            ComponentRevision::new(tracedecay_query::retrieval::QUERY_RANKING_REVISION_V1)
+                .expect("ranking revision"),
+            keyring,
+        )
+        .expect("query authority"),
+    );
+    registry
+        .mount_query_authority(project, scope, authority)
+        .await
+        .expect("mount query authority");
+}
+
+#[tokio::test]
+async fn production_query_journey_activates_cold_and_serves_warm_edits_stale_until_publish() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let initial_hold = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold initial reconcile");
+    registry
+        .mount_worktree(
+            project_id(),
+            project.path(),
+            store.path().to_path_buf(),
+            None,
+        )
+        .await
+        .expect("mount worktree");
+    let identity =
+        super::identity::IndexingIdentityV1::resolve(project.path()).expect("indexing identity");
+    let scope = ResolvedScope::new(
+        project_id(),
+        identity.repository_id().clone(),
+        identity.worktree_id().clone(),
+        identity.head_ref().cloned(),
+    )
+    .expect("resolved scope");
+
+    assert!(matches!(
+        registry
+            .execute_query_search(&scope, search_request("activation_revision"))
+            .await,
+        Err(super::query_runtime::QuerySearchExecutionErrorV1::GenerationUnavailable)
+    ));
+    drop(initial_hold);
+
+    let initial = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_ready_for_scope(&scope).await {
+                break latest;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initial background publication");
+    let initial_generation = initial.generation().manifest().generation_id.clone();
+    mount_query_authority(&registry, project.path(), &scope, &initial).await;
+    let retry = registry
+        .execute_query_search(&scope, search_request("activation_revision"))
+        .await
+        .expect("retry after demand activation");
+    assert!(!retry.served_stale);
+    assert_eq!(retry.generation, initial_generation);
+
+    let edit_hold = registry
+        .background_reconcile_admission()
+        .acquire_owned()
+        .await
+        .expect("hold edit reconcile");
+    write(project.path(), "src/lib.rs", 2);
+    git(project.path(), &["add", "src/lib.rs"]);
+    git(project.path(), &["commit", "-q", "-m", "edit"]);
+    assert!(
+        registry
+            .notify_hook_paths(project.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let stale = registry
+        .execute_query_search(&scope, search_request("activation_revision"))
+        .await
+        .expect("warm edit serves prior generation");
+    assert!(stale.served_stale);
+    assert_eq!(stale.generation, initial_generation);
+    drop(edit_hold);
+
+    let published = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            if let Some(latest) = registry.latest_complete_ready_for_scope(&scope).await
+                && latest.generation().manifest().generation_id != initial_generation
+            {
+                break latest;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("edited generation publication");
+    let retry = registry
+        .execute_query_search(&scope, search_request("activation_revision"))
+        .await
+        .expect("retry after edit publication");
+    assert!(!retry.served_stale);
+    assert_eq!(
+        retry.generation,
+        published.generation().manifest().generation_id
+    );
+    registry.shutdown().await;
 }
 
 /// Activation pays the sealed decode and every per-generation derivation. The

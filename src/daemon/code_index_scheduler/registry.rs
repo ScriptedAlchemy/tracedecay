@@ -963,7 +963,7 @@ impl CodeIndexSchedulerRegistryV1 {
         Ok(())
     }
 
-    pub(super) async fn query_authority_for_scope(
+    pub(in crate::daemon) async fn query_authority_for_scope(
         &self,
         scope: &tracedecay_application::ResolvedScope,
     ) -> Option<Arc<tracedecay_query::retrieval::QueryAuthorityV1>> {

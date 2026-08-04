@@ -2,9 +2,12 @@
 
 use gix::bstr::ByteSlice as _;
 
+const MAX_LOCAL_BRANCH_SCAN: usize = 4_096;
+
 #[derive(Clone, Debug)]
 pub struct LocalBranchReadControlV1 {
     pub max_refs: usize,
+    pub after: Option<String>,
     pub deadline: Option<tracedecay_application::Deadline>,
     pub cancellation: Option<tracedecay_application::CancellationSignal>,
 }
@@ -41,6 +44,8 @@ pub enum LocalBranchSnapshotErrorV1 {
     EnumerationUnavailable,
     #[error("local branch enumeration requires a positive reference limit")]
     InvalidLimit,
+    #[error("local branch enumeration exceeded its bounded capacity after {examined} refs")]
+    CapacityExceeded { examined: usize },
     #[error("local branch read was cancelled")]
     Cancelled,
     #[error("local branch read timed out")]
@@ -50,7 +55,16 @@ pub enum LocalBranchSnapshotErrorV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BranchSnapshot {
     pub name: String,
+    pub reference: tracedecay_domain::RefId,
     pub commit: String,
+    pub tree: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalBranchRevisionV1 {
+    pub reference: tracedecay_domain::RefId,
+    pub commit: tracedecay_domain::GitOidV1,
+    pub tree: tracedecay_domain::GitOidV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,29 +72,15 @@ pub struct LocalBranchSnapshotsV1 {
     pub snapshots: Vec<BranchSnapshot>,
     pub examined: usize,
     pub truncated: bool,
+    pub next_after: Option<String>,
 }
 
-/// Resolves one exact local `refs/heads/*` branch tip to its peeled commit.
-pub fn local_branch_commit(
-    project_root: &std::path::Path,
-    branch: &str,
-) -> Result<tracedecay_domain::GitOidV1, LocalBranchSnapshotErrorV1> {
-    local_branch_commit_controlled(
-        project_root,
-        branch,
-        &LocalBranchReadControlV1 {
-            max_refs: 1,
-            deadline: None,
-            cancellation: None,
-        },
-    )
-}
-
-pub fn local_branch_commit_controlled(
+/// Resolves one exact local `refs/heads/*` branch tip to commit and tree.
+pub fn local_branch_revision_controlled(
     project_root: &std::path::Path,
     branch: &str,
     control: &LocalBranchReadControlV1,
-) -> Result<tracedecay_domain::GitOidV1, LocalBranchSnapshotErrorV1> {
+) -> Result<LocalBranchRevisionV1, LocalBranchSnapshotErrorV1> {
     control.termination().map_or(Ok(()), Err)?;
     let refname = format!("refs/heads/{branch}");
     gix::refs::FullName::try_from(refname.as_str()).map_err(|_| {
@@ -99,41 +99,54 @@ pub fn local_branch_commit_controlled(
             branch: branch.to_owned(),
         })?;
     control.termination().map_or(Ok(()), Err)?;
-    let commit = reference
-        .peel_to_commit()
-        .map_err(|_| LocalBranchSnapshotErrorV1::InvalidReference {
+    let commit =
+        reference
+            .peel_to_commit()
+            .map_err(|_| LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: branch.to_owned(),
+            })?;
+    let commit_id = commit.id().to_string();
+    let tree_id = commit
+        .tree_id()
+        .map_err(|_| LocalBranchSnapshotErrorV1::ReferenceUnavailable {
             branch: branch.to_owned(),
         })?
-        .id()
         .to_string();
     control.termination().map_or(Ok(()), Err)?;
-    tracedecay_domain::GitOidV1::new(commit).map_err(|_| {
-        LocalBranchSnapshotErrorV1::InvalidReference {
-            branch: branch.to_owned(),
-        }
+    Ok(LocalBranchRevisionV1 {
+        reference: tracedecay_domain::RefId::new(refname).map_err(|_| {
+            LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: branch.to_owned(),
+            }
+        })?,
+        commit: tracedecay_domain::GitOidV1::new(commit_id).map_err(|_| {
+            LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: branch.to_owned(),
+            }
+        })?,
+        tree: tracedecay_domain::GitOidV1::new(tree_id).map_err(|_| {
+            LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: branch.to_owned(),
+            }
+        })?,
     })
 }
 
-/// Lists a bounded prefix of exact local branch tips without spawning Git.
-pub fn local_branch_snapshots(
-    project_root: &std::path::Path,
-) -> Result<LocalBranchSnapshotsV1, LocalBranchSnapshotErrorV1> {
-    local_branch_snapshots_controlled(
-        project_root,
-        &LocalBranchReadControlV1 {
-            max_refs: 128,
-            deadline: None,
-            cancellation: None,
-        },
-    )
-}
-
+/// Lists one stable lexical page from a bounded complete local-ref snapshot.
 pub fn local_branch_snapshots_controlled(
     project_root: &std::path::Path,
     control: &LocalBranchReadControlV1,
 ) -> Result<LocalBranchSnapshotsV1, LocalBranchSnapshotErrorV1> {
     if control.max_refs == 0 {
         return Err(LocalBranchSnapshotErrorV1::InvalidLimit);
+    }
+    if let Some(after) = control.after.as_deref() {
+        let refname = format!("refs/heads/{after}");
+        gix::refs::FullName::try_from(refname.as_str()).map_err(|_| {
+            LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: after.to_owned(),
+            }
+        })?;
     }
     control.termination().map_or(Ok(()), Err)?;
     let repo =
@@ -145,35 +158,68 @@ pub fn local_branch_snapshots_controlled(
         .local_branches()
         .map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?;
     let mut snapshots = Vec::new();
-    let mut examined = 0;
     for reference in branches {
         control.termination().map_or(Ok(()), Err)?;
-        examined += 1;
-        if snapshots.len() == control.max_refs {
-            snapshots.sort_unstable_by(|left: &BranchSnapshot, right| left.name.cmp(&right.name));
-            return Ok(LocalBranchSnapshotsV1 {
-                snapshots,
-                examined,
-                truncated: true,
+        if snapshots.len() == MAX_LOCAL_BRANCH_SCAN {
+            return Err(LocalBranchSnapshotErrorV1::CapacityExceeded {
+                examined: snapshots.len() + 1,
             });
         }
         let mut reference =
             reference.map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?;
         let name = reference.name().shorten().to_str_lossy().into_owned();
-        let commit = reference
-            .peel_to_commit()
-            .map_err(|_| LocalBranchSnapshotErrorV1::InvalidReference {
+        let commit = reference.peel_to_commit().map_err(|_| {
+            LocalBranchSnapshotErrorV1::InvalidReference {
+                branch: name.clone(),
+            }
+        })?;
+        let commit_id = commit.id().to_string();
+        let tree_id = commit
+            .tree_id()
+            .map_err(|_| LocalBranchSnapshotErrorV1::ReferenceUnavailable {
                 branch: name.clone(),
             })?
-            .id()
             .to_string();
-        snapshots.push(BranchSnapshot { name, commit });
+        snapshots.push(BranchSnapshot {
+            reference: tracedecay_domain::RefId::new(format!("refs/heads/{name}")).map_err(
+                |_| LocalBranchSnapshotErrorV1::InvalidReference {
+                    branch: name.clone(),
+                },
+            )?,
+            name,
+            commit: tracedecay_domain::GitOidV1::new(commit_id)
+                .map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?
+                .as_str()
+                .to_owned(),
+            tree: tracedecay_domain::GitOidV1::new(tree_id)
+                .map_err(|_| LocalBranchSnapshotErrorV1::EnumerationUnavailable)?
+                .as_str()
+                .to_owned(),
+        });
     }
     snapshots.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    snapshots.dedup_by(|left, right| left.name == right.name);
+    let examined = snapshots.len();
+    let start = control.after.as_deref().map_or(0, |after| {
+        snapshots.partition_point(|snapshot| snapshot.name.as_str() <= after)
+    });
+    let mut selected = snapshots
+        .into_iter()
+        .skip(start)
+        .take(control.max_refs + 1)
+        .collect::<Vec<_>>();
+    let truncated = selected.len() > control.max_refs;
+    if truncated {
+        selected.truncate(control.max_refs);
+    }
+    let next_after = truncated
+        .then(|| selected.last().map(|snapshot| snapshot.name.clone()))
+        .flatten();
     Ok(LocalBranchSnapshotsV1 {
-        snapshots,
+        snapshots: selected,
         examined,
-        truncated: false,
+        truncated,
+        next_after,
     })
 }
 
@@ -199,6 +245,15 @@ mod tests {
             .expect("git output")
             .trim()
             .to_owned()
+    }
+
+    fn control(max_refs: usize) -> LocalBranchReadControlV1 {
+        LocalBranchReadControlV1 {
+            max_refs,
+            after: None,
+            deadline: None,
+            cancellation: None,
+        }
     }
 
     #[test]
@@ -238,10 +293,14 @@ mod tests {
             ],
         );
 
-        let resolved = local_branch_commit(root.path(), "selected").expect("selected ref");
-        assert_eq!(resolved.as_str(), selected);
-        assert_ne!(resolved.as_str(), git(root.path(), &["rev-parse", "HEAD"]));
-        assert!(local_branch_commit(root.path(), "missing").is_err());
+        let resolved = local_branch_revision_controlled(root.path(), "selected", &control(1))
+            .expect("selected ref");
+        assert_eq!(resolved.commit.as_str(), selected);
+        assert_ne!(
+            resolved.commit.as_str(),
+            git(root.path(), &["rev-parse", "HEAD"])
+        );
+        assert!(local_branch_revision_controlled(root.path(), "missing", &control(1)).is_err());
     }
 
     #[test]
@@ -277,14 +336,16 @@ mod tests {
             root.path(),
             &LocalBranchReadControlV1 {
                 max_refs: 32,
+                after: None,
                 deadline: None,
                 cancellation: None,
             },
         )
         .expect("bounded branch page");
         assert_eq!(page.snapshots.len(), 32);
-        assert_eq!(page.examined, 33);
+        assert_eq!(page.examined, 97);
         assert!(page.truncated);
+        assert!(page.next_after.is_some());
 
         let cancellation = tracedecay_application::CancellationSignal::active("cancel.branch-refs")
             .expect("cancellation");
@@ -294,6 +355,7 @@ mod tests {
                 root.path(),
                 &LocalBranchReadControlV1 {
                     max_refs: 32,
+                    after: None,
                     deadline: None,
                     cancellation: Some(cancellation),
                 },
@@ -308,6 +370,7 @@ mod tests {
                 root.path(),
                 &LocalBranchReadControlV1 {
                     max_refs: 32,
+                    after: None,
                     deadline: Some(expired),
                     cancellation: None,
                 },
@@ -315,12 +378,103 @@ mod tests {
             Err(LocalBranchSnapshotErrorV1::TimedOut)
         );
         assert!(matches!(
-            local_branch_commit(root.path(), "missing"),
+            local_branch_revision_controlled(root.path(), "missing", &control(1)),
             Err(LocalBranchSnapshotErrorV1::NotFound { .. })
         ));
         assert!(matches!(
-            local_branch_commit(root.path(), "bad..name"),
+            local_branch_revision_controlled(root.path(), "bad..name", &control(1)),
             Err(LocalBranchSnapshotErrorV1::InvalidReference { .. })
         ));
+    }
+
+    #[test]
+    fn packed_and_loose_refs_share_one_stable_lexical_page() {
+        let root = tempfile::tempdir().expect("tempdir");
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        std::fs::write(root.path().join("fixture.txt"), "base\n").expect("write base");
+        git(root.path(), &["add", "fixture.txt"]);
+        git(
+            root.path(),
+            &[
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+        git(root.path(), &["branch", "alpha"]);
+        git(root.path(), &["branch", "charlie"]);
+        git(root.path(), &["pack-refs", "--all", "--prune"]);
+        git(root.path(), &["branch", "beta"]);
+        git(root.path(), &["branch", "zulu"]);
+
+        let page = local_branch_snapshots_controlled(
+            root.path(),
+            &LocalBranchReadControlV1 {
+                max_refs: 2,
+                after: None,
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .expect("mixed ref page");
+
+        assert_eq!(
+            page.snapshots
+                .iter()
+                .map(|snapshot| snapshot.name.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        assert_eq!(
+            page.examined, 5,
+            "a stable prefix must be selected from the complete bounded ref set"
+        );
+        assert!(page.truncated);
+        assert_eq!(page.next_after.as_deref(), Some("beta"));
+
+        let next = local_branch_snapshots_controlled(
+            root.path(),
+            &LocalBranchReadControlV1 {
+                max_refs: 2,
+                after: page.next_after,
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .expect("next mixed ref page");
+        assert_eq!(
+            next.snapshots
+                .iter()
+                .map(|snapshot| snapshot.name.as_str())
+                .collect::<Vec<_>>(),
+            ["charlie", "main"]
+        );
+        assert!(next.truncated);
+        assert_eq!(next.next_after.as_deref(), Some("main"));
+        let final_page = local_branch_snapshots_controlled(
+            root.path(),
+            &LocalBranchReadControlV1 {
+                max_refs: 2,
+                after: next.next_after,
+                deadline: None,
+                cancellation: None,
+            },
+        )
+        .expect("final mixed ref page");
+        assert_eq!(
+            final_page
+                .snapshots
+                .iter()
+                .map(|snapshot| snapshot.name.as_str())
+                .collect::<Vec<_>>(),
+            ["zulu"]
+        );
+        assert!(!final_page.truncated);
+        assert!(final_page.next_after.is_none());
     }
 }

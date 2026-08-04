@@ -46,7 +46,7 @@ fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSea
     }
 }
 
-fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
+pub(super) fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
     let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
         return Ok(None);
     };
@@ -109,7 +109,7 @@ fn semantic_status_value(
 /// answer from one produced while a lane was down. Emitted on every search
 /// response, including the successful ones, because "no matches" and "the
 /// matching lane was not running" are otherwise indistinguishable.
-fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> Value {
+pub(super) fn coverage_value(coverage: &crate::mcp::server::CodeIndexSearchCoverageV1) -> Value {
     fn lane(status: &crate::mcp::server::CodeIndexLaneStatusV1) -> Value {
         match status {
             crate::mcp::server::CodeIndexLaneStatusV1::Complete => json!("complete"),
@@ -257,7 +257,9 @@ pub(super) async fn handle_search(
         crate::mcp::server::CodeIndexSearchRequestV1 {
             project_root: cg.project_root().to_path_buf(),
             query: query.to_owned(),
+            source_reference: None,
             source_revision: None,
+            source_tree: None,
             limit,
             cursor,
             mode: semantic_mode,
@@ -1888,7 +1890,9 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_reference: None,
                 source_revision: None,
+                source_tree: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
@@ -1918,7 +1922,9 @@ mod tests {
             crate::mcp::server::CodeIndexSearchRequestV1 {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
+                source_reference: None,
                 source_revision: None,
+                source_tree: None,
                 limit: 10,
                 cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,
