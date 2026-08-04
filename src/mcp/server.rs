@@ -409,6 +409,10 @@ pub struct McpServer {
     /// Owns admitted tool handlers that need longer than the response-side
     /// settlement grace after cancellation or deadline expiry.
     retained_tool_dispatch_tasks: requests::RetainedToolDispatchTasks,
+    /// Construction-time weak self-reference used only to move an admitted
+    /// handler into the retained task owner without changing request APIs to
+    /// require `&Arc<McpServer>`.
+    retained_dispatch_server: std::sync::Weak<McpServer>,
 }
 
 impl McpServer {
@@ -808,7 +812,7 @@ impl McpServer {
             )
             .map(|service| Arc::new(service) as Arc<dyn SessionRetrievalServicePort>);
 
-        let server = Arc::new(Self {
+        let server = Arc::new_cyclic(|retained_dispatch_server| Self {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
@@ -889,6 +893,7 @@ impl McpServer {
             project_server_lifecycle: ProjectServerResponseLifecycle::default(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
             retained_tool_dispatch_tasks: requests::RetainedToolDispatchTasks::new(),
+            retained_dispatch_server: retained_dispatch_server.clone(),
         });
 
         tokio::task::spawn_blocking(move || {

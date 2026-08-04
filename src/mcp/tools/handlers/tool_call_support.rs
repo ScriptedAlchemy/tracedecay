@@ -523,4 +523,63 @@ mod dispatch_control_tests {
         tasks.shutdown().await;
         assert!(settlement.is_joined());
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_non_cooperative_worker_is_reaped_by_shutdown_owner() {
+        let cancellation =
+            tracedecay_application::CancellationSignal::active("cancellation.reap.fixture")
+                .expect("cancellation");
+        let control = McpToolDispatchControl::new("tracedecay_search", None, cancellation)
+            .expect("dispatch control");
+        let tasks = Arc::new(crate::mcp::server::RetainedToolDispatchTasks::new());
+        let settlement = Arc::new(crate::mcp::server::DispatchExecutionSettlement::new());
+        let worker_started = Arc::new(tokio::sync::Notify::new());
+        let worker_release = Arc::new(tokio::sync::Notify::new());
+        let runner_control = control.clone();
+        let runner_tasks = Arc::clone(&tasks);
+        let runner_settlement = Arc::clone(&settlement);
+        let started = Arc::clone(&worker_started);
+        let release = Arc::clone(&worker_release);
+        let runner = tokio::spawn(async move {
+            runner_control
+                .run_retained(
+                    McpToolDispatchStage::Handler,
+                    runner_tasks.as_ref(),
+                    runner_settlement,
+                    async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    },
+                )
+                .await
+        });
+
+        worker_started.notified().await;
+        control.cancel(tracedecay_application::clock::now_micros());
+        tokio::task::yield_now().await;
+        tokio::time::advance(WORKER_SETTLEMENT_GRACE + std::time::Duration::from_millis(1)).await;
+        let error = runner
+            .await
+            .expect("dispatch runner joins")
+            .expect_err("cancelled non-cooperative handler");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("tool_dispatch_cancelled")
+        );
+        assert!(settlement.is_settling());
+
+        let shutdown_tasks = Arc::clone(&tasks);
+        let shutdown = tokio::spawn(async move {
+            shutdown_tasks.shutdown().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must retain and join the unsettled handler"
+        );
+        worker_release.notify_one();
+        shutdown.await.expect("shutdown owner joins");
+        assert!(settlement.is_joined());
+    }
 }

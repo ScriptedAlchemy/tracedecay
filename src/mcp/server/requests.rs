@@ -242,10 +242,7 @@ impl McpServer {
     /// Dispatches a parsed JSON-RPC request to the appropriate handler.
     ///
     /// Returns `None` for notifications (requests without an `id`).
-    pub(crate) async fn handle_request(
-        self: &Arc<Self>,
-        request: &JsonRpcRequest,
-    ) -> Option<JsonRpcResponse> {
+    pub(crate) async fn handle_request(&self, request: &JsonRpcRequest) -> Option<JsonRpcResponse> {
         // The initialize-replay entry point builds its own per-connection
         // context so replay dispatches carry a real memory-request scope,
         // exactly like the live connection loop. These callers never dispatch
@@ -288,7 +285,7 @@ impl McpServer {
     }
 
     pub(crate) async fn handle_request_for_connection(
-        self: &Arc<Self>,
+        &self,
         request: &JsonRpcRequest,
         timings_enabled: bool,
         connection: &mut ConnectionRouteState,
@@ -619,13 +616,20 @@ impl McpServer {
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
         let cg = self.reopen_if_branch_drifted().await;
         match cg.get_stats().await {
-            Ok(stats) => {
-                let mut output = serde_json::to_value(&stats).unwrap_or(json!({}));
-                output["branch_diagnostics"] =
-                    serde_json::to_value(cg.branch_diagnostics()).unwrap_or(json!({}));
-                let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-                Self::resource_contents(id, "tracedecay://status", "application/json", &text)
-            }
+            Ok(stats) => match (|| -> Result<String> {
+                let mut output = serde_json::to_value(&stats)?;
+                output["branch_diagnostics"] = serde_json::to_value(cg.branch_diagnostics())?;
+                Ok(serde_json::to_string_pretty(&output)?)
+            })() {
+                Ok(text) => {
+                    Self::resource_contents(id, "tracedecay://status", "application/json", &text)
+                }
+                Err(error) => JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("failed to serialize graph stats: {error}"),
+                ),
+            },
             Err(e) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,
@@ -746,8 +750,16 @@ impl McpServer {
             "branch_count": branches.len(),
             "branches": branches,
         });
-        let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-        Self::resource_contents(id, "tracedecay://branches", "application/json", &text)
+        match serde_json::to_string_pretty(&output) {
+            Ok(text) => {
+                Self::resource_contents(id, "tracedecay://branches", "application/json", &text)
+            }
+            Err(error) => JsonRpcResponse::error(
+                id,
+                ErrorCode::InternalError,
+                format!("failed to serialize branch inventory: {error}"),
+            ),
+        }
     }
 
     #[allow(clippy::result_large_err)]
@@ -1049,7 +1061,7 @@ impl McpServer {
 
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_tool_call(
-        self: &Arc<Self>,
+        &self,
         id: &Value,
         tool_name: &str,
         arguments: Value,
@@ -1180,7 +1192,24 @@ impl McpServer {
             }
         };
         let settlement = Arc::new(DispatchExecutionSettlement::new());
-        let execution_server = Arc::clone(self);
+        let execution_server = match self.retained_dispatch_server.upgrade() {
+            Some(server) => server,
+            None => {
+                return DispatchedToolCall {
+                    cg,
+                    selected_owner,
+                    selected_scope,
+                    outcome: Err(TraceDecayError::project_route(
+                        "tool_dispatch_shutdown",
+                        true,
+                        "MCP retained dispatch owner is unavailable",
+                    )),
+                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    worker_settlement:
+                        super::request_receipts::ToolCallWorkerSettlement::NotStarted,
+                };
+            }
+        };
         let execution_cg = Arc::clone(&cg);
         let execution_tool_name = tool_name.to_owned();
         let execution_implicit_project_path = implicit_project_path.map(Path::to_path_buf);
@@ -1514,7 +1543,7 @@ impl McpServer {
         let banner = format_per_file_staleness_banner(cg.project_root(), &stale_files);
         // Machine-readable marker. Same shape as before
         // so existing scrapers keep working.
-        let stale_json = serde_json::to_string(&stale_files).unwrap_or_else(|_| "[]".to_string());
+        let stale_json = json!(stale_files).to_string();
         let marker = format!("\ntracedecay_graph_stale: {stale_json}");
         debug_assert!(
             result.value.is_object(),
@@ -1797,7 +1826,7 @@ impl McpServer {
 
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
-        self: &Arc<Self>,
+        &self,
         id: Value,
         params: Option<&Value>,
         timings_enabled: bool,
