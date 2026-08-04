@@ -9,7 +9,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
-use gix::bstr::ByteSlice;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::{
@@ -27,6 +26,11 @@ use tracedecay_graph_db::{
 
 use crate::application::context::CancellationToken;
 
+mod native;
+
+pub(crate) use native::capture_source;
+use native::{CollectCommitError, collect_commit_record, is_ancestor, require_current_target};
+
 const HISTORY_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 const WINDOW_BUCKET_SECS: i64 = 24 * 60 * 60;
 const MAX_CHANGED_FILES_PER_COMMIT: usize = 20_000;
@@ -37,6 +41,7 @@ const MAX_CHANGED_PATH_REFERENCES: usize = 50_000;
 const MAX_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DURABLE_FRONTIER: usize = 512;
 const MAX_PROJECTION_ENTITIES: usize = MAX_WINDOW_COMMITS + MAX_UNIQUE_PATHS + 2;
+const PROJECTION_PAGE_SIZE: usize = 256;
 const GRAPH_FORMAT_VERSION: u32 = 2;
 const PROJECTION: &str = "git-health";
 const READY_ENTITY: &str = "git-health-ready";
@@ -136,6 +141,7 @@ struct WorkingStateV1 {
     target: GitHealthProjectionSourceV1,
     pending: VecDeque<GitOidV1>,
     counters: ProjectionCountersV1,
+    expiration_complete: bool,
     complete: bool,
 }
 
@@ -145,6 +151,7 @@ impl WorkingStateV1 {
             pending: VecDeque::from([target.commit.clone()]),
             target,
             counters: ProjectionCountersV1::default(),
+            expiration_complete: true,
             complete: false,
         }
     }
@@ -154,10 +161,13 @@ impl WorkingStateV1 {
         if target.commit != ready.source.commit {
             pending.push_back(target.commit.clone());
         }
+        let expiration_complete =
+            target.window_start_epoch_secs == ready.source.window_start_epoch_secs;
         Self {
             target,
             pending,
             counters: ready.counters.clone(),
+            expiration_complete,
             complete: false,
         }
     }
@@ -347,16 +357,25 @@ impl GitHealthProjectionStoreV1 {
         let mut working =
             match persisted_working.filter(|state| !state.complete && state.target == target) {
                 Some(working) => working,
-                None => self.initialize_target(
-                    scope,
-                    &repository,
-                    ready.as_ref(),
-                    target.clone(),
-                    Arc::clone(&graph_cancellation),
-                )?,
+                None => {
+                    require_current_target(repository_root, scope, now_epoch_secs, &target)?;
+                    self.initialize_target(
+                        scope,
+                        &repository,
+                        ready.as_ref(),
+                        target.clone(),
+                        Arc::clone(&graph_cancellation),
+                    )?
+                }
             };
-        let mut mutations =
-            self.expire_outside_window(scope, &mut working, Arc::clone(&graph_cancellation))?;
+        let mut mutations = if working.expiration_complete {
+            Vec::new()
+        } else {
+            let mutations =
+                self.expire_outside_window(scope, &mut working, Arc::clone(&graph_cancellation))?;
+            working.expiration_complete = true;
+            mutations
+        };
         if !mutations.is_empty() {
             working.counters.batches_completed = checked_add_u64(
                 working.counters.batches_completed,
@@ -379,6 +398,8 @@ impl GitHealthProjectionStoreV1 {
                     },
                 )?));
             }
+            cancellation_checkpoint(cancellation)?;
+            require_current_target(repository_root, scope, now_epoch_secs, &target)?;
             self.database.apply(GraphWriteBatch::new(
                 namespace(scope)?,
                 projection()?,
@@ -422,6 +443,10 @@ impl GitHealthProjectionStoreV1 {
                 Ok(record) => record,
                 Err(CollectCommitError::PathLimit) => {
                     working.mark_partial(GitHealthProjectionPartialReasonV1::CommitPathLimit);
+                    break;
+                }
+                Err(CollectCommitError::Partial(reason)) => {
+                    working.mark_partial(reason);
                     break;
                 }
                 Err(CollectCommitError::Projection(error)) => return Err(error),
@@ -502,6 +527,7 @@ impl GitHealthProjectionStoreV1 {
             )?));
         }
         cancellation_checkpoint(cancellation)?;
+        require_current_target(repository_root, scope, now_epoch_secs, &target)?;
         self.database.apply(GraphWriteBatch::new(
             namespace(scope)?,
             projection()?,
@@ -667,21 +693,30 @@ impl GitHealthProjectionStoreV1 {
         scope: &ResolvedScope,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<GraphEntity>, GitHealthProjectionError> {
-        let page = self.database.read_projection(GraphProjectionReadRequest {
-            namespace: namespace(scope)?,
-            projection: projection()?,
-            after_entity: None,
-            after_relation: None,
-            max_entities: MAX_PROJECTION_ENTITIES,
-            max_relations: 0,
-            cancellation,
-        })?;
-        if page.next_entity.is_some() {
-            return Err(GitHealthProjectionError::Corrupt(
-                "Git health projection exceeds its entity bound".to_owned(),
-            ));
+        let mut entities = Vec::new();
+        let mut after_entity = None;
+        loop {
+            let page = self.database.read_projection(GraphProjectionReadRequest {
+                namespace: namespace(scope)?,
+                projection: projection()?,
+                after_entity,
+                after_relation: None,
+                max_entities: PROJECTION_PAGE_SIZE,
+                max_relations: 0,
+                cancellation: Arc::clone(&cancellation),
+            })?;
+            entities.extend(page.entities);
+            if entities.len() > MAX_PROJECTION_ENTITIES {
+                return Err(GitHealthProjectionError::Corrupt(
+                    "Git health projection exceeds its entity bound".to_owned(),
+                ));
+            }
+            let Some(next) = page.next_entity else {
+                break;
+            };
+            after_entity = Some(next);
         }
-        Ok(page.entities)
+        Ok(entities)
     }
 
     fn read_state<T: for<'de> Deserialize<'de>>(
@@ -738,264 +773,6 @@ impl GitHealthProjectionStoreV1 {
         }
         usize_property(&entity, FILE_CHURN_PROPERTY).map(Some)
     }
-}
-
-pub(crate) fn capture_source(
-    repository_root: &Path,
-    scope: &ResolvedScope,
-    now_epoch_secs: i64,
-) -> Result<GitHealthProjectionSourceV1, GitHealthProjectionError> {
-    scope
-        .validate()
-        .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
-    let identity =
-        crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(repository_root)
-            .map_err(|error| GitHealthProjectionError::Git(error.to_string()))?;
-    if identity.repository_id() != &scope.repository_id
-        || identity.worktree_id() != &scope.worktree_id
-        || identity.head_ref() != scope.reference.as_ref()
-    {
-        return Err(GitHealthProjectionError::ScopeDrift);
-    }
-    let commit = identity
-        .head_commit()
-        .ok_or_else(|| GitHealthProjectionError::Git("HEAD has no commit".to_owned()))
-        .and_then(|commit| {
-            GitOidV1::new(commit.as_str())
-                .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))
-        })?;
-    let tree = identity
-        .head_tree()
-        .ok_or_else(|| GitHealthProjectionError::Git("HEAD commit has no readable tree".to_owned()))
-        .and_then(|tree| {
-            GitOidV1::new(tree.as_str())
-                .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))
-        })?;
-    let window_end_epoch_secs = now_epoch_secs
-        .checked_sub(now_epoch_secs.rem_euclid(WINDOW_BUCKET_SECS))
-        .ok_or_else(|| {
-            GitHealthProjectionError::Corrupt(
-                "Git health window end is outside the supported range".to_owned(),
-            )
-        })?;
-    let window_start_epoch_secs = window_end_epoch_secs
-        .checked_sub(HISTORY_WINDOW_SECS)
-        .ok_or_else(|| {
-            GitHealthProjectionError::Corrupt(
-                "Git health window start is outside the supported range".to_owned(),
-            )
-        })?;
-    let projection_generation = canonical_sha256(&(
-        GENERATION_DOMAIN,
-        scope,
-        &commit,
-        &tree,
-        window_start_epoch_secs,
-        window_end_epoch_secs,
-    ))
-    .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
-    Ok(GitHealthProjectionSourceV1 {
-        scope: scope.clone(),
-        commit,
-        tree,
-        projection_generation,
-        window_start_epoch_secs,
-        window_end_epoch_secs,
-    })
-}
-
-enum CollectCommitError {
-    PathLimit,
-    Projection(GitHealthProjectionError),
-}
-
-fn collect_commit_record(
-    repository: &gix::Repository,
-    oid: &GitOidV1,
-    cancellation: &CancellationToken,
-) -> Result<CommitRecordV1, CollectCommitError> {
-    cancellation_checkpoint(cancellation).map_err(CollectCommitError::Projection)?;
-    let object_id = gix::ObjectId::from_hex(oid.as_str().as_bytes()).map_err(|error| {
-        CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-    })?;
-    let object = repository.find_object(object_id).map_err(|error| {
-        CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-    })?;
-    let commit = object.try_into_commit().map_err(|error| {
-        CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-    })?;
-    let committed_at_epoch_secs = commit
-        .time()
-        .map_err(|error| {
-            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-        })?
-        .seconds;
-    let tree = GitOidV1::new(
-        commit
-            .tree_id()
-            .map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-            })?
-            .detach()
-            .to_string(),
-    )
-    .map_err(|error| {
-        CollectCommitError::Projection(GitHealthProjectionError::Corrupt(error.to_string()))
-    })?;
-    let parents = commit
-        .parent_ids()
-        .map(|parent| {
-            GitOidV1::new(parent.detach().to_string()).map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Corrupt(error.to_string()))
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut changed_files = if let Some(first_parent) = commit.parent_ids().next() {
-        let parent_object = repository
-            .find_object(first_parent.detach())
-            .map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-            })?;
-        let parent_commit = parent_object.try_into_commit().map_err(|error| {
-            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-        })?;
-        changed_files_between(
-            &parent_commit.tree().map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-            })?,
-            &commit.tree().map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-            })?,
-            cancellation,
-        )?
-    } else {
-        let entries = commit
-            .tree()
-            .map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-            })?
-            .traverse()
-            .breadthfirst
-            .files()
-            .map_err(|error| {
-                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-            })?;
-        if entries.len() > MAX_CHANGED_FILES_PER_COMMIT {
-            return Err(CollectCommitError::PathLimit);
-        }
-        entries
-            .into_iter()
-            .filter(|entry| !entry.mode.is_tree())
-            .map(|entry| {
-                exact_path(entry.filepath.as_bytes()).map_err(CollectCommitError::Projection)
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
-    changed_files.sort();
-    changed_files.dedup();
-    if changed_files.iter().map(String::len).sum::<usize>() > MAX_COMMIT_RECORD_PATH_BYTES {
-        return Err(CollectCommitError::PathLimit);
-    }
-    cancellation_checkpoint(cancellation).map_err(CollectCommitError::Projection)?;
-    Ok(CommitRecordV1 {
-        oid: oid.clone(),
-        tree,
-        committed_at_epoch_secs,
-        parents,
-        changed_files,
-    })
-}
-
-fn changed_files_between(
-    from: &gix::Tree<'_>,
-    to: &gix::Tree<'_>,
-    cancellation: &CancellationToken,
-) -> Result<Vec<String>, CollectCommitError> {
-    let mut changed = Vec::new();
-    let mut bound_exceeded = false;
-    let mut path_error = None;
-    from.changes()
-        .map_err(|error| {
-            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-        })?
-        .for_each_to_obtain_tree(to, |change| {
-            if cancellation.is_cancelled() {
-                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
-            }
-            use gix::object::tree::diff::Change;
-            let mut push_path = |path: &[u8]| {
-                if changed.len() >= MAX_CHANGED_FILES_PER_COMMIT {
-                    bound_exceeded = true;
-                    return false;
-                }
-                match exact_path(path) {
-                    Ok(path) => changed.push(path),
-                    Err(error) => path_error = Some(error),
-                }
-                path_error.is_none()
-            };
-            let keep_going = match change {
-                Change::Addition {
-                    location,
-                    entry_mode,
-                    ..
-                }
-                | Change::Modification {
-                    location,
-                    entry_mode,
-                    ..
-                }
-                | Change::Deletion {
-                    location,
-                    entry_mode,
-                    ..
-                } => entry_mode.is_tree() || push_path(location.as_bytes()),
-                Change::Rewrite {
-                    source_location,
-                    source_entry_mode,
-                    location,
-                    entry_mode,
-                    ..
-                } => {
-                    (source_entry_mode.is_tree() || push_path(source_location.as_bytes()))
-                        && (entry_mode.is_tree() || push_path(location.as_bytes()))
-                }
-            };
-            Ok(if keep_going {
-                std::ops::ControlFlow::Continue(())
-            } else {
-                std::ops::ControlFlow::Break(())
-            })
-        })
-        .map_err(|error| {
-            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
-        })?;
-    cancellation_checkpoint(cancellation).map_err(CollectCommitError::Projection)?;
-    if let Some(error) = path_error {
-        return Err(CollectCommitError::Projection(error));
-    }
-    if bound_exceeded {
-        return Err(CollectCommitError::PathLimit);
-    }
-    Ok(changed)
-}
-
-fn exact_path(path: &[u8]) -> Result<String, GitHealthProjectionError> {
-    std::str::from_utf8(path)
-        .map(str::to_owned)
-        .map_err(|_| GitHealthProjectionError::Git("Git path is not valid UTF-8".to_owned()))
-}
-
-fn is_ancestor(repository: &gix::Repository, ancestor: &GitOidV1, head: &GitOidV1) -> bool {
-    let Ok(ancestor_id) = gix::ObjectId::from_hex(ancestor.as_str().as_bytes()) else {
-        return false;
-    };
-    let Ok(head_id) = gix::ObjectId::from_hex(head.as_str().as_bytes()) else {
-        return false;
-    };
-    repository
-        .merge_base(head_id, ancestor_id)
-        .is_ok_and(|base| base.detach() == ancestor_id)
 }
 
 fn state_entity<T: Serialize>(

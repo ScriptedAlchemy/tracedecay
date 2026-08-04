@@ -1,0 +1,298 @@
+//! Bounded native-`gix` source capture for the Git health projection.
+
+use std::path::Path;
+
+use gix::bstr::ByteSlice;
+use tracedecay_application::{
+    GitHealthProjectionPartialReasonV1, GitHealthProjectionSourceV1, ResolvedScope,
+};
+use tracedecay_domain::{GitOidV1, canonical_sha256};
+
+use super::{
+    CommitRecordV1, GENERATION_DOMAIN, GitHealthProjectionError, HISTORY_WINDOW_SECS,
+    MAX_CHANGED_FILES_PER_COMMIT, MAX_COMMIT_RECORD_PATH_BYTES, MAX_DURABLE_FRONTIER,
+    WINDOW_BUCKET_SECS, cancellation_checkpoint,
+};
+use crate::application::context::CancellationToken;
+
+pub(crate) fn capture_source(
+    repository_root: &Path,
+    scope: &ResolvedScope,
+    now_epoch_secs: i64,
+) -> Result<GitHealthProjectionSourceV1, GitHealthProjectionError> {
+    scope
+        .validate()
+        .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
+    let identity =
+        crate::daemon::code_index_scheduler::identity::IndexingIdentityV1::resolve(repository_root)
+            .map_err(|error| GitHealthProjectionError::Git(error.to_string()))?;
+    if identity.repository_id() != &scope.repository_id
+        || identity.worktree_id() != &scope.worktree_id
+        || identity.head_ref() != scope.reference.as_ref()
+    {
+        return Err(GitHealthProjectionError::ScopeDrift);
+    }
+    let commit = identity
+        .head_commit()
+        .ok_or_else(|| GitHealthProjectionError::Git("HEAD has no commit".to_owned()))
+        .and_then(|commit| {
+            GitOidV1::new(commit.as_str())
+                .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))
+        })?;
+    let tree = identity
+        .head_tree()
+        .ok_or_else(|| GitHealthProjectionError::Git("HEAD commit has no readable tree".to_owned()))
+        .and_then(|tree| {
+            GitOidV1::new(tree.as_str())
+                .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))
+        })?;
+    let window_end_epoch_secs = now_epoch_secs
+        .checked_sub(now_epoch_secs.rem_euclid(WINDOW_BUCKET_SECS))
+        .ok_or_else(|| {
+            GitHealthProjectionError::Corrupt(
+                "Git health window end is outside the supported range".to_owned(),
+            )
+        })?;
+    let window_start_epoch_secs = window_end_epoch_secs
+        .checked_sub(HISTORY_WINDOW_SECS)
+        .ok_or_else(|| {
+            GitHealthProjectionError::Corrupt(
+                "Git health window start is outside the supported range".to_owned(),
+            )
+        })?;
+    let projection_generation = canonical_sha256(&(
+        GENERATION_DOMAIN,
+        scope,
+        &commit,
+        &tree,
+        window_start_epoch_secs,
+        window_end_epoch_secs,
+    ))
+    .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
+    Ok(GitHealthProjectionSourceV1 {
+        scope: scope.clone(),
+        commit,
+        tree,
+        projection_generation,
+        window_start_epoch_secs,
+        window_end_epoch_secs,
+    })
+}
+
+pub(super) fn require_current_target(
+    repository_root: &Path,
+    scope: &ResolvedScope,
+    now_epoch_secs: i64,
+    target: &GitHealthProjectionSourceV1,
+) -> Result<(), GitHealthProjectionError> {
+    let current = capture_source(repository_root, scope, now_epoch_secs)?;
+    if &current == target {
+        Ok(())
+    } else {
+        Err(GitHealthProjectionError::ScopeDrift)
+    }
+}
+
+pub(super) enum CollectCommitError {
+    PathLimit,
+    Partial(GitHealthProjectionPartialReasonV1),
+    Projection(GitHealthProjectionError),
+}
+
+pub(super) fn collect_commit_record(
+    repository: &gix::Repository,
+    oid: &GitOidV1,
+    cancellation: &CancellationToken,
+) -> Result<CommitRecordV1, CollectCommitError> {
+    cancellation_checkpoint(cancellation).map_err(CollectCommitError::Projection)?;
+    let object_id = gix::ObjectId::from_hex(oid.as_str().as_bytes()).map_err(|error| {
+        CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+    })?;
+    let object = repository.find_object(object_id).map_err(|error| {
+        CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+    })?;
+    let commit = object.try_into_commit().map_err(|error| {
+        CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+    })?;
+    let committed_at_epoch_secs = commit
+        .time()
+        .map_err(|error| {
+            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+        })?
+        .seconds;
+    let tree = GitOidV1::new(
+        commit
+            .tree_id()
+            .map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+            })?
+            .detach()
+            .to_string(),
+    )
+    .map_err(|error| {
+        CollectCommitError::Projection(GitHealthProjectionError::Corrupt(error.to_string()))
+    })?;
+    let parents = commit
+        .parent_ids()
+        .map(|parent| {
+            GitOidV1::new(parent.detach().to_string()).map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Corrupt(error.to_string()))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if parents.len() > MAX_DURABLE_FRONTIER {
+        return Err(CollectCommitError::Partial(
+            GitHealthProjectionPartialReasonV1::FrontierLimit,
+        ));
+    }
+    let mut changed_files = if let Some(first_parent) = commit.parent_ids().next() {
+        let parent_object = repository
+            .find_object(first_parent.detach())
+            .map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+            })?;
+        let parent_commit = parent_object.try_into_commit().map_err(|error| {
+            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+        })?;
+        changed_files_between(
+            &parent_commit.tree().map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+            })?,
+            &commit.tree().map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+            })?,
+            cancellation,
+        )?
+    } else {
+        let entries = commit
+            .tree()
+            .map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+            })?
+            .traverse()
+            .breadthfirst
+            .files()
+            .map_err(|error| {
+                CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+            })?;
+        if entries.len() > MAX_CHANGED_FILES_PER_COMMIT {
+            return Err(CollectCommitError::PathLimit);
+        }
+        entries
+            .into_iter()
+            .filter(|entry| !entry.mode.is_tree())
+            .map(|entry| {
+                exact_path(entry.filepath.as_bytes()).map_err(CollectCommitError::Projection)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    changed_files.sort();
+    changed_files.dedup();
+    if changed_files.iter().map(String::len).sum::<usize>() > MAX_COMMIT_RECORD_PATH_BYTES {
+        return Err(CollectCommitError::PathLimit);
+    }
+    cancellation_checkpoint(cancellation).map_err(CollectCommitError::Projection)?;
+    Ok(CommitRecordV1 {
+        oid: oid.clone(),
+        tree,
+        committed_at_epoch_secs,
+        parents,
+        changed_files,
+    })
+}
+
+fn changed_files_between(
+    from: &gix::Tree<'_>,
+    to: &gix::Tree<'_>,
+    cancellation: &CancellationToken,
+) -> Result<Vec<String>, CollectCommitError> {
+    let mut changed = Vec::new();
+    let mut bound_exceeded = false;
+    let mut path_error = None;
+    from.changes()
+        .map_err(|error| {
+            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+        })?
+        .for_each_to_obtain_tree(to, |change| {
+            if cancellation.is_cancelled() {
+                return Ok::<_, std::convert::Infallible>(std::ops::ControlFlow::Break(()));
+            }
+            use gix::object::tree::diff::Change;
+            let mut push_path = |path: &[u8]| {
+                if changed.len() >= MAX_CHANGED_FILES_PER_COMMIT {
+                    bound_exceeded = true;
+                    return false;
+                }
+                match exact_path(path) {
+                    Ok(path) => changed.push(path),
+                    Err(error) => path_error = Some(error),
+                }
+                path_error.is_none()
+            };
+            let keep_going = match change {
+                Change::Addition {
+                    location,
+                    entry_mode,
+                    ..
+                }
+                | Change::Modification {
+                    location,
+                    entry_mode,
+                    ..
+                }
+                | Change::Deletion {
+                    location,
+                    entry_mode,
+                    ..
+                } => entry_mode.is_tree() || push_path(location.as_bytes()),
+                Change::Rewrite {
+                    source_location,
+                    source_entry_mode,
+                    location,
+                    entry_mode,
+                    ..
+                } => {
+                    (source_entry_mode.is_tree() || push_path(source_location.as_bytes()))
+                        && (entry_mode.is_tree() || push_path(location.as_bytes()))
+                }
+            };
+            Ok(if keep_going {
+                std::ops::ControlFlow::Continue(())
+            } else {
+                std::ops::ControlFlow::Break(())
+            })
+        })
+        .map_err(|error| {
+            CollectCommitError::Projection(GitHealthProjectionError::Git(error.to_string()))
+        })?;
+    cancellation_checkpoint(cancellation).map_err(CollectCommitError::Projection)?;
+    if let Some(error) = path_error {
+        return Err(CollectCommitError::Projection(error));
+    }
+    if bound_exceeded {
+        return Err(CollectCommitError::PathLimit);
+    }
+    Ok(changed)
+}
+
+fn exact_path(path: &[u8]) -> Result<String, GitHealthProjectionError> {
+    std::str::from_utf8(path)
+        .map(str::to_owned)
+        .map_err(|_| GitHealthProjectionError::Git("Git path is not valid UTF-8".to_owned()))
+}
+
+pub(super) fn is_ancestor(
+    repository: &gix::Repository,
+    ancestor: &GitOidV1,
+    head: &GitOidV1,
+) -> bool {
+    let Ok(ancestor_id) = gix::ObjectId::from_hex(ancestor.as_str().as_bytes()) else {
+        return false;
+    };
+    let Ok(head_id) = gix::ObjectId::from_hex(head.as_str().as_bytes()) else {
+        return false;
+    };
+    repository
+        .merge_base(head_id, ancestor_id)
+        .is_ok_and(|base| base.detach() == ancestor_id)
+}

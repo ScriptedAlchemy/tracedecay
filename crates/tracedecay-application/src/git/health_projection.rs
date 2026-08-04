@@ -54,7 +54,6 @@ pub enum GitHealthProjectionPartialReasonV1 {
     UniquePathLimit,
     ChangedPathLimit,
     PathBytesLimit,
-    RelationLimit,
     CommitPathLimit,
 }
 

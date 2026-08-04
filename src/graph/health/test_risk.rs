@@ -249,12 +249,13 @@ pub async fn analyze_test_risk(
         .filter(|risk| include_tested || !risk.has_test())
         .collect();
 
-    let git_history = git_health.map_or(
+    let mut git_history = git_health.map_or(
         GitHealthProjectionAvailabilityV1::Unavailable {
             reason: GitHealthProjectionUnavailableReasonV1::NotMounted,
         },
         GitHealthProjectionReadServiceV1::read,
     );
+    restrict_git_history_to_path(&mut git_history, path_prefix);
     match &git_history {
         GitHealthProjectionAvailabilityV1::Ready { snapshot } => {
             apply_churn(&mut risks, snapshot);
@@ -323,6 +324,22 @@ pub async fn analyze_test_risk(
             confidence_note: "coverage_pct is a depth-3 static attribution lower bound; direct_unit is strongest, closure is calibrated integration-style evidence and keeps a higher residual risk than a direct test edge.",
         },
     })
+}
+
+fn restrict_git_history_to_path(
+    availability: &mut GitHealthProjectionAvailabilityV1,
+    path_prefix: Option<&str>,
+) {
+    let snapshot = match availability {
+        GitHealthProjectionAvailabilityV1::Ready { snapshot }
+        | GitHealthProjectionAvailabilityV1::Refreshing { snapshot, .. }
+        | GitHealthProjectionAvailabilityV1::Stale { snapshot, .. } => snapshot,
+        GitHealthProjectionAvailabilityV1::Warming { .. }
+        | GitHealthProjectionAvailabilityV1::Unavailable { .. } => return,
+    };
+    snapshot
+        .file_churn
+        .retain(|path, _| crate::path_scope::path_matches_scope(path, path_prefix));
 }
 
 fn apply_churn(risks: &mut [RiskEntry], snapshot: &GitHealthProjectionSnapshotV1) {
@@ -413,7 +430,9 @@ mod churn_tests {
     };
     use tracedecay_domain::{GitOidV1, ManifestDigest, ProjectId, RefId, RepositoryId, WorktreeId};
 
-    use super::{RiskEntry, TestAttributionMethod, apply_churn};
+    use tracedecay_application::GitHealthProjectionAvailabilityV1;
+
+    use super::{RiskEntry, TestAttributionMethod, apply_churn, restrict_git_history_to_path};
 
     fn risk(file: &str) -> RiskEntry {
         RiskEntry {
@@ -474,5 +493,20 @@ mod churn_tests {
             &snapshot(GitHealthProjectionCoverageV1::Complete),
         );
         assert_eq!(risks[0].churn, Some(0));
+    }
+
+    #[test]
+    fn scoped_history_never_returns_paths_outside_authorized_prefix() {
+        let mut snapshot = snapshot(GitHealthProjectionCoverageV1::Complete);
+        snapshot
+            .file_churn
+            .insert("private/secret.rs".to_owned(), 9);
+        let mut availability = GitHealthProjectionAvailabilityV1::Ready { snapshot };
+        restrict_git_history_to_path(&mut availability, Some("src"));
+        let GitHealthProjectionAvailabilityV1::Ready { snapshot } = availability else {
+            panic!("ready history must remain ready");
+        };
+        assert_eq!(snapshot.file_churn.get("src/present.rs"), Some(&3));
+        assert!(!snapshot.file_churn.contains_key("private/secret.rs"));
     }
 }

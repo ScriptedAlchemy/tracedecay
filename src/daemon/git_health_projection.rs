@@ -171,7 +171,6 @@ impl GitHealthProjectionRegistryV1 {
             task: Mutex::new(None),
             commit_batch_limit: DEFAULT_COMMIT_BATCH_LIMIT,
         });
-        owner.start();
         {
             let mut state = self.inner.state.lock().map_err(|_| {
                 GitHealthProjectionError::Graph(
@@ -180,6 +179,7 @@ impl GitHealthProjectionRegistryV1 {
             })?;
             state.owners.insert(key.clone(), Arc::clone(&owner));
         }
+        owner.start();
         Ok(Arc::new(MountedGitHealthProjectionPortV1 {
             registry: Arc::clone(&self.inner),
             key,

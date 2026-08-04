@@ -7,12 +7,13 @@ use tracedecay_application::{
     ResolvedScope,
 };
 use tracedecay_domain::ProjectId;
-use tracedecay_graph_db::GraphDbError;
+use tracedecay_graph_db::{GraphDbError, GraphWatermark, ProjectionReplacement, SourceGeneration};
 
 use super::{
-    CommitRecordV1, GitHealthProjectionError, GitHealthProjectionStoreV1, MAX_DURABLE_FRONTIER,
-    MAX_UNIQUE_PATHS, MAX_WINDOW_COMMITS, ProjectionCountersV1, TokenCancellation, WorkingStateV1,
-    capture_source,
+    CommitRecordV1, GitHealthProjectionError, GitHealthProjectionStoreV1,
+    MAX_CHANGED_PATH_REFERENCES, MAX_DURABLE_FRONTIER, MAX_PATH_BYTES, MAX_UNIQUE_PATHS,
+    MAX_WINDOW_COMMITS, ProjectionCountersV1, ReadyStateV1, TokenCancellation, WorkingStateV1,
+    capture_source, file_entity, namespace, projection, state_entity,
 };
 use crate::application::context::CancellationToken;
 
@@ -31,6 +32,10 @@ fn non_final_graph_store_shape_requires_typed_reset() {
 }
 
 fn git(root: &Path, args: &[&str]) {
+    git_at(root, args, NOW_SECS - 60);
+}
+
+fn git_at(root: &Path, args: &[&str], committed_at: i64) {
     let output = std::process::Command::new("git")
         .args(args)
         .current_dir(root)
@@ -38,8 +43,8 @@ fn git(root: &Path, args: &[&str]) {
         .env("GIT_AUTHOR_EMAIL", "test@tracedecay.invalid")
         .env("GIT_COMMITTER_NAME", "TraceDecay Test")
         .env("GIT_COMMITTER_EMAIL", "test@tracedecay.invalid")
-        .env("GIT_AUTHOR_DATE", format!("@{} +0000", NOW_SECS - 60))
-        .env("GIT_COMMITTER_DATE", format!("@{} +0000", NOW_SECS - 60))
+        .env("GIT_AUTHOR_DATE", format!("@{committed_at} +0000"))
+        .env("GIT_COMMITTER_DATE", format!("@{committed_at} +0000"))
         .output()
         .expect("git command should start");
     assert!(
@@ -57,11 +62,16 @@ fn repository() -> TempDir {
 }
 
 fn commit_file(root: &Path, ordinal: usize, path: &str) {
+    commit_file_at(root, ordinal, path, NOW_SECS - 60);
+}
+
+fn commit_file_at(root: &Path, ordinal: usize, path: &str, committed_at: i64) {
     fs::write(root.join(path), format!("revision {ordinal}\n")).expect("write fixture");
     git(root, &["add", path]);
-    git(
+    git_at(
         root,
         &["commit", "--quiet", "-m", &format!("commit {ordinal}")],
+        committed_at,
     );
 }
 
@@ -179,6 +189,36 @@ fn same_head_advances_the_day_window_without_rewalking_history() {
     assert_eq!(snapshot.source.window_end_epoch_secs, {
         next_day - next_day.rem_euclid(24 * 60 * 60)
     });
+}
+
+#[test]
+fn day_boundary_expires_only_commits_that_leave_the_window() {
+    let root = repository();
+    let initial_source_start = NOW_SECS - NOW_SECS.rem_euclid(24 * 60 * 60) - 90 * 24 * 60 * 60;
+    commit_file_at(root.path(), 0, "expired.rs", initial_source_start + 60);
+    commit_file_at(root.path(), 1, "retained.rs", NOW_SECS - 60);
+    let scope = scope(root.path());
+    let store_dir = TempDir::new().expect("temporary projection store");
+    let cancellation = CancellationToken::new();
+    let store = GitHealthProjectionStoreV1::open(
+        &store_dir.path().join("project-graph.grafeo"),
+        &cancellation,
+    )
+    .expect("open projection");
+    finish_projection(&store, root.path(), &scope, 2, &cancellation);
+
+    let next_day = NOW_SECS + 24 * 60 * 60;
+    let progress = store
+        .advance(root.path(), &scope, next_day, 2, &cancellation)
+        .expect("incremental expiry");
+    assert_eq!(progress.commits_examined, 0);
+    assert!(progress.complete);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&scope) else {
+        panic!("expired window must remain ready");
+    };
+    assert_eq!(snapshot.commits_projected, 1);
+    assert_eq!(snapshot.file_churn.get("expired.rs"), None);
+    assert_eq!(snapshot.file_churn.get("retained.rs"), Some(&1));
 }
 
 #[test]
@@ -354,6 +394,7 @@ fn total_commit_path_and_frontier_bounds_produce_typed_partial_coverage() {
             commits_projected: MAX_WINDOW_COMMITS,
             ..ProjectionCountersV1::default()
         },
+        expiration_complete: true,
         complete: false,
     };
     assert_eq!(
@@ -384,6 +425,36 @@ fn total_commit_path_and_frontier_bounds_produce_typed_partial_coverage() {
         Some(tracedecay_application::GitHealthProjectionPartialReasonV1::UniquePathLimit)
     );
 
+    commits.counters.unique_paths = 0;
+    commits.counters.changed_path_references = MAX_CHANGED_PATH_REFERENCES;
+    assert_eq!(
+        store
+            .admission_failure(
+                &scope,
+                &commits,
+                &record,
+                &Default::default(),
+                std::sync::Arc::new(TokenCancellation(cancellation.clone())),
+            )
+            .expect("changed path bound"),
+        Some(tracedecay_application::GitHealthProjectionPartialReasonV1::ChangedPathLimit)
+    );
+
+    commits.counters.changed_path_references = 0;
+    commits.counters.path_bytes = MAX_PATH_BYTES;
+    assert_eq!(
+        store
+            .admission_failure(
+                &scope,
+                &commits,
+                &record,
+                &Default::default(),
+                std::sync::Arc::new(TokenCancellation(cancellation)),
+            )
+            .expect("path byte bound"),
+        Some(tracedecay_application::GitHealthProjectionPartialReasonV1::PathBytesLimit)
+    );
+
     let parents = vec![target.commit; MAX_DURABLE_FRONTIER + 1];
     commits.admit_parents(&parents);
     assert_eq!(
@@ -393,4 +464,58 @@ fn total_commit_path_and_frontier_bounds_produce_typed_partial_coverage() {
         }
     );
     assert!(commits.pending.is_empty());
+}
+
+#[test]
+fn projection_reads_paginate_without_losing_bounded_path_counters() {
+    let root = repository();
+    commit_file(root.path(), 0, "base.rs");
+    let scope = scope(root.path());
+    let target = capture_source(root.path(), &scope, NOW_SECS).expect("source");
+    let store_dir = TempDir::new().expect("temporary projection store");
+    let cancellation = CancellationToken::new();
+    let store = GitHealthProjectionStoreV1::open(
+        &store_dir.path().join("project-graph.grafeo"),
+        &cancellation,
+    )
+    .expect("open projection");
+    let mut entities = (0..300)
+        .map(|ordinal| file_entity(&format!("src/generated-{ordinal}.rs"), 1))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("bounded file counters");
+    entities.push(
+        state_entity(
+            super::READY_ENTITY,
+            &ReadyStateV1 {
+                source: target.clone(),
+                counters: ProjectionCountersV1 {
+                    unique_paths: 300,
+                    path_bytes: (0..300)
+                        .map(|ordinal| format!("src/generated-{ordinal}.rs").len())
+                        .sum(),
+                    ..ProjectionCountersV1::default()
+                },
+            },
+        )
+        .expect("ready state"),
+    );
+    store
+        .database()
+        .replace_projection(ProjectionReplacement {
+            namespace: namespace(&scope).expect("namespace"),
+            projection: projection().expect("projection"),
+            source_generation: SourceGeneration::new(target.projection_generation.as_str())
+                .expect("generation"),
+            next_watermark: GraphWatermark::new("pagination-fixture").expect("watermark"),
+            entities,
+            relations: Vec::new(),
+            cancellation: std::sync::Arc::new(TokenCancellation(cancellation)),
+        })
+        .expect("publish paginated fixture");
+
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&scope) else {
+        panic!("paginated snapshot must be ready");
+    };
+    assert_eq!(snapshot.file_churn.len(), 300);
+    assert_eq!(snapshot.file_churn.get("src/generated-299.rs"), Some(&1));
 }

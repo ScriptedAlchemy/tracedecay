@@ -192,3 +192,39 @@ async fn retired_owner_releases_capacity_for_another_project() {
     drop(second_port);
     registry.shutdown().await;
 }
+
+#[tokio::test]
+async fn failed_store_open_does_not_consume_owner_capacity() {
+    let repository = TempDir::new().expect("temporary repository");
+    git(repository.path(), &["init", "--quiet", "-b", "main"]);
+    commit(repository.path(), 0);
+    let stores = TempDir::new().expect("project graphs");
+    let blocked_parent = stores.path().join("not-a-directory");
+    fs::write(&blocked_parent, "fixture").expect("blocked store parent");
+    let registry = GitHealthProjectionRegistryV1::new(1);
+
+    assert!(
+        registry
+            .mount(
+                repository.path(),
+                blocked_parent.join("project-graph.grafeo"),
+                scope(repository.path()),
+            )
+            .await
+            .is_err(),
+        "an invalid project graph path must fail closed"
+    );
+    assert_eq!(registry.owner_count(), 0);
+
+    let port = registry
+        .mount(
+            repository.path(),
+            stores.path().join("project-graph.grafeo"),
+            scope(repository.path()),
+        )
+        .await
+        .expect("failed open must not consume the owner slot");
+    assert_eq!(registry.owner_count(), 1);
+    drop(port);
+    registry.shutdown().await;
+}
