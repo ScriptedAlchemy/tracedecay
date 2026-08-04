@@ -1112,19 +1112,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 }
 
-#[test]
-fn adapter_contains_only_the_borrowed_engine_handle() {
-    fn assert_exact_fields(adapter: &GlobalDbTemporalReadPort<'_>) {
-        let GlobalDbTemporalReadPort { read: _ } = adapter;
-    }
-
-    let _ = assert_exact_fields;
-    assert_eq!(
-        std::mem::size_of::<GlobalDbTemporalReadPort<'static>>(),
-        std::mem::size_of::<super::super::sql::TemporalSqlRead<'static>>()
-    );
-}
-
 #[tokio::test]
 async fn frozen_generation_survives_rotation_while_a_new_snapshot_observes_drift() {
     let dir = tempdir().expect("temporary directory");

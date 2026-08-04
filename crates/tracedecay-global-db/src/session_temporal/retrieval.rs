@@ -2,7 +2,7 @@ use tracedecay_runtime_core::db::engine::{Value, params};
 
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationFactV1,
-    CanonicalWorkflowSemanticKindV1, DurableObservationV1,
+    CanonicalWorkflowSemanticKindV1, DurableObservationV1, ProjectId, RetrievalAnchorId, SessionId,
 };
 use tracedecay_runtime_core::db::engine;
 use tracedecay_temporal_query::candidates::{CandidateChannel, CandidatePlan};
@@ -16,6 +16,9 @@ use tracedecay_temporal_query::ranking::RankingCandidate;
 
 mod candidates;
 mod cursors;
+#[cfg(test)]
+#[path = "retrieval/graph_relation_tests.rs"]
+mod graph_relation_tests;
 mod queries;
 mod records;
 mod rows;
@@ -24,7 +27,9 @@ mod semantic_filter_tests;
 #[cfg(test)]
 mod tests;
 
+use super::relations::{SessionRelationError, SessionRelationGraphStore, SummarySourceVisitKind};
 use super::sql::{TemporalSqlRead, TemporalSqlRows};
+use super::store::execution_control_graph_cancellation;
 use candidates::*;
 use cursors::*;
 use records::*;
@@ -36,6 +41,36 @@ pub const SNAPSHOT_OPERATION: &str = "validate temporal read snapshot";
 pub const MIN_CURSOR_CAPACITY: usize = 96;
 pub const MAX_SUMMARY_SOURCES_PER_RECORD: usize = 256;
 const FILTER_SCAN_PAGE_ITEMS: usize = 64;
+
+fn temporal_relation_error(
+    error: SessionRelationError,
+    control: &tracedecay_temporal_query::ports::ExecutionControl,
+) -> TemporalPortError {
+    if error == SessionRelationError::Cancelled
+        && let Err(control_error) = control.checkpoint()
+    {
+        return control_error;
+    }
+    match error {
+        SessionRelationError::BudgetExhausted => TemporalPortError::BudgetExceeded {
+            resource: "summary source relations",
+        },
+        SessionRelationError::Cancelled => TemporalPortError::Cancelled,
+        SessionRelationError::Invalid
+        | SessionRelationError::Cycle
+        | SessionRelationError::Conflict
+        | SessionRelationError::Corrupt => read_message(
+            CANDIDATE_OPERATION,
+            "session relation projection is invalid",
+        ),
+        SessionRelationError::NotFound
+        | SessionRelationError::Unavailable
+        | SessionRelationError::Storage(_) => read_message(
+            CANDIDATE_OPERATION,
+            "session relation projection is unavailable",
+        ),
+    }
+}
 
 fn observation_matches_filter(
     encoded: &str,
@@ -115,6 +150,12 @@ fn observation_matches_filter(
 /// Borrowed read-only adapter over one authoritative database snapshot.
 pub struct GlobalDbTemporalReadPort<'a> {
     read: TemporalSqlRead<'a>,
+    relation_authority: Option<SessionReadRelationAuthority<'a>>,
+}
+
+struct SessionReadRelationAuthority<'a> {
+    project_id: &'a ProjectId,
+    store: SessionRelationGraphStore,
 }
 
 impl<'a> GlobalDbTemporalReadPort<'a> {
@@ -122,17 +163,43 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
     pub const fn new(read: &'a engine::Connection) -> Self {
         Self {
             read: TemporalSqlRead::engine_connection(read),
+            relation_authority: None,
         }
     }
 
     pub const fn new_registered(read: &'a engine::ReadSnapshot) -> Self {
         Self {
             read: TemporalSqlRead::registered(read),
+            relation_authority: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub const fn new_with_relations(
+        read: &'a engine::Connection,
+        project_id: &'a ProjectId,
+        store: SessionRelationGraphStore,
+    ) -> Self {
+        Self {
+            read: TemporalSqlRead::engine_connection(read),
+            relation_authority: Some(SessionReadRelationAuthority { project_id, store }),
+        }
+    }
+
+    pub const fn new_registered_with_relations(
+        read: &'a engine::ReadSnapshot,
+        project_id: &'a ProjectId,
+        store: SessionRelationGraphStore,
+    ) -> Self {
+        Self {
+            read: TemporalSqlRead::registered(read),
+            relation_authority: Some(SessionReadRelationAuthority { project_id, store }),
         }
     }
 
     async fn candidate_matches_filter(
         &self,
+        snapshot: &TemporalExecutionSnapshot,
         candidate: &RankingCandidate,
         filter: &TemporalCandidateFilterV1,
     ) -> Result<bool, TemporalPortError> {
@@ -174,7 +241,8 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         {
             return Ok(true);
         }
-        self.candidate_observations_match(candidate, filter).await
+        self.candidate_observations_match(candidate, filter, snapshot)
+            .await
     }
 
     async fn session_matches_filter(
@@ -290,6 +358,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         &self,
         candidate: &RankingCandidate,
         filter: &TemporalCandidateFilterV1,
+        snapshot: &TemporalExecutionSnapshot,
     ) -> Result<bool, TemporalPortError> {
         let session_id = candidate
             .session
@@ -324,33 +393,11 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                  LIMIT 257",
                 common_values(),
             ),
-            CandidateChannel::Summary => (
-                "WITH RECURSIVE retained(source_anchor_id, source_summary_id, depth) AS (
-                    SELECT source.source_anchor_id, source.source_summary_id, 0
-                    FROM session_summary_nodes summary
-                    JOIN session_summary_sources source
-                      ON source.summary_id = summary.summary_id
-                    WHERE summary.session_id = ?1
-                      AND summary.summary_id = ?2
-                      AND summary.summary_anchor_id = ?3
-                    UNION ALL
-                    SELECT nested.source_anchor_id, nested.source_summary_id, retained.depth + 1
-                    FROM retained
-                    JOIN session_summary_sources nested
-                      ON nested.summary_id = retained.source_summary_id
-                    WHERE retained.depth < 63
-                    LIMIT 257
-                 )
-                 SELECT observation.observation_json, occurrence.role
-                 FROM retained
-                 JOIN session_occurrences occurrence
-                   ON occurrence.retrieval_anchor_id = retained.source_anchor_id
-                  AND occurrence.session_id = ?1
-                 JOIN observations observation
-                   ON observation.observation_id = occurrence.source_observation_id
-                 LIMIT 257",
-                common_values(),
-            ),
+            CandidateChannel::Summary => {
+                return self
+                    .summary_observations_match(candidate, filter, snapshot)
+                    .await;
+            }
             CandidateChannel::Anchor
             | CandidateChannel::Scope
             | CandidateChannel::ExactMessage
@@ -401,6 +448,95 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                 matched = true;
             }
         }
+        Ok(matched)
+    }
+
+    async fn summary_observations_match(
+        &self,
+        candidate: &RankingCandidate,
+        filter: &TemporalCandidateFilterV1,
+        snapshot: &TemporalExecutionSnapshot,
+    ) -> Result<bool, TemporalPortError> {
+        let authority = self.relation_authority.as_ref().ok_or_else(|| {
+            read_message(
+                CANDIDATE_OPERATION,
+                "mounted session relation graph is unavailable",
+            )
+        })?;
+        let session_id =
+            SessionId::new(candidate.session.as_deref().ok_or_else(|| {
+                read_message(CANDIDATE_OPERATION, "candidate session is missing")
+            })?)
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let control = snapshot.request().execution_control();
+        control.checkpoint()?;
+        let visits = authority
+            .store
+            .summary_sources(
+                authority.project_id,
+                &session_id,
+                snapshot.watermarks().generation,
+                &candidate.retriever_record_id,
+                MAX_SUMMARY_SOURCES_PER_RECORD,
+                execution_control_graph_cancellation(control),
+            )
+            .map_err(|error| temporal_relation_error(error, control))?;
+        control.checkpoint()?;
+        let source_anchors = visits
+            .into_iter()
+            .filter_map(|visit| match visit.source {
+                SummarySourceVisitKind::Anchor { anchor_id } => Some(anchor_id),
+                SummarySourceVisitKind::Summary { .. } => None,
+            })
+            .collect::<Vec<RetrievalAnchorId>>();
+        if source_anchors.is_empty() {
+            return Ok(false);
+        }
+        let encoded_anchors = serde_json::to_string(&source_anchors)
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let generation = i64::try_from(snapshot.watermarks().generation)
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let mut rows = self
+            .read
+            .query(
+                "SELECT observation.observation_json, occurrence.role
+                 FROM json_each(?2) AS retained
+                 JOIN session_occurrences occurrence
+                   ON occurrence.retrieval_anchor_id = CAST(retained.value AS TEXT)
+                  AND occurrence.session_id = ?1
+                  AND occurrence.generation = ?3
+                 JOIN observations observation
+                   ON observation.observation_id = occurrence.source_observation_id
+                 ORDER BY CAST(retained.key AS INTEGER)
+                 LIMIT 257",
+                params![session_id.as_str(), encoded_anchors, generation],
+            )
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+        let mut count = 0usize;
+        let mut matched = false;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| read_error(CANDIDATE_OPERATION, error))?
+        {
+            count += 1;
+            if count > MAX_SUMMARY_SOURCES_PER_RECORD {
+                return Err(TemporalPortError::BudgetExceeded {
+                    resource: "semantic filter source count",
+                });
+            }
+            let encoded = row
+                .get::<String>(0)
+                .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            let role = row
+                .get::<String>(1)
+                .map_err(|error| read_error(CANDIDATE_OPERATION, error))?;
+            if observation_matches_filter(&encoded, &role, filter)? {
+                matched = true;
+            }
+        }
+        control.checkpoint()?;
         Ok(matched)
     }
 
@@ -750,7 +886,11 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
                         stable_id: candidate.retriever_record_id.clone(),
                     };
                     if !self
-                        .candidate_matches_filter(&candidate, snapshot.request().semantic_filter())
+                        .candidate_matches_filter(
+                            snapshot,
+                            &candidate,
+                            snapshot.request().semantic_filter(),
+                        )
                         .await?
                     {
                         continue;
