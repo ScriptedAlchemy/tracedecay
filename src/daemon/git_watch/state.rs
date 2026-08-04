@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::sync::RwLock;
 use std::sync::atomic::AtomicBool;
 #[cfg(test)]
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Notify};
 
@@ -15,6 +17,51 @@ use crate::daemon::maintenance::MaintenanceCoordinator;
 pub(super) enum WorktreeRegistration {
     Ready,
     Capacity,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct OperationScanProbe {
+    armed: AtomicBool,
+    active: AtomicU64,
+    pub(super) entered: Notify,
+    wait_lock: std::sync::Mutex<()>,
+    wait: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl OperationScanProbe {
+    pub(super) fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    pub(super) fn block_if_armed(
+        &self,
+        cancellation: &crate::application::context::CancellationToken,
+    ) {
+        if !self.armed.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        self.active.fetch_add(1, Ordering::AcqRel);
+        self.entered.notify_one();
+        let started = Instant::now();
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !cancellation.is_cancelled() && started.elapsed() < Duration::from_secs(2) {
+            let (next, _) = self
+                .wait
+                .wait_timeout(guard, Duration::from_millis(10))
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = next;
+        }
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    pub(super) fn active(&self) -> u64 {
+        self.active.load(Ordering::Acquire)
+    }
 }
 
 /// Repository-scoped watcher state.
@@ -39,6 +86,8 @@ pub(super) struct WatchState {
     pub(super) drained_plans: AtomicU64,
     #[cfg(test)]
     pub(super) plan_drained: Notify,
+    #[cfg(test)]
+    pub(super) operation_scan_probe: OperationScanProbe,
 }
 
 impl WatchState {
@@ -64,6 +113,8 @@ impl WatchState {
             drained_plans: AtomicU64::new(0),
             #[cfg(test)]
             plan_drained: Notify::new(),
+            #[cfg(test)]
+            operation_scan_probe: OperationScanProbe::default(),
         }
     }
 
@@ -115,7 +166,14 @@ impl WatchState {
     /// Git directories whose operation markers can transiently move shared
     /// repository refs. This includes linked worktrees not yet mounted by the
     /// daemon: their operation still affects every registered root.
-    pub(super) fn operation_git_dirs(&self, max_worktrees: usize) -> Option<Vec<PathBuf>> {
+    pub(super) fn operation_git_dirs(
+        &self,
+        max_worktrees: usize,
+        mut should_stop: impl FnMut() -> bool,
+    ) -> Option<Vec<PathBuf>> {
+        if should_stop() {
+            return None;
+        }
         let mut git_dirs = self.git_dirs().into_iter().collect::<BTreeSet<_>>();
         if git_dirs.len() > max_worktrees {
             return None;
@@ -123,6 +181,9 @@ impl WatchState {
         match std::fs::read_dir(self.common_dir.join("worktrees")) {
             Ok(entries) => {
                 for entry in entries {
+                    if should_stop() {
+                        return None;
+                    }
                     let entry = entry.ok()?;
                     if entry.file_type().ok()?.is_dir() {
                         git_dirs.insert(entry.path());
@@ -138,11 +199,24 @@ impl WatchState {
         Some(git_dirs.into_iter().collect())
     }
 
-    pub(super) fn prune_missing_worktrees(&self) {
-        self.worktrees
+    pub(super) fn prune_missing_worktrees(&self, mut should_stop: impl FnMut() -> bool) -> bool {
+        let mut worktrees = self
+            .worktrees
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retain(|root, git_dir| root.is_dir() && git_dir.is_dir());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut missing = Vec::new();
+        for (root, git_dir) in worktrees.iter() {
+            if should_stop() {
+                return false;
+            }
+            if !root.is_dir() || !git_dir.is_dir() {
+                missing.push(root.clone());
+            }
+        }
+        for root in missing {
+            worktrees.remove(&root);
+        }
+        true
     }
 
     #[cfg(test)]

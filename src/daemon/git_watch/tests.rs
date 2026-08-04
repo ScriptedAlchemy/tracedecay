@@ -225,24 +225,25 @@ async fn contended_event_requests_a_bounded_reconciliation() {
 
 #[test]
 fn heartbeat_staleness() {
+    let now = HEARTBEAT_STALE_MILLIS + 20_000;
     let fresh = ProjectHealthSnapshot {
-        last_heartbeat: now_secs(),
+        last_heartbeat: now,
         last_freshness_request: 0,
         degraded: false,
     };
-    assert!(!fresh.heartbeat_stale());
+    assert!(!fresh.heartbeat_stale_at(now));
     let never = ProjectHealthSnapshot {
         last_heartbeat: 0,
         last_freshness_request: 0,
         degraded: false,
     };
-    assert!(never.heartbeat_stale());
+    assert!(never.heartbeat_stale_at(now));
     let old = ProjectHealthSnapshot {
-        last_heartbeat: now_secs().saturating_sub(HEARTBEAT_STALE_SECS + 10),
+        last_heartbeat: now.saturating_sub(HEARTBEAT_STALE_MILLIS + 10_000),
         last_freshness_request: 0,
         degraded: false,
     };
-    assert!(old.heartbeat_stale());
+    assert!(old.heartbeat_stale_at(now));
 }
 
 // ---- Real `GitWatcher` tests (drive the public API + the real debounce
@@ -591,7 +592,7 @@ fn incomplete_worktree_registry_fails_closed_during_operation_hold() {
     );
 
     assert!(
-        state.operation_git_dirs(1).is_none(),
+        state.operation_git_dirs(1, || false).is_none(),
         "enumeration over the hard bound must not publish partial metadata"
     );
     assert!(
@@ -774,6 +775,11 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
 
     assert!(watcher.inner.projects.lock().await.is_empty());
     assert!(state.task.lock().await.is_none());
+    assert_eq!(
+        watcher.ensure_watching(repo.path()).await,
+        GitWatcherAdmission::ShuttingDown,
+        "shutdown admission must remain distinct from a disabled watcher"
+    );
     let drained_before = state.drained_plans.load(Ordering::Acquire);
     git(
         repo.path(),
@@ -789,6 +795,43 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
         state.dirty.lock().await.is_clean(),
         "metadata events after shutdown must not reach detached watcher state"
     );
+}
+
+#[tokio::test]
+async fn shutdown_cancels_and_joins_active_metadata_scan() {
+    let repo = temp_repo();
+    let watcher = GitWatcher::new(fast_watch_config());
+    let Some(state) = ensure_watching_or_skip(&watcher, repo.path()).await else {
+        return;
+    };
+    state.operation_scan_probe.arm();
+    classify_and_mark(
+        &state,
+        &notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Content,
+            )),
+            paths: vec![state.common_dir.join("HEAD")],
+            attrs: EventAttributes::default(),
+        },
+    );
+    tokio::time::timeout(
+        TEST_READY_TIMEOUT,
+        state.operation_scan_probe.entered.notified(),
+    )
+    .await
+    .expect("the bounded metadata scan must start");
+
+    watcher.cancel();
+    tokio::time::timeout(TEST_READY_TIMEOUT, watcher.shutdown())
+        .await
+        .expect("shutdown must join the active metadata scan after phase-one cancellation");
+    assert_eq!(
+        state.operation_scan_probe.active(),
+        0,
+        "no watcher-owned blocking scan may survive shutdown"
+    );
+    assert!(state.task.lock().await.is_none());
 }
 
 /// The safety-critical property that justifies this metadata watcher over the

@@ -563,6 +563,12 @@ impl DaemonEngine {
         // (the watcher may have started after this server was cached).
         match self.git_watcher.ensure_watching(&project_path).await {
             git_watch::GitWatcherAdmission::Ready | git_watch::GitWatcherAdmission::Disabled => {}
+            git_watch::GitWatcherAdmission::ShuttingDown => {
+                log_daemon_event(
+                    "git_watch_admission_rejected",
+                    &[("reason", "shutting_down".to_string())],
+                );
+            }
             git_watch::GitWatcherAdmission::Capacity => {
                 log_daemon_event(
                     "git_watch_admission_rejected",
