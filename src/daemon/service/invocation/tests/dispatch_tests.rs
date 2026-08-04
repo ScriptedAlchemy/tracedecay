@@ -722,7 +722,8 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     };
     service
         .disconnect_lsp_session(&registry, session.clone())
-        .await;
+        .await
+        .expect("disconnect active session");
     assert_eq!(registry.lock().await.active_sessions(), 1);
     assert_eq!(service.lsp_sessions.lock().await.len(), 1);
 
@@ -766,9 +767,13 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     else {
         panic!("expected active transport takeover");
     };
-    service
+    let stale_disconnect = service
         .disconnect_lsp_session(&registry, reconnected_session)
         .await;
+    assert_eq!(
+        stale_disconnect,
+        Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+    );
     assert_eq!(registry.lock().await.active_sessions(), 1);
     assert_eq!(service.lsp_sessions.lock().await.len(), 1);
     let stale_transport = service

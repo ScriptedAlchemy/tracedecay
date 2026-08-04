@@ -346,9 +346,11 @@ struct LspLeaseTask {
 }
 
 impl LspLeaseTask {
-    async fn stop(self) {
+    async fn stop(self) -> Result<(), DaemonInvocationProblem> {
         self.cancellation.cancel();
-        let _ = self.handle.await;
+        self.handle
+            .await
+            .map_err(|_| DaemonInvocationProblem::Unavailable)
     }
 
     fn abort(&self) {
@@ -357,39 +359,66 @@ impl LspLeaseTask {
     }
 }
 
+struct LspLeaseTaskRegistryState {
+    accepting: bool,
+    next_generation: u64,
+    tasks: BTreeMap<LspSessionId, LspLeaseTask>,
+}
+
+impl Default for LspLeaseTaskRegistryState {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            next_generation: 0,
+            tasks: BTreeMap::new(),
+        }
+    }
+}
+
 /// Owns one bounded expiry task per disconnected session.
 ///
+/// Task creation and insertion occur under one registry lock, so even an
+/// immediately-ready expiry cannot finish before its handle is registered.
 /// Generations prevent an older task from retiring its replacement, and each
 /// task holds only a weak registry reference so dropping the daemon aborts all
 /// remaining work without creating an ownership cycle.
 #[derive(Default)]
 pub(super) struct LspLeaseTaskRegistry {
-    next_generation: AtomicU64,
-    tasks: StdMutex<BTreeMap<LspSessionId, LspLeaseTask>>,
+    state: StdMutex<LspLeaseTaskRegistryState>,
 }
 
 impl LspLeaseTaskRegistry {
-    pub(super) fn reserve_generation(&self) -> Option<u64> {
-        self.next_generation
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(1)
-            })
-            .ok()
-    }
-
-    pub(super) async fn replace(
-        &self,
+    pub(super) async fn start<F>(
+        self: &Arc<Self>,
         session_id: LspSessionId,
-        generation: u64,
         cancellation: crate::application::context::CancellationToken,
-        handle: tokio::task::JoinHandle<()>,
-    ) {
+        task: F,
+    ) -> Result<(), DaemonInvocationProblem>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let current_session_id = session_id.clone();
         let previous = {
-            let mut tasks = match self.tasks.lock() {
-                Ok(tasks) => tasks,
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            tasks.insert(
+            if !state.accepting {
+                return Err(DaemonInvocationProblem::Unavailable);
+            }
+            let Some(generation) = state.next_generation.checked_add(1) else {
+                return Err(DaemonInvocationProblem::Unavailable);
+            };
+            state.next_generation = generation;
+            let task_registry = Arc::downgrade(self);
+            let task_session_id = session_id.clone();
+            let handle = tokio::spawn(async move {
+                task.await;
+                if let Some(task_registry) = task_registry.upgrade() {
+                    task_registry.finish(&task_session_id, generation);
+                }
+            });
+            state.tasks.insert(
                 session_id,
                 LspLeaseTask {
                     generation,
@@ -399,59 +428,79 @@ impl LspLeaseTaskRegistry {
             )
         };
         if let Some(previous) = previous {
-            previous.stop().await;
+            if previous.stop().await.is_err() {
+                self.cancel(&current_session_id).await?;
+                return Err(DaemonInvocationProblem::Unavailable);
+            }
         }
+        Ok(())
     }
 
-    pub(super) async fn cancel(&self, session_id: &LspSessionId) {
-        let task = match self.tasks.lock() {
-            Ok(mut tasks) => tasks.remove(session_id),
-            Err(poisoned) => poisoned.into_inner().remove(session_id),
+    pub(super) async fn cancel(
+        &self,
+        session_id: &LspSessionId,
+    ) -> Result<(), DaemonInvocationProblem> {
+        let task = match self.state.lock() {
+            Ok(mut state) => state.tasks.remove(session_id),
+            Err(poisoned) => poisoned.into_inner().tasks.remove(session_id),
         };
         if let Some(task) = task {
-            task.stop().await;
+            task.stop().await?;
         }
+        Ok(())
     }
 
     pub(super) fn finish(&self, session_id: &LspSessionId, generation: u64) {
-        let mut tasks = match self.tasks.lock() {
-            Ok(tasks) => tasks,
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if tasks
+        if state
+            .tasks
             .get(session_id)
             .is_some_and(|task| task.generation == generation)
         {
-            tasks.remove(session_id);
+            state.tasks.remove(session_id);
         }
     }
 
-    pub(super) async fn shutdown(&self) {
-        let tasks = match self.tasks.lock() {
-            Ok(mut tasks) => std::mem::take(&mut *tasks),
-            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+    fn begin_shutdown(&self) -> BTreeMap<LspSessionId, LspLeaseTask> {
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
         };
+        state.accepting = false;
+        std::mem::take(&mut state.tasks)
+    }
+
+    pub(super) async fn shutdown(&self) -> Result<(), DaemonInvocationProblem> {
+        let tasks = self.begin_shutdown();
+        let mut outcome = Ok(());
         for task in tasks.into_values() {
-            task.stop().await;
+            if let Err(problem) = task.stop().await {
+                outcome = Err(problem);
+            }
         }
+        outcome
     }
 
     #[cfg(test)]
     pub(super) fn active_tasks(&self) -> usize {
-        match self.tasks.lock() {
-            Ok(tasks) => tasks.len(),
-            Err(poisoned) => poisoned.into_inner().len(),
+        match self.state.lock() {
+            Ok(state) => state.tasks.len(),
+            Err(poisoned) => poisoned.into_inner().tasks.len(),
         }
     }
 }
 
 impl Drop for LspLeaseTaskRegistry {
     fn drop(&mut self) {
-        let tasks = match self.tasks.get_mut() {
-            Ok(tasks) => tasks,
+        let state = match self.state.get_mut() {
+            Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        for task in tasks.values() {
+        state.accepting = false;
+        for task in state.tasks.values() {
             task.abort();
         }
     }
