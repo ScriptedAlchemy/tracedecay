@@ -4,27 +4,226 @@
 //! profile adapter remains here because it owns filesystem backup/error policy.
 
 pub use tracedecay_agent_hosts::agents::{
-    AgentIntegration, AntigravityIntegration, CLI_FALLBACK_PROMPT_RULES, ClaudeIntegration,
-    ClineIntegration, CodexIntegration, CopilotIntegration, CursorIntegration, DoctorCounters,
-    GeminiIntegration, HealthcheckContext, HermesIntegration, InstallContext, KiloIntegration,
-    KimiIntegration, KiroIntegration, ManagedSkillExportReport, OpenCodeIntegration,
-    RooCodeIntegration, UpdatePluginOutcome, VibeIntegration, ZedIntegration,
-    available_integrations, backup_and_write_json, backup_config_file, copilot_cli_dir,
-    detect_missing_installed_agents, export_managed_skills_to_agent_hosts,
-    export_managed_skills_to_agents, home_dir, kiro_data_dir, load_json_file,
-    load_json_file_strict, load_jsonc_file, load_jsonc_file_strict, load_toml_file,
+    AgentIntegration, CLI_FALLBACK_PROMPT_RULES, DoctorCounters, HealthcheckContext,
+    InstallContext, ManagedSkillExportReport, UpdatePluginOutcome, available_integrations,
+    backup_and_write_json, backup_config_file, copilot_cli_dir, detect_missing_installed_agents,
+    export_managed_skills_to_agent_hosts, export_managed_skills_to_agents, home_dir, kiro_data_dir,
+    load_json_file, load_json_file_strict, load_jsonc_file, load_jsonc_file_strict, load_toml_file,
     offer_git_post_commit_hook, parse_jsonc, pick_integrations_interactive, restore_config_backup,
     safe_write_json_file, safe_write_text_file, vscode_data_dir, vscode_insiders_data_dir,
     which_tracedecay, write_json_file, write_toml_file,
 };
-pub use tracedecay_agent_hosts::agents::{
-    antigravity, claude, cline, codex, copilot, cursor, gemini, kilo, kimi, kiro, opencode,
-    plugin_bundle, prompt_rules, roo_code, vibe, zed,
-};
+pub use tracedecay_agent_hosts::agents::{plugin_bundle, prompt_rules};
+
+macro_rules! root_integration {
+    ($name:ident, $delegate:path) => {
+        pub struct $name;
+
+        impl AgentIntegration for $name {
+            fn name(&self) -> &'static str {
+                configure_root_ports();
+                AgentIntegration::name(&$delegate)
+            }
+
+            fn id(&self) -> &'static str {
+                configure_root_ports();
+                AgentIntegration::id(&$delegate)
+            }
+
+            fn install(&self, ctx: &InstallContext) -> crate::errors::Result<()> {
+                configure_root_ports();
+                AgentIntegration::install(&$delegate, ctx)
+            }
+
+            fn supports_local_install(&self) -> bool {
+                configure_root_ports();
+                AgentIntegration::supports_local_install(&$delegate)
+            }
+
+            fn install_local(
+                &self,
+                ctx: &InstallContext,
+                project_path: &std::path::Path,
+            ) -> crate::errors::Result<()> {
+                configure_root_ports();
+                AgentIntegration::install_local(&$delegate, ctx, project_path)
+            }
+
+            fn post_install<'a>(
+                &'a self,
+                project_path: Option<&'a std::path::Path>,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>> {
+                configure_root_ports();
+                Box::pin(async move {
+                    AgentIntegration::post_install(&$delegate, project_path).await;
+                })
+            }
+
+            fn update_plugin(
+                &self,
+                ctx: &InstallContext,
+            ) -> crate::errors::Result<UpdatePluginOutcome> {
+                configure_root_ports();
+                AgentIntegration::update_plugin(&$delegate, ctx)
+            }
+
+            fn export_managed_skills(
+                &self,
+                home: &std::path::Path,
+                profile_root: &std::path::Path,
+            ) -> crate::errors::Result<
+                Vec<tracedecay_agent_hosts::automation::skill_targets::SkillInstallSummary>,
+            > {
+                configure_root_ports();
+                AgentIntegration::export_managed_skills(&$delegate, home, profile_root)
+            }
+
+            fn export_managed_skills_local(
+                &self,
+                project_root: &std::path::Path,
+                profile_root: &std::path::Path,
+            ) -> crate::errors::Result<
+                Vec<tracedecay_agent_hosts::automation::skill_targets::SkillInstallSummary>,
+            > {
+                configure_root_ports();
+                AgentIntegration::export_managed_skills_local(
+                    &$delegate,
+                    project_root,
+                    profile_root,
+                )
+            }
+
+            fn uninstall(&self, ctx: &InstallContext) -> crate::errors::Result<()> {
+                configure_root_ports();
+                AgentIntegration::uninstall(&$delegate, ctx)
+            }
+
+            fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
+                configure_root_ports();
+                AgentIntegration::healthcheck(&$delegate, dc, ctx);
+            }
+
+            fn is_detected(&self, home: &std::path::Path) -> bool {
+                configure_root_ports();
+                AgentIntegration::is_detected(&$delegate, home)
+            }
+
+            fn has_tracedecay(&self, home: &std::path::Path) -> bool {
+                configure_root_ports();
+                AgentIntegration::has_tracedecay(&$delegate, home)
+            }
+
+            fn primary_config_path(&self, home: &std::path::Path) -> Option<std::path::PathBuf> {
+                configure_root_ports();
+                AgentIntegration::primary_config_path(&$delegate, home)
+            }
+        }
+    };
+}
+
+root_integration!(
+    AntigravityIntegration,
+    tracedecay_agent_hosts::agents::AntigravityIntegration
+);
+root_integration!(
+    ClaudeIntegration,
+    tracedecay_agent_hosts::agents::ClaudeIntegration
+);
+root_integration!(
+    ClineIntegration,
+    tracedecay_agent_hosts::agents::ClineIntegration
+);
+root_integration!(
+    CodexIntegration,
+    tracedecay_agent_hosts::agents::CodexIntegration
+);
+root_integration!(
+    CopilotIntegration,
+    tracedecay_agent_hosts::agents::CopilotIntegration
+);
+root_integration!(
+    CursorIntegration,
+    tracedecay_agent_hosts::agents::CursorIntegration
+);
+root_integration!(
+    GeminiIntegration,
+    tracedecay_agent_hosts::agents::GeminiIntegration
+);
+root_integration!(
+    HermesIntegration,
+    tracedecay_agent_hosts::agents::HermesIntegration
+);
+root_integration!(
+    KiloIntegration,
+    tracedecay_agent_hosts::agents::KiloIntegration
+);
+root_integration!(
+    KimiIntegration,
+    tracedecay_agent_hosts::agents::KimiIntegration
+);
+root_integration!(
+    KiroIntegration,
+    tracedecay_agent_hosts::agents::KiroIntegration
+);
+root_integration!(
+    OpenCodeIntegration,
+    tracedecay_agent_hosts::agents::OpenCodeIntegration
+);
+root_integration!(
+    RooCodeIntegration,
+    tracedecay_agent_hosts::agents::RooCodeIntegration
+);
+root_integration!(
+    VibeIntegration,
+    tracedecay_agent_hosts::agents::VibeIntegration
+);
+root_integration!(
+    ZedIntegration,
+    tracedecay_agent_hosts::agents::ZedIntegration
+);
+
+macro_rules! integration_module {
+    ($module:ident, $name:ident) => {
+        pub mod $module {
+            pub use super::$name;
+        }
+    };
+}
+
+integration_module!(antigravity, AntigravityIntegration);
+integration_module!(cline, ClineIntegration);
+integration_module!(copilot, CopilotIntegration);
+integration_module!(gemini, GeminiIntegration);
+integration_module!(kilo, KiloIntegration);
+integration_module!(kimi, KimiIntegration);
+integration_module!(kiro, KiroIntegration);
+integration_module!(opencode, OpenCodeIntegration);
+integration_module!(roo_code, RooCodeIntegration);
+integration_module!(vibe, VibeIntegration);
+integration_module!(zed, ZedIntegration);
+
+pub mod claude {
+    pub use super::ClaudeIntegration;
+    pub use tracedecay_agent_hosts::agents::claude::check_install_stale;
+}
+
+pub mod codex {
+    pub use super::CodexIntegration;
+    pub use tracedecay_agent_hosts::agents::codex::{
+        export_codex_plugin_artifact, remove_legacy_codex_native_automation,
+    };
+}
+
+pub mod cursor {
+    pub use super::CursorIntegration;
+    pub use tracedecay_agent_hosts::agents::cursor::{
+        cursor_memory_rule_path, embedded_plugin_files,
+    };
+}
 
 /// Compatibility module retaining the root-owned Hermes profile I/O seam.
 pub mod hermes {
-    pub use tracedecay_agent_hosts::agents::HermesIntegration;
+    pub use super::HermesIntegration;
 
     pub mod profile_config {
         pub use tracedecay_agent_hosts::agents::hermes::profile_config::*;
@@ -40,12 +239,26 @@ pub(crate) fn configure_root_ports() {
         cursor_catch_up_ingest_max_bytes: root_cursor_catch_up_ingest_max_bytes,
         cursor_post_install: root_cursor_post_install,
         cursor_session_health: root_cursor_session_health,
+        hermes_dashboard_assets: root_hermes_dashboard_assets,
         memory_injection_enabled: crate::hooks::memory_inject::memory_injection_enabled,
         degraded_serve_stderr_marker: || crate::serve::DEGRADED_SERVE_STDERR_MARKER,
         user_memory_curator: root_user_memory_curator,
         project_analytics_events: root_project_analytics_events,
         latest_session_activity: root_latest_session_activity,
     });
+}
+
+fn root_hermes_dashboard_assets() -> tracedecay_agent_hosts::ports::HermesDashboardAssets {
+    tracedecay_agent_hosts::ports::HermesDashboardAssets {
+        holographic_js: crate::dashboard::assets::HOLOGRAPHIC_JS,
+        holographic_css: crate::dashboard::assets::HOLOGRAPHIC_CSS,
+        lcm_js: crate::dashboard::assets::LCM_JS,
+        lcm_css: crate::dashboard::assets::LCM_CSS,
+        graph_js: crate::dashboard::assets::GRAPH_JS,
+        graph_css: crate::dashboard::assets::GRAPH_CSS,
+        savings_js: crate::dashboard::assets::SAVINGS_JS,
+        savings_css: crate::dashboard::assets::SAVINGS_CSS,
+    }
 }
 
 fn root_tool_definitions() -> Vec<tracedecay_agent_hosts::ports::ToolDescriptor> {

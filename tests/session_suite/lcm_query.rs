@@ -178,10 +178,10 @@ fn summary_draft(
 #[test]
 fn lcm_modules_do_not_depend_on_context_builder_or_memory_fact_store() {
     for path in [
-        "src/sessions/lcm/raw.rs",
-        "src/sessions/lcm/dag.rs",
-        "src/sessions/lcm/query.rs",
-        "src/sessions/lcm/compression.rs",
+        "crates/tracedecay-sessions/src/runtime/lcm/raw.rs",
+        "crates/tracedecay-sessions/src/runtime/lcm/dag.rs",
+        "crates/tracedecay-sessions/src/runtime/lcm/query.rs",
+        "crates/tracedecay-sessions/src/runtime/lcm/compression.rs",
     ] {
         let source = std::fs::read_to_string(path).unwrap();
         assert!(

@@ -313,11 +313,11 @@ pub trait GitBackfillAnalytics {
     fn timestamp(&self) -> i64;
 }
 
-struct NoAnalytics;
+struct NoAnalytics(&'static str);
 
 impl GitBackfillAnalytics for NoAnalytics {
     fn provider(&self) -> &str {
-        ""
+        self.0
     }
 
     fn session_id(&self) -> Option<&str> {

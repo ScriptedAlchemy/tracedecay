@@ -104,6 +104,10 @@ pub trait RegistryRuntime {
     async fn open_at(&self, path: &Path) -> Option<Self::Database>;
 
     async fn open_read_only_at(&self, path: &Path) -> Option<Self::Database>;
+
+    fn fail_registry_retirement_once(&self, _profile_root: &Path) -> bool {
+        false
+    }
 }
 
 pub fn canonical_project_key(project_path: &Path) -> String {

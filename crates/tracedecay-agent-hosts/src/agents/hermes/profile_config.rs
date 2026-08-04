@@ -135,7 +135,7 @@ fn parse_yaml_scalar(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// Adds TraceDecay to the Hermes plugin, memory-provider, and context-engine
+/// Adds `TraceDecay` to the Hermes plugin, memory-provider, and context-engine
 /// configuration while preserving unrelated profile settings.
 pub fn enable_plugin_config(existing: &str) -> std::result::Result<String, String> {
     let without_legacy_pin = remove_pinned_project_root_config(existing)?;

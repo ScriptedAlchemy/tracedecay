@@ -56,12 +56,25 @@ pub struct CursorSessionHealth {
     pub literal_workspace_placeholder_paths: Vec<String>,
 }
 
+#[derive(Clone, Copy)]
+pub struct HermesDashboardAssets {
+    pub holographic_js: &'static str,
+    pub holographic_css: &'static str,
+    pub lcm_js: &'static str,
+    pub lcm_css: &'static str,
+    pub graph_js: &'static str,
+    pub graph_css: &'static str,
+    pub savings_js: &'static str,
+    pub savings_css: &'static str,
+}
+
 pub struct RootPorts {
     pub tool_definitions: fn() -> Vec<ToolDescriptor>,
     pub format_capable_tool_names: fn() -> Vec<String>,
     pub cursor_catch_up_ingest_max_bytes: fn() -> u64,
     pub cursor_post_install: fn(PathBuf) -> CursorPostInstallFuture,
     pub cursor_session_health: fn(&Path) -> Option<CursorSessionHealth>,
+    pub hermes_dashboard_assets: fn() -> HermesDashboardAssets,
     pub memory_injection_enabled: fn() -> bool,
     pub degraded_serve_stderr_marker: fn() -> &'static str,
     pub user_memory_curator: for<'a> fn(
@@ -120,6 +133,27 @@ pub(crate) fn cursor_post_install(project_path: PathBuf) -> Result<CursorPostIns
 
 pub(crate) fn cursor_session_health(project_path: &Path) -> Result<Option<CursorSessionHealth>> {
     Ok((root_ports()?.cursor_session_health)(project_path))
+}
+
+pub(crate) fn hermes_dashboard_assets() -> Result<HermesDashboardAssets> {
+    if let Some(ports) = ROOT_PORTS.get() {
+        return Ok((ports.hermes_dashboard_assets)());
+    }
+    #[cfg(test)]
+    return Ok(HermesDashboardAssets {
+        holographic_js: "holographic-js",
+        holographic_css: "holographic-css",
+        lcm_js: "lcm-js",
+        lcm_css: "lcm-css",
+        graph_js: "graph-js",
+        graph_css: "graph-css",
+        savings_js: "savings-js",
+        savings_css: "savings-css",
+    });
+    #[cfg(not(test))]
+    Err(TraceDecayError::Config {
+        message: "agent-host root ports are not configured".to_string(),
+    })
 }
 
 pub(crate) fn memory_injection_enabled() -> Result<bool> {

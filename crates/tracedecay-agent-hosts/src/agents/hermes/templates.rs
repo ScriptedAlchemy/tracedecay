@@ -107,7 +107,7 @@ def hermes_home_dir(hermes_home=None):
     return str(
         hermes_home
         or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    ))
+    )
 
 def plugin_config_block(hermes_home=None):
     """Return the `plugins.tracedecay` mapping from the profile config.yaml.

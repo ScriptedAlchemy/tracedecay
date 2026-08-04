@@ -5,6 +5,11 @@ publish = false
 edition = "2024"
 license = "MIT"
 description = "Tree-sitter language extraction for TraceDecay"
+autotests = false
+
+[[test]]
+name = "extraction"
+path = "tests/main.rs"
 
 [features]
 default = ["lite", "medium", "full"]

@@ -33,34 +33,6 @@ jobs:
           ref: ${{ github.ref_name }}
           persist-credentials: false
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: npm
-          cache-dependency-path: dashboard/package-lock.json
-
-      - name: Build dashboard assets
-        working-directory: dashboard
-        run: |
-          npm ci
-          npm run build
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-linux-mold
-
-      - name: Cache Cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-          key: ${{ runner.os }}-cargo-github-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-github-release-
-            ${{ runner.os }}-cargo-
-
       - name: Create GitHub release with release-plz
         id: release
         uses: release-plz/action@v0.5
@@ -87,6 +59,8 @@ jobs:
       - name: Check GitHub release version drift
         if: always()
         run: scripts/check-release-drift.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
 
   release-plz-pr:
     name: Open or update release PR

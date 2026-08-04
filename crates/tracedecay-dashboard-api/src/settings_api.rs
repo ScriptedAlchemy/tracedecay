@@ -265,7 +265,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "savings_db": state.savings_db_path,
         },
         "version": {
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": state.product_version,
             "channel": state.release_channel,
             "cached_latest_version": non_empty(&user.cached_latest_version),
         },

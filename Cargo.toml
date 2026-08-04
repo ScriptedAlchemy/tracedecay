@@ -30,36 +30,6 @@ readme = "README.md"
 keywords = ["code-intelligence", "knowledge-graph", "mcp", "tree-sitter", "claude"]
 categories = ["development-tools", "command-line-utilities"]
 
-# Explicit whitelist so `cargo package`/`cargo publish` ship everything the
-# build needs — including the PREBUILT dashboard dist bundles, which are
-# gitignored (an `exclude`-style package can never pick them up). Run
-# `cd dashboard && npm ci && npm run build` before packaging; build.rs fails
-# fast (or auto-builds from a git checkout) when they are missing.
-include = [
-    "/CHANGELOG.md",
-    "/LICENSE",
-    "/README.md",
-    "/rust-toolchain.toml",
-    "/.cargo/config.toml",
-    "/build.rs",
-    "/src/**",
-    "/benches/**",
-    "/examples/**",
-    "/benchmarks/queries/default.toml",
-    "/plugin/**",
-    "/vendor/**",
-    "/dashboard/shell/dist/**",
-    "/dashboard/holographic/dist/**",
-    "/dashboard/lcm/dist/**",
-    "/dashboard/graph/dist/**",
-    "/dashboard/code-diagnostics/dist/**",
-    "/dashboard/savings/dist/**",
-    "/dashboard/settings/dist/**",
-    "/dashboard/hermes-wrapper/manifest.json",
-    "/dashboard/hermes-wrapper/plugin_api.py",
-    "/dashboard/hermes-wrapper/src/**",
-]
-
 [features]
 default = ["full", "token-counting"]
 

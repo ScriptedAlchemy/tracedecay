@@ -50,8 +50,11 @@ PY
 )"
 
 if [[ -z "$release_version" ]]; then
-  release_version="$(curl -fsSL \
-    -A "tracedecay-release-drift-check" \
+  curl_args=(-fsSL -A "tracedecay-release-drift-check")
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl_args+=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  fi
+  release_version="$(curl "${curl_args[@]}" \
     https://api.github.com/repos/ScriptedAlchemy/tracedecay/releases/latest \
     | python3 -c '
 import json

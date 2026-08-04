@@ -21,13 +21,6 @@ use std::path::Path;
 
 use crate::errors::{Result, TraceDecayError};
 
-mod assets {
-    include!(concat!(
-        env!("OUT_DIR"),
-        "/hermes_dashboard_assets_generated.rs"
-    ));
-}
-
 /// Manifest for the wrapper plugin (canonical source: `dashboard/hermes-wrapper/`).
 const MANIFEST_JSON: &str = include_str!("../../../../../dashboard/hermes-wrapper/manifest.json");
 /// `FastAPI` reverse proxy mounted by Hermes at `/api/plugins/tracedecay/`.
@@ -82,6 +75,7 @@ pub(super) fn refresh_if_previously_deployed(
 /// The binary path is baked into `plugin_api.py`; the dashboard resolves its
 /// real project from the Hermes process cwd or an explicit `TraceDecay` env var.
 fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
+    let assets = crate::ports::hermes_dashboard_assets()?;
     let dashboard_dir = plugin_dir.join("dashboard");
     let dist_dir = dashboard_dir.join("dist");
     std::fs::create_dir_all(&dist_dir).map_err(|e| TraceDecayError::Config {
@@ -94,11 +88,11 @@ fn deploy(plugin_dir: &Path, tracedecay_bin: &str) -> Result<()> {
         &plugin_api(tracedecay_bin)?,
     )?;
     super::write_text_file(&dist_dir.join("index.js"), WRAPPER_ENTRY_JS)?;
-    super::write_text_file(&dist_dir.join("holographic.js"), assets::HOLOGRAPHIC_JS)?;
-    super::write_text_file(&dist_dir.join("lcm.js"), assets::LCM_JS)?;
-    super::write_text_file(&dist_dir.join("graph.js"), assets::GRAPH_JS)?;
-    super::write_text_file(&dist_dir.join("savings.js"), assets::SAVINGS_JS)?;
-    super::write_text_file(&dist_dir.join("style.css"), &wrapper_style_css())?;
+    super::write_text_file(&dist_dir.join("holographic.js"), assets.holographic_js)?;
+    super::write_text_file(&dist_dir.join("lcm.js"), assets.lcm_js)?;
+    super::write_text_file(&dist_dir.join("graph.js"), assets.graph_js)?;
+    super::write_text_file(&dist_dir.join("savings.js"), assets.savings_js)?;
+    super::write_text_file(&dist_dir.join("style.css"), &wrapper_style_css(assets))?;
 
     eprintln!(
         "\x1b[32m✔\x1b[0m Wrote Hermes dashboard plugin page to {}",
@@ -185,13 +179,13 @@ fn plugin_api(tracedecay_bin: &str) -> Result<String> {
 
 /// Wrapper stylesheet: wrapper chrome + the child stylesheets, concatenated
 /// exactly like `dashboard/build.mjs` builds `hermes-wrapper/dist/style.css`.
-fn wrapper_style_css() -> String {
+fn wrapper_style_css(assets: crate::ports::HermesDashboardAssets) -> String {
     [
         WRAPPER_CSS,
-        assets::HOLOGRAPHIC_CSS,
-        assets::LCM_CSS,
-        assets::GRAPH_CSS,
-        assets::SAVINGS_CSS,
+        assets.holographic_css,
+        assets.lcm_css,
+        assets.graph_css,
+        assets.savings_css,
     ]
     .join("\n")
 }
@@ -273,13 +267,14 @@ mod tests {
 
     #[test]
     fn wrapper_css_concatenates_all_child_sheets() {
-        let css = wrapper_style_css();
+        let assets = crate::ports::hermes_dashboard_assets().unwrap();
+        let css = wrapper_style_css(assets);
         assert!(css.starts_with(WRAPPER_CSS));
         for child in [
-            assets::HOLOGRAPHIC_CSS,
-            assets::LCM_CSS,
-            assets::GRAPH_CSS,
-            assets::SAVINGS_CSS,
+            assets.holographic_css,
+            assets.lcm_css,
+            assets.graph_css,
+            assets.savings_css,
         ] {
             assert!(css.contains(child));
         }

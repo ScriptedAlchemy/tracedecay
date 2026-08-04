@@ -39,14 +39,12 @@ for required in [
         raise SystemExit(f"root-only GitHub release workflow missing {required!r}")
 PY
 
-python3 - "$release_config" "$root_manifest" \
-  crates/tracedecay-domain/Cargo.toml \
-  crates/tracedecay-code-extraction/Cargo.toml \
-  crates/tracedecay-jsonrpc/Cargo.toml <<'PY'
+python3 - "$release_config" "$root_manifest" <<'PY'
 import sys
 import tomllib
+from pathlib import Path
 
-config_path, root_path, *internal_paths = sys.argv[1:]
+config_path, root_path = sys.argv[1:]
 with open(config_path, "rb") as handle:
     config = tomllib.load(handle)
 
@@ -71,15 +69,6 @@ for key, value in {
     if root_release.get(key) != value:
         raise SystemExit(f"tracedecay release-plz {key} must be {value!r}")
 
-internal_names = [
-    "tracedecay-domain",
-    "tracedecay-code-extraction",
-    "tracedecay-jsonrpc",
-]
-for name in internal_names:
-    if packages.get(name, {}).get("release") is not False:
-        raise SystemExit(f"internal crate {name} must be ignored by release-plz")
-
 with open(root_path, "rb") as handle:
     root_manifest = tomllib.load(handle)
 if root_manifest["package"].get("name") != "tracedecay":
@@ -89,13 +78,20 @@ if root_manifest["package"].get("publish") is not False:
 if not any(binary.get("name") == "tracedecay" for binary in root_manifest.get("bin", [])):
     raise SystemExit("root binary must remain named tracedecay")
 
-for path, name in zip(internal_paths, internal_names, strict=True):
+internal_paths = [Path(member) / "Cargo.toml" for member in root_manifest["workspace"]["members"]]
+internal_names = []
+for path in internal_paths:
     with open(path, "rb") as handle:
         manifest = tomllib.load(handle)
-    if manifest["package"].get("name") != name:
-        raise SystemExit(f"unexpected internal manifest {path}")
+    name = manifest["package"].get("name")
+    internal_names.append(name)
     if manifest["package"].get("publish") is not False:
         raise SystemExit(f"internal crate {name} must set publish = false")
+    if packages.get(name, {}).get("release") is not False:
+        raise SystemExit(f"internal crate {name} must be ignored by release-plz")
+
+if len(internal_names) != 13:
+    raise SystemExit(f"expected 13 internal crates, found {len(internal_names)}")
 PY
 
 python3 - "$release_plz" <<'PY'

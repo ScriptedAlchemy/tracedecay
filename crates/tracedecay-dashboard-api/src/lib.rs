@@ -1,8 +1,31 @@
+#![deny(clippy::all)]
+#![warn(clippy::pedantic)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(not(test), deny(clippy::expect_used))]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::struct_excessive_bools)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::wildcard_imports)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::unnecessary_wraps)]
+#![allow(clippy::single_match)]
+#![allow(clippy::needless_borrow)]
+#![allow(clippy::map_unwrap_or)]
+#![allow(clippy::redundant_closure)]
+#![allow(clippy::redundant_closure_for_method_calls)]
+#![allow(clippy::format_push_string)]
+
 //! Dashboard HTTP routes, read models, and services.
 //!
 //! The root crate retains embedded assets plus CLI/daemon server composition.
-
-#![allow(clippy::collapsible_if)]
 
 pub mod analytics_api;
 pub mod automation_config_api;
@@ -162,12 +185,12 @@ pub trait DashboardProjectRegistry: Send + Sync {
         &self,
         limit: usize,
         active_project_id: Option<String>,
-    ) -> DashboardFuture<DashboardProjectList>;
+    ) -> DashboardFuture<crate::errors::Result<DashboardProjectList>>;
     fn context(
         &self,
         project_id: String,
         active_project_id: Option<String>,
-    ) -> DashboardFuture<Option<DashboardProjectContext>>;
+    ) -> DashboardFuture<crate::errors::Result<Option<DashboardProjectContext>>>;
 }
 
 pub type DashboardProjectRegistryHandle = Arc<dyn DashboardProjectRegistry>;
@@ -251,6 +274,7 @@ pub struct DashboardState {
     pub lcm_scope: String,
     pub accounting_store: Option<DashboardAccountingStoreHandle>,
     pub accounting_mode: DashboardAccountingMode,
+    pub product_version: &'static str,
     pub release_channel: &'static str,
     pub pr_autotrack_reader: Option<DashboardPrAutotrackReader>,
     pub savings_db_path: String,

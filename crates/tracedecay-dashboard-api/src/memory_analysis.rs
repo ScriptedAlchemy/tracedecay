@@ -534,6 +534,7 @@ fn candidate_confidence(base: f64, fact: &Value) -> f64 {
 /// into an explicit `/curate/apply` delete/merge op. They are NEVER
 /// auto-applied: the `/curate` apply path only executes the dedup `actions`
 /// list.
+#[allow(clippy::implicit_hasher)]
 pub fn propose_hygiene_candidates(
     scan_facts: &[Value],
     pair_facts: &[Value],

@@ -497,8 +497,7 @@ async fn push_dashboard_automation_activity_result(
         state,
         "validation",
         format!(
-            "Validated dashboard {task_label} proposal: {} accepted item(s), {} rejected item(s)",
-            accepted_count, rejected_count
+            "Validated dashboard {task_label} proposal: {accepted_count} accepted item(s), {rejected_count} rejected item(s)"
         ),
         true,
     )
@@ -521,8 +520,7 @@ async fn push_dashboard_automation_activity_result(
         state,
         "report",
         format!(
-            "Dashboard {task_label} automation run {}: {} accepted item(s), {} rejected item(s)",
-            status, accepted_count, rejected_count
+            "Dashboard {task_label} automation run {status}: {accepted_count} accepted item(s), {rejected_count} rejected item(s)"
         ),
         !mutates_store,
     )
@@ -530,7 +528,7 @@ async fn push_dashboard_automation_activity_result(
     push_curation_activity(
         state,
         "finish",
-        format!("Finished dashboard {task_label} automation run: {}", status),
+        format!("Finished dashboard {task_label} automation run: {status}"),
         !mutates_store,
     )
     .await;

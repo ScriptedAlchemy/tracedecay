@@ -50,7 +50,7 @@ impl From<tracedecay_lsp::LspError> for TraceDecayError {
 impl From<tracedecay_automation::AutomationError> for TraceDecayError {
     fn from(value: tracedecay_automation::AutomationError) -> Self {
         Self::Config {
-            message: value.to_string(),
+            message: value.into_message(),
         }
     }
 }

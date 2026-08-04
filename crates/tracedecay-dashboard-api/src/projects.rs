@@ -65,6 +65,7 @@ impl DashboardRuntime {
         let context = registry
             .context(project_id.to_string(), self.active.project_id.clone())
             .await
+            .map_err(|_| config_error("could not open tracedecay project registry"))?
             .ok_or_else(|| config_error(format!("registered project not found: {project_id}")))?;
         if let Some(cached) = self.project_states.read().await.get(project_id).cloned() {
             if cached.cache_key == context.cache_key {
@@ -135,7 +136,22 @@ pub async fn list(
     };
 
     let active_project_id = runtime.active_project_id().map(str::to_string);
-    let view = registry.list(limit, active_project_id.clone()).await;
+    let Ok(view) = registry.list(limit, active_project_id.clone()).await else {
+        return Json(json!({
+            "status": "missing_registry",
+            "limit": limit,
+            "truncated": false,
+            "projects": [],
+            "active_project_id": runtime.active_project_id(),
+            "active_project_root": runtime.active_project_root(),
+            "summary": {
+                "project_count": 0,
+                "repo_count": 0,
+                "truncated": false,
+            },
+            "project_tree": [],
+        }));
+    };
 
     Json(json!({
         "status": "ok",
@@ -164,10 +180,21 @@ pub async fn context(
             })),
         );
     };
-    let Some(context) = registry
+    let Ok(context) = registry
         .context(project_id.clone(), runtime.active.project_id.clone())
         .await
     else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "missing_registry",
+                "project": null,
+                "aliases": [],
+                "stores": [],
+            })),
+        );
+    };
+    let Some(context) = context else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({

@@ -22,7 +22,14 @@
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
 pub(crate) mod assets;
-pub use tracedecay_dashboard_api::memory_curate;
+pub mod memory_curate {
+    pub use tracedecay_dashboard_api::memory_curate::{
+        CURATION_DEFAULT_MAX_CLUSTERS, CURATION_DEFAULT_MIN_CONFIDENCE, MemoryCurateOptions,
+        run_user_memory_curate,
+    };
+
+    pub use super::run_memory_curate;
+}
 pub(crate) use tracedecay_dashboard_api::{
     AutomationSchedulerReconciler, DashboardAccountingStore, DashboardAccountingStoreHandle,
     DashboardAutomationExecutor, DashboardAutomationTask, DashboardAutomationWriter,
@@ -35,8 +42,8 @@ pub(crate) use tracedecay_dashboard_api::{
 pub(crate) use tracedecay_dashboard_api::{
     analytics_api, automation_config_api, automation_fact_proposals_api, automation_jobs_api,
     automation_outcomes_api, automation_run_api, automation_scheduler_api, automation_skills_api,
-    code_diagnostics_api, code_diagnostics_broker, graph_api, lcm_api, memory_api, projects,
-    savings_api, settings_api, token_count,
+    code_diagnostics_api, graph_api, lcm_api, memory_api, projects, savings_api, settings_api,
+    token_count,
 };
 
 use std::path::{Path, PathBuf};
@@ -61,6 +68,16 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::GlobalDb;
 use crate::storage::StorageMode;
 use crate::tracedecay::TraceDecay;
+
+pub(crate) fn code_diagnostics_broker(
+    project_root: PathBuf,
+    settings: lsp::settings::CodeDiagnosticsSettings,
+) -> lsp::broker::DiagnosticBroker {
+    lsp::broker::DiagnosticBroker::from_inner(tracedecay_dashboard_api::code_diagnostics_broker(
+        project_root,
+        settings,
+    ))
+}
 
 struct RootDashboardAccountingStore {
     db: Arc<GlobalDb>,
@@ -206,10 +223,12 @@ impl DashboardProjectRegistry for RootDashboardProjectRegistry {
         &self,
         limit: usize,
         active_project_id: Option<String>,
-    ) -> DashboardFuture<DashboardProjectList> {
+    ) -> DashboardFuture<crate::errors::Result<DashboardProjectList>> {
         Box::pin(async move {
             let Some(db) = GlobalDb::open().await else {
-                return DashboardProjectList::default();
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "could not open tracedecay project registry".to_string(),
+                });
             };
             let mut projects = db.list_code_projects(limit + 1).await;
             let truncated = projects.len() > limit;
@@ -230,12 +249,12 @@ impl DashboardProjectRegistry for RootDashboardProjectRegistry {
                     .unwrap_or(Value::Null)
                 })
                 .collect();
-            DashboardProjectList {
+            Ok(DashboardProjectList {
                 truncated,
                 projects,
                 summary: serde_json::to_value(view.summary).unwrap_or(Value::Null),
                 project_tree: serde_json::to_value(view.project_tree).unwrap_or(Value::Null),
-            }
+            })
         })
     }
 
@@ -243,10 +262,16 @@ impl DashboardProjectRegistry for RootDashboardProjectRegistry {
         &self,
         project_id: String,
         active_project_id: Option<String>,
-    ) -> DashboardFuture<Option<DashboardProjectContext>> {
+    ) -> DashboardFuture<crate::errors::Result<Option<DashboardProjectContext>>> {
         Box::pin(async move {
-            let db = GlobalDb::open().await?;
-            let context = db.project_registry_context_by_id(&project_id).await?;
+            let Some(db) = GlobalDb::open().await else {
+                return Err(crate::errors::TraceDecayError::Config {
+                    message: "could not open tracedecay project registry".to_string(),
+                });
+            };
+            let Some(context) = db.project_registry_context_by_id(&project_id).await else {
+                return Ok(None);
+            };
             let public = crate::project_registry::PublicProjectRegistryContext::new(
                 &context,
                 active_project_id.as_deref(),
@@ -256,11 +281,11 @@ impl DashboardProjectRegistry for RootDashboardProjectRegistry {
                 "aliases": public.aliases,
                 "stores": public.stores,
             });
-            Some(DashboardProjectContext {
+            Ok(Some(DashboardProjectContext {
                 cache_key: format!("{context:?}"),
                 project_root: PathBuf::from(&context.project.canonical_root),
                 payload,
-            })
+            }))
         })
     }
 }
@@ -624,8 +649,10 @@ async fn build_state_inner(
     let code_diagnostics_settings = lsp::settings::load_settings(&dashboard_root)
         .await
         .unwrap_or_default();
-    let code_diagnostics =
-        code_diagnostics_broker(cg.project_root().to_path_buf(), code_diagnostics_settings);
+    let code_diagnostics = tracedecay_dashboard_api::code_diagnostics_broker(
+        cg.project_root().to_path_buf(),
+        code_diagnostics_settings,
+    );
     let accounting_store = GlobalDb::open().await.map(|db| {
         Arc::new(RootDashboardAccountingStore { db: Arc::new(db) })
             as DashboardAccountingStoreHandle
@@ -656,6 +683,7 @@ async fn build_state_inner(
             enabled: accounting_mode.enabled(),
             source: accounting_mode.as_str(),
         },
+        product_version: env!("CARGO_PKG_VERSION"),
         release_channel: if crate::cloud::is_beta() {
             "beta"
         } else {
@@ -777,6 +805,7 @@ pub async fn run_memory_curate(
         lcm_scope: storage_mode_label(&layout.storage_mode).to_string(),
         accounting_store: None,
         accounting_mode: tracedecay_dashboard_api::DashboardAccountingMode::default(),
+        product_version: env!("CARGO_PKG_VERSION"),
         release_channel: if crate::cloud::is_beta() {
             "beta"
         } else {
@@ -791,10 +820,12 @@ pub async fn run_memory_curate(
         dashboard_root: layout.dashboard_root.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
-            cg.project_root().to_path_buf(),
-            lsp::settings::CodeDiagnosticsSettings::default(),
-        ))),
+        code_diagnostics: Arc::new(RwLock::new(
+            tracedecay_dashboard_api::code_diagnostics_broker(
+                cg.project_root().to_path_buf(),
+                lsp::settings::CodeDiagnosticsSettings::default(),
+            ),
+        )),
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler: None,
         automation_writer: direct_dashboard_automation_writer(),
@@ -805,7 +836,7 @@ pub async fn run_memory_curate(
         project_registry: None,
         project_state_builder: None,
     };
-    memory_curate::run_memory_curate_with_state(&state, options).await
+    tracedecay_dashboard_api::memory_curate::run_memory_curate_with_state(&state, options).await
 }
 
 /// Detached catch-up ingest for transcript sources (Claude, Codex, Vibe,
@@ -1409,4 +1440,89 @@ async fn plugins_list() -> Json<Value> {
             })
             .collect::<Vec<_>>()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::global_db::{
+        CodeProjectRecord, GraphScopeRecord, ProjectRegistryContext, ProjectStoreContext,
+        StoreArtifactRecord, StoreInstanceRecord,
+    };
+
+    fn code_project() -> CodeProjectRecord {
+        CodeProjectRecord {
+            project_id: "proj_test".to_string(),
+            canonical_root: "/repo".to_string(),
+            display_root: "/repo".to_string(),
+            git_common_dir: Some("/repo/.git".to_string()),
+            git_remote_url: Some("https://example.com/repo.git".to_string()),
+            default_branch: Some("main".to_string()),
+            created_at: 100,
+            last_seen_at: 200,
+        }
+    }
+
+    fn store_context() -> ProjectStoreContext {
+        ProjectStoreContext {
+            store: StoreInstanceRecord {
+                store_id: "store:test".to_string(),
+                project_id: "proj_test".to_string(),
+                store_kind: "code_project".to_string(),
+                storage_mode: "profile_sharded".to_string(),
+                store_relpath: "projects/proj_test".to_string(),
+                manifest_relpath: Some("projects/proj_test/store_manifest.json".to_string()),
+                created_at: 110,
+                last_verified_at: Some(210),
+                last_write_at: Some(220),
+            },
+            graph_scopes: vec![GraphScopeRecord {
+                graph_scope_id: "store:test:branch:main".to_string(),
+                project_id: "proj_test".to_string(),
+                store_id: "store:test".to_string(),
+                branch_name: "main".to_string(),
+                db_relpath: "projects/proj_test/branches/main.db".to_string(),
+                parent_scope_id: None,
+                last_synced_at: Some(230),
+                writable: true,
+            }],
+            artifacts: vec![StoreArtifactRecord {
+                store_id: "store:test".to_string(),
+                artifact_kind: "graph_db".to_string(),
+                relpath: "projects/proj_test/branches/main.db".to_string(),
+                size_bytes: Some(4096),
+                schema_version: None,
+                updated_at: Some(240),
+            }],
+        }
+    }
+
+    fn registry_context() -> ProjectRegistryContext {
+        ProjectRegistryContext {
+            project: code_project(),
+            aliases: Vec::new(),
+            stores: vec![store_context()],
+        }
+    }
+
+    #[test]
+    fn registry_context_changes_with_project_metadata() {
+        let base = registry_context();
+        let mut changed = registry_context();
+        changed.project.canonical_root = "/new-repo".to_string();
+        changed.project.last_seen_at += 1;
+
+        assert_ne!(base, changed);
+    }
+
+    #[test]
+    fn registry_context_changes_with_store_metadata() {
+        let base = registry_context();
+        let mut changed = registry_context();
+        changed.stores[0].store.last_write_at = Some(999);
+        changed.stores[0].graph_scopes[0].db_relpath =
+            "projects/proj_test/branches/feature.db".to_string();
+        changed.stores[0].artifacts[0].updated_at = Some(1000);
+
+        assert_ne!(base, changed);
+    }
 }

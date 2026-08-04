@@ -30,6 +30,11 @@ pub struct LegacyHermesStateImport {
 pub trait HermesStateImporter {
     fn user_sessions_db_path(&self, profile_root: &Path) -> PathBuf;
 
+    async fn resolve_store_layout_for_identity(
+        &self,
+        project_root: &Path,
+    ) -> crate::errors::Result<crate::storage::StoreLayout>;
+
     async fn ingest_legacy_pinned_profile(
         &self,
         target_sessions_db_path: &Path,
@@ -811,7 +816,15 @@ async fn resolve_target_layout<H: HermesStateImporter>(
         )?);
     }
 
-    let layout = crate::storage::resolve_layout(&target_project.root, tracedecay_profile_root)?;
+    let production_profile = crate::storage::default_profile_root()
+        .is_ok_and(|default| same_path(&default, tracedecay_profile_root));
+    let layout = if production_profile {
+        state_importer
+            .resolve_store_layout_for_identity(&target_project.root)
+            .await
+    } else {
+        crate::storage::resolve_layout(&target_project.root, tracedecay_profile_root)
+    }?;
     project_layout(layout)
 }
 

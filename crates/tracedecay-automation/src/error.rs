@@ -11,6 +11,10 @@ impl AutomationError {
             message: message.into(),
         }
     }
+
+    pub fn into_message(self) -> String {
+        self.message
+    }
 }
 
 impl fmt::Display for AutomationError {

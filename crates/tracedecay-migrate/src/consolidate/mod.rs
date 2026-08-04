@@ -1311,18 +1311,29 @@ async fn retire_legacy_registry_owners<R: RegistryRuntime>(
         .await
         .map_err(|error| config_error(format!("could not begin registry cleanup: {error}")))?;
 
-    #[cfg(test)]
-    {
-        let injected_failure = profile_root
-            .join(LEDGER_DIR)
-            .join(".fail-registry-retirement-once");
-        if injected_failure.is_file() {
-            let _ = fs::remove_file(injected_failure);
-            let _ = conn.execute("ROLLBACK", ()).await;
-            return Err(config_error(
-                "synthetic registry retirement failure after manifest retirement",
-            ));
+    let injected_failure = registry.fail_registry_retirement_once(profile_root) || {
+        #[cfg(test)]
+        {
+            let injected_failure = profile_root
+                .join(LEDGER_DIR)
+                .join(".fail-registry-retirement-once");
+            if injected_failure.is_file() {
+                let _ = fs::remove_file(injected_failure);
+                true
+            } else {
+                false
+            }
         }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
+    if injected_failure {
+        let _ = conn.execute("ROLLBACK", ()).await;
+        return Err(config_error(
+            "synthetic registry retirement failure after manifest retirement",
+        ));
     }
 
     let result = async {

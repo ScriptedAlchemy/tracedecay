@@ -89,6 +89,21 @@ pub mod hermes {
         async fn open_read_only_at(&self, path: &Path) -> Option<Self::Database> {
             GlobalDb::open_read_only_at(path).await
         }
+
+        #[cfg_attr(not(test), allow(unused_variables))]
+        fn fail_registry_retirement_once(&self, profile_root: &Path) -> bool {
+            #[cfg(test)]
+            {
+                let marker = profile_root
+                    .join("migration-inventory")
+                    .join(".fail-registry-retirement-once");
+                if marker.is_file() {
+                    let _ = std::fs::remove_file(marker);
+                    return true;
+                }
+            }
+            false
+        }
     }
 
     impl registry_adapter::RegistryDatabase for GlobalDb {
@@ -196,6 +211,13 @@ pub mod hermes {
     impl HermesStateImporter for RootHermesStateImporter {
         fn user_sessions_db_path(&self, profile_root: &Path) -> PathBuf {
             crate::sessions::user_sessions_db_path(profile_root)
+        }
+
+        async fn resolve_store_layout_for_identity(
+            &self,
+            project_root: &Path,
+        ) -> crate::errors::Result<crate::storage::StoreLayout> {
+            crate::tracedecay::TraceDecay::resolve_store_layout_for_identity(project_root).await
         }
 
         async fn ingest_legacy_pinned_profile(

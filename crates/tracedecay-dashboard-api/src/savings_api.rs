@@ -745,6 +745,7 @@ pub async fn models(
 /// GET `/api/plugins/savings/pricing` — the merged model price table with
 /// provenance (`live` data is always served from its disk cache, so `source`
 /// is `"cache"` or `"fallback"`).
+#[allow(clippy::unused_async)]
 pub async fn pricing() -> Json<Value> {
     savings_pricing::ensure_background_refresh();
     Json(savings_pricing::pricing_payload())

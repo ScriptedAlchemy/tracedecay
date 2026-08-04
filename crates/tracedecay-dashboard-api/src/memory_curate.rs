@@ -142,6 +142,7 @@ fn user_state(
         lcm_scope: "user".to_string(),
         accounting_store: None,
         accounting_mode: DashboardAccountingMode::default(),
+        product_version: env!("CARGO_PKG_VERSION"),
         release_channel: "stable",
         pr_autotrack_reader: None,
         savings_db_path: String::new(),
