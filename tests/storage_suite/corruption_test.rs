@@ -14,6 +14,7 @@ use crate::support;
 use std::io::{Seek, Write};
 use tempfile::TempDir;
 use tracedecay::db::Database;
+use tracedecay::db::migrations::{FULL_REINDEX_REQUIRED_KEY, FULL_REINDEX_REQUIRED_VALUE};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions, try_acquire_sync_lock_at};
 use tracedecay::types::*;
 
@@ -591,6 +592,40 @@ async fn dirty_open_reuses_recovery_lock_for_migration_reindex()
         "migration re-index must complete after dirty recovery"
     );
     assert!(!layout.dirty_path.exists());
+    reopened.close();
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_migration_reindex_retries_after_migration_already_committed()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn retried() {}\n")?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    ts.db()
+        .set_metadata(FULL_REINDEX_REQUIRED_KEY, FULL_REINDEX_REQUIRED_VALUE)
+        .await?;
+    ts.checkpoint().await?;
+    ts.close();
+
+    let reopened = TraceDecay::open_with_options(&project_root, open_options).await?;
+    assert_eq!(reopened.get_nodes_by_name("retried").await?.len(), 1);
+    assert_eq!(
+        reopened
+            .db()
+            .get_metadata(FULL_REINDEX_REQUIRED_KEY)
+            .await?
+            .as_deref(),
+        Some("0"),
+        "reindex intent must clear only after the retry commits"
+    );
     reopened.close();
     Ok(())
 }

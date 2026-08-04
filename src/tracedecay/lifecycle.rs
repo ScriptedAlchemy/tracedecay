@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::branch;
 use crate::branch_meta::{self, BranchMeta};
 use crate::config::{TraceDecayConfig, db_filename, load_config_from_path, save_config_to_path};
+use crate::db::migrations::{FULL_REINDEX_REQUIRED_KEY, FULL_REINDEX_REQUIRED_VALUE};
 use crate::db::{Database, DatabaseAuthority};
 use crate::errors::{Result, TraceDecayError};
 use crate::extraction::LanguageRegistry;
@@ -481,13 +482,16 @@ impl TraceDecay {
             }
             Err(e) => return Err(e),
         };
+        let reindex_pending = db.get_metadata(FULL_REINDEX_REQUIRED_KEY).await?.as_deref()
+            == Some(FULL_REINDEX_REQUIRED_VALUE);
+        let needs_reindex = migrated || reindex_pending;
 
         // If the sentinel was set but the database opened successfully, run a
         // quick integrity check.
         if crashed {
             match db.quick_check().await {
                 Ok(true) => {
-                    if !migrated {
+                    if !needs_reindex {
                         clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
                         clear_dirty_sentinel_at(&store_layout.dirty_path);
                     }
@@ -535,8 +539,8 @@ impl TraceDecay {
             read_only: false,
         };
 
-        if migrated {
-            eprintln!("[tracedecay] schema changed — performing full re-index…");
+        if needs_reindex {
+            eprintln!("[tracedecay] schema re-index required — performing full re-index…");
             let on_file = |current, total, file: &str| {
                 eprintln!("[tracedecay] re-indexing [{current}/{total}] {file}");
             };
@@ -547,6 +551,7 @@ impl TraceDecay {
                 }
                 None => ts.index_all_with_progress(on_file).await?,
             };
+            ts.db.set_metadata(FULL_REINDEX_REQUIRED_KEY, "0").await?;
             eprintln!("[tracedecay] re-index complete.");
         }
         drop(recovery_lock);

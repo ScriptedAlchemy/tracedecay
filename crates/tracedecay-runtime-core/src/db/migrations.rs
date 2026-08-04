@@ -9,7 +9,7 @@
 //! The current schema version is stored in `PRAGMA user_version`, which
 //! is an atomic integer built into `SQLite`. No extra table is needed.
 
-use libsql::Connection;
+use libsql::{Connection, params};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
@@ -17,6 +17,11 @@ use crate::memory::store::MemoryStore;
 /// The highest migration version defined in this file. Bump this and add a
 /// new entry to `run_migration` whenever the schema changes.
 const LATEST_VERSION: u32 = 18;
+
+/// Durable metadata set transactionally with schema migrations and cleared
+/// only after the owning project completes its required full reindex.
+pub const FULL_REINDEX_REQUIRED_KEY: &str = "full_reindex_required";
+pub const FULL_REINDEX_REQUIRED_VALUE: &str = "1";
 
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &Connection) -> Result<u32> {
@@ -353,6 +358,16 @@ async fn run_migrations(conn: &Connection, current: u32) -> Result<()> {
         run_migration(conn, version).await?;
         set_version(conn, version).await?;
     }
+    conn.execute(
+        "INSERT OR REPLACE INTO metadata (key, value)
+         VALUES (?1, ?2)",
+        params![FULL_REINDEX_REQUIRED_KEY, FULL_REINDEX_REQUIRED_VALUE],
+    )
+    .await
+    .map_err(|e| TraceDecayError::Database {
+        message: format!("failed to mark full reindex required: {e}"),
+        operation: "migrate".to_string(),
+    })?;
     Ok(())
 }
 
