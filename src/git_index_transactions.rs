@@ -8,7 +8,9 @@
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, Write};
+#[cfg(not(unix))]
+use std::io::Seek;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -111,6 +113,7 @@ pub(crate) struct FixedGitIndexRunner {
 /// exact lock file over the real index.
 pub(crate) struct NativeIndexLock {
     path: PathBuf,
+    #[cfg(not(unix))]
     file: File,
     published: bool,
 }
@@ -327,7 +330,7 @@ impl FixedGitIndexRunner {
 
     pub(crate) fn acquire_index_lock(&self) -> Result<NativeIndexLock, NativeGitIndexError> {
         let path = self.index_lock_path();
-        let file = OpenOptions::new()
+        let lock_file = OpenOptions::new()
             .create_new(true)
             .read(true)
             .write(true)
@@ -339,9 +342,12 @@ impl FixedGitIndexRunner {
                     NativeGitIndexError::Io(error.to_string())
                 }
             })?;
+        #[cfg(unix)]
+        drop(lock_file);
         Ok(NativeIndexLock {
             path,
-            file,
+            #[cfg(not(unix))]
+            file: lock_file,
             published: false,
         })
     }
