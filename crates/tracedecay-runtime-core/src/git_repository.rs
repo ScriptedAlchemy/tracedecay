@@ -1,28 +1,31 @@
 //! Single read-only Git repository authority.
 //!
 //! Repository topology, refs, HEAD, object format, operation state, status,
-//! and bounded history are read through `gix`. Native Git is retained only for
-//! the linked-worktree symbolic-HEAD probe required to preserve exact
-//! per-worktree branch identity.
+//! and bounded history are read through `gix`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use gix::bstr::ByteSlice as _;
 use tracedecay_domain::git::{
-    GitChangeKindV1, GitCommitIdentityV1, GitCommitMetadataV1, GitDegradationV1, GitFileModeV1,
-    GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitStatusEntryV1,
-    GitTrackedStatusV1,
+    GitChangeKindV1, GitDegradationV1, GitFileModeV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1,
+    GitOperationStateV1, GitStatusEntryV1, GitTrackedStatusV1,
 };
-use tracedecay_domain::research::canonical_sha256;
-use tracedecay_domain::research::time::UtcMicros;
+
+mod history;
+pub use history::{
+    GitHistoryBudget, GitHistoryOptions, GitHistoryTermination, GitRepositoryHistory,
+};
 
 /// A typed failure from the in-process Git repository authority.
 #[derive(Debug, thiserror::Error)]
 pub enum GitRepositoryError {
     #[error("not a Git repository: {path}")]
     NotARepository { path: String },
+    #[error("Git repository at {path} is unreadable: {detail}")]
+    UnreadableRepository { path: String, detail: String },
+    #[error("Git HEAD is unreadable: {detail}")]
+    UnreadableHead { detail: String },
     #[error("Git repository {operation} failed: {detail}")]
     Operation {
         operation: &'static str,
@@ -49,23 +52,6 @@ pub struct GitRepositoryStatus {
     pub degradations: BTreeSet<GitDegradationV1>,
 }
 
-/// Fixed options for a bounded commit traversal.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitHistoryOptions {
-    pub max_count: u32,
-    pub first_parent: bool,
-    pub path: Option<String>,
-    pub follow_renames: bool,
-}
-
-/// Bounded history without application-specific repository identity.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GitRepositoryHistory {
-    pub commits: Vec<GitCommitMetadataV1>,
-    pub truncated: bool,
-    pub degradations: BTreeSet<GitDegradationV1>,
-}
-
 /// One thread-safe `gix` repository authority.
 #[derive(Debug)]
 pub struct GitRepositoryAuthority {
@@ -73,32 +59,39 @@ pub struct GitRepositoryAuthority {
     worktree_root: Option<PathBuf>,
     git_dir: PathBuf,
     common_dir: PathBuf,
-    linked_worktree: bool,
-    native_git_invocations: AtomicUsize,
 }
 
 impl GitRepositoryAuthority {
     /// Discover the repository containing `path`.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
-        let repository = gix::discover(path).map_err(|_| GitRepositoryError::NotARepository {
-            path: path.display().to_string(),
-        })?;
+        let repository =
+            gix::discover_opts(path, Default::default(), gix::open::Options::isolated()).map_err(
+                |error| match error {
+                    gix::discover::Error::Discover(
+                        gix::discover::upwards::Error::NoGitRepository { .. },
+                    ) => GitRepositoryError::NotARepository {
+                        path: path.display().to_string(),
+                    },
+                    error => GitRepositoryError::UnreadableRepository {
+                        path: path.display().to_string(),
+                        detail: error.to_string(),
+                    },
+                },
+            )?;
         let worktree_root = repository
             .workdir()
             .map(|path| canonical(path, "worktree root"))
-            .transpose()?;
-        let git_dir = canonical(repository.git_dir(), "Git directory")?;
-        let common_dir = canonical(repository.common_dir(), "Git common directory")?;
-        let linked_worktree = worktree_root
-            .as_ref()
-            .is_some_and(|root| root.join(".git").is_file());
+            .transpose()
+            .map_err(|error| repository_error(path, error))?;
+        let git_dir = canonical(repository.git_dir(), "Git directory")
+            .map_err(|error| repository_error(path, error))?;
+        let common_dir = canonical(repository.common_dir(), "Git common directory")
+            .map_err(|error| repository_error(path, error))?;
         Ok(Self {
             repository: repository.into_sync(),
             worktree_root,
             git_dir,
             common_dir,
-            linked_worktree,
-            native_git_invocations: AtomicUsize::new(0),
         })
     }
 
@@ -117,11 +110,6 @@ impl GitRepositoryAuthority {
         &self.common_dir
     }
 
-    /// Native Git fallbacks attempted by this authority instance.
-    pub fn native_git_invocations(&self) -> usize {
-        self.native_git_invocations.load(Ordering::Relaxed)
-    }
-
     /// Repository object format from parsed Git configuration.
     pub fn object_format(&self) -> Result<GitObjectFormatV1, GitRepositoryError> {
         match self.repository.to_thread_local().object_hash() {
@@ -134,20 +122,9 @@ impl GitRepositoryAuthority {
         }
     }
 
-    /// Exact HEAD state. Linked worktrees retain one bounded native
-    /// `symbolic-ref` probe because their HEAD is per-worktree.
+    /// Exact HEAD state for this repository or linked worktree.
     pub fn head(&self) -> Result<GitHeadStateV1, GitRepositoryError> {
         let repository = self.repository.to_thread_local();
-        if self.linked_worktree
-            && let Some(branch) = self.linked_symbolic_head()
-        {
-            let reference_name = format!("refs/heads/{branch}");
-            let reference = repository
-                .find_reference(reference_name.as_str())
-                .map_err(|error| operation("HEAD", error))?;
-            let commit = GitOidV1::new(reference.id().to_string())?;
-            return Ok(GitHeadStateV1::Attached { branch, commit });
-        }
         head_from_gix(&repository)
     }
 
@@ -412,88 +389,6 @@ impl GitRepositoryAuthority {
         })
     }
 
-    /// Bounded in-process commit traversal. Path selection compares the
-    /// selected entry across parent trees; exact-content renames are followed
-    /// without invoking native Git.
-    pub fn history(
-        &self,
-        options: &GitHistoryOptions,
-    ) -> Result<GitRepositoryHistory, GitRepositoryError> {
-        let repository = self.repository.to_thread_local();
-        let head = self.head()?;
-        let op_state = self.operation_state();
-        let mut degradations = self.degradations(&repository, &head, op_state);
-        let Some(head_id) = head.commit() else {
-            return Ok(GitRepositoryHistory {
-                commits: Vec::new(),
-                truncated: false,
-                degradations,
-            });
-        };
-        if self.git_dir.join("shallow").is_file() || self.common_dir.join("shallow").is_file() {
-            degradations.insert(GitDegradationV1::ShallowBoundary);
-        }
-
-        let tip = gix::hash::ObjectId::from_hex(head_id.as_str().as_bytes())
-            .map_err(|error| operation("history", error))?;
-        let mut walk =
-            repository
-                .rev_walk([tip])
-                .sorting(gix::revision::walk::Sorting::ByCommitTime(
-                    Default::default(),
-                ));
-        if options.first_parent {
-            walk = walk.first_parent_only();
-        }
-        let walk = walk.all().map_err(|error| operation("history", error))?;
-        let max_count = options.max_count.max(1) as usize;
-        let mut path = options.path.clone();
-        let mut commits = Vec::with_capacity(max_count.saturating_add(1));
-        let scan_limit = max_count.saturating_mul(1024).clamp(1024, 100_000);
-        let mut scanned = 0usize;
-        let mut scan_truncated = false;
-
-        for info in walk {
-            if scanned >= scan_limit {
-                scan_truncated = true;
-                break;
-            }
-            if commits.len() > max_count {
-                break;
-            }
-            scanned += 1;
-            let info = info.map_err(|error| operation("history", error))?;
-            let commit = repository
-                .find_commit(info.id)
-                .map_err(|error| operation("history", error))?;
-            if let Some(selected_path) = path.as_mut()
-                && !commit_touches_path(&commit, selected_path, options.follow_renames)?
-            {
-                continue;
-            }
-            commits.push(commit_metadata(&commit)?);
-        }
-
-        let truncated = commits.len() > max_count || scan_truncated;
-        if commits.len() > max_count {
-            commits.truncate(max_count);
-        }
-        if truncated {
-            degradations.insert(GitDegradationV1::TruncatedOutput);
-        }
-        Ok(GitRepositoryHistory {
-            commits,
-            truncated,
-            degradations,
-        })
-    }
-
-    fn linked_symbolic_head(&self) -> Option<String> {
-        let root = self.worktree_root.as_deref()?;
-        self.native_git_invocations.fetch_add(1, Ordering::Relaxed);
-        crate::git::git_capture(root, &["symbolic-ref", "--short", "-q", "HEAD"])
-    }
-
     fn degradations(
         &self,
         repository: &gix::Repository,
@@ -603,7 +498,9 @@ impl TrackedStatusBuilder {
 fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepositoryError> {
     let head = repository
         .head()
-        .map_err(|error| operation("HEAD", error))?;
+        .map_err(|error| GitRepositoryError::UnreadableHead {
+            detail: error.to_string(),
+        })?;
     let branch = head
         .referent_name()
         .and_then(|name| name.as_bstr().to_str().ok())
@@ -618,106 +515,17 @@ fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepo
             commit: GitOidV1::new(commit.to_string())?,
         }),
         (None, Some(branch)) => Ok(GitHeadStateV1::Unborn { branch }),
-        (None, None) => Err(GitRepositoryError::Operation {
-            operation: "HEAD",
+        (None, None) => Err(GitRepositoryError::UnreadableHead {
             detail: "HEAD has neither a commit nor a branch".to_owned(),
         }),
     }
 }
 
-fn commit_metadata(commit: &gix::Commit<'_>) -> Result<GitCommitMetadataV1, GitRepositoryError> {
-    let decoded = commit
-        .decode()
-        .map_err(|error| operation("history", error))?;
-    let author = decoded
-        .author()
-        .map_err(|error| operation("history", error))?;
-    let committer = decoded
-        .committer()
-        .map_err(|error| operation("history", error))?;
-    let message = decoded.message.to_str_lossy();
-    let subject = message
-        .lines()
-        .next()
-        .unwrap_or("")
-        .chars()
-        .take(512)
-        .collect();
-    Ok(GitCommitMetadataV1 {
-        commit: GitOidV1::new(commit.id().to_string())?,
-        tree: GitOidV1::new(decoded.tree().to_string())?,
-        parents: decoded
-            .parents()
-            .map(|parent| GitOidV1::new(parent.to_string()))
-            .collect::<Result<_, _>>()?,
-        author: GitCommitIdentityV1 {
-            name: author.name.to_str_lossy().into_owned(),
-            email: author.email.to_str_lossy().into_owned(),
-            at: UtcMicros(author.seconds().saturating_mul(1_000_000)),
-        },
-        committer: GitCommitIdentityV1 {
-            name: committer.name.to_str_lossy().into_owned(),
-            email: committer.email.to_str_lossy().into_owned(),
-            at: UtcMicros(committer.seconds().saturating_mul(1_000_000)),
-        },
-        subject,
-        message_digest: canonical_sha256(&message.as_ref())?,
-    })
-}
-
-fn commit_touches_path(
-    commit: &gix::Commit<'_>,
-    path: &mut String,
-    follow_renames: bool,
-) -> Result<bool, GitRepositoryError> {
-    let tree = commit.tree().map_err(|error| operation("history", error))?;
-    let current = tree_entry(&tree, path)?;
-    let parents = commit.parent_ids().collect::<Vec<_>>();
-    if parents.is_empty() {
-        return Ok(current.is_some());
+fn repository_error(path: &Path, error: impl std::fmt::Display) -> GitRepositoryError {
+    GitRepositoryError::UnreadableRepository {
+        path: path.display().to_string(),
+        detail: error.to_string(),
     }
-    let parent_object = parents[0]
-        .object()
-        .map_err(|error| operation("history", error))?;
-    let parent = parent_object
-        .try_into_commit()
-        .map_err(|error| operation("history", error))?;
-    let parent_tree = parent.tree().map_err(|error| operation("history", error))?;
-    let previous = tree_entry(&parent_tree, path)?;
-    let changed = current != previous;
-    if changed
-        && follow_renames
-        && previous.is_none()
-        && let Some((current_id, _)) = current
-        && let Some(previous_path) = find_path_by_id(&parent_tree, current_id)?
-    {
-        *path = previous_path;
-    }
-    Ok(changed)
-}
-
-fn tree_entry(
-    tree: &gix::Tree<'_>,
-    path: &str,
-) -> Result<Option<(gix::hash::ObjectId, gix::object::tree::EntryMode)>, GitRepositoryError> {
-    tree.lookup_entry_by_path(path)
-        .map(|entry| entry.map(|entry| (entry.object_id(), entry.mode())))
-        .map_err(|error| operation("history", error))
-}
-
-fn find_path_by_id(
-    tree: &gix::Tree<'_>,
-    id: gix::hash::ObjectId,
-) -> Result<Option<String>, GitRepositoryError> {
-    let files = tree
-        .traverse()
-        .breadthfirst
-        .files()
-        .map_err(|error| operation("history", error))?;
-    Ok(files
-        .into_iter()
-        .find(|entry| entry.oid == id)
-        .map(|entry| entry.filepath.to_string()))
 }
 
 fn path_text(
