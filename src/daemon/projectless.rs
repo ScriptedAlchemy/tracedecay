@@ -346,7 +346,6 @@ async fn projectless_user_lcm_tools_call_response(
             Arc::clone(&user_session_db),
         )
         .await;
-    let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
         .and_then(|root| root.with_profile_runtime_shard(profile_identity))
         .and_then(|root| {
@@ -354,7 +353,6 @@ async fn projectless_user_lcm_tools_call_response(
                 Arc::clone(&user_session_db),
                 Arc::clone(&user_session_db),
                 root,
-                Arc::clone(&retrieval_calls),
                 Some(refresh_wake.clone()),
             )
         })

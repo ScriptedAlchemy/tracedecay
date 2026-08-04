@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -337,6 +336,10 @@ async fn partial_history_search_serves_active_data_without_waiting_for_refresh()
         "stored partial history evidence",
     ))
     .await;
+    let project_before = runtime
+        .session_domain_sha256_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("project session-domain digest before stored retrieval");
 
     let stored = tokio::time::timeout(
         Duration::from_secs(1),
@@ -361,13 +364,6 @@ async fn partial_history_search_serves_active_data_without_waiting_for_refresh()
             .is_some_and(|text| text.contains("stored partial history evidence")),
         "{stored}"
     );
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        1,
-        "AllowStored must reach canonical temporal retrieval"
-    );
 
     let fresh = message_search(
         &server,
@@ -384,11 +380,12 @@ async fn partial_history_search_serves_active_data_without_waiting_for_refresh()
     assert_eq!(fresh["service_status"]["backlog"], 0);
     assert_eq!(fresh["service_status"]["blocker"], "worker_missing");
     assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        1,
-        "RequireFresh must fail before canonical temporal retrieval"
+        runtime
+            .session_domain_sha256_for_test(HostAdmissionScope::Project)
+            .await
+            .expect("project session-domain digest after stored retrieval"),
+        project_before,
+        "stored retrieval and typed refresh rejection must remain read-only"
     );
     server.shutdown().await;
 }
@@ -426,16 +423,12 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
         }),
     )
     .await;
-    assert_eq!(all_registered["project_scope"], "all_registered");
-    // The fan-out is a project-scoped read: it never crosses into the profile
-    // retrieval service, whatever the registry answers.
+    assert_eq!(all_registered["status"], "deferred", "{all_registered}");
     assert_eq!(
-        server.user_session_retrieval_calls.load(Ordering::Relaxed),
-        0
+        all_registered["error"]["code"], "session_retrieval_multi_root_deferred",
+        "{all_registered}"
     );
-    let after_all_registered = server
-        .project_session_retrieval_calls
-        .load(Ordering::Relaxed);
+    assert_eq!(all_registered["project_scope"], "all_registered");
 
     let project = message_search(
         &server,
@@ -445,16 +438,7 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
     // A fresh root with no active generations is empty (zero hits), not
     // unavailable: refresh is a separate explicit durable operation.
     assert_eq!(project["outcome"], "complete_zero");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        after_all_registered + 1
-    );
-    assert_eq!(
-        server.user_session_retrieval_calls.load(Ordering::Relaxed),
-        0
-    );
+    assert_eq!(project["store_scope"], "project", "{project}");
 
     let profile = message_search(
         &server,
@@ -466,16 +450,7 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
     )
     .await;
     assert_eq!(profile["outcome"], "complete_zero");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        after_all_registered + 1
-    );
-    assert_eq!(
-        server.user_session_retrieval_calls.load(Ordering::Relaxed),
-        1
-    );
+    assert_eq!(profile["store_scope"], "profile", "{profile}");
 
     let denied = message_search(
         &server,
@@ -487,12 +462,7 @@ async fn transport_selects_one_service_and_all_registered_stays_project_scoped()
     )
     .await;
     assert_eq!(denied["outcome"], "wrong_scope");
-    assert_eq!(
-        server
-            .project_session_retrieval_calls
-            .load(Ordering::Relaxed),
-        after_all_registered + 2
-    );
+    assert_eq!(denied["store_scope"], "project", "{denied}");
     server.shutdown().await;
 }
 
