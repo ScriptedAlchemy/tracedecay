@@ -275,18 +275,26 @@ async fn historical_session_catch_up(db: &RegisteredGlobalDb) -> Option<Value> {
 
 fn historical_session_catch_up_state(ingest: &SessionIngestHealth) -> Option<Value> {
     const THRESHOLD: u64 = crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES;
-    (ingest.max_transcript_pending_bytes > THRESHOLD).then(|| {
-        json!({
-            "status": "warming",
-            "coverage": "partial",
-            "authority": "daemon",
-            "reason": "historical_transcript_backlog",
-            "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
-            "pending_bytes": ingest.pending_bytes,
-            "pending_transcripts": ingest.pending_transcripts,
-            "message": "Historical session recall is partially available while the daemon continues bounded background catch-up.",
-        })
-    })
+    let warming = ingest.max_transcript_pending_bytes > THRESHOLD;
+    Some(json!({
+        "status": if warming { "warming" } else { "current" },
+        "coverage": if warming { "partial" } else { "complete" },
+        "authority": "daemon",
+        "reason": if warming {
+            "historical_transcript_backlog"
+        } else {
+            "historical_catch_up_current"
+        },
+        "providers": crate::sessions::SessionProvider::ALL.map(|provider| provider.id()),
+        "max_transcript_pending_bytes": ingest.max_transcript_pending_bytes,
+        "pending_bytes": ingest.pending_bytes,
+        "pending_transcripts": ingest.pending_transcripts,
+        "message": if warming {
+            "Historical session recall is partially available while the daemon continues bounded background catch-up."
+        } else {
+            "Historical session recall catch-up is current."
+        },
+    }))
 }
 
 fn render_status_md(value: &Value) -> String {
@@ -354,6 +362,18 @@ mod tests {
         assert_eq!(state["coverage"], "partial");
         assert_eq!(state["authority"], "daemon");
         assert!(!state.to_string().contains("sessions ingest"));
+    }
+
+    #[test]
+    fn historical_status_names_database_and_discovery_backed_providers() {
+        let state = historical_session_catch_up_state(&SessionIngestHealth::default())
+            .expect("complete historical coverage remains visible");
+        let providers = state["providers"].as_array().unwrap();
+
+        assert!(providers.iter().any(|provider| provider == "kimi"));
+        assert!(providers.iter().any(|provider| provider == "opencode"));
+        assert_eq!(state["status"], "current");
+        assert_eq!(state["coverage"], "complete");
     }
 }
 fn active_project_context(
