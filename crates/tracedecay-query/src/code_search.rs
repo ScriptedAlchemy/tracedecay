@@ -65,6 +65,7 @@ pub enum CodeIndexSearchUnavailableReasonV1 {
     TimedOut,
     CapacityUnavailable,
     GenerationUnavailable,
+    GenerationUnverified,
     SemanticUnavailable,
     InvalidRequest,
     Internal,
@@ -79,6 +80,7 @@ impl CodeIndexSearchUnavailableReasonV1 {
             Self::TimedOut => "timed_out",
             Self::CapacityUnavailable => "search_capacity_unavailable",
             Self::GenerationUnavailable => "generation_unavailable",
+            Self::GenerationUnverified => "generation_unverified",
             Self::SemanticUnavailable => "semantic_unavailable",
             Self::InvalidRequest => "invalid_request",
             Self::Internal => "search_failed",
@@ -364,5 +366,13 @@ mod tests {
             coverage.degraded_or_fail(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable),
             Err(CodeIndexSearchUnavailableReasonV1::GenerationUnavailable)
         );
+    }
+
+    #[test]
+    fn cold_activation_is_distinct_from_an_absent_generation() {
+        let reason = CodeIndexSearchUnavailableReasonV1::GenerationUnverified;
+        assert_eq!(reason.as_str(), "generation_unverified");
+        let coverage = CodeIndexSearchCoverageV1::unavailable(lane_reason::GENERATION_REBUILDING);
+        assert_eq!(coverage.degraded_or_fail(reason), Err(reason));
     }
 }

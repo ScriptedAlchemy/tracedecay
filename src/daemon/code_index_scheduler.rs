@@ -1178,18 +1178,6 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     ProductionOpen(String),
     #[error("code-index privacy sanitizer failed: {0}")]
     Privacy(String),
-    /// Mount admission did not free a permit within its deadline. The store is
-    /// healthy and the decode is merely queued behind other worktrees, so this
-    /// is retryable — unlike every other variant here.
-    #[error("code-index mount admission is warming: no permit within {waited_ms}ms; retry")]
-    MountAdmissionWarming { waited_ms: u64 },
-}
-
-impl CodeIndexSchedulerErrorV1 {
-    /// Whether retrying the same mount against this daemon can succeed.
-    pub(super) fn is_retryable(&self) -> bool {
-        matches!(self, Self::MountAdmissionWarming { .. })
-    }
 }
 
 struct AtomicFlagReset(Arc<AtomicBool>);
@@ -1280,7 +1268,10 @@ impl CodeIndexWorktreeSchedulerV1 {
             .map_err(|error| CodeIndexSchedulerErrorV1::Identity(error.to_string()))?;
         let repository_id = identity.repository_id().clone();
         let worktree_id = identity.worktree_id().clone();
-        let git_metadata = identity::GitMetadataFingerprintV1::capture(&project_root);
+        // Cold open establishes structural identity only. Repository-wide
+        // freshness probes and sealed-generation decoding belong to the
+        // retained background owner after the route is mounted.
+        let git_metadata = identity::GitMetadataFingerprintV1::default();
         let sanitizer_revision = id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
         let publication =
             DaemonCodeIndexPublicationStoreV1::new(&store_root, sanitizer_revision.clone())?;
@@ -1300,57 +1291,16 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
         .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
-        let restored = publication
-            .load_active_shared()
-            .map_err(CodeIndexProductionErrorV1::Publication)?;
-        // Identity backstop: a restored generation may only be adopted when it
-        // was produced under this exact repository AND worktree. A matching path
-        // or branch label is never sufficient; cross-worktree reuse is refused.
-        if let Some(generation) = &restored {
-            let snapshot = generation.snapshot();
-            let same_project = generation.manifest().project_id == project_id;
-            let same_worktree = snapshot.worktree.as_ref() == Some(&worktree_id);
-            let same_repository = snapshot.repository == repository_id;
-            if !same_project || !same_worktree || !same_repository {
-                return Err(CodeIndexSchedulerErrorV1::Identity(
-                    "active code generation belongs to a different project/worktree identity"
-                        .to_owned(),
-                ));
-            }
-        }
-        // Restore-time freshness witness (P2). A durable witness records the
-        // tier-1 git-metadata and tier-2 stat signatures the restored generation
-        // was reconciled against. When BOTH still match the current on-disk
-        // source, the sealed generation provably equals the working tree, so the
-        // scheduler may adopt it as verified and skip the forced cold reconcile
-        // (a whole-repo read+sanitize+hash over every file). Any mismatch, a
-        // generation-id mismatch, or an absent/corrupt witness keeps the
-        // conservative unverified state and the worker performs a full reconcile,
-        // so the witness only ever SKIPS redundant work and never serves stale.
-        let restore_verified_stat = restored.as_ref().and_then(|generation| {
-            let witness = RestoreFreshnessWitnessV1::load(&store_root)?;
-            if witness.generation_id != generation.manifest().generation_id.as_str() {
-                return None;
-            }
-            if witness.git_metadata_signature != git_metadata.stable_signature() {
-                return None;
-            }
-            let current_stat = worktree_stat_signature_for(&project_root).ok()?;
-            (witness.stat_signature == current_stat).then_some(current_stat)
-        });
-        let verified_against_source = restore_verified_stat.is_some();
-        let freshness_unknown = restored.is_some() && !verified_against_source;
-        let last_reconciled_at_micros = verified_against_source.then(|| now_micros().0);
-        let latest_content_identity = restored
-            .as_ref()
-            .map(|generation| generation.snapshot().content_identity.clone());
+        let verified_against_source = false;
+        let freshness_unknown = true;
+        let last_reconciled_at_micros = None;
+        let latest_content_identity = None;
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
-        // Restoring a sealed generation authorizes serve-prior-generation, not a
-        // freshness claim. Cadence must verify against gix before tier-1/tier-2
-        // clocks may suppress reconciliation, EXCEPT when the restore-time
-        // witness above already proved the generation current.
+        // Nothing is decoded or served until the retained owner proves the
+        // durable generation belongs to this exact identity and its freshness
+        // frontier still matches the worktree.
         let scheduler = Self {
             project_id,
             project_root,
@@ -1362,7 +1312,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             git_metadata,
             last_reconciled_at: Instant::now(),
             last_reconciled_at_micros,
-            last_stat_signature: restore_verified_stat,
+            last_stat_signature: None,
             verified_against_source,
             freshness_unknown,
             byte_pool,
@@ -1428,6 +1378,93 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.wake.notify_one();
     }
 
+    fn validate_generation_identity(
+        &self,
+        generation: &CodeIndexPublishedGenerationV1,
+    ) -> Result<(), CodeIndexSchedulerErrorV1> {
+        let snapshot = generation.snapshot();
+        if generation.manifest().project_id != self.project_id
+            || snapshot.repository != self.repository_id
+            || snapshot.worktree.as_ref() != Some(&self.worktree_id)
+        {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "active code generation belongs to a different project/worktree identity"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Activate a retained sealed generation only after its durable freshness
+    /// frontier proves that the exact worktree state it describes is unchanged.
+    ///
+    /// This is deliberately background-only: sealed decode, gix status/index
+    /// classification, and the source stat sweep are all repository-sized.
+    /// Missing, corrupt, or mismatched frontier evidence simply declines the
+    /// fast path so the same retained owner performs authoritative reconcile.
+    fn activate_retained_generation_from_frontier(
+        &mut self,
+    ) -> Result<Option<CodeIndexReconcileOutcomeV1>, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
+        {
+            let hints = self
+                .hints
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if hints.overflow || !hints.paths.is_empty() {
+                return Ok(None);
+            }
+        }
+        let Some(generation) = self
+            .publication
+            .load_active_shared()
+            .map_err(CodeIndexProductionErrorV1::Publication)?
+        else {
+            return Ok(None);
+        };
+        self.validate_generation_identity(&generation)?;
+        let Some(witness) = RestoreFreshnessWitnessV1::load(&self.store_root) else {
+            return Ok(None);
+        };
+        if witness.generation_id != generation.manifest().generation_id.as_str() {
+            return Ok(None);
+        }
+        let metadata = identity::GitMetadataFingerprintV1::capture(&self.project_root);
+        if witness.git_metadata_signature != metadata.stable_signature() {
+            return Ok(None);
+        }
+        let Ok(stat_signature) = self.worktree_stat_signature() else {
+            return Ok(None);
+        };
+        if witness.stat_signature != stat_signature {
+            return Ok(None);
+        }
+        let snapshot_content_identity = generation.snapshot().content_identity.clone();
+        self.latest_content_identity = Some(snapshot_content_identity.clone());
+        self.mark_reconciled(metadata, Some(stat_signature));
+        if let Some(schedule) = &self.semantic_schedule {
+            let _ = schedule(&generation);
+        }
+        Ok(Some(CodeIndexReconcileOutcomeV1::Noop(
+            CodeIndexNoopEvidenceV1 {
+                snapshot_content_identity,
+                overflow_reconciled: false,
+            },
+        )))
+    }
+
+    /// Retained-owner activation entry point. Foreground reads never call this.
+    pub(super) fn activate_or_reconcile(
+        &mut self,
+    ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        if let Some(outcome) = self.activate_retained_generation_from_frontier()? {
+            return Ok(outcome);
+        }
+        self.reconcile_now()
+    }
+
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
@@ -1464,19 +1501,37 @@ impl CodeIndexWorktreeSchedulerV1 {
             overflow_reconciled |= hints.overflow;
             let mut captured = self.capture_authoritative_snapshot()?;
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
-            let latest_snapshot = self
+            let active_generation = self
                 .publication
                 .load_active_shared()
-                .map_err(CodeIndexProductionErrorV1::Publication)?
+                .map_err(CodeIndexProductionErrorV1::Publication)?;
+            if let Some(generation) = active_generation.as_ref() {
+                self.validate_generation_identity(generation)?;
+            }
+            let latest_snapshot = active_generation
+                .as_ref()
                 .map(|generation| generation.snapshot().clone());
             let unchanged_source = latest_snapshot.as_ref().is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
                     && latest.source_revision == captured.snapshot.source_revision
             });
-            if self.latest_content_identity.as_ref() == Some(&captured.snapshot.content_identity)
+            let active_content_identity = latest_snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.content_identity);
+            if self
+                .latest_content_identity
+                .as_ref()
+                .or(active_content_identity)
+                == Some(&captured.snapshot.content_identity)
                 && unchanged_source
             {
+                self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
                 self.mark_reconciled(sampled_metadata, sampled_signature);
+                if let (Some(schedule), Some(generation)) =
+                    (&self.semantic_schedule, active_generation.as_ref())
+                {
+                    let _ = schedule(generation);
+                }
                 return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
                     snapshot_content_identity: captured.snapshot.content_identity,
                     overflow_reconciled,
@@ -1817,6 +1872,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         }
         .ok()
         .flatten()?;
+        self.validate_generation_identity(&generation).ok()?;
         Some(self.bind_latest_complete(generation))
     }
 
@@ -1895,12 +1951,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.publication
             .load_generation(generation_id)
             .map(|generation| {
-                generation.map(|generation| LatestCompleteCodeIndexV1 {
-                    generation,
-                    query_owners: Arc::new(OnceLock::new()),
-                    record_index: Arc::new(OnceLock::new()),
-                    query_owners_build_gate: Arc::new(Mutex::new(())),
-                })
+                generation
+                    .filter(|generation| self.validate_generation_identity(generation).is_ok())
+                    .map(|generation| LatestCompleteCodeIndexV1 {
+                        generation,
+                        query_owners: Arc::new(OnceLock::new()),
+                        record_index: Arc::new(OnceLock::new()),
+                        query_owners_build_gate: Arc::new(Mutex::new(())),
+                    })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
