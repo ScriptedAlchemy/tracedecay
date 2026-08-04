@@ -142,8 +142,20 @@ impl OpenCodeSource {
     }
 
     fn load(&self) -> TranscriptIngestResult<Option<LoadedOpenCode>> {
-        if !self.database_path.is_file() || self.roots.is_empty() {
+        if self.roots.is_empty() {
             return Ok(None);
+        }
+        match std::fs::metadata(&self.database_path) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(scan_error(
+                    "stat OpenCode database",
+                    &self.database_path,
+                    error,
+                ));
+            }
         }
         let connection = tracedecay_rusqlite_runtime::open_immutable_reader(&self.database_path)
             .map_err(|error| scan_error("open immutable database", &self.database_path, error))?;
@@ -622,5 +634,35 @@ mod tests {
         assert!(outcome.deferred_by_byte_cap);
         assert_eq!(outcome.stats.messages_upserted, 1);
         assert_eq!(admission.observations().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_database_is_typed_instead_of_empty_success() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let database = temp.path().join("opencode.db");
+        symlink(&database, &database).unwrap();
+        let source = OpenCodeSource::with_database(database.clone(), vec![temp.path().into()]);
+
+        let error = capture_opencode_observations(
+            &MemoryHostAdmission::default(),
+            &source,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::runtime::source::TranscriptIngestError::ScanIo {
+                operation: "stat OpenCode database",
+                path,
+                ..
+            } if path == database
+        ));
     }
 }
