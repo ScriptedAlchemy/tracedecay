@@ -8,7 +8,8 @@ use std::fmt;
 use tracedecay_application::CancellationSignal;
 use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
 use tracedecay_code_index::graph_projection::{
-    CodeGraphProjectionError, CodeGraphProjectionPublisher, CodeGraphProjectionStore,
+    CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionPublisher,
+    CodeGraphProjectionStore,
 };
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
@@ -22,8 +23,7 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,

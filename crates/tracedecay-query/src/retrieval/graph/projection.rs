@@ -2,14 +2,12 @@
 
 use std::collections::BTreeMap;
 
-use tracedecay_code_index::graph_projection::{
-    CodeGraphEvidenceAdapterV1 as StoredCodeGraphEvidenceAdapterV1, CodeGraphProjectionError,
-};
+use tracedecay_code_index::graph_projection::{CodeGraphEvidenceReader, CodeGraphProjectionError};
 use tracedecay_domain::{
-    CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkV1, CompactCandidate,
-    ComponentRevision, EvidenceRole, FixedPointScore, FreshnessCompatibilityV1, LogicalEvidenceId,
-    RepositoryId, RetrievalAnchorId, RetrieverBatch, RetrieverCoverage, RetrieverKind,
-    RetrieverOutcome, ScoreDomainId, SourceFreshness, SourceOccurrenceId, UtcMicros,
+    CanonicalRelationEdgeV1, CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore,
+    FreshnessCompatibilityV1, LogicalEvidenceId, RetrievalAnchorId, RetrieverBatch,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceFreshness,
+    SourceOccurrenceId, UtcMicros,
 };
 
 use super::{GraphLaneEvidence, GraphLaneRequest, GraphPathSegmentV1};
@@ -18,44 +16,7 @@ use crate::retrieval::ports::{
     contract_error,
 };
 
-/// Compatibility constructor for production callers that still assemble one
-/// complete generation from its immutable code-index publication payload.
-#[derive(Clone, Debug)]
-pub struct CodeGraphEvidenceAdapterV1 {
-    stored: StoredCodeGraphEvidenceAdapterV1,
-}
-
-impl CodeGraphEvidenceAdapterV1 {
-    pub fn new(
-        generation: CodeGenerationId,
-        repository_id: Option<RepositoryId>,
-        freshness: SourceFreshness,
-        edges: &[CanonicalRelationEdgeV1],
-        chunks: &[CodeSearchChunkV1],
-    ) -> Result<Self, RetrievalPortError> {
-        Ok(Self {
-            stored: StoredCodeGraphEvidenceAdapterV1::new(
-                generation,
-                repository_id,
-                freshness,
-                edges,
-                chunks,
-            )
-            .map_err(map_projection_error)?,
-        })
-    }
-}
-
-impl GraphEvidenceReadPort for CodeGraphEvidenceAdapterV1 {
-    fn read_graph_evidence(
-        &self,
-        request: &GraphLaneRequest,
-    ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
-        read_graph_evidence(&self.stored, request)
-    }
-}
-
-impl GraphEvidenceReadPort for StoredCodeGraphEvidenceAdapterV1 {
+impl GraphEvidenceReadPort for CodeGraphEvidenceReader {
     fn read_graph_evidence(
         &self,
         request: &GraphLaneRequest,
@@ -65,15 +26,15 @@ impl GraphEvidenceReadPort for StoredCodeGraphEvidenceAdapterV1 {
 }
 
 fn read_graph_evidence(
-    stored: &StoredCodeGraphEvidenceAdapterV1,
+    reader: &CodeGraphEvidenceReader,
     request: &GraphLaneRequest,
 ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError> {
     request.validate()?;
-    if request.generation != *stored.generation() {
+    if request.generation != *reader.generation() {
         return Err(RetrievalPortError::GenerationMismatch);
     }
-    if stored.freshness().compatibility != FreshnessCompatibilityV1::Current {
-        return Ok(RetrieverOutcome::Stale(stored.freshness().clone()));
+    if reader.freshness().compatibility != FreshnessCompatibilityV1::Current {
+        return Ok(RetrieverOutcome::Stale(reader.freshness().clone()));
     }
     let seed_symbols = request
         .seed_anchors
@@ -86,7 +47,7 @@ fn read_graph_evidence(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let raw = stored
+    let raw = reader
         .traverse(
             &request.generation,
             &seed_symbols,
@@ -112,8 +73,8 @@ fn read_graph_evidence(
             logical_evidence_id: LogicalEvidenceId::new(evidence_id).map_err(contract_error)?,
             source_occurrence_id: source_occurrence_id.clone(),
             file_occurrence_id: Some(raw_candidate.binding.file.clone()),
-            source_namespace: stored.freshness().source_namespace.clone(),
-            repository_id: stored.repository_id().cloned(),
+            source_namespace: reader.freshness().source_namespace.clone(),
+            repository_id: reader.repository_id().cloned(),
             session_or_thread_id: None,
             logical_copy_cluster_id: None,
             logical_copy_evidence_anchor: None,
@@ -125,13 +86,13 @@ fn read_graph_evidence(
             ordinal_rank: ordinal as u32,
             exact_admission_proof: None,
             retriever_evidence_anchor: retrieval_anchor(format!("evidence.{occurrence}"))?,
-            freshness: stored.freshness().clone(),
+            freshness: reader.freshness().clone(),
         };
         let evidence = GraphLaneEvidence {
             binding: CodeCandidateBindingV1 {
                 candidate_anchor: candidate.anchor_id.clone(),
                 occurrence: CodeOccurrenceRefV1 {
-                    generation: stored.generation().clone(),
+                    generation: reader.generation().clone(),
                     file: raw_candidate.binding.file,
                     symbol: Some(target),
                     chunk: raw_candidate.binding.chunk,
@@ -181,6 +142,12 @@ fn map_projection_error(error: CodeGraphProjectionError) -> RetrievalPortError {
         CodeGraphProjectionError::Cancelled => RetrievalPortError::Cancelled,
         CodeGraphProjectionError::BudgetExhausted => RetrievalPortError::BudgetExceeded,
         unavailable => RetrievalPortError::AuthorityUnavailable(unavailable.to_string()),
+    }
+}
+
+impl From<CodeGraphProjectionError> for RetrievalPortError {
+    fn from(error: CodeGraphProjectionError) -> Self {
+        map_projection_error(error)
     }
 }
 
