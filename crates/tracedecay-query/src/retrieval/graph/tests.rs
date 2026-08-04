@@ -5,7 +5,12 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use tracedecay_application::CancellationSignal;
 use tracedecay_application::retrieval::MAX_CALLABLE_CODE_DEPTH;
+use tracedecay_code_index::graph_projection::{
+    CodeGraphEvidenceReader, CodeGraphProjectionError, CodeGraphProjectionPublisher,
+    CodeGraphProjectionStore,
+};
 use tracedecay_domain::{
     BoundedSanitizedText, CanonicalRelationEdgeV1, ChunkerRevision, CodeSearchChunkAnchorV1,
     CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate, ContentDigest, EdgeAuthorityV1,
@@ -18,15 +23,16 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CodeGraphEvidenceAdapterV1, GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever,
-    GraphPathSegmentV1,
+    GraphLane, GraphLaneEvidence, GraphLaneRequest, GraphLaneRetriever, GraphPathSegmentV1,
 };
 use crate::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, GraphEvidenceReadPort, RetrievalPortError,
 };
 
 mod measurement;
+mod projection;
 mod scale;
+mod storage;
 
 fn id<T>(value: &str) -> T
 where
@@ -212,23 +218,53 @@ fn projection_batch(
     edges: &[CanonicalRelationEdgeV1],
     symbols: &[&str],
 ) -> RetrieverBatch<GraphLaneEvidence> {
-    let chunks: Vec<_> = symbols
-        .iter()
-        .map(|symbol| projection_chunk(request, &format!("chunk.{symbol}"), symbol))
-        .collect();
-    let adapter = CodeGraphEvidenceAdapterV1::new(
-        request.generation.clone(),
-        None,
-        freshness(FreshnessCompatibilityV1::Current),
-        edges,
-        &chunks,
-    )
-    .expect("projection is valid");
+    let cancellation =
+        CancellationSignal::active("cancellation.code-graph.fixture").expect("valid token");
+    let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
+    publish_projection(&store, request, edges, symbols);
+    read_projection(&store, request, &cancellation)
+}
+
+fn read_projection(
+    store: &CodeGraphProjectionStore,
+    request: &GraphLaneRequest,
+    cancellation: &CancellationSignal,
+) -> RetrieverBatch<GraphLaneEvidence> {
+    let adapter = store
+        .evidence_reader(
+            &request.generation,
+            None,
+            freshness(FreshnessCompatibilityV1::Current),
+            cancellation,
+        )
+        .expect("published generation is readable");
     complete_batch(
         adapter
             .read_graph_evidence(request)
             .expect("graph read succeeds"),
     )
+}
+
+fn projection_chunks(request: &GraphLaneRequest, symbols: &[&str]) -> Vec<CodeSearchChunkV1> {
+    let chunks: Vec<_> = symbols
+        .iter()
+        .map(|symbol| projection_chunk(request, &format!("chunk.{symbol}"), symbol))
+        .collect();
+    chunks
+}
+
+fn publish_projection(
+    store: &CodeGraphProjectionStore,
+    request: &GraphLaneRequest,
+    edges: &[CanonicalRelationEdgeV1],
+    symbols: &[&str],
+) {
+    let chunks = projection_chunks(request, symbols);
+    let cancellation =
+        CancellationSignal::active("cancellation.code-graph.fixture").expect("valid token");
+    store
+        .publish_code_graph(&request.generation, edges, &chunks, &cancellation)
+        .expect("projection publication succeeds");
 }
 
 fn batch(
@@ -426,19 +462,16 @@ fn graph_projection_rejects_foreign_generation_chunks() {
     let request = graph_request(8, 1);
     let mut foreign = projection_chunk(&request, "chunk.foreign", "symbol.foreign");
     foreign.anchor.generation_id = id("generation.foreign");
+    let cancellation =
+        CancellationSignal::active("cancellation.code-graph.foreign").expect("valid token");
+    let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
 
-    let result = CodeGraphEvidenceAdapterV1::new(
-        request.generation,
-        None,
-        freshness(FreshnessCompatibilityV1::Current),
-        &[],
-        &[foreign],
+    let result = store.publish_code_graph(&request.generation, &[], &[foreign], &cancellation);
+
+    assert_eq!(
+        result.unwrap_err(),
+        CodeGraphProjectionError::GenerationMismatch
     );
-
-    assert!(matches!(
-        result,
-        Err(RetrievalPortError::GenerationMismatch)
-    ));
 }
 
 #[test]
@@ -447,18 +480,20 @@ fn graph_projection_rejects_conflicting_symbol_bindings() {
     let primary = projection_chunk(&request, "chunk.target.a", "symbol.target");
     let mut conflicting = projection_chunk(&request, "chunk.target.b", "symbol.target");
     conflicting.anchor.file_occurrence_id = id("file.symbol.other");
+    let cancellation =
+        CancellationSignal::active("cancellation.code-graph.conflict").expect("valid token");
+    let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
 
-    let result = CodeGraphEvidenceAdapterV1::new(
-        request.generation,
-        None,
-        freshness(FreshnessCompatibilityV1::Current),
+    let result = store.publish_code_graph(
+        &request.generation,
         &[],
         &[primary, conflicting],
+        &cancellation,
     );
 
     assert!(matches!(
         result,
-        Err(RetrievalPortError::Contract(message))
+        Err(CodeGraphProjectionError::Contract(message))
             if message == "one symbol occurrence has conflicting graph candidate bindings"
     ));
 }
@@ -646,19 +681,18 @@ fn graph_projection_selects_symbol_chunk_binding_canonically() {
         projection_chunk(&request, "chunk.target.a", "symbol.target"),
     ];
     let read = |chunks: &[CodeSearchChunkV1]| {
-        let adapter = CodeGraphEvidenceAdapterV1::new(
-            request.generation.clone(),
-            None,
-            freshness(FreshnessCompatibilityV1::Current),
-            std::slice::from_ref(&edge),
-            chunks,
-        )
-        .expect("projection is valid");
-        complete_batch(
-            adapter
-                .read_graph_evidence(&request)
-                .expect("graph read succeeds"),
-        )
+        let cancellation =
+            CancellationSignal::active("cancellation.code-graph.binding").expect("valid token");
+        let store = CodeGraphProjectionStore::memory(&cancellation).expect("open memory graph");
+        store
+            .publish_code_graph(
+                &request.generation,
+                std::slice::from_ref(&edge),
+                chunks,
+                &cancellation,
+            )
+            .expect("projection is valid");
+        read_projection(&store, &request, &cancellation)
     };
 
     let first = read(&chunks);
@@ -676,121 +710,6 @@ fn graph_projection_selects_symbol_chunk_binding_canonically() {
             .as_str(),
         "chunk.target.a"
     );
-}
-
-#[test]
-fn graph_projection_breaks_equal_score_ties_by_canonical_full_path() {
-    let mut request = graph_request(8, 1);
-    request.seed_anchors = vec![
-        binding(&request, "occ.seed-z", "symbol.seed-z"),
-        binding(&request, "occ.seed-a", "symbol.seed-a"),
-    ];
-    let target = id::<SymbolOccurrenceId>("symbol.target");
-    let edges = vec![
-        CanonicalRelationEdgeV1 {
-            from_occurrence: id("symbol.seed-z"),
-            to_occurrence: target.clone(),
-            kind: RelationEdgeKindV1::Calls,
-            authority: EdgeAuthorityV1::SyntaxExact,
-            evidence_span: SourceSpan {
-                start_byte: 0,
-                end_byte: 1,
-            },
-        },
-        CanonicalRelationEdgeV1 {
-            from_occurrence: id("symbol.seed-a"),
-            to_occurrence: target,
-            kind: RelationEdgeKindV1::Calls,
-            authority: EdgeAuthorityV1::SyntaxExact,
-            evidence_span: SourceSpan {
-                start_byte: 1,
-                end_byte: 2,
-            },
-        },
-    ];
-
-    let result = projection_batch(
-        &request,
-        &edges,
-        &["symbol.seed-z", "symbol.seed-a", "symbol.target"],
-    );
-
-    result.validate().expect("batch remains valid");
-    let evidence = &result.evidence_by_occurrence[&id("code-graph:symbol.target")];
-    assert_eq!(evidence.path[0].from.as_str(), "symbol.seed-a");
-}
-
-#[test]
-fn graph_projection_relaxes_a_same_seed_diamond_to_the_stronger_path() {
-    let request = graph_request(8, 2);
-    let edges = vec![
-        CanonicalRelationEdgeV1 {
-            from_occurrence: id("symbol.seed"),
-            to_occurrence: id("symbol.a-weak"),
-            kind: RelationEdgeKindV1::Calls,
-            authority: EdgeAuthorityV1::SyntaxExact,
-            evidence_span: SourceSpan {
-                start_byte: 0,
-                end_byte: 1,
-            },
-        },
-        CanonicalRelationEdgeV1 {
-            from_occurrence: id("symbol.seed"),
-            to_occurrence: id("symbol.z-strong"),
-            kind: RelationEdgeKindV1::Calls,
-            authority: EdgeAuthorityV1::SyntaxExact,
-            evidence_span: SourceSpan {
-                start_byte: 1,
-                end_byte: 2,
-            },
-        },
-        CanonicalRelationEdgeV1 {
-            from_occurrence: id("symbol.a-weak"),
-            to_occurrence: id("symbol.target"),
-            kind: RelationEdgeKindV1::Calls,
-            authority: EdgeAuthorityV1::HeuristicCandidate,
-            evidence_span: SourceSpan {
-                start_byte: 2,
-                end_byte: 3,
-            },
-        },
-        CanonicalRelationEdgeV1 {
-            from_occurrence: id("symbol.z-strong"),
-            to_occurrence: id("symbol.target"),
-            kind: RelationEdgeKindV1::Calls,
-            authority: EdgeAuthorityV1::SyntaxExact,
-            evidence_span: SourceSpan {
-                start_byte: 3,
-                end_byte: 4,
-            },
-        },
-    ];
-
-    let result = projection_batch(
-        &request,
-        &edges,
-        &[
-            "symbol.seed",
-            "symbol.a-weak",
-            "symbol.z-strong",
-            "symbol.target",
-        ],
-    );
-
-    result.validate().expect("batch remains valid");
-    assert_eq!(
-        result
-            .candidates
-            .iter()
-            .filter(
-                |candidate| candidate.source_occurrence_id.as_str() == "code-graph:symbol.target"
-            )
-            .count(),
-        1
-    );
-    let evidence = &result.evidence_by_occurrence[&id("code-graph:symbol.target")];
-    assert_eq!(evidence.path[0].to.as_str(), "symbol.z-strong");
-    assert_eq!(evidence.weakest_authority, EdgeAuthorityV1::SyntaxExact);
 }
 
 #[test]

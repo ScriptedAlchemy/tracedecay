@@ -17,7 +17,7 @@ use super::support::{conversion, invalid, u64_to_i64};
 
 // The stored column text is owned by `tracedecay_store::diagnostics::codec` so
 // this executor and the root `DiagnosticsStore` cannot drift apart across a
-// cutover. These aliases keep the SQL below readable.
+// migration. These aliases keep the SQL below readable.
 const CURRENT: &str = DIAGNOSTIC_STATE_CURRENT;
 const SUPERSEDED: &str = DIAGNOSTIC_STATE_SUPERSEDED;
 const CLEARED: &str = DIAGNOSTIC_STATE_CLEARED;

@@ -55,7 +55,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     /// by the registry after a successful drain has been verified.
     fn close_and_join(&self) -> Result<(), String>;
 
-    /// Transitional S11 SQL facade bound to this already-verified attachment.
+    /// Exact SQL channel bound to this already-verified attachment.
     ///
     /// Implementations must return a handle over their owned writer/readers;
     /// they must never reopen the locator path.
@@ -72,17 +72,6 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     fn storage_page_counts(&self, reader_wait: Duration) -> Result<(u64, u64, u64), String> {
         let _ = reader_wait;
         Err("physical runtime has no store-size telemetry port".to_owned())
-    }
-
-    /// Reads per-table payload bytes from the retained attachment, so a store's
-    /// size can be attributed to the tables that hold it rather than reported
-    /// as one opaque total.
-    ///
-    /// Same constraints as [`Self::storage_page_counts`]: the already-open
-    /// reader pool only, no caller-provided SQL.
-    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
-        let _ = reader_wait;
-        Err("physical runtime has no table-size telemetry port".to_owned())
     }
 
     /// Runs one typed, page-bounded incremental compaction on the retained

@@ -37,6 +37,7 @@ mod ownership;
 mod replay;
 mod restart_proxy;
 mod rmcp_route;
+mod runtime_identity;
 mod scheduler_config;
 mod scheduler_shutdown;
 mod socket;

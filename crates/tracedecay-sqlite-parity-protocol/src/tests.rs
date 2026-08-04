@@ -70,14 +70,6 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         Command::Integrity {
             check: IntegrityCheck::Full,
         },
-        Command::RowParity {
-            table: GraphTable::Nodes,
-        },
-        Command::FtsParity {
-            table: GraphFtsTable::Nodes,
-            query: "parity".to_owned(),
-            limit: 1,
-        },
         Command::SessionStoreCount {
             family: SessionStoreFamily::Observation,
             table: SessionStoreTable::Observations,
@@ -95,18 +87,6 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
     ] {
         round_trip(command);
     }
-    for table in [
-        GraphTable::Nodes,
-        GraphTable::Edges,
-        GraphTable::Files,
-        GraphTable::UnresolvedRefs,
-        GraphTable::Vectors,
-        GraphTable::Metadata,
-        GraphTable::NodesFts,
-    ] {
-        round_trip(table);
-    }
-    round_trip(GraphFtsTable::Nodes);
     for family in [
         SessionStoreFamily::Observation,
         SessionStoreFamily::Transcript,
@@ -265,8 +245,6 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
         ErrorCode::RefusedLiveProfile,
         ErrorCode::OpenFailed,
         ErrorCode::ReadOnlyInvariant,
-        ErrorCode::InvalidFtsQuery,
-        ErrorCode::InvalidFtsLimit,
         ErrorCode::InvalidStoreFamily,
         ErrorCode::InvalidPageCursor,
         ErrorCode::InvalidPageLimit,
@@ -280,7 +258,7 @@ fn every_request_command_cursor_and_error_variant_round_trips() {
 }
 
 #[test]
-fn every_graph_session_journal_and_response_result_variant_round_trips() {
+fn every_session_journal_and_response_result_variant_round_trips() {
     let column = SessionStoreColumn {
         ordinal: 0,
         name: "id".to_owned(),
@@ -351,18 +329,6 @@ fn every_graph_session_journal_and_response_result_variant_round_trips() {
         Output::Integrity(IntegrityReport {
             check: IntegrityCheck::Full,
             findings: vec!["ok".to_owned()],
-        }),
-        Output::RowParity(RowParity {
-            table: GraphTable::Nodes,
-            row_count: Some(1),
-        }),
-        Output::FtsParity(FtsParity {
-            table: GraphFtsTable::Nodes,
-            matches: vec![FtsMatch {
-                rowid: 1,
-                rank: 1.5,
-                snippet: "match".to_owned(),
-            }],
         }),
         Output::SessionStoreCount(SessionStoreCount {
             family: SessionStoreFamily::Observation,
@@ -676,22 +642,6 @@ fn semantic_validation_rejects_invalid_closed_commands_before_io() {
     };
     assert!(validate_request(&valid).is_ok());
     for (command, code) in [
-        (
-            Command::FtsParity {
-                table: GraphFtsTable::Nodes,
-                query: " ".to_owned(),
-                limit: 1,
-            },
-            ErrorCode::InvalidFtsQuery,
-        ),
-        (
-            Command::FtsParity {
-                table: GraphFtsTable::Nodes,
-                query: "nodes".to_owned(),
-                limit: 0,
-            },
-            ErrorCode::InvalidFtsLimit,
-        ),
         (
             Command::SessionStoreCount {
                 family: SessionStoreFamily::Lcm,

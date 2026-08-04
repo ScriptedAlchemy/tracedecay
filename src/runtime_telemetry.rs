@@ -89,6 +89,66 @@ pub struct DatabaseSnapshot {
     /// at. This is the after-the-fact evidence: where the workers went, and
     /// whether anyone is queued behind them.
     pub reader_pool: Option<ReaderPoolOccupancy>,
+    /// Bounded daemon store-runtime registry telemetry for all mounted shards.
+    pub runtime_registry: RuntimeRegistrySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistrySnapshot {
+    pub inventory_shards: u32,
+    pub returned_shards: u32,
+    pub omitted_shards: u32,
+    pub per_shard_queue_max_operations: u32,
+    pub per_shard_queue_max_bytes: u64,
+    pub global_queue_max_bytes: u64,
+    pub wal_soft_limit_bytes: u64,
+    pub wal_hard_limit_bytes: u64,
+    pub aggregate: RuntimeRegistryAggregateSnapshot,
+    pub shards: Vec<RuntimeRegistryShardSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryAggregateSnapshot {
+    pub ready: u32,
+    pub opening: u32,
+    pub draining: u32,
+    pub exclusive_maintenance: u32,
+    pub reopening: u32,
+    pub faulted: u32,
+    pub closed: u32,
+    pub healthy: u32,
+    pub degraded: u32,
+    pub unknown_health: u32,
+    pub pinned_profiles: u32,
+    pub eviction_eligible: u32,
+    pub writer_present: u32,
+    pub physical_reader_handles: u64,
+    pub queued_operations: u64,
+    pub queued_bytes: u64,
+    pub total_leases: u64,
+    pub wal_bytes: u64,
+    pub memory_estimate_bytes: u64,
+    pub global_queued_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeRegistryShardSnapshot {
+    pub shard: String,
+    pub incarnation: u64,
+    pub authority_epoch: u64,
+    pub state: String,
+    pub health: String,
+    pub writer_present: bool,
+    pub physical_reader_handles: u32,
+    pub queued_operations: u32,
+    pub queued_bytes: u64,
+    pub total_leases: u64,
+    pub wal_bytes: u64,
+    pub memory_estimate_bytes: u64,
+    pub pinned_profile: bool,
+    pub idle_for_ms: u64,
+    pub eviction_eligible: bool,
+    pub eviction_blocker_count: u32,
 }
 
 /// Per-lane reader-pool occupancy at one instant.
@@ -241,6 +301,9 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            nodes / edges    {nodes} / {edges}\n\
            readers general  {readers_general}\n\
            readers health   {readers_health}\n\
+           runtime shards    {runtime_shards} mounted ({runtime_omitted} omitted)\n\
+           runtime queue     {runtime_queue}\n\
+           runtime wal       {runtime_wal}\n\
         ",
         ver = snap.tracedecay_version,
         os = snap.host_os,
@@ -287,6 +350,14 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
             || "(unattached)".to_string(),
             |pool| lane_line(&pool.health)
         ),
+        runtime_shards = d.runtime_registry.inventory_shards,
+        runtime_omitted = d.runtime_registry.omitted_shards,
+        runtime_queue = format!(
+            "{} ops / {}",
+            d.runtime_registry.aggregate.queued_operations,
+            bytes_human(d.runtime_registry.aggregate.queued_bytes)
+        ),
+        runtime_wal = bytes_human(d.runtime_registry.aggregate.wal_bytes),
     )
 }
 
@@ -402,6 +473,8 @@ pub(crate) async fn collect_database(
         .reader_pool_occupancy()
         .as_ref()
         .map(ReaderPoolOccupancy::from_pool);
+    let runtime_registry =
+        RuntimeRegistrySnapshot::from_projection(cg.store_runtime_registry().runtime_telemetry());
     Ok(DatabaseSnapshot {
         project_root,
         db_path,
@@ -420,7 +493,109 @@ pub(crate) async fn collect_database(
         node_count,
         edge_count,
         reader_pool,
+        runtime_registry,
     })
+}
+
+impl RuntimeRegistrySnapshot {
+    fn from_projection(
+        projection: crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection,
+    ) -> Self {
+        let aggregate = &projection.aggregate;
+        let shards = projection
+            .shards
+            .iter()
+            .map(RuntimeRegistryShardSnapshot::from_telemetry)
+            .collect();
+        Self {
+            inventory_shards: aggregate.inventory_shards,
+            returned_shards: aggregate.returned_shards,
+            omitted_shards: aggregate.omitted_shards,
+            per_shard_queue_max_operations: projection.per_shard_queue_budget.max_operations,
+            per_shard_queue_max_bytes: projection.per_shard_queue_budget.max_bytes,
+            global_queue_max_bytes: projection.global_queue_budget_bytes,
+            wal_soft_limit_bytes: projection.wal_budget.soft_limit_bytes,
+            wal_hard_limit_bytes: projection.wal_budget.hard_limit_bytes,
+            aggregate: RuntimeRegistryAggregateSnapshot {
+                ready: aggregate.states.ready,
+                opening: aggregate.states.opening,
+                draining: aggregate.states.draining,
+                exclusive_maintenance: aggregate.states.exclusive_maintenance,
+                reopening: aggregate.states.reopening,
+                faulted: aggregate.states.faulted,
+                closed: aggregate.states.closed,
+                healthy: aggregate.health.healthy,
+                degraded: aggregate.health.degraded,
+                unknown_health: aggregate.health.unknown,
+                pinned_profiles: aggregate.pinned_profiles,
+                eviction_eligible: aggregate.eviction_eligible,
+                writer_present: aggregate.writer_present,
+                physical_reader_handles: aggregate.physical_reader_handles,
+                queued_operations: aggregate.queued_operations,
+                queued_bytes: aggregate.queued_bytes,
+                total_leases: aggregate.total_leases,
+                wal_bytes: aggregate.wal_bytes,
+                memory_estimate_bytes: aggregate.memory_estimate_bytes,
+                global_queued_bytes: aggregate.global_queued_bytes,
+            },
+            shards,
+        }
+    }
+}
+
+impl RuntimeRegistryShardSnapshot {
+    fn from_telemetry(
+        telemetry: &crate::daemon::store_runtime::telemetry::ShardRuntimeTelemetry,
+    ) -> Self {
+        Self {
+            shard: format!("{:?}", telemetry.binding.shard_id.scope),
+            incarnation: telemetry.binding.incarnation.get(),
+            authority_epoch: telemetry.binding.authority_epoch.get(),
+            state: runtime_state_label(telemetry.state).to_string(),
+            health: runtime_health_label(telemetry.health).to_string(),
+            writer_present: telemetry.writer_present,
+            physical_reader_handles: telemetry.physical_reader_handles,
+            queued_operations: telemetry.queued_operations,
+            queued_bytes: telemetry.queued_bytes,
+            total_leases: u64::from(telemetry.leases.general_readers)
+                .saturating_add(u64::from(telemetry.leases.health_readers))
+                .saturating_add(u64::from(telemetry.leases.snapshots))
+                .saturating_add(u64::from(telemetry.leases.watchers))
+                .saturating_add(u64::from(telemetry.leases.schedulers))
+                .saturating_add(u64::from(telemetry.leases.clients)),
+            wal_bytes: telemetry.wal_bytes,
+            memory_estimate_bytes: telemetry.memory_estimate_bytes,
+            pinned_profile: telemetry.pinned_profile,
+            idle_for_ms: telemetry.idle_for_ms,
+            eviction_eligible: telemetry.eviction_eligible,
+            eviction_blocker_count: telemetry.eviction_blocker_count,
+        }
+    }
+}
+
+fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'static str {
+    match state {
+        tracedecay_store::RuntimeMaintenanceStateV1::Closed => "closed",
+        tracedecay_store::RuntimeMaintenanceStateV1::Opening => "opening",
+        tracedecay_store::RuntimeMaintenanceStateV1::Ready => "ready",
+        tracedecay_store::RuntimeMaintenanceStateV1::Draining => "draining",
+        tracedecay_store::RuntimeMaintenanceStateV1::ExclusiveMaintenance => {
+            "exclusive_maintenance"
+        }
+        tracedecay_store::RuntimeMaintenanceStateV1::Reopening => "reopening",
+        tracedecay_store::RuntimeMaintenanceStateV1::Faulted => "faulted",
+    }
+}
+
+fn runtime_health_label(
+    health: crate::daemon::store_runtime::shard::ShardRuntimeHealth,
+) -> &'static str {
+    match health {
+        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
+        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
+        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
+        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
+    }
 }
 
 fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {

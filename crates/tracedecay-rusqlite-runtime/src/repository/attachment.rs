@@ -12,8 +12,7 @@ use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, FrozenWatermarkCoverageV1, FrozenWatermarkVectorV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadOutcomeV1, RuntimeReadRequestV1,
     RuntimeReadResultV1, RuntimeRequestProbeV1, RuntimeSubmitOutcomeV1, RuntimeSubmitRequestV1,
-    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, StoreShardScopeV1,
-    VerifiedStoreLocatorV1,
+    ShardWatermarkV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use crate::{
@@ -54,9 +53,6 @@ impl RepositoryPhysicalAttachmentFactory {
         admission: AdmissionConfigV1,
         start_hook: &mut dyn FnMut(AttachmentWorkerStartStage),
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
-            return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
-        }
         let opened_database =
             OpenedDatabaseFile::pin(&path).map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
@@ -77,9 +73,6 @@ impl RepositoryPhysicalAttachmentFactory {
         path: PathBuf,
         admission: AdmissionConfigV1,
     ) -> Result<RepositoryRuntimePhysicalAttachment, RepositoryAttachmentStartError> {
-        if matches!(binding.shard_id.scope, StoreShardScopeV1::Code { .. }) {
-            return Err(RepositoryAttachmentStartError::UnsupportedShardScope);
-        }
         let opened_database = OpenedDatabaseFile::create_new(&path)
             .map_err(RepositoryAttachmentStartError::Identity)?;
         self.attach_opened(
@@ -256,7 +249,6 @@ fn repository_start_failure(
 
 #[derive(Debug)]
 pub enum RepositoryAttachmentStartError {
-    UnsupportedShardScope,
     Identity(crate::connection::OpenedDatabaseFileError),
     Reader(ReaderStartError),
     Writer(WriterStartError),
@@ -265,9 +257,6 @@ pub enum RepositoryAttachmentStartError {
 impl fmt::Display for RepositoryAttachmentStartError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedShardScope => {
-                formatter.write_str("repository attachment does not own code shards")
-            }
             Self::Identity(error) => write!(formatter, "identify repository attachment: {error}"),
             Self::Reader(error) => write!(formatter, "start repository readers: {error}"),
             Self::Writer(error) => write!(formatter, "start repository writer: {error}"),
@@ -281,7 +270,6 @@ impl Error for RepositoryAttachmentStartError {
             Self::Identity(error) => Some(error),
             Self::Reader(error) => Some(error),
             Self::Writer(error) => Some(error),
-            Self::UnsupportedShardScope => None,
         }
     }
 }
@@ -816,10 +804,15 @@ mod tests {
     }
 
     #[test]
-    fn real_sqlite_attachment_reopens_and_rejects_stale_handles_after_exact_once_close() {
+    fn real_sqlite_attachment_drains_pending_wal_reopens_and_rejects_stale_handles() {
         let directory = TempDir::new().unwrap();
         let path = directory.path().join("repository.sqlite3");
-        rusqlite::Connection::open(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        let journal_mode: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode, "wal");
+        drop(connection);
         let path = path.canonicalize().unwrap();
         let binding = binding();
         let locator = locator(&binding);
@@ -860,6 +853,11 @@ mod tests {
                 rows.rows.last().unwrap().values,
                 vec![ExactSqlValue::Integer(cycle)]
             );
+            let wal_path = PathBuf::from(format!("{}-wal", path.display()));
+            assert!(
+                fs::metadata(&wal_path).unwrap().len() > 0,
+                "each close cycle must begin with committed frames pending in WAL"
+            );
 
             attachment.drain().unwrap();
             attachment.close_and_join().unwrap();
@@ -885,6 +883,14 @@ mod tests {
                 )
                 .unwrap_err();
             assert!(matches!(read_error, ExactSqlError::ReaderUnavailable(_)));
+
+            let reopened = rusqlite::Connection::open(&path).unwrap();
+            let count: i64 = reopened
+                .query_row("SELECT COUNT(*) FROM runtime_lifecycle", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, cycle + 1);
         }
     }
 }

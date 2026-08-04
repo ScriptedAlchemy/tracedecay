@@ -228,7 +228,6 @@ impl TraceDecay {
             project_root,
             &open_options,
             profile_database.as_ref(),
-            true,
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;
@@ -524,7 +523,6 @@ impl TraceDecay {
             project_root,
             &open_options,
             profile_database.as_ref(),
-            true,
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;
@@ -790,7 +788,6 @@ impl TraceDecay {
             project_root,
             &open_options,
             profile_database.as_ref(),
-            false,
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;
