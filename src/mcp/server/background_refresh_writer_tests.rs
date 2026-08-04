@@ -4,9 +4,99 @@ use super::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+struct RefreshDropped(Arc<AtomicBool>);
+
+impl Drop for RefreshDropped {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[tokio::test]
+async fn shutdown_joins_inflight_read_refresh_and_rejects_respawn() {
+    let (cg, dir, authority) = init_indexed_repo().await;
+    let root = dir.path().to_path_buf();
+    drop(cg);
+    let cg = authority.reopen_project_graph(&root).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicBool::new(false));
+    let armed = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let entered_tx = Arc::new(Mutex::new(Some(entered_tx)));
+    let refresh_writer: BackgroundRefreshWriter = {
+        let calls = Arc::clone(&calls);
+        let dropped = Arc::clone(&dropped);
+        let armed = Arc::clone(&armed);
+        let entered_tx = Arc::clone(&entered_tx);
+        Arc::new(move |_request: BackgroundRefreshRequest| {
+            let calls = Arc::clone(&calls);
+            let dropped = Arc::clone(&dropped);
+            let armed = Arc::clone(&armed);
+            let entered_tx = Arc::clone(&entered_tx);
+            Box::pin(async move {
+                if !armed.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+                let _dropped = RefreshDropped(dropped);
+                calls.fetch_add(1, Ordering::AcqRel);
+                if let Some(entered_tx) = entered_tx.lock().expect("entered lock").take() {
+                    let _ = entered_tx.send(());
+                }
+                std::future::pending().await
+            })
+        })
+    };
+    let server = McpServer::new_with_context(
+        McpServerConstructionContext::direct(cg, None)
+            .with_background_refresh_writer(refresh_writer),
+    )
+    .await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up settles before the tested refresh"
+    );
+    armed.store(true, Ordering::Release);
+    let snapshot = server.cg_snapshot().await;
+    server
+        .background_refresh_running
+        .store(true, Ordering::Release);
+    server.spawn_read_refresh_task(&snapshot, 17);
+    entered_rx.await.expect("refresh task entered");
+
+    let failures = server.shutdown_background_tasks().await;
+
+    assert!(failures.is_empty(), "{failures:?}");
+    assert!(
+        dropped.load(Ordering::Acquire),
+        "shutdown must abort and join the retained refresh task"
+    );
+    assert!(
+        !server.background_refresh_running.load(Ordering::Acquire),
+        "shutdown must leave no in-flight refresh state"
+    );
+
+    server
+        .background_refresh_running
+        .store(true, Ordering::Release);
+    server.spawn_read_refresh_task(&snapshot, 17);
+    assert_eq!(
+        calls.load(Ordering::Acquire),
+        1,
+        "closed background-task admission must reject a shutdown-time respawn"
+    );
+    assert!(
+        !server.background_refresh_running.load(Ordering::Acquire),
+        "rejected refresh admission must release the single-flight claim"
+    );
+    server.shutdown().await;
+}
 
 #[tokio::test]
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {

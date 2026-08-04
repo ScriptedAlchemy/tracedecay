@@ -533,6 +533,14 @@ async fn run_startup_session_post_ingest(
 /// preserved as-is here rather than harmonized.
 struct CooldownGate;
 
+struct ReadRefreshRunningGuard(Arc<AtomicBool>);
+
+impl Drop for ReadRefreshRunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 impl CooldownGate {
     /// Returns `true` iff at least `window_secs` have elapsed since
     /// `atomic`'s last stamp and this call won the race to advance it
@@ -650,12 +658,12 @@ impl McpServer {
     ///
     /// Never blocks: this used to take `branch_reopen.lock().await`, so every
     /// caller arriving during an in-flight reopen queued behind a full DB open.
-    /// It now try-locks and detaches exactly like the drift path.
+    /// It now try-locks and submits to the retained owner like the drift path.
     pub(crate) async fn reopen_after_branch_tracking_added(&self) {
         self.spawn_branch_reopen(BranchReopenTrigger::TrackingAdded);
     }
 
-    /// Single-flights and detaches one reopen onto the live branch.
+    /// Single-flights and retains one reopen onto the live branch.
     ///
     /// The `branch_reopen` guard is *moved into* the spawned task, so it is
     /// held for the reopen's real duration while no caller ever awaits it. A
@@ -671,7 +679,7 @@ impl McpServer {
         let completions = Arc::clone(&self.branch_reopen_completions);
         let reconcile = self.database_owner_reconciler.clone();
         let reason = trigger.reason();
-        tokio::spawn(async move {
+        let admitted = self.background_tasks.spawn(async move {
             let _reopen_guard = reopen_guard;
             let current = cg_cell.read().await.clone();
             // Drift-triggered reopens re-check against a *fresh snapshot*: a
@@ -721,14 +729,17 @@ impl McpServer {
             }
             completions.fetch_add(1, Ordering::Release);
         });
+        if !admitted {
+            self.branch_reopen_completions
+                .fetch_add(1, Ordering::Release);
+        }
     }
 
     /// Polls until at least one branch reopen has completed past `after`, or
     /// until `timeout` elapses. Returns `true` if one landed.
     ///
-    /// Reopens are detached, so tests (and any caller that genuinely needs the
-    /// post-swap state rather than an answer) observe completion here instead
-    /// of blocking the request path.
+    /// Reopens do not block requests, so tests (and any caller that genuinely
+    /// needs the post-swap state rather than an answer) observe completion here.
     #[doc(hidden)]
     pub async fn wait_for_branch_reopen(&self, after: u64, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -1035,7 +1046,7 @@ impl McpServer {
         self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
     }
 
-    /// Spawns the detached D4 refresh task. The task owns cheap `Arc` clones
+    /// Spawns the retained D4 refresh task. The task owns cheap `Arc` clones
     /// of the background-refresh flag, the completion stamp, and the shared
     /// file-token map, so no `Arc<Self>` receiver is needed. Prefers diff-
     /// scoping off `last_synced_commit`; falls back to the full tree walk
@@ -1045,6 +1056,7 @@ impl McpServer {
     /// `true`; this task clears it on completion.
     pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>, escalation: usize) {
         let running = Arc::clone(&self.background_refresh_running);
+        let rejected_running = Arc::clone(&running);
         let done_at = Arc::clone(&self.last_background_refresh_done_at);
         let token_map = Arc::clone(&self.file_token_map);
         let refresh = Arc::clone(&self.background_refresh_writer);
@@ -1053,7 +1065,8 @@ impl McpServer {
             project_root: cg.project_root().to_path_buf(),
             full_sync_escalation_files: escalation,
         };
-        tokio::spawn(async move {
+        let admitted = self.background_tasks.spawn(async move {
+            let _running = ReadRefreshRunningGuard(Arc::clone(&running));
             match refresh(request).await {
                 Ok(Some(fresh)) => {
                     if let Ok(mut guard) = token_map.lock() {
@@ -1069,8 +1082,10 @@ impl McpServer {
                 }
             }
             done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
-            running.store(false, Ordering::Release);
         });
+        if !admitted {
+            rejected_running.store(false, Ordering::Release);
+        }
     }
 
     /// Returns a compact one-line notice when automation runs have staged

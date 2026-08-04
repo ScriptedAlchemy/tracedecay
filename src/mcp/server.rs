@@ -41,6 +41,7 @@ use super::tools::{
 };
 use super::transport::{ErrorCode, JsonRpcRequest, JsonRpcResponse};
 
+mod background_tasks;
 mod connection;
 mod construction;
 mod hook_dispatch;
@@ -219,14 +220,16 @@ pub struct McpServer {
     /// `Arc` so the detached branch-reopen task can hold a cheap clone and swap
     /// the freshly opened instance in when it lands.
     cg: Arc<tokio::sync::RwLock<Arc<TraceDecay>>>,
-    /// Single-flights branch reopen work. Held by the detached reopen task, not
+    /// Single-flights branch reopen work. Held by the retained reopen task, not
     /// by the request that noticed the drift: a reopen is a full DB open plus a
-    /// sealed restore, and no caller ever waits on it.
+    /// sealed restore, and no request waits on it.
     branch_reopen: Arc<tokio::sync::Mutex<()>>,
-    /// Count of completed branch reopens (success or failure). Lets tests and
-    /// callers observe that a detached swap has landed without exposing the
-    /// task handle.
+    /// Count of completed branch reopens (success, failure, or rejected
+    /// shutdown-time admission) without exposing the retained task handle.
     branch_reopen_completions: Arc<AtomicU64>,
+    /// Retains non-request maintenance futures so shutdown can fence task
+    /// admission, cancel every live future, and join it before stores close.
+    background_tasks: background_tasks::McpBackgroundTaskOwner,
     stats: ServerStats,
     method_call_counts: std::sync::Mutex<HashMap<String, u64>>,
     resource_read_counts: std::sync::Mutex<HashMap<String, u64>>,
@@ -359,7 +362,7 @@ pub struct McpServer {
     /// previous flag soup carried. `Arc` so the detached ingest task can
     /// settle the same machine that waiters and shutdown read.
     startup_catch_up: Arc<StartupCatchUpMachineV1>,
-    /// `true` while a detached sync-on-read refresh (D4) is in flight.
+    /// `true` while a retained sync-on-read refresh (D4) is in flight.
     /// Single-flights the background refresh: `compare_exchange`d to `true`
     /// before spawning and cleared on completion. Also read by the D7
     /// staleness banner so an in-progress refresh emits the informational
@@ -852,6 +855,7 @@ impl McpServer {
             cg: Arc::new(tokio::sync::RwLock::new(cg)),
             branch_reopen: Arc::new(tokio::sync::Mutex::new(())),
             branch_reopen_completions: Arc::new(AtomicU64::new(0)),
+            background_tasks: background_tasks::McpBackgroundTaskOwner::default(),
             stats: ServerStats::new(),
             method_call_counts: std::sync::Mutex::new(HashMap::new()),
             resource_read_counts: std::sync::Mutex::new(HashMap::new()),

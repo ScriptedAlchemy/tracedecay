@@ -144,13 +144,12 @@ impl McpServer {
     }
 
     async fn run_shutdown(self: Arc<Self>) -> crate::daemon::ShutdownStatus {
-        self.shutdown_background_tasks().await;
+        let mut failures = self.shutdown_background_tasks().await;
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
         let tokens_saved = self.tokens_saved.load(Ordering::Relaxed);
 
-        let mut failures = Vec::new();
         let cg = self.cg_snapshot().await;
         // Persist final tokens-saved value
         if let Err(e) = cg.set_tokens_saved(tokens_saved).await {
@@ -207,7 +206,8 @@ impl McpServer {
         }
     }
 
-    pub(crate) async fn shutdown_background_tasks(&self) {
+    pub(crate) async fn shutdown_background_tasks(&self) -> Vec<String> {
+        let failures = self.background_tasks.shutdown().await;
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
@@ -216,6 +216,7 @@ impl McpServer {
         // joined, and the machine marked cancelled.
         self.shutdown_startup_catch_up_sync().await;
         self.shutdown_startup_transcript_ingest().await;
+        failures
     }
 }
 
