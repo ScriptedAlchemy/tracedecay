@@ -257,7 +257,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_context_scout_claim",
         "tracedecay_context_scout_delivery",
         "tracedecay_context_scout_feedback",
-        "tracedecay_lcm_doctor",
         "tracedecay_lcm_preflight",
         "tracedecay_lcm_compress",
         "tracedecay_lcm_session_boundary",
@@ -286,6 +285,41 @@ fn test_tool_definitions_have_annotations() {
             tool.name
         );
     }
+}
+
+#[test]
+fn lcm_doctor_exposes_diagnostics_only() {
+    let tools = get_tool_definitions();
+    let doctor = tools
+        .iter()
+        .find(|tool| tool.name == "tracedecay_lcm_doctor")
+        .expect("LCM Doctor definition");
+    let properties = doctor.input_schema["properties"]
+        .as_object()
+        .expect("LCM Doctor properties");
+    let modes = properties["mode"]["enum"]
+        .as_array()
+        .expect("LCM Doctor modes");
+
+    assert_eq!(modes, &[json!("diagnose"), json!("retention")]);
+    for removed in [
+        "apply",
+        "doctor_clean_apply_enabled",
+        "lcm_gc_apply_enabled",
+        "gc_config",
+        "ignore_session_patterns",
+        "stateless_session_patterns",
+        "ignore_message_patterns",
+    ] {
+        assert!(
+            !properties.contains_key(removed),
+            "read-only Doctor must not accept `{removed}`"
+        );
+    }
+    assert_eq!(
+        doctor.annotations.as_ref().unwrap()["readOnlyHint"],
+        json!(true)
+    );
 }
 
 #[test]

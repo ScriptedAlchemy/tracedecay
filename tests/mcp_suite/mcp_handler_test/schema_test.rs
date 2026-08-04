@@ -294,24 +294,10 @@ fn lcm_tool_schemas_are_registered_with_stable_names() {
         .expect("tracedecay_lcm_doctor definition");
     assert_eq!(
         doctor.input_schema["properties"]["mode"]["enum"],
-        json!(["diagnose", "repair", "retention", "clean", "gc"])
+        json!(["diagnose", "retention"])
     );
-    assert_eq!(
-        doctor.input_schema["properties"]["apply"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["doctor_clean_apply_enabled"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["lcm_gc_apply_enabled"]["type"],
-        json!("boolean")
-    );
-    assert_eq!(
-        doctor.input_schema["properties"]["gc_config"]["type"],
-        json!("object")
-    );
+    assert!(doctor.input_schema["properties"]["apply"].is_null());
+    assert!(doctor.annotations.as_ref().unwrap()["readOnlyHint"] == json!(true));
 }
 
 #[test]

@@ -9,12 +9,15 @@ impl HostAdmissionTestRuntimeV1 {
         crate::sessions::lcm::LcmCompressionResponse,
         crate::sessions::lcm::LcmError,
     > {
-        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_compress_guarded(request, &control, || Ok(()))
-            .await
+        crate::daemon::lcm_effects::DaemonLcmEffectService::new(
+            self.project_registered
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.profile_registered)),
+            None,
+            None,
+        )
+        .compress(request)
+        .await
     }
 
     #[doc(hidden)]
@@ -38,14 +41,11 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         session_id: Option<&str>,
         mode: &str,
-        apply: bool,
-        clean_config: crate::sessions::lcm::LcmCleanConfig,
-        gc_config: crate::sessions::lcm::LcmGcConfig,
     ) -> std::result::Result<serde_json::Value, crate::sessions::lcm::LcmError> {
         self.project_registered
             .as_deref()
             .unwrap_or(self.profile_registered.as_ref())
-            .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
+            .lcm_doctor(provider, session_id, mode)
             .await
     }
 
@@ -212,11 +212,15 @@ impl HostAdmissionTestRuntimeV1 {
         crate::sessions::lcm::LcmSessionBoundaryResponse,
         crate::sessions::lcm::LcmError,
     > {
-        self.project_registered
-            .as_deref()
-            .unwrap_or(self.profile_registered.as_ref())
-            .lcm_session_boundary(request)
-            .await
+        crate::daemon::lcm_effects::DaemonLcmEffectService::new(
+            self.project_registered
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.profile_registered)),
+            None,
+            None,
+        )
+        .session_boundary(request)
+        .await
     }
 
     #[doc(hidden)]

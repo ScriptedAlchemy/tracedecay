@@ -558,79 +558,42 @@ impl RegisteredGlobalDb {
         provider: &str,
         session_id: Option<&str>,
         mode: &str,
-        apply: bool,
-        clean_config: LcmCleanConfig,
-        gc_config: LcmGcConfig,
     ) -> Result<serde_json::Value, LcmError> {
         let storage_root = self.lcm_storage_root()?;
         let request = doctor::DoctorRequest {
             storage_root,
-            db_path: self.db_path(),
             provider,
             session_id,
             mode,
-            apply,
-            clean_config,
-            gc_config,
         };
-        if !doctor::request_mutates(&request) {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let result = doctor::doctor(&transaction, request).await?;
-            transaction.rollback().await?;
-            return Ok(result);
-        }
-
-        let applies_payload_gc = apply && mode == "gc";
-        let mut gc_drain = if applies_payload_gc {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let drain =
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?;
-            transaction.commit().await?;
-            Some(drain)
-        } else {
-            None
-        };
-
-        let transaction = self
-            .begin_write_transaction()
+        let snapshot = self
+            .read_snapshot()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut result = doctor::doctor(&transaction, request).await?;
-        transaction.commit().await?;
-
-        if let Some(drain) = gc_drain.as_mut() {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            drain.merge(
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?,
-            );
-            if let Some(report) = result.pointer_mut("/repairs/gc_report") {
-                gc::finalize_gc_report_value(&transaction, report, std::mem::take(drain)).await?;
-            }
-            transaction.commit().await?;
-        }
-        Ok(result)
+        doctor::doctor(&snapshot, request).await
     }
 
     pub async fn lcm_session_boundary(
         &self,
         request: LcmSessionBoundaryRequest,
     ) -> Result<LcmSessionBoundaryResponse, LcmError> {
+        self.lcm_session_boundary_guarded(request, || Ok(())).await
+    }
+
+    pub async fn lcm_session_boundary_guarded<F>(
+        &self,
+        request: LcmSessionBoundaryRequest,
+        before_commit: F,
+    ) -> Result<LcmSessionBoundaryResponse, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| LcmError::Db(error.to_string()))?;
         let response = compression::record_session_boundary(&transaction, request).await?;
+        before_commit()?;
         transaction.commit().await?;
         Ok(response)
     }

@@ -17,8 +17,8 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_session_boundary(
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
     let response = storage
-        .db
-        .lcm_session_boundary(LcmSessionBoundaryRequest {
+        .effects
+        .session_boundary(LcmSessionBoundaryRequest {
             provider: provider.to_string(),
             session_id: session_id.to_string(),
             old_session_id: string_arg(&args, "old_session_id").map(str::to_string),
@@ -106,50 +106,52 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_compress(
 ) -> Result<ToolResult> {
     let provider = required_specific_provider_arg(&args)?;
     let session_id = required_string_arg(&args, "session_id")?;
+    if args.get("messages").is_some() {
+        return Err(argument_error(
+            "messages are admitted through canonical host ingestion, not compression",
+        ));
+    }
+    if args.get("summarizer").is_some() {
+        return Err(argument_error(
+            "summarization is daemon-owned and cannot be supplied by a host adapter",
+        ));
+    }
     let response_handle_root = lcm_response_handle_root(context.project_root, &args);
-    let summarizer_advisory = summarizer_pressure_advisory(&args)?;
     let storage = match open_lcm_storage(context, &args, LcmOpenMode::Writable).await {
         LcmStorageResolution::Available(storage) => storage,
         LcmStorageResolution::Unavailable(result) => return Ok(result),
     };
-    let control = tracedecay_temporal_query::ports::ExecutionControl::default();
     let response = storage
-        .db
-        .lcm_compress_guarded(
-            LcmCompressionRequest {
-                provider: provider.to_string(),
-                session_id: session_id.to_string(),
-                messages: messages_arg(&args)?,
-                current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
-                focus_topic: string_arg(&args, "focus_topic").map(str::to_string),
-                ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
-                stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
-                ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
-                expected_current_frontier_store_id: non_negative_i64_arg(
-                    &args,
-                    "expected_current_frontier_store_id",
-                )?,
-                threshold_tokens: non_negative_i64_arg(&args, "threshold_tokens")?,
-                max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
-                leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
-                max_source_messages: bounded_usize_arg(
-                    &args,
-                    "max_source_messages",
-                    1,
-                    usize::MAX,
-                )?,
-                summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
-                incremental_max_depth: signed_i64_arg(&args, "incremental_max_depth")?,
-                fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
-                dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
-                dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
-                context_length: non_negative_i64_arg(&args, "context_length")?,
-                reserve_tokens_floor: non_negative_i64_arg(&args, "reserve_tokens_floor")?,
-                summarizer: summarizer_arg(&args)?,
+        .effects
+        .compress(LcmCompressionRequest {
+            provider: provider.to_string(),
+            session_id: session_id.to_string(),
+            messages: Vec::new(),
+            current_tokens: non_negative_i64_arg(&args, "current_tokens")?,
+            focus_topic: string_arg(&args, "focus_topic").map(str::to_string),
+            ignore_session_patterns: string_array_arg(&args, "ignore_session_patterns")?,
+            stateless_session_patterns: string_array_arg(&args, "stateless_session_patterns")?,
+            ignore_message_patterns: string_array_arg(&args, "ignore_message_patterns")?,
+            expected_current_frontier_store_id: non_negative_i64_arg(
+                &args,
+                "expected_current_frontier_store_id",
+            )?,
+            threshold_tokens: non_negative_i64_arg(&args, "threshold_tokens")?,
+            max_assembly_tokens: non_negative_i64_arg(&args, "max_assembly_tokens")?,
+            leaf_chunk_tokens: non_negative_i64_arg(&args, "leaf_chunk_tokens")?,
+            max_source_messages: bounded_usize_arg(&args, "max_source_messages", 1, usize::MAX)?,
+            summary_fan_in: bounded_usize_arg(&args, "summary_fan_in", 2, usize::MAX)?,
+            incremental_max_depth: signed_i64_arg(&args, "incremental_max_depth")?,
+            fresh_tail_count: bounded_usize_arg(&args, "fresh_tail_count", 0, usize::MAX)?,
+            dynamic_leaf_chunk_enabled: bool_arg(&args, "dynamic_leaf_chunk_enabled")?,
+            dynamic_leaf_chunk_max: non_negative_i64_arg(&args, "dynamic_leaf_chunk_max")?,
+            context_length: non_negative_i64_arg(&args, "context_length")?,
+            reserve_tokens_floor: non_negative_i64_arg(&args, "reserve_tokens_floor")?,
+            summarizer: LcmSummarizerMode::Provided {
+                summary_text: String::new(),
+                route: Some("daemon_deterministic".to_string()),
             },
-            &control,
-            || Ok(()),
-        )
+        })
         .await
         .map_err(lcm_error)?;
     Ok(tool_json(
@@ -159,7 +161,6 @@ pub(in crate::mcp::tools::handlers) async fn handle_lcm_compress(
             "status": response.status,
             "provider": provider,
             "session_id": session_id,
-            "summarizer_advisory": summarizer_advisory,
             "reason": response.reason,
             "summary_nodes_created": response.summary_nodes_created,
             "summary_nodes": response.summary_nodes,

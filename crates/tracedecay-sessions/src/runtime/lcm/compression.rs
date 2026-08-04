@@ -2344,6 +2344,12 @@ fn rescuing_summary_text_from_texts(
     source_texts: &[String],
     source_token_count: i64,
 ) -> (String, bool) {
+    if summary_text.trim().is_empty() {
+        return (
+            deterministic_fallback_summary(source_texts, source_token_count),
+            true,
+        );
+    }
     if source_token_count < MIN_SUMMARY_RESCUE_SOURCE_TOKENS
         || crate::lcm::estimate_tokens(&summary_text) < source_token_count
     {

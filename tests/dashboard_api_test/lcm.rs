@@ -18,9 +18,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionScope;
 use tracedecay::dashboard;
-use tracedecay::sessions::lcm::{
-    LcmCleanConfig, LcmError, LcmGcConfig, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft,
-};
+use tracedecay::sessions::lcm::{LcmError, LcmSourceRef, LcmStatus, LcmSummaryNodeDraft};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::tracedecay::TraceDecayOpenOptions;
 use tracedecay_domain::ProjectId;
@@ -278,14 +276,7 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     let seeded_doctor = if payload_seed.is_some() {
         Some(
             runtime
-                .lcm_doctor_for_test(
-                    "cursor",
-                    Some(&session_id),
-                    "diagnose",
-                    false,
-                    LcmCleanConfig::default(),
-                    LcmGcConfig::default(),
-                )
+                .lcm_doctor_for_test("cursor", Some(&session_id), "diagnose")
                 .await
                 .expect("seeded doctor"),
         )

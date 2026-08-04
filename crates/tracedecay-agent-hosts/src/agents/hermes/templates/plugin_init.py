@@ -3717,9 +3717,7 @@ class TraceDecayContextEngine(ContextEngine):
         return replay
 
     def _compress_to_result(self, messages, current_tokens=None, focus_topic=None, **kwargs):
-        summarizer = kwargs.pop("summarizer", None) or {"mode": "hermes_auxiliary"}
         force = bool(kwargs.pop("force", False))
-        max_auxiliary_attempts = _auxiliary_retry_limit(kwargs)
         tool_kwargs = _project_call_kwargs(
             kwargs.get("project_root") or self.project_root
         )
@@ -3750,10 +3748,8 @@ class TraceDecayContextEngine(ContextEngine):
         )
         args.update({
             "provider": STANDARD_HERMES_LCM_PROVIDER,
-            "messages": messages,
             "current_tokens": current_tokens,
             "focus_topic": focus_topic,
-            "summarizer": summarizer,
         })
         args = _lcm_store_args(
             args,
@@ -3777,100 +3773,16 @@ class TraceDecayContextEngine(ContextEngine):
                 except (TypeError, ValueError):
                     pass
 
-        attempts = 0
-        retry_status = None
-        error_classification = None
-        fallback_used = False
-        attempt_args = dict(args)
-
-        while attempts < max_auxiliary_attempts:
-            first = call_tracedecay_json(
-                "tracedecay_lcm_compress", attempt_args, **tool_kwargs
-            )
-            if _compression_replay_is_compacted(first):
-                return _with_auxiliary_metadata(
-                    _compacted_lcm_result_error(first),
-                    attempts=attempts,
-                    retry_status=retry_status,
-                    error_classification=error_classification,
-                    fallback_used=fallback_used,
-                )
-            if first.get("status") != "needs_summary":
-                return _with_auxiliary_metadata(
-                    first,
-                    attempts=attempts,
-                    retry_status=retry_status,
-                    error_classification=error_classification,
-                    fallback_used=fallback_used,
-                )
-
-            summary_request = first.get("summary_request") or {}
-            source_messages = _summary_source_messages(
-                summary_request.get("source_messages") or messages
-            )
-            attempts += 1
-            extraction_result = self._run_pre_compaction_extraction(
-                summary_request,
-                source_messages,
-            )
-            summary = self._summarize_with_escalation(
-                source_messages,
-                focus_topic=summary_request.get("focus_topic") or focus_topic or "",
-                summary_request=summary_request,
-                allow_retry_signal=True,
-                **kwargs,
-            )
-            summary_status = summary.get("status")
-            if summary_status in ("retry", "error"):
-                error_classification = summary.get("error_classification") or (
-                    "retry_worthy" if summary_status == "retry" else "permanent"
-                )
-                smaller_limit = _next_smaller_source_limit(
-                    source_messages,
-                    attempt_args.get("max_source_messages"),
-                )
-                if (
-                    summary_status == "retry"
-                    and smaller_limit is not None
-                    and attempts < max_auxiliary_attempts
-                ):
-                    retry_status = "retried"
-                    attempt_args = dict(args)
-                    attempt_args["max_source_messages"] = smaller_limit
-                    continue
-                retry_status = "retry_exhausted" if summary_status == "retry" else "not_retryable"
-                return _auxiliary_error_result(
-                    first,
-                    attempts=attempts,
-                    retry_status=retry_status,
-                    error_classification=error_classification,
-                    error=summary.get("error"),
-                )
-
-            if summary_status == "fallback":
-                fallback_used = True
-                retry_status = retry_status or "fallback_summary"
-                error_classification = summary.get("error_classification") or error_classification
-
-            provided_args = dict(attempt_args)
-            provided_route = _extraction_route_payload(summary.get("route"), extraction_result)
-            provided_args["summarizer"] = {
-                "mode": "provided",
-                "summary_text": summary["text"],
-                "route": provided_route,
-            }
-            result = call_tracedecay_json(
-                "tracedecay_lcm_compress", provided_args, **tool_kwargs
-            )
-            if _compression_replay_is_compacted(result):
-                result = _compacted_lcm_result_error(result)
-            return _with_auxiliary_metadata(
-                result,
-                attempts=attempts,
-                retry_status=retry_status,
-                error_classification=error_classification,
-                fallback_used=fallback_used,
-            )
+        result = call_tracedecay_json("tracedecay_lcm_compress", args, **tool_kwargs)
+        if _compression_replay_is_compacted(result):
+            result = _compacted_lcm_result_error(result)
+        return _with_auxiliary_metadata(
+            result,
+            attempts=0,
+            retry_status=None,
+            error_classification=None,
+            fallback_used=bool(result.get("fallback_used")),
+        )
 
 class TracedecayMemoryProvider(MemoryProvider):
     provider_id = "tracedecay"

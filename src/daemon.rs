@@ -311,6 +311,7 @@ use project_server_lifecycle::{
     schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
     shutdown_project_servers,
 };
+pub(crate) mod lcm_effects;
 mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
