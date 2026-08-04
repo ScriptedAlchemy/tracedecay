@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.71](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.70...v0.0.71) (2026-08-04)
+
+
+### Bug Fixes
+
+* **update:** reuse lifecycle lease for Hermes refresh ([#499](https://github.com/ScriptedAlchemy/tracedecay/issues/499)) ([19ff99a](https://github.com/ScriptedAlchemy/tracedecay/commit/19ff99a53ab20173027041967bb477b05a819a7e))
+
 ## [0.0.70](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.69...v0.0.70) (2026-08-04)
 
 
