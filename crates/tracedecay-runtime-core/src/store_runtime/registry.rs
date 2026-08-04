@@ -44,8 +44,8 @@ pub(crate) use capacity::{DEFAULT_PROJECT_CODE_OPEN_RUNTIMES, MAX_PROJECT_CODE_O
 pub use close::ClosedStoreRuntime;
 pub use destructive::{DestructiveMaintenanceReservation, DestructiveMaintenanceTarget};
 pub use leases::{
-    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeLeaseAcquireResult,
-    StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
+    ProfileAuthorityPin, ProfileAuthorityPinResult, StoreRuntimeAccessMode,
+    StoreRuntimeLeaseAcquireResult, StoreRuntimeOpenMode, StoreRuntimeOpenRequest,
 };
 pub use open::StoreRuntimeOpenResult;
 pub(crate) use open::{StoreRuntimeOpenBegin, StoreRuntimeOpenJoin};
@@ -576,6 +576,11 @@ pub enum StoreRuntimeRegistryFailure {
     },
     RuntimeEvictionInProgress {
         key: Box<StoreRuntimeKey>,
+    },
+    DatabaseRuntimeIdentityConflict {
+        requested: Box<StoreRuntimeKey>,
+        retained: Box<StoreRuntimeKey>,
+        path: PathBuf,
     },
     DestructiveMaintenanceInProgress {
         root: PathBuf,

@@ -14,8 +14,8 @@ use tracedecay_store::{
 };
 
 use super::{
-    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime, StoreRuntimeKey,
-    StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
+    PhysicalRuntimeAttachment, PhysicalRuntimeSnapshot, PublishedShardRuntime,
+    StoreRuntimeAccessMode, StoreRuntimeKey, StoreRuntimeOpenMode, StoreRuntimeRegistryFailure,
 };
 use crate::store_runtime::shard::{ShardRuntime, ShardRuntimeError};
 
@@ -191,6 +191,13 @@ impl LifecycleShardRuntimeAttachment {
         }
         let attachment = if request.locator.is_prospective() {
             self.repository.initialize(
+                request.binding.clone(),
+                request.locator.verified().clone(),
+                request.locator.path().to_path_buf(),
+                admission,
+            )
+        } else if request.access == StoreRuntimeAccessMode::ReadOnly {
+            self.repository.attach_read_only(
                 request.binding.clone(),
                 request.locator.verified().clone(),
                 request.locator.path().to_path_buf(),
@@ -499,6 +506,7 @@ pub struct ShardRuntimeBuildRequest {
     pub(super) binding: StoreRuntimeBindingV1,
     locator: RuntimeLocatorRecord,
     mode: StoreRuntimeOpenMode,
+    access: StoreRuntimeAccessMode,
     database_authority: Option<crate::db::DatabaseAuthority>,
 }
 
@@ -507,12 +515,14 @@ impl ShardRuntimeBuildRequest {
         binding: StoreRuntimeBindingV1,
         locator: RuntimeLocatorRecord,
         mode: StoreRuntimeOpenMode,
+        access: StoreRuntimeAccessMode,
         database_authority: Option<crate::db::DatabaseAuthority>,
     ) -> Self {
         Self {
             binding,
             locator,
             mode,
+            access,
             database_authority,
         }
     }
@@ -527,6 +537,10 @@ impl ShardRuntimeBuildRequest {
 
     pub const fn mode(&self) -> StoreRuntimeOpenMode {
         self.mode
+    }
+
+    pub const fn access(&self) -> StoreRuntimeAccessMode {
+        self.access
     }
 
     pub fn database_authority(&self) -> Option<&crate::db::DatabaseAuthority> {
