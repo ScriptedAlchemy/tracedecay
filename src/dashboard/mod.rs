@@ -73,10 +73,7 @@ pub(crate) fn code_diagnostics_broker(
     project_root: PathBuf,
     settings: lsp::settings::CodeDiagnosticsSettings,
 ) -> lsp::broker::DiagnosticBroker {
-    lsp::broker::DiagnosticBroker::from_inner(tracedecay_dashboard_api::code_diagnostics_broker(
-        project_root,
-        settings,
-    ))
+    tracedecay_dashboard_api::code_diagnostics_broker(project_root, settings)
 }
 
 struct RootDashboardAccountingStore {

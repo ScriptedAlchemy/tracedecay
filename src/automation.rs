@@ -1,33 +1,10 @@
 //! Root composition façade for host automation.
 
 pub use tracedecay_agent_hosts::automation::{
-    agent_targets, artifacts, config, fact_proposals, hermes_skill_bridge, host_receipts, jobs,
-    lifecycle, managed_skills, memory_digest, outcomes, run_ledger, session_reflector,
+    agent_targets, artifacts, backend, config, fact_proposals, hermes_skill_bridge, host_receipts,
+    jobs, lifecycle, managed_skills, memory_digest, outcomes, run_ledger, session_reflector,
     skill_frontmatter, skill_materialization, skill_targets, skill_writer, staged_notice, text,
 };
-
-/// Root compatibility façade for automation backends.
-pub mod backend {
-    pub use tracedecay_agent_hosts::automation::backend::{
-        AGENT_TASK_MAX_ATTEMPTS, AGENT_TASK_RETRY_BACKOFFS, AgentBackendAvailability,
-        AgentTaskBackend, AgentTaskContract, AgentTaskFailureClass, AgentTaskFailureDisposition,
-        AgentTaskKind, AgentTaskRequest, AgentTaskResponse, BackendRetryPolicy,
-        CodexAppServerBackend, agent_task_contract, agent_task_failure_disposition,
-        backend_availability, classify_agent_task_error_message, prompt_version,
-        run_agent_task_with_retry, task_key,
-    };
-
-    /// Extract a JSON object using the root crate's historical error type.
-    pub fn extract_json_object_prefix(text: &str) -> crate::errors::Result<serde_json::Value> {
-        tracedecay_agent_hosts::automation::backend::extract_json_object_prefix_preserving_json(
-            text,
-        )
-        .map_err(|error| match error {
-            tracedecay_automation::backend::JsonExtractionError::Json(error) => error.into(),
-            tracedecay_automation::backend::JsonExtractionError::Config(error) => error.into(),
-        })
-    }
-}
 
 pub mod memory_curator {
     pub use tracedecay_agent_hosts::automation::memory_curator::{
