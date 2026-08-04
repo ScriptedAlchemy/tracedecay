@@ -8,12 +8,14 @@ use tracedecay_hooks::{DaemonHookEvent, HookAgent};
 use super::codex::codex_additional_context_json;
 use super::memory_inject;
 use super::post_tool_use::{
-    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, captured_tool_output, is_claude_edit_tool,
-    is_claude_hint_tool, tool_input_command_str, tool_input_edit_text, tool_input_file_path_str,
-    trusted_tool_failure,
+    CLAUDE_POST_TOOL_USE_SHELL_TOOLS, CLAUDE_POST_TOOL_USE_SPEC, captured_tool_output,
+    is_claude_edit_tool, is_claude_hint_tool, is_post_tool_use_failure_event,
+    notify_post_tool_use_with_telemetry, tool_input_command_str, tool_input_edit_text,
+    tool_input_file_path_str, trusted_tool_failure,
 };
 use super::steering::{
-    append_tracedecay_bootstrap_context, cursor_index_signals_for_root, index_status_line,
+    append_context_block, append_context_recovery_hint, append_tracedecay_bootstrap_context,
+    cursor_index_signals_for_root, index_status_line, session_start_from_compaction,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint, is_harness_memory_path};
 use super::{
@@ -154,7 +156,7 @@ pub async fn hook_claude_session_start() -> i32 {
         &event,
         &parsed,
     );
-    let guidance = if let Some(root) = root.as_deref() {
+    let v2_admitted = if let Some(root) = root.as_deref() {
         super::v2::dispatch(
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
@@ -163,16 +165,49 @@ pub async fn hook_claude_session_start() -> i32 {
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-        .flatten()
     } else {
         None
     };
-    match guidance {
-        Some(guidance) => println!(
+    if let Some(guidance) = v2_admitted {
+        if let Some(guidance) = guidance {
+            println!(
+                "{}",
+                codex_additional_context_json("SessionStart", &guidance)
+            );
+        } else {
+            println!("{}", serde_json::json!({}));
+        }
+        return 0;
+    }
+    let mut context = claude_session_context_for_event(&event).await;
+    let session_id = event_session_id(&parsed);
+    if root.is_none() && ingest_user_claude_session(session_id.clone()).await {
+        super::schedule_user_session_review("claude", session_id.as_deref());
+    }
+    let digest = match root.as_deref() {
+        Some(root) => {
+            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
+        }
+        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
+    };
+    if let Some(digest) = digest {
+        append_context_block(&mut context, &digest);
+    }
+    if let Some(root) = root.as_ref()
+        && let Some(event) = claude_session_start_hook_event(&parsed)
+    {
+        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
+    }
+    if session_start_from_compaction(&event) {
+        append_context_recovery_hint(&mut context);
+    }
+    if context.is_empty() {
+        println!("{}", serde_json::json!({}));
+    } else {
+        println!(
             "{}",
-            codex_additional_context_json("SessionStart", &guidance)
-        ),
-        None => println!("{}", serde_json::json!({})),
+            codex_additional_context_json("SessionStart", &context)
+        );
     }
     0
 }
@@ -251,20 +286,26 @@ pub async fn claude_session_context_for_event(event_json: &str) -> String {
     }
 }
 
-/// Claude Code `PostToolUse` bounded native edit admission.
+/// Claude Code `PostToolUse` / `PostToolUseFailure` hook handler used to keep
+/// the graph fresh and surface outcome-aware TraceDecay hints.
 pub async fn hook_claude_post_tool_use() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let hook_event_name = if is_post_tool_use_failure_event(&parsed) {
+        "PostToolUseFailure"
+    } else {
+        "PostToolUse"
+    };
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry = record_hook_invoked_parsed(
         root.as_deref(),
         HintAgent::Claude,
-        "PostToolUse",
+        hook_event_name,
         &event,
         &parsed,
     );
-    let guidance = if let Some(root) = root.as_deref() {
-        super::v2::dispatch(
+    if let Some(root) = root.as_deref()
+        && let Some(guidance) = super::v2::dispatch(
             tracedecay_hooks::HookHostV1::ClaudeCode,
             &event,
             root,
@@ -272,16 +313,22 @@ pub async fn hook_claude_post_tool_use() -> i32 {
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-        .flatten()
-    } else {
-        None
-    };
-    if let Some(guidance) = guidance {
+    {
+        if let Some(guidance) = guidance {
+            println!(
+                "{}",
+                codex_additional_context_json(hook_event_name, &guidance)
+            );
+        }
+        return 0;
+    }
+    if let Some(context) = claude_post_tool_use_hint_context(&parsed) {
         println!(
             "{}",
-            codex_additional_context_json("PostToolUse", &guidance)
+            codex_additional_context_json(hook_event_name, &context)
         );
     }
+    notify_post_tool_use_with_telemetry(&CLAUDE_POST_TOOL_USE_SPEC, &parsed, &hook_telemetry).await;
     0
 }
 
@@ -412,8 +459,8 @@ pub async fn hook_prompt_submit() {
     }
 }
 
-/// `Stop` hook handler: admits the native turn boundary without transcript or
-/// model work on the hook path.
+/// `Stop` hook handler: admits the native turn boundary before the existing
+/// projectless-session catch-up fallback.
 pub async fn hook_stop() {
     let event = match super::read_stdin_bounded() {
         Ok(super::HookStdinRead::Event(event)) => event,
@@ -437,7 +484,7 @@ async fn claude_stop_response_for_event(event: &str) -> String {
     let root = event_project_root_with_identity(&parsed).await;
     let hook_telemetry =
         record_hook_invoked_parsed(root.as_deref(), HintAgent::Claude, "Stop", event, &parsed);
-    let guidance = match root.as_deref() {
+    let v2_admitted = match root.as_deref() {
         Some(root) => super::v2::dispatch(
             tracedecay_hooks::HookHostV1::ClaudeCode,
             event,
@@ -445,14 +492,23 @@ async fn claude_stop_response_for_event(event: &str) -> String {
             Some(&hook_telemetry),
         )
         .await
-        .into_recorded_guidance(&hook_telemetry)
-        .flatten(),
+        .into_recorded_guidance(&hook_telemetry),
         None => None,
     };
-    guidance.map_or_else(
-        || serde_json::json!({}).to_string(),
-        |guidance| codex_additional_context_json("Stop", &guidance),
-    )
+    if let Some(guidance) = v2_admitted {
+        return guidance.map_or_else(
+            || serde_json::json!({}).to_string(),
+            |guidance| codex_additional_context_json("Stop", &guidance),
+        );
+    }
+    let session_id = event_session_id(&parsed);
+    if root.is_none()
+        && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
+            .await
+    {
+        super::schedule_user_session_review("claude", session_id.as_deref());
+    }
+    serde_json::json!({}).to_string()
 }
 
 /// Incrementally ingests one live projectless Claude session into the profile
