@@ -7,9 +7,10 @@ use std::sync::Arc;
 use tokio::task::JoinSet;
 
 use super::shutdown_coordination::{
-    ShutdownOwner, ShutdownReceipt, ShutdownStatus, prepare_shutdown_owner_phases,
+    ShutdownOwner, ShutdownOwnerReceipt, ShutdownReceipt, ShutdownStatus,
+    prepare_shutdown_owner_phases,
 };
-use super::store_shutdown::ShutdownTaskReceipt;
+use super::store_shutdown::{ShutdownTaskOutcome, ShutdownTaskReceipt};
 use super::{
     DAEMON_CLIENT_DRAIN_DEADLINE, DAEMON_TASK_ABORT_DEADLINE, DaemonLifecycle,
     core_lifecycle::DaemonShutdownClaim,
@@ -76,8 +77,66 @@ impl DaemonShutdownReceipt {
                 .owners
                 .iter()
                 .any(|owner| owner.status == ShutdownStatus::TimedOut)
-            || self.project_servers.status() == ShutdownStatus::TimedOut
+            || self.project_servers.timed_out_count() > 0
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct DaemonShutdownFailures {
+    in_flight: Vec<String>,
+    clients: Vec<String>,
+    background: Vec<ShutdownOwnerReceipt>,
+    project_servers: Vec<ShutdownTaskOutcome>,
+}
+
+impl DaemonShutdownFailures {
+    fn record(&mut self, receipt: &DaemonShutdownReceipt) {
+        record_status_failure(&mut self.in_flight, &receipt.in_flight);
+        record_status_failure(&mut self.clients, &receipt.clients);
+        for owner in &receipt.background.owners {
+            if matches!(owner.status, ShutdownStatus::Failed(_)) && !self.background.contains(owner)
+            {
+                self.background.push(owner.clone());
+            }
+        }
+        for outcome in &receipt.project_servers.outcomes {
+            if matches!(outcome.status, ShutdownStatus::Failed(_))
+                && !self.project_servers.contains(outcome)
+            {
+                self.project_servers.push(outcome.clone());
+            }
+        }
+    }
+
+    fn apply(&self, receipt: &mut DaemonShutdownReceipt) {
+        retain_status_failures(&mut receipt.in_flight, &self.in_flight);
+        retain_status_failures(&mut receipt.clients, &self.clients);
+        receipt.background.retain_failures_from(&self.background);
+        receipt
+            .project_servers
+            .retain_failures_from(&self.project_servers);
+    }
+}
+
+fn record_status_failure(failures: &mut Vec<String>, status: &ShutdownStatus) {
+    if let ShutdownStatus::Failed(error) = status
+        && !failures.contains(error)
+    {
+        failures.push(error.clone());
+    }
+}
+
+fn retain_status_failures(status: &mut ShutdownStatus, failures: &[String]) {
+    if matches!(status, ShutdownStatus::TimedOut) || failures.is_empty() {
+        return;
+    }
+    let mut errors = failures.to_vec();
+    if let ShutdownStatus::Failed(error) = status
+        && !errors.contains(error)
+    {
+        errors.push(error.clone());
+    }
+    *status = ShutdownStatus::Failed(errors.join("; retry failed: "));
 }
 
 pub(super) async fn coordinate_daemon_shutdown<Prepare>(
@@ -98,7 +157,10 @@ where
             drop(prepare);
             attempt
         }
-        DaemonShutdownClaim::Run(attempt) => {
+        DaemonShutdownClaim::Run {
+            attempt,
+            mut failures,
+        } => {
             let coordinator_lifecycle = lifecycle.clone();
             let runner_lifecycle = lifecycle.clone();
             let coordinator_attempt = Arc::clone(&attempt);
@@ -111,15 +173,20 @@ where
                         Err(_) => DaemonShutdownReceipt::preparation_timed_out(shutdown_deadline),
                     }
                 });
-                let receipt = match runner.await {
+                let mut receipt = match runner.await {
                     Ok(receipt) => receipt,
                     Err(error) => DaemonShutdownReceipt::coordinator_failed(
                         shutdown_deadline,
                         error.to_string(),
                     ),
                 };
-                coordinator_lifecycle
-                    .finish_shutdown_attempt(&coordinator_attempt, Arc::new(receipt));
+                failures.record(&receipt);
+                failures.apply(&mut receipt);
+                coordinator_lifecycle.finish_shutdown_attempt(
+                    &coordinator_attempt,
+                    Arc::new(receipt),
+                    failures,
+                );
             });
             attempt
         }
@@ -413,6 +480,111 @@ mod tests {
         assert_eq!(cancellations.load(Ordering::Acquire), 2);
         assert!(retry.background.unfinished().is_empty());
         assert!(retry.project_servers.is_clean());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_preserves_a_typed_failure_from_an_earlier_timed_out_attempt() {
+        let lifecycle = DaemonLifecycle::default();
+        let first_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(1);
+        let first = tokio::spawn({
+            let lifecycle = lifecycle.clone();
+            async move {
+                coordinate_daemon_shutdown(&lifecycle, first_deadline, async {
+                    DaemonShutdownPlan::new(
+                        JoinSet::new(),
+                        vec![vec![
+                            ShutdownOwner::with_deadline_result(
+                                "failed_owner",
+                                || {},
+                                |_| async { Err::<(), _>("typed shutdown failure") },
+                            ),
+                            ShutdownOwner::new("timed_out_owner", || {}, std::future::pending()),
+                        ]],
+                        async { ShutdownTaskReceipt::default() },
+                    )
+                })
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(tokio::time::Duration::from_secs(1)).await;
+        let first = first.await.expect("first shutdown attempt");
+
+        assert!(first.is_retryable());
+        assert!(matches!(
+            first.background.owners.as_slice(),
+            [failed, timed_out]
+                if failed.name == "failed_owner"
+                    && failed.status
+                        == ShutdownStatus::Failed("typed shutdown failure".to_owned())
+                    && timed_out.name == "timed_out_owner"
+                    && timed_out.status == ShutdownStatus::TimedOut
+        ));
+
+        let retry = coordinate_daemon_shutdown(
+            &lifecycle,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            async {
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                    ShutdownTaskReceipt::default()
+                })
+            },
+        )
+        .await;
+
+        assert!(!retry.is_retryable());
+        assert!(matches!(
+            retry.background.owners.as_slice(),
+            [failed]
+                if failed.name == "failed_owner"
+                    && failed.status
+                        == ShutdownStatus::Failed("typed shutdown failure".to_owned())
+        ));
+        assert_eq!(retry.background.unfinished(), &["failed_owner"]);
+    }
+
+    #[tokio::test]
+    async fn mixed_project_server_failure_and_timeout_retries_without_losing_failure() {
+        let lifecycle = DaemonLifecycle::default();
+        let mut first_project_servers =
+            ShutdownTaskReceipt::failed("failed_server", "typed server failure");
+        first_project_servers.extend(ShutdownTaskReceipt::timed_out("timed_out_server"));
+        let first =
+            coordinate_daemon_shutdown(
+                &lifecycle,
+                tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+                async move {
+                    DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async move {
+                        first_project_servers
+                    })
+                },
+            )
+            .await;
+
+        assert!(first.is_retryable());
+        let retry = coordinate_daemon_shutdown(
+            &lifecycle,
+            tokio::time::Instant::now() + tokio::time::Duration::from_secs(1),
+            async {
+                DaemonShutdownPlan::new(JoinSet::new(), Vec::new(), async {
+                    ShutdownTaskReceipt::default()
+                })
+            },
+        )
+        .await;
+
+        assert!(!retry.is_retryable());
+        assert_eq!(
+            retry.project_servers.status(),
+            ShutdownStatus::Failed("failed_server: typed server failure".to_owned())
+        );
+        assert!(matches!(
+            retry.project_servers.outcomes.as_slice(),
+            [failed]
+                if failed.owner == "failed_server"
+                    && failed.status
+                        == ShutdownStatus::Failed("typed server failure".to_owned())
+        ));
     }
 
     #[tokio::test(start_paused = true)]

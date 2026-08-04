@@ -138,6 +138,36 @@ impl ShutdownReceipt {
             unfinished: vec![name],
         }
     }
+
+    pub(super) fn retain_failures_from(&mut self, failures: &[ShutdownOwnerReceipt]) {
+        for failure in failures {
+            let ShutdownStatus::Failed(prior_error) = &failure.status else {
+                continue;
+            };
+            match self
+                .owners
+                .iter()
+                .position(|owner| owner.name == failure.name)
+            {
+                Some(index) => match self.owners[index].status.clone() {
+                    ShutdownStatus::Clean => self.owners[index].status = failure.status.clone(),
+                    ShutdownStatus::Failed(error) if error != *prior_error => {
+                        self.owners[index].status =
+                            ShutdownStatus::Failed(format!("{prior_error}; retry failed: {error}"));
+                    }
+                    ShutdownStatus::Failed(_) => {}
+                    ShutdownStatus::TimedOut => self.owners.insert(index, failure.clone()),
+                },
+                None => self.owners.push(failure.clone()),
+            }
+        }
+        self.unfinished.clear();
+        for owner in &self.owners {
+            if !owner.status.is_clean() && !self.unfinished.contains(&owner.name) {
+                self.unfinished.push(owner.name);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

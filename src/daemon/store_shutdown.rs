@@ -68,6 +68,33 @@ impl ShutdownTaskReceipt {
         self.outcomes.append(&mut other.outcomes);
     }
 
+    pub(super) fn retain_failures_from(&mut self, failures: &[ShutdownTaskOutcome]) {
+        for failure in failures {
+            let ShutdownTaskStatus::Failed(prior_error) = &failure.status else {
+                continue;
+            };
+            match self
+                .outcomes
+                .iter()
+                .position(|outcome| outcome.owner == failure.owner)
+            {
+                Some(index) => match self.outcomes[index].status.clone() {
+                    ShutdownTaskStatus::Clean => {
+                        self.outcomes[index].status = failure.status.clone()
+                    }
+                    ShutdownTaskStatus::Failed(error) if error != *prior_error => {
+                        self.outcomes[index].status = ShutdownTaskStatus::Failed(format!(
+                            "{prior_error}; retry failed: {error}"
+                        ));
+                    }
+                    ShutdownTaskStatus::Failed(_) => {}
+                    ShutdownTaskStatus::TimedOut => self.outcomes.insert(index, failure.clone()),
+                },
+                None => self.outcomes.push(failure.clone()),
+            }
+        }
+    }
+
     pub(super) fn failed_count(&self) -> usize {
         self.outcomes
             .iter()

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tokio::time::Duration;
 
-use super::shutdown_orchestration::DaemonShutdownReceipt;
+use super::shutdown_orchestration::{DaemonShutdownFailures, DaemonShutdownReceipt};
 
 /// Upper bound on graceful-shutdown persistence work (per-server token
 /// persistence and WAL checkpoints). Must stay comfortably below systemd's
@@ -36,6 +36,7 @@ pub(crate) struct DaemonActivity {
 struct DaemonShutdownCoordinator {
     in_flight: Option<Arc<DaemonShutdownAttempt>>,
     terminal: Option<Arc<DaemonShutdownReceipt>>,
+    failures: DaemonShutdownFailures,
 }
 
 pub(super) struct DaemonShutdownAttempt {
@@ -43,7 +44,10 @@ pub(super) struct DaemonShutdownAttempt {
 }
 
 pub(super) enum DaemonShutdownClaim {
-    Run(Arc<DaemonShutdownAttempt>),
+    Run {
+        attempt: Arc<DaemonShutdownAttempt>,
+        failures: DaemonShutdownFailures,
+    },
     Wait(Arc<DaemonShutdownAttempt>),
     Terminal(Arc<DaemonShutdownReceipt>),
 }
@@ -125,13 +129,17 @@ impl DaemonLifecycle {
         let (receipt, _) = tokio::sync::watch::channel(None);
         let attempt = Arc::new(DaemonShutdownAttempt { receipt });
         shutdown.in_flight = Some(Arc::clone(&attempt));
-        DaemonShutdownClaim::Run(attempt)
+        DaemonShutdownClaim::Run {
+            attempt,
+            failures: shutdown.failures.clone(),
+        }
     }
 
     pub(super) fn finish_shutdown_attempt(
         &self,
         attempt: &Arc<DaemonShutdownAttempt>,
         receipt: Arc<DaemonShutdownReceipt>,
+        failures: DaemonShutdownFailures,
     ) {
         let mut shutdown = self
             .inner
@@ -144,6 +152,7 @@ impl DaemonLifecycle {
             .is_some_and(|current| Arc::ptr_eq(current, attempt))
         {
             shutdown.in_flight = None;
+            shutdown.failures = failures;
             if !receipt.is_retryable() {
                 shutdown.terminal = Some(Arc::clone(&receipt));
             }
