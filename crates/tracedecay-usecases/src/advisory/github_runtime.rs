@@ -924,6 +924,7 @@ pub struct GitHubReviewRefreshReceiptV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GitHubReviewRefreshOutcomeV1 {
     Stored(Box<GitHubReviewRefreshReceiptV1>),
+    Cancelled,
     Denied,
     Stale,
     Unavailable,
@@ -990,17 +991,15 @@ where
             if request.validate().is_err() {
                 return GitHubReviewRefreshOutcomeV1::Unavailable;
             }
-            if !context_allows_feedback_operation(
-                context,
-                &request.scope,
-                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-            ) {
-                return GitHubReviewRefreshOutcomeV1::Denied;
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
             }
             if let Some(outcome) =
                 blocked_refresh_outcome(self.source_access.authorize(context, request).await)
             {
+                return outcome;
+            }
+            if let Some(outcome) = refresh_request_outcome(context, request) {
                 return outcome;
             }
             let previous = match self.store.load(context, request).await {
@@ -1012,29 +1011,22 @@ where
                 }
                 GitHubReviewRefreshStoreReadOutcomeV1::Empty => None,
                 GitHubReviewRefreshStoreReadOutcomeV1::Unavailable => {
-                    if !context_allows_feedback_operation(
-                        context,
-                        &request.scope,
-                        GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                        GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-                    ) {
-                        return GitHubReviewRefreshOutcomeV1::Denied;
+                    if let Some(outcome) = refresh_request_outcome(context, request) {
+                        return outcome;
                     }
                     return GitHubReviewRefreshOutcomeV1::Unavailable;
                 }
             };
             let first_read = self.port.read(context, request).await;
-            if !context_allows_feedback_operation(
-                context,
-                &request.scope,
-                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-            ) {
-                return GitHubReviewRefreshOutcomeV1::Denied;
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
             }
             if let Some(outcome) =
                 blocked_refresh_outcome(self.source_access.authorize(context, request).await)
             {
+                return outcome;
+            }
+            if let Some(outcome) = refresh_request_outcome(context, request) {
                 return outcome;
             }
             let GitHubReviewReadPortOutcomeV1::Read(first_response) = first_read else {
@@ -1053,17 +1045,15 @@ where
             let (latest_attempt, receipt, quarantined) =
                 if requires_refresh_scan_consensus(&first_response) {
                     let second_read = self.port.read(context, request).await;
-                    if !context_allows_feedback_operation(
-                        context,
-                        &request.scope,
-                        GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                        GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-                    ) {
-                        return GitHubReviewRefreshOutcomeV1::Denied;
+                    if let Some(outcome) = refresh_request_outcome(context, request) {
+                        return outcome;
                     }
                     if let Some(outcome) = blocked_refresh_outcome(
                         self.source_access.authorize(context, request).await,
                     ) {
+                        return outcome;
+                    }
+                    if let Some(outcome) = refresh_request_outcome(context, request) {
                         return outcome;
                     }
                     let GitHubReviewReadPortOutcomeV1::Read(second_response) = second_read else {
@@ -1098,17 +1088,15 @@ where
                         )
                     } else {
                         let third_read = self.port.read(context, request).await;
-                        if !context_allows_feedback_operation(
-                            context,
-                            &request.scope,
-                            GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                            GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-                        ) {
-                            return GitHubReviewRefreshOutcomeV1::Denied;
+                        if let Some(outcome) = refresh_request_outcome(context, request) {
+                            return outcome;
                         }
                         if let Some(outcome) = blocked_refresh_outcome(
                             self.source_access.authorize(context, request).await,
                         ) {
+                            return outcome;
+                        }
+                        if let Some(outcome) = refresh_request_outcome(context, request) {
                             return outcome;
                         }
                         let GitHubReviewReadPortOutcomeV1::Read(third_response) = third_read else {
@@ -1178,26 +1166,30 @@ where
                 return GitHubReviewRefreshOutcomeV1::Unavailable;
             };
             let expected = previous.as_ref().map(|state| &state.revision);
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
+            }
             if let Some(outcome) =
                 blocked_refresh_outcome(self.source_access.authorize(context, request).await)
             {
+                return outcome;
+            }
+            if let Some(outcome) = refresh_request_outcome(context, request) {
                 return outcome;
             }
             let outcome = self
                 .store
                 .compare_and_record(context, request, expected, &next)
                 .await;
-            if !context_allows_feedback_operation(
-                context,
-                &request.scope,
-                GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-                GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
-            ) {
-                return GitHubReviewRefreshOutcomeV1::Denied;
+            if let Some(outcome) = refresh_request_outcome(context, request) {
+                return outcome;
             }
             if let Some(outcome) =
                 blocked_refresh_outcome(self.source_access.authorize(context, request).await)
             {
+                return outcome;
+            }
+            if let Some(outcome) = refresh_request_outcome(context, request) {
                 return outcome;
             }
             match outcome {
@@ -1231,6 +1223,24 @@ where
                 }
             }
         })
+    }
+}
+
+fn refresh_request_outcome(
+    context: &RequestContext,
+    request: &GitHubReviewReadRequestV1,
+) -> Option<GitHubReviewRefreshOutcomeV1> {
+    if context.cancellation().is_cancelled() {
+        Some(GitHubReviewRefreshOutcomeV1::Cancelled)
+    } else if !context_allows_feedback_operation(
+        context,
+        &request.scope,
+        GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+        GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
+    ) {
+        Some(GitHubReviewRefreshOutcomeV1::Denied)
+    } else {
+        None
     }
 }
 
@@ -1652,6 +1662,24 @@ mod tests {
             state.attempt_receipts[0].disposition,
             GitHubReviewRefreshAttemptDispositionV1::Agreed
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_refresh_never_reads_or_writes_and_reports_cancellation() {
+        let (context, request) =
+            context_and_request(GitHubReviewReadOperationV1::RestListPullRequestReviewComments);
+        let context = context.with_cancellation(
+            CancellationContext::cancelled("cancel.github.refresh", UtcMicros(12)).unwrap(),
+        );
+        let reads = Reads::new(vec![read(complete_response(&request))]);
+        let store = RefreshStore::default();
+        let coordinator = GitHubReviewRefreshCoordinatorV1::new(&reads, &store, Ready);
+
+        let outcome = coordinator.refresh(&context, &request).await;
+
+        assert_eq!(outcome, GitHubReviewRefreshOutcomeV1::Cancelled);
+        assert_eq!(reads.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(store.commits.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
