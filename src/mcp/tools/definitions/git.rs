@@ -119,13 +119,13 @@ pub(super) fn def_branch_search() -> ToolDefinition {
     def(
         "tracedecay_branch_search",
         "Cross-Branch Search",
-        "Search the exact snapshot selected by another branch or ref in the project graph.",
+        "Search for symbols in another branch's code graph. Opens the target branch's DB and runs a search query against it.",
         json!({
             "type": "object",
             "properties": {
                 "branch": {
                     "type": "string",
-                    "description": "Existing local branch or ref to search"
+                    "description": "Branch name to search in (must be tracked via `tracedecay branch add`)"
                 },
                 "query": {
                     "type": "string",
@@ -151,7 +151,7 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
             "properties": {
                 "base": {
                     "type": "string",
-                    "description": "Exact base branch or ref (e.g. 'main')"
+                    "description": "Base branch name (e.g. 'main'). Defaults to the project's default branch."
                 },
                 "head": {
                     "type": "string",
@@ -165,8 +165,7 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
                     "type": "string",
                     "description": "Optional kind filter — only show diffs for this symbol kind (e.g. 'function', 'struct')"
                 }
-            },
-            "required": ["base"]
+            }
         }),
     )
 }
@@ -174,8 +173,8 @@ pub(super) fn def_branch_diff() -> ToolDefinition {
 pub(super) fn def_branch_list() -> ToolDefinition {
     def(
         "tracedecay_branch_list",
-        "List Branch Snapshots",
-        "List local branches and their exact commit snapshots in the project graph.",
+        "List Tracked Branches",
+        "List all tracked branches with their DB sizes, parent branch, and last sync time. Returns an empty list if multi-branch is not active.",
         json!({
             "type": "object",
             "properties": {}

@@ -1,26 +1,26 @@
-//! Daemon pull-request worktree auto-tracking (opt-in via
-//! `sync.auto_track_pr_branches`).
+//! Daemon PR-branch auto-tracking (opt-in via `sync.auto_track_pr_branches`).
 //!
 //! # What this does
 //!
 //! When a project enables `sync.auto_track_pr_branches`, a daemon poll loop
-//! discovers open pull requests on the repo's `origin` remote, mounts each PR
-//! head as an owned linked worktree, and feeds that worktree to the shared
-//! project code-index owner. When a PR closes or merges, its managed worktree
-//! and synthetic Git refs are removed; immutable published project generations
-//! remain governed by the shared retention policy.
+//! discovers the open pull requests on the repo's `origin` remote and tracks
+//! each PR head branch through the *existing* branch-tracking machinery so
+//! `branch_diff` / `branch_search` / `branch_list` and graph queries work against
+//! every open PR without anyone running `tracedecay branch add`. When a PR closes
+//! or merges, its branch is untracked and its per-branch store is cleaned up.
 //!
 //! # Why worktrees
 //!
-//! Code-index capture scans the working tree at the admitted project root; it
-//! does not read blobs directly from an arbitrary Git ref. To index a PR head
-//! accurately the head must therefore be checked out somewhere. We
+//! [`crate::tracedecay::indexing`] syncs a branch DB by scanning the *working
+//! tree* at the passed project root — it does not read blobs out of a git ref.
+//! So to index a PR head accurately the head must be checked out somewhere. We
 //! therefore fetch each PR head into a deterministic local ref
 //! (`refs/tracedecay/pr/<N>`), check it out into a linked worktree on a local
-//! branch named `tracedecay/autotrack/pr/<N>` under the store's `pr-worktrees/`
-//! dir (a named branch, not detached HEAD), and mount that worktree in the same
-//! shared scheduler used for
-//! every other linked worktree. A branch
+//! branch named `pr/<N>` under the store's `pr-worktrees/` dir (a *named* branch,
+//! not detached HEAD — the branch-drift guard in sync refuses a detached
+//! worktree), and track that worktree exactly the way the
+//! git-metadata watcher tracks any other linked worktree
+//! ([`crate::tracedecay::TraceDecay::add_branch_tracking_with_options`]). A branch
 //! can only be checked out in one worktree at a time, so we never reuse the PR's
 //! real head-branch name (which the user may have checked out); instead every
 //! PR-managed entry is tracked under the synthetic label `pr/<N>`. That also keeps
@@ -43,37 +43,39 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 
+use crate::branch::{BranchAdminAction, BranchAdminOutcome};
+
 use super::branch_admin::StoreAdministration;
 use super::log_daemon_event;
 
 #[derive(Clone, Copy)]
 struct PrStoreAdministration<'a> {
+    daemon: &'a StoreAdministration,
     graph: Option<&'a std::sync::Arc<crate::tracedecay::TraceDecay>>,
-    code_index: Option<&'a crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
 }
 
 impl<'a> PrStoreAdministration<'a> {
     fn new(
         daemon: &'a StoreAdministration,
         graph: &'a std::sync::Arc<crate::tracedecay::TraceDecay>,
-        code_index: &'a crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
     ) -> Self {
         Self {
+            daemon,
             graph: Some(graph),
-            code_index: Some(code_index),
         }
     }
 
     #[cfg(test)]
-    fn state_only(_daemon: &'a StoreAdministration) -> Self {
+    fn state_only(daemon: &'a StoreAdministration) -> Self {
         Self {
+            daemon,
             graph: None,
-            code_index: None,
         }
     }
 }
 
-/// Filename of the PR-autotrack state sidecar in the project's store data root.
+/// Filename of the PR-autotrack state sidecar, stored next to `branch-meta.json`
+/// in the project's store data root.
 const STATE_FILENAME: &str = "pr-autotrack.json";
 /// Maximum number of *new* PR branches tracked per poll cycle, so a repo with
 /// 100 open PRs ramps up gradually instead of forking 100 syncs at once.
@@ -172,8 +174,6 @@ pub struct ManagedPrSummary {
     pub pr: u64,
     /// PR head branch name.
     pub head_branch: String,
-    /// Exact remote commit currently mounted for this managed worktree.
-    pub head_sha: String,
 }
 
 /// Returns the managed PR branches (sorted by PR number) for a project's store.
@@ -186,7 +186,6 @@ pub fn managed_summary(data_root: &Path) -> Vec<ManagedPrSummary> {
             branch,
             pr: m.pr,
             head_branch: m.head_branch,
-            head_sha: m.head_sha,
         })
         .collect();
     out.sort_by_key(|s| s.pr);
@@ -489,26 +488,9 @@ pub async fn reconcile_project(
             };
         }
     };
-    let graph_runtime =
-        crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry::default();
-    let code_index =
-        crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_graph_runtime(
-            MAX_NEW_TRACKS_PER_CYCLE.saturating_add(1),
-            graph_runtime.clone(),
-        );
-    let administration = PrStoreAdministration::new(&administration, &graph, &code_index);
-    let report =
-        reconcile_project_with_administration(repo_root, data_root, discovery, cap, administration)
-            .await;
-    // This public fixture journey owns a complete temporary daemon generation.
-    // Force the newly mounted generation current before closing it so tests
-    // exercise durable Grafeo publication rather than a detached worker.
-    for managed in load_state(data_root).managed.values() {
-        let _ = code_index.latest_complete_ready(&managed.worktree).await;
-    }
-    code_index.shutdown().await;
-    graph_runtime.close_all().await;
-    report
+    let administration = PrStoreAdministration::new(&administration, &graph);
+    reconcile_project_with_administration(repo_root, data_root, discovery, cap, administration)
+        .await
 }
 
 async fn reconcile_project_with_administration(
@@ -609,9 +591,11 @@ async fn reconcile_project_with_administration(
             continue;
         }
         if let Some(managed) = current {
-            // A changed remote head invalidates this managed worktree's active
-            // code-index generation. Retire the mount and its owned Git
-            // artifacts before mounting the replacement commit.
+            // A changed remote head invalidates the entire branch graph. Drop
+            // the owned store before rebuilding so stale data is never served.
+            // If removal is busy or fails, leave the old state and owned Git
+            // artifacts intact; tracking the new head would otherwise mix the
+            // two generations under one label.
             match untrack_pr(repo_root, data_root, label, &managed, administration).await {
                 Ok(()) => {
                     state.managed.remove(label);
@@ -665,10 +649,10 @@ async fn reconcile_project_with_administration(
                                 );
                             }
                             Err(cleanup_reason) => {
-                                // The successfully-added worktree remains owned and
+                                // The successfully-added branch remains owned and
                                 // recoverable. Do not drop it from in-memory state
-                                // before cleanup has actually removed its Git
-                                // artifacts, and expose both failures to the caller.
+                                // before the coordinator has actually removed its
+                                // store, and expose both failures to the caller.
                                 state_dirty = dirty_before_insert;
                                 let reason = format!(
                                     "{persist_reason}; rollback cleanup failed: {cleanup_reason}"
@@ -701,8 +685,8 @@ async fn reconcile_project_with_administration(
     report
 }
 
-/// Fetches a PR head, checks it out into a named linked worktree, and tracks
-/// that worktree under the synthetic PR label. Returns the managed record.
+/// Fetches a PR head, checks it out into a detached linked worktree, and tracks
+/// that worktree under the `pr/<N>` label. Returns the managed record.
 async fn track_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -715,13 +699,12 @@ async fn track_pr(
         .join("pr-worktrees")
         .join(format!("pr-{}", pr.number));
     let Some(graph) = administration.graph.map(std::sync::Arc::clone) else {
-        return Err("retained project owner is unavailable".to_string());
-    };
-    let Some(code_index) = administration.code_index else {
-        return Err("daemon code-index registry is unavailable".to_string());
+        return Err("retained project graph is unavailable".to_string());
     };
 
-    let generation_ready = code_index.is_worktree_mounted(&worktree).await;
+    let graph_ready = crate::branch_meta::load_branch_meta(data_root)
+        .and_then(|meta| crate::branch::resolve_branch_db_path(data_root, &label, &meta))
+        .is_some_and(|path| path.is_file());
     let branch_ref = format!("refs/heads/{label}");
     let branch_ready = ref_points_to(repo_root, &branch_ref, &pr.head_sha);
     let tracking_ref_ready = ref_points_to(repo_root, &tracking_ref, &pr.head_sha);
@@ -729,8 +712,8 @@ async fn track_pr(
         && crate::branch::current_branch(&worktree).as_deref() == Some(label.as_str());
     let validated_orphan =
         branch_ready && tracking_ref_ready && (!worktree.exists() || worktree_ready);
-    if generation_ready || validated_orphan {
-        code_index.unmount_worktree(&worktree).await;
+    if graph_ready || validated_orphan {
+        remove_pr_store(repo_root, data_root, &label, administration).await?;
         cleanup_pr_worktree(repo_root, data_root, pr.number, &pr.head_sha, true);
     }
 
@@ -740,8 +723,8 @@ async fn track_pr(
     let label_for_prep = label.clone();
     let expected_head = pr.head_sha.clone();
     // git operations are blocking; keep them off the reactor. A failed fetch or
-    // worktree add can still have left owned artifacts behind, so retire its
-    // scheduler mount before attempting Git cleanup.
+    // worktree add can still have left owned artifacts behind, so reconcile its
+    // store through the coordinator before attempting Git cleanup.
     match tokio::task::spawn_blocking(move || {
         prepare_pr_worktree(&repo, &wt, &tref, &label_for_prep, &expected_head)
     })
@@ -775,33 +758,51 @@ async fn track_pr(
         }
     }
 
-    let project_id = graph
-        .store_layout()
-        .identity
-        .project_id
-        .as_ref()
-        .ok_or_else(|| "registered project identity is unavailable".to_string())
-        .and_then(|project_id| {
-            tracedecay_domain::ProjectId::new(project_id.clone())
-                .map_err(|error| format!("registered project identity is invalid: {error}"))
-        })?;
-    match code_index
-        .mount_project_worktree(
-            project_id,
-            &worktree,
-            data_root.to_path_buf(),
-            data_root.join("code-index-v1"),
-            None,
+    // The branch add prepares metadata, syncs its new SQLite family, and then
+    // finalizes metadata. Construct its future only after the writer gate is
+    // acquired so a coordinator removal cannot observe a half-prepared branch.
+    match administration
+        .daemon
+        .with_writer_in(
+            crate::daemon::branch_admin::graph_writer_scope(
+                graph.as_ref(),
+                crate::daemon::branch_admin::StoreWriterClass::Owner,
+            ),
+            || async { graph.track_worktree_branch(&worktree, &label).await },
         )
         .await
     {
-        Ok(_) => Ok(ManagedPr {
+        Ok(crate::branch::BranchAddOutcome::Added) => Ok(ManagedPr {
             pr: pr.number,
             head_branch: pr.head_branch.clone(),
             head_sha: pr.head_sha.clone(),
             worktree,
             tracking_ref,
         }),
+        Ok(outcome) => {
+            // Deferred may leave branch metadata behind. AlreadyTracked can
+            // be an orphan from an interrupted prior cycle. Neither proves a
+            // completed sync, so remove its store through the coordinator
+            // before releasing the owned worktree/refs for a future retry.
+            let reason = match outcome {
+                crate::branch::BranchAddOutcome::NotIndexed => "project not indexed",
+                crate::branch::BranchAddOutcome::AlreadyTracked => {
+                    "internal PR branch was already tracked"
+                }
+                crate::branch::BranchAddOutcome::Deferred => "branch tracking deferred",
+                crate::branch::BranchAddOutcome::Added => unreachable!(),
+            };
+            cleanup_failed_track(
+                repo_root,
+                data_root,
+                pr.number,
+                &pr.head_sha,
+                &label,
+                administration,
+                reason,
+            )
+            .await
+        }
         Err(error) => {
             let reason = error.to_string();
             cleanup_failed_track(
@@ -818,9 +819,40 @@ async fn track_pr(
     }
 }
 
-/// Rolls back a failed generation mount before deleting its owned Git
-/// artifacts. Immutable generations already published in the project graph
-/// intentionally remain as historical evidence.
+/// Removes a store selected by its known project layout. `Remove` does not use
+/// the retention values, so zero keeps this path independent of config/layout
+/// re-resolution while retaining the coordinator's safety checks.
+async fn remove_pr_store(
+    repo_root: &Path,
+    data_root: &Path,
+    label: &str,
+    administration: PrStoreAdministration<'_>,
+) -> std::result::Result<(), String> {
+    let report = administration
+        .daemon
+        .execute_branch_admin_in_layout(
+            repo_root,
+            data_root,
+            BranchAdminAction::Remove {
+                branch: label.to_string(),
+            },
+            0,
+            0,
+        )
+        .await
+        .map_err(|error| format!("branch-store removal failed: {error}"))?;
+    match report.outcome {
+        BranchAdminOutcome::Removed
+        | BranchAdminOutcome::NotTracked
+        | BranchAdminOutcome::NoTracking => Ok(()),
+        outcome @ BranchAdminOutcome::NoChanges => Err(format!(
+            "branch-store removal returned unexpected outcome {outcome:?}"
+        )),
+    }
+}
+
+/// Rolls back a failed branch add without deleting owned Git artifacts until
+/// the coordinator proves the corresponding branch store is gone.
 async fn cleanup_failed_track(
     repo_root: &Path,
     data_root: &Path,
@@ -830,21 +862,24 @@ async fn cleanup_failed_track(
     administration: PrStoreAdministration<'_>,
     original_reason: &str,
 ) -> std::result::Result<ManagedPr, String> {
-    let _ = label;
-    if let Some(code_index) = administration.code_index {
-        let worktree = data_root.join("pr-worktrees").join(format!("pr-{pr}"));
-        code_index.unmount_worktree(&worktree).await;
+    match remove_pr_store(repo_root, data_root, label, administration).await {
+        Ok(()) => {
+            cleanup_pr_worktree(repo_root, data_root, pr, head_sha, true);
+            Err(original_reason.to_string())
+        }
+        Err(cleanup_reason) => Err(format!(
+            "{original_reason}; failed to remove incomplete branch store: {cleanup_reason}"
+        )),
     }
-    cleanup_pr_worktree(repo_root, data_root, pr, head_sha, true);
-    Err(original_reason.to_string())
 }
 
 /// Fetches `refs/pull/<N>/head` into `tracking_ref` and adds a linked worktree
 /// checked out on a local branch named `label` (`pr/<N>`) at that ref.
 ///
-/// The worktree must be on a named branch matching the tracking label so its
-/// Git provenance is exact. Idempotent: a stale worktree at `worktree` is
-/// removed first, and `-B` resets the branch.
+/// The worktree must be on a *named* branch matching the tracking label — a
+/// detached HEAD trips the branch-drift guard in sync (the DB serves `pr/<N>`
+/// but the working tree would report detached HEAD). Idempotent: a stale
+/// worktree at `worktree` is removed first, and `-B` resets the branch.
 fn prepare_pr_worktree(
     repo_root: &Path,
     worktree: &Path,
@@ -905,9 +940,9 @@ fn prepare_pr_worktree(
     Ok(())
 }
 
-/// Untracks a managed PR: retires its live scheduler, then removes its
-/// worktree, local tracking branch, and ref. Published project-graph evidence
-/// is immutable and is not deleted with the checkout.
+/// Untracks a managed PR: removes its branch store, its worktree, its local
+/// tracking branch, and its ref. The Git artifacts are released only after the
+/// coordinator reports that the store is gone (or was already absent).
 async fn untrack_pr(
     repo_root: &Path,
     data_root: &Path,
@@ -916,20 +951,28 @@ async fn untrack_pr(
     administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<(), String> {
     let expected_label = pr_label(managed.pr);
+    let legacy_label = format!("pr/{}", managed.pr);
+    let is_legacy = label == legacy_label;
     let expected_worktree = data_root
         .join("pr-worktrees")
         .join(format!("pr-{}", managed.pr));
     let expected_ref = pr_tracking_ref(managed.pr);
-    if label != expected_label
+    if (label != expected_label && !is_legacy)
         || managed.worktree != expected_worktree
         || managed.tracking_ref != expected_ref
     {
         return Err("managed PR entry does not own the requested branch artifacts".to_string());
     }
-    if let Some(code_index) = administration.code_index {
-        code_index.unmount_worktree(&managed.worktree).await;
-    }
-    cleanup_pr_worktree(repo_root, data_root, managed.pr, &managed.head_sha, true);
+    remove_pr_store(repo_root, data_root, label, administration).await?;
+    // `pr/<N>` is the pre-namespace persisted format. Remove its owned store
+    // and worktree once, but never delete that ambiguous local branch name.
+    cleanup_pr_worktree(
+        repo_root,
+        data_root,
+        managed.pr,
+        &managed.head_sha,
+        !is_legacy,
+    );
     Ok(())
 }
 
@@ -968,19 +1011,21 @@ async fn sweep_orphan_pr_worktrees(
             continue;
         }
         let label = pr_label(number);
-        if let Some(code_index) = administration.code_index {
-            code_index.unmount_worktree(&entry.path()).await;
+        match remove_pr_store(repo_root, data_root, &label, administration).await {
+            Ok(()) => {
+                cleanup_pr_worktree(repo_root, data_root, number, "", true);
+                log_daemon_event(
+                    "pr_autotrack",
+                    &[
+                        ("project", repo_root.display().to_string()),
+                        ("action", "swept".to_string()),
+                        ("pr", number.to_string()),
+                        ("reason", "orphan worktree".to_string()),
+                    ],
+                );
+            }
+            Err(reason) => log_pr_skip(repo_root, Some(&label), Some(number), &reason),
         }
-        cleanup_pr_worktree(repo_root, data_root, number, "", true);
-        log_daemon_event(
-            "pr_autotrack",
-            &[
-                ("project", repo_root.display().to_string()),
-                ("action", "swept".to_string()),
-                ("pr", number.to_string()),
-                ("reason", "orphan worktree".to_string()),
-            ],
-        );
     }
 }
 
@@ -1041,35 +1086,31 @@ fn remove_worktree(repo_root: &Path, worktree: &Path) {
 // Poll loop (daemon wiring)
 // ---------------------------------------------------------------------------
 
+/// Spawns the PR-autotrack poll loop. Cheap and inert when no registered project
+/// has the feature enabled — each tick consults only daemon-published snapshots.
+pub fn spawn(global_db_path: Option<PathBuf>) -> tokio::task::JoinHandle<()> {
+    spawn_with_administration(global_db_path, StoreAdministration::default())
+}
+
 /// Spawns the PR-autotrack poll loop with the daemon's shared store coordinator.
-/// Managed worktrees mount through the daemon's one code-index registry, which
-/// in turn resolves the one project Grafeo handle.
+/// The coordinator serializes PR additions and destructive branch administration
+/// with every other daemon connection that owns the same store family.
 pub(super) fn spawn_with_administration(
     _global_db_path: Option<PathBuf>,
     administration: StoreAdministration,
-    code_index: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        run(administration, code_index).await;
+        run(administration).await;
     })
 }
 
-async fn run(
-    administration: StoreAdministration,
-    code_index: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) {
+async fn run(administration: StoreAdministration) {
     let Ok(database) = administration.registered_profile_database().await else {
         return;
     };
     let mut last_poll: HashMap<PathBuf, Instant> = HashMap::new();
     loop {
-        tick(
-            database.as_ref(),
-            &mut last_poll,
-            &administration,
-            &code_index,
-        )
-        .await;
+        tick(database.as_ref(), &mut last_poll, &administration).await;
         tokio::time::sleep(BASE_TICK).await;
     }
 }
@@ -1078,7 +1119,6 @@ async fn tick(
     database: &crate::global_db::RegisteredGlobalDb,
     last_poll: &mut HashMap<PathBuf, Instant>,
     administration: &StoreAdministration,
-    code_index: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) {
     let window = 14 * 86_400;
     let cap = 64;
@@ -1110,13 +1150,13 @@ async fn tick(
         }
         last_poll.insert(root.clone(), Instant::now());
         if cfg.auto_track_pr_branches {
-            poll_project(root, administration, code_index).await;
+            poll_project(root, administration).await;
         } else {
             // Feature disabled: if it left managed PR state behind (it was on,
             // then turned off), tear that state down once instead of stranding
-            // worktrees/refs/branches forever. Gated on the poll cadence
+            // worktrees/refs/branches/stores forever. Gated on the poll cadence
             // (via last_poll above) so a disabled project isn't probed each tick.
-            teardown_disabled_project_with_administration(&root, administration, code_index).await;
+            teardown_disabled_project_with_administration(&root, administration).await;
         }
     }
 }
@@ -1136,11 +1176,7 @@ async fn retained_project_graph(
 }
 
 /// Runs one discovery + reconcile pass for a project and logs a poll summary.
-async fn poll_project(
-    repo_root: PathBuf,
-    administration: &StoreAdministration,
-    code_index: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
-) {
+async fn poll_project(repo_root: PathBuf, administration: &StoreAdministration) {
     let Some(graph) = retained_project_graph(administration, &repo_root).await else {
         return; // not indexed — nothing to attach PR branches to yet
     };
@@ -1174,7 +1210,7 @@ async fn poll_project(
         &data_root,
         &discovery,
         MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::new(administration, &graph, code_index),
+        PrStoreAdministration::new(administration, &graph),
     )
     .await;
     let managed = load_state(&data_root).managed.len();
@@ -1195,10 +1231,11 @@ async fn poll_project(
 /// is now disabled.
 ///
 /// When the feature is turned off after it has tracked PRs, every managed
-/// worktree, `refs/tracedecay/pr/*` ref, and synthetic `pr/<N>` branch would
-/// otherwise be stranded forever and consume disk. This runs one removals-only
-/// reconcile (empty desired set) to clean the managed set down to empty. Cheap
-/// and inert once nothing is managed, so it is safe to call every poll cadence.
+/// worktree, `refs/tracedecay/pr/*` ref, synthetic `pr/<N>` branch and
+/// per-branch store would otherwise be stranded forever (surfacing stale graphs
+/// in `branch_list` and consuming disk). This runs one removals-only reconcile
+/// (empty desired set) to clean the managed set down to empty. Cheap and inert
+/// once nothing is managed, so it is safe to call every poll cadence.
 pub async fn teardown_disabled_project(
     graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
     repo_root: &Path,
@@ -1206,34 +1243,23 @@ pub async fn teardown_disabled_project(
     let Ok(administration) = StoreAdministration::for_retained_project_graph(&graph).await else {
         return;
     };
-    let graph_runtime =
-        crate::daemon::embedded_graph_runtime::EmbeddedGraphRuntimeRegistry::default();
-    let code_index =
-        crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1::with_graph_runtime(
-            MAX_NEW_TRACKS_PER_CYCLE.saturating_add(1),
-            graph_runtime.clone(),
-        );
-    teardown_disabled_project_with_graph(repo_root, graph, &administration, &code_index).await;
-    code_index.shutdown().await;
-    graph_runtime.close_all().await;
+    teardown_disabled_project_with_graph(repo_root, graph, &administration).await;
 }
 
 async fn teardown_disabled_project_with_administration(
     repo_root: &Path,
     administration: &StoreAdministration,
-    code_index: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) {
     let Some(graph) = retained_project_graph(administration, repo_root).await else {
         return; // not indexed — no managed state to tear down
     };
-    teardown_disabled_project_with_graph(repo_root, graph, administration, code_index).await;
+    teardown_disabled_project_with_graph(repo_root, graph, administration).await;
 }
 
 async fn teardown_disabled_project_with_graph(
     repo_root: &Path,
     graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
     administration: &StoreAdministration,
-    code_index: &crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
 ) {
     let data_root = graph.store_layout().data_root.clone();
     if load_state(&data_root).managed.is_empty() {
@@ -1246,7 +1272,7 @@ async fn teardown_disabled_project_with_graph(
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::new(administration, &graph, code_index),
+        PrStoreAdministration::new(administration, &graph),
     )
     .await;
     log_daemon_event(
