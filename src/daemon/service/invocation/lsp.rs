@@ -418,6 +418,7 @@ impl DaemonInvocationService {
     }
 
     pub(crate) async fn expire_all(&self) {
+        self.lsp_lease_tasks.shutdown().await;
         self.lsp_sessions.lock().await.clear();
         self.authorized_lsp_workspaces.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
@@ -649,6 +650,7 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
+        self.lsp_lease_tasks.cancel(access.session_id()).await;
         if !endpoint_detached {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -747,20 +749,39 @@ impl DaemonInvocationService {
             let _ = session.actor.detach();
             session.expires_at_ms
         };
+        let Some(generation) = self.lsp_lease_tasks.reserve_generation() else {
+            let _ = lsp_registry.lock().await.close(&access, now_ms);
+            self.lsp_sessions.lock().await.remove(access.session_id());
+            return;
+        };
+        let session_id = access.session_id().clone();
         let sessions = Arc::clone(&self.lsp_sessions);
         let registry = Arc::clone(lsp_registry);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                expires_at_ms.saturating_sub(now_millis()),
-            ))
-            .await;
-            let now_ms = now_millis();
-            registry.lock().await.expire_at(now_ms);
-            sessions
-                .lock()
-                .await
-                .retain(|_, session| session.expires_at_ms > now_ms);
+        let lease_tasks = Arc::downgrade(&self.lsp_lease_tasks);
+        let cancellation = crate::application::context::CancellationToken::new();
+        let task_cancellation = cancellation.clone();
+        let task_session_id = session_id.clone();
+        let handle = tokio::spawn(async move {
+            let elapsed = tokio::select! {
+                () = tokio::time::sleep(std::time::Duration::from_millis(
+                    expires_at_ms.saturating_sub(now_millis()),
+                )) => true,
+                () = task_cancellation.cancelled() => false,
+            };
+            if elapsed {
+                registry.lock().await.expire_at(expires_at_ms);
+                sessions
+                    .lock()
+                    .await
+                    .retain(|_, session| session.expires_at_ms > expires_at_ms);
+            }
+            if let Some(lease_tasks) = lease_tasks.upgrade() {
+                lease_tasks.finish(&task_session_id, generation);
+            }
         });
+        self.lsp_lease_tasks
+            .replace(session_id, generation, cancellation, handle)
+            .await;
     }
 
     pub(super) async fn authenticate(
@@ -782,6 +803,7 @@ impl DaemonInvocationService {
             Err(expired) => {
                 if expired {
                     self.lsp_sessions.lock().await.remove(access.session_id());
+                    self.lsp_lease_tasks.cancel(access.session_id()).await;
                 }
                 Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
             }
