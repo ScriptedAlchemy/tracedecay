@@ -702,31 +702,37 @@ pub fn resolve_persisted_layout(
     project_root: &Path,
     profile_root: &Path,
 ) -> Result<Option<StoreLayout>> {
-    if let Some(marker) = read_enrollment_marker(project_root)? {
+    // Linked worktrees have their own filesystem root but share one Git common
+    // directory with the primary checkout. Resolve that repository identity
+    // before considering an enrollment marker, so a stale local worktree
+    // marker cannot split the project's durable store.
+    let enrollment_root = crate::worktree::repository_identity_root(project_root)
+        .unwrap_or_else(|| project_root.to_path_buf());
+    if let Some(marker) = read_repository_identity_marker(project_root)? {
+        return profile_sharded_layout(
+            project_root,
+            profile_root,
+            &EnrollmentMarker {
+                project_id: marker.project_id,
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .map(Some);
+    }
+    if let Some(marker) = read_enrollment_marker(&enrollment_root)? {
         if marker.storage_mode != StorageMode::ProfileSharded {
             return Err(TraceDecayError::Config {
                 message: format!(
                     "unsupported storage_mode={:?} in enrollment marker for '{}'; \
                      run TraceDecay migration to move this project into the user profile store",
                     marker.storage_mode,
-                    project_root.display()
+                    enrollment_root.display()
                 ),
             });
         }
         return profile_sharded_layout(project_root, profile_root, &marker).map(Some);
     }
-    let Some(marker) = read_repository_identity_marker(project_root)? else {
-        return Ok(None);
-    };
-    profile_sharded_layout(
-        project_root,
-        profile_root,
-        &EnrollmentMarker {
-            project_id: marker.project_id,
-            storage_mode: StorageMode::ProfileSharded,
-        },
-    )
-    .map(Some)
+    Ok(None)
 }
 
 pub fn default_profile_root() -> Result<PathBuf> {
@@ -1683,6 +1689,78 @@ mod tests {
             sentinel.is_file(),
             "the selected existing store must stay intact"
         );
+    }
+
+    #[test]
+    fn linked_worktree_uses_the_repository_store_over_a_local_enrollment_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary");
+        let linked = dir.path().join("linked");
+        let profile_root = dir.path().join("profile");
+        fs::create_dir_all(&primary).unwrap();
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "TraceDecay Test"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&primary)
+                .status()
+                .unwrap();
+            assert!(status.success(), "fixture repository setup must succeed");
+        }
+        fs::write(primary.join("file.rs"), "pub fn shared() {}\n").unwrap();
+        for args in [vec!["add", "."], vec!["commit", "-m", "seed"]] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&primary)
+                .status()
+                .unwrap();
+            assert!(status.success(), "fixture commit must succeed");
+        }
+        let status = std::process::Command::new("git")
+            .args(["worktree", "add", "-b", "linked", linked.to_str().unwrap()])
+            .current_dir(&primary)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "fixture linked worktree setup must succeed"
+        );
+
+        let shared_project_id = "proj_primary_store";
+        write_enrollment_marker(
+            &primary,
+            &EnrollmentMarker {
+                project_id: shared_project_id.to_string(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        assert!(write_repository_identity_marker(&primary, shared_project_id).unwrap());
+        write_enrollment_marker(
+            &linked,
+            &EnrollmentMarker {
+                project_id: "proj_stale_worktree_store".to_string(),
+                storage_mode: StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+
+        let layout = resolve_persisted_layout(&linked, &profile_root)
+            .unwrap()
+            .expect("repository identity should resolve a profile store");
+
+        assert_eq!(
+            layout.identity.project_id.as_deref(),
+            Some(shared_project_id)
+        );
+        assert_eq!(
+            layout.data_root,
+            profile_root.join("projects").join(shared_project_id)
+        );
+        assert_eq!(layout.project_root, linked);
     }
 
     #[test]
