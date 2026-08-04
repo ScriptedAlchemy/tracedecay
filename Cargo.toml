@@ -19,7 +19,7 @@ exclude = [".worktrees", ".codex-worktrees"]
 
 [package]
 name = "tracedecay"
-version = "0.0.69"
+version = "0.0.70"
 publish = false
 edition = "2024"
 description = "Code intelligence tool that builds a semantic knowledge graph from Rust, Go, Java, Scala, TypeScript, Python, C, C++, Kotlin, C#, Swift, and many more codebases"

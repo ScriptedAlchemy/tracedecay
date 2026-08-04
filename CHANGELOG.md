@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.70](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.69...v0.0.70) (2026-08-04)
+
+
+### Bug Fixes
+
+* **release:** tolerate missing release PR output ([b39adb8](https://github.com/ScriptedAlchemy/tracedecay/commit/b39adb812e7efaed33db9ff4f2cd22c5ecf849b0))
+* **release:** tolerate missing release PR output ([b0cc36c](https://github.com/ScriptedAlchemy/tracedecay/commit/b0cc36c23b4a9a37ad444e79947875ed8c533c62))
+
 ## [0.0.69](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.68...v0.0.69) (2026-08-04)
 
 
