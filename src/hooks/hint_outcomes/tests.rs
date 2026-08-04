@@ -1,7 +1,7 @@
 use tempfile::TempDir;
 use tracedecay_application::{
-    HintEmissionV1, HintOutcomeCorrelationPortV1, HintOutcomeObservationV1, HintOutcomePortErrorV1,
-    HintOutcomePortFuture, HintOutcomePortOperationV1, HintToolActivityV1,
+    HintEmission, HintOutcomeCorrelationPort, HintOutcomeObservation, HintOutcomePortError,
+    HintOutcomePortFuture, HintOutcomePortOperation, HintToolActivity,
 };
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -17,31 +17,31 @@ const PROJECT: &str = "proj_hint_outcomes";
 const HINT_TS: i64 = 1_000_000;
 
 struct FailingPort {
-    operation: HintOutcomePortOperationV1,
+    operation: HintOutcomePortOperation,
 }
 
 impl FailingPort {
     fn result<T>(
         &self,
-        operation: HintOutcomePortOperationV1,
+        operation: HintOutcomePortOperation,
         value: T,
-    ) -> Result<T, HintOutcomePortErrorV1> {
+    ) -> Result<T, HintOutcomePortError> {
         if self.operation == operation {
-            Err(HintOutcomePortErrorV1::new(operation, "injected failure"))
+            Err(HintOutcomePortError::new(operation, "injected failure"))
         } else {
             Ok(value)
         }
     }
 }
 
-impl HintOutcomeCorrelationPortV1 for FailingPort {
+impl HintOutcomeCorrelationPort for FailingPort {
     fn resolved_hint_ids<'a>(
         &'a self,
         _project_id: &'a str,
         _limit: u32,
     ) -> HintOutcomePortFuture<'a, Vec<String>> {
         Box::pin(
-            async move { self.result(HintOutcomePortOperationV1::QueryResolvedHints, Vec::new()) },
+            async move { self.result(HintOutcomePortOperation::QueryResolvedHints, Vec::new()) },
         )
     }
 
@@ -49,11 +49,11 @@ impl HintOutcomeCorrelationPortV1 for FailingPort {
         &'a self,
         project_id: &'a str,
         _limit: u32,
-    ) -> HintOutcomePortFuture<'a, Vec<HintEmissionV1>> {
+    ) -> HintOutcomePortFuture<'a, Vec<HintEmission>> {
         Box::pin(async move {
             self.result(
-                HintOutcomePortOperationV1::QueryEmittedHints,
-                vec![HintEmissionV1 {
+                HintOutcomePortOperation::QueryEmittedHints,
+                vec![HintEmission {
                     provider: "hook_claude".to_owned(),
                     project_id: project_id.to_owned(),
                     session_id: "session-1".to_owned(),
@@ -71,11 +71,11 @@ impl HintOutcomeCorrelationPortV1 for FailingPort {
         _session_id: &'a str,
         _after_timestamp: i64,
         _limit: u32,
-    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivityV1>> {
+    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivity>> {
         Box::pin(async move {
             self.result(
-                HintOutcomePortOperationV1::QuerySessionActivity,
-                vec![HintToolActivityV1 {
+                HintOutcomePortOperation::QuerySessionActivity,
+                vec![HintToolActivity {
                     timestamp: HINT_TS + 1,
                     tool_names: vec!["tracedecay_context".to_owned()],
                 }],
@@ -85,9 +85,9 @@ impl HintOutcomeCorrelationPortV1 for FailingPort {
 
     fn append_outcomes<'a>(
         &'a self,
-        _outcomes: &'a [HintOutcomeObservationV1],
+        _outcomes: &'a [HintOutcomeObservation],
     ) -> HintOutcomePortFuture<'a, ()> {
-        Box::pin(async move { self.result(HintOutcomePortOperationV1::AppendOutcomes, ()) })
+        Box::pin(async move { self.result(HintOutcomePortOperation::AppendOutcomes, ()) })
     }
 }
 
@@ -417,7 +417,7 @@ async fn correlation_is_idempotent_across_runs() {
 async fn query_failure_is_typed_instead_of_becoming_an_empty_pass() {
     let error = correlate_hint_outcomes(
         &FailingPort {
-            operation: HintOutcomePortOperationV1::QueryResolvedHints,
+            operation: HintOutcomePortOperation::QueryResolvedHints,
         },
         PROJECT,
         HINT_TS + 120,
@@ -433,7 +433,7 @@ async fn query_failure_is_typed_instead_of_becoming_an_empty_pass() {
 async fn append_failure_is_typed_after_a_resolved_observation() {
     let error = correlate_hint_outcomes(
         &FailingPort {
-            operation: HintOutcomePortOperationV1::AppendOutcomes,
+            operation: HintOutcomePortOperation::AppendOutcomes,
         },
         PROJECT,
         HINT_TS + 120,

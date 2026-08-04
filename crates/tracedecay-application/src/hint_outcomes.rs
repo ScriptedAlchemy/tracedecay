@@ -10,17 +10,17 @@ use std::pin::Pin;
 use thiserror::Error;
 
 pub type HintOutcomePortFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T, HintOutcomePortErrorV1>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<T, HintOutcomePortError>> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HintOutcomePortOperationV1 {
+pub enum HintOutcomePortOperation {
     QueryResolvedHints,
     QueryEmittedHints,
     QuerySessionActivity,
     AppendOutcomes,
 }
 
-impl HintOutcomePortOperationV1 {
+impl HintOutcomePortOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::QueryResolvedHints => "query_resolved_hints",
@@ -33,13 +33,13 @@ impl HintOutcomePortOperationV1 {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("hint-outcome port {operation} failed: {detail}")]
-pub struct HintOutcomePortErrorV1 {
+pub struct HintOutcomePortError {
     operation: &'static str,
     detail: String,
 }
 
-impl HintOutcomePortErrorV1 {
-    pub fn new(operation: HintOutcomePortOperationV1, detail: impl Into<String>) -> Self {
+impl HintOutcomePortError {
+    pub fn new(operation: HintOutcomePortOperation, detail: impl Into<String>) -> Self {
         Self {
             operation: operation.as_str(),
             detail: detail.into(),
@@ -56,7 +56,7 @@ impl HintOutcomePortErrorV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HintEmissionV1 {
+pub struct HintEmission {
     pub provider: String,
     pub project_id: String,
     pub session_id: String,
@@ -66,22 +66,22 @@ pub struct HintEmissionV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HintToolActivityV1 {
+pub struct HintToolActivity {
     pub timestamp: i64,
     pub tool_names: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HintOutcomeResolutionV1 {
+pub enum HintOutcomeResolution {
     Acted { tool_name: String },
     Ignored,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HintOutcomeObservationV1 {
-    pub emission: HintEmissionV1,
+pub struct HintOutcomeObservation {
+    pub emission: HintEmission,
     pub observed_at_secs: i64,
-    pub resolution: HintOutcomeResolutionV1,
+    pub resolution: HintOutcomeResolution,
 }
 
 /// Store-neutral reads and writes required by one bounded correlation pass.
@@ -89,7 +89,7 @@ pub struct HintOutcomeObservationV1 {
 /// The port deliberately exposes neither database handles nor storage rows.
 /// Implementations must preserve the exact project filter and return a typed
 /// error instead of fabricating an empty result.
-pub trait HintOutcomeCorrelationPortV1: Send + Sync {
+pub trait HintOutcomeCorrelationPort: Send + Sync {
     fn resolved_hint_ids<'a>(
         &'a self,
         project_id: &'a str,
@@ -100,7 +100,7 @@ pub trait HintOutcomeCorrelationPortV1: Send + Sync {
         &'a self,
         project_id: &'a str,
         limit: u32,
-    ) -> HintOutcomePortFuture<'a, Vec<HintEmissionV1>>;
+    ) -> HintOutcomePortFuture<'a, Vec<HintEmission>>;
 
     fn session_tool_activity<'a>(
         &'a self,
@@ -108,10 +108,10 @@ pub trait HintOutcomeCorrelationPortV1: Send + Sync {
         session_id: &'a str,
         after_timestamp: i64,
         limit: u32,
-    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivityV1>>;
+    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivity>>;
 
     fn append_outcomes<'a>(
         &'a self,
-        outcomes: &'a [HintOutcomeObservationV1],
+        outcomes: &'a [HintOutcomeObservation],
     ) -> HintOutcomePortFuture<'a, ()>;
 }
