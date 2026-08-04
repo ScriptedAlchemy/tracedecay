@@ -285,7 +285,7 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
     let page = store
         .retrieve_session_temporal_page(
             SessionTemporalRetrievalRequestV1::new(
-                session_id,
+                session_id.clone(),
                 TemporalModeV1::Evolution,
                 RetrievalGrainV1::Occurrence,
                 snapshot,
