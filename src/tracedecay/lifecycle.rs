@@ -518,6 +518,7 @@ impl TraceDecay {
                 }
             }
         }
+        drop(recovery_lock);
 
         let ts = Self {
             db,

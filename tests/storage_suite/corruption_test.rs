@@ -564,6 +564,38 @@ async fn dirty_open_checks_integrity_before_writable_migration()
 }
 
 #[tokio::test]
+async fn dirty_open_releases_recovery_lock_before_migration_reindex()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(project_root.join("src"))?;
+    std::fs::write(project_root.join("src/lib.rs"), "pub fn migrated() {}\n")?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.db()
+        .conn()
+        .execute_batch("PRAGMA user_version = 17")
+        .await?;
+    ts.checkpoint().await?;
+    ts.close();
+    std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
+
+    let reopened = TraceDecay::open_with_options(&project_root, open_options).await?;
+    assert!(
+        reopened.get_nodes_by_name("migrated").await?.len() == 1,
+        "migration re-index must complete after dirty recovery"
+    );
+    assert!(!layout.dirty_path.exists());
+    reopened.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn dirty_open_does_not_race_an_active_sync_lock()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;

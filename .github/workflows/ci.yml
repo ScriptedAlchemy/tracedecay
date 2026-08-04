@@ -45,7 +45,10 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: npm run lint:commit -- --from "$BASE_SHA" --to "$HEAD_SHA"
+        run: |
+          while IFS= read -r commit_sha; do
+            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
+          done < <(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA")
 
       - name: Validate pushed commit messages
         if: github.event_name == 'push'
@@ -56,13 +59,17 @@ jobs:
           set -euo pipefail
           if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
             if git rev-parse "${HEAD_SHA}^" >/dev/null 2>&1; then
-              npm run lint:commit -- --from "${HEAD_SHA}^" --to "$HEAD_SHA"
+              range="${HEAD_SHA}^..${HEAD_SHA}"
             else
               git show --no-patch --format=%B "$HEAD_SHA" | npm run lint:commit --
+              exit 0
             fi
           else
-            npm run lint:commit -- --from "$BEFORE_SHA" --to "$HEAD_SHA"
+            range="$BEFORE_SHA..$HEAD_SHA"
           fi
+          while IFS= read -r commit_sha; do
+            git show --no-patch --format=%B "$commit_sha" | npm run --silent lint:commit --
+          done < <(git rev-list --no-merges "$range")
 
   release-version-drift:
     name: Release Version Drift

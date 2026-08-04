@@ -326,8 +326,7 @@ fn metadata_project_location(
                     matched = Some(path);
                 }
             }
-            ProjectMembership::NoMatch => {}
-            ProjectMembership::Unknown => return None,
+            ProjectMembership::NoMatch | ProjectMembership::Unknown => {}
         }
     }
     matched
@@ -553,4 +552,35 @@ fn message_metadata(
         append_usage_metadata(&mut metadata, &[entry]);
     }
     Value::Object(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tracedecay_runtime_core::worktree::{GitRepoIdentity, GitRepoIdentityOutcome};
+
+    fn mixed_identity(path: &Path) -> GitRepoIdentityOutcome {
+        if path == Path::new("/unavailable") {
+            GitRepoIdentityOutcome::Unknown
+        } else {
+            GitRepoIdentityOutcome::Resolved(GitRepoIdentity {
+                worktree_root: path.to_path_buf(),
+                common_dir: PathBuf::from("/shared/.git"),
+            })
+        }
+    }
+
+    #[test]
+    fn definitive_metadata_path_match_overrides_unknown_auxiliary_path() {
+        let metadata = serde_json::json!({
+            "projectPath": "/match",
+            "workspaceDirectory": "/unavailable"
+        });
+        let matchers = ProjectRootMatcherCache::with_identity_resolver(mixed_identity);
+
+        assert_eq!(
+            metadata_project_location(&metadata, Path::new("/project"), &matchers),
+            Some(PathBuf::from("/match"))
+        );
+    }
 }
