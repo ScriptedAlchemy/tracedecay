@@ -8,7 +8,7 @@
 //! (read-side graph queries), [`diagnostics`] (branch state), [`facts`]
 //! (session memory), and [`locking`] (dirty sentinel + sync lock).
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use crate::config::TraceDecayConfig;
 use crate::db::Database;
@@ -30,7 +30,6 @@ mod project_runtime_port;
 mod queries;
 mod scan;
 
-pub use diagnostics::{BranchDiagnostics, TrackedBranchDiagnostic};
 pub use indexing::{GraphRebuildAvailabilityV1, GraphRebuildStatusV1};
 pub(crate) use lifecycle::{git_remote_url, is_fts_only_corruption};
 
@@ -50,23 +49,11 @@ pub struct TraceDecay {
     configuration_runtime: Arc<crate::application::configuration::ProjectConfigurationRuntime>,
     project_root: PathBuf,
     store_layout: StoreLayout,
-    active_graph_layout: ActiveGraphLayout,
     open_options: TraceDecayOpenOptions,
     registry: LanguageRegistry,
     /// The active git branch (None if detached HEAD or not a git repo).
     active_branch: Option<String>,
-    /// The branch whose DB is actually being served (may differ from `active_branch` on fallback).
-    serving_branch: Option<String>,
-    /// Set when serving from a fallback (ancestor) DB instead of the exact branch.
-    fallback_warning: Option<String>,
     read_only: bool,
-    /// Memoized result of [`diagnostics::TraceDecay::db_path`]. All inputs
-    /// (`project_root`, `store_layout.data_root`, `serving_branch`) are
-    /// immutable for the lifetime of an instance — branch changes produce a
-    /// new `TraceDecay` rather than mutating an existing one (see
-    /// `sync_retained_worktree_branch`) — so the resolved path is safe to
-    /// cache for the instance's lifetime.
-    db_path_cache: OnceLock<PathBuf>,
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
@@ -237,12 +224,6 @@ impl TraceDecay {
             )
             .is_some_and(|current| pin.configuration().matches_current(&current))
     }
-}
-
-#[derive(Debug, Clone)]
-struct ActiveGraphLayout {
-    dirty_path: PathBuf,
-    sync_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Default)]

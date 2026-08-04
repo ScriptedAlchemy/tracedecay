@@ -23,8 +23,7 @@ use tracedecay_application::source_edit::{
 use tracedecay_application::{ApiMigrationApplyResultV1, ApiMigrationPlanV1};
 use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_usecases::tracedecay::{
-    BranchDiagnostics, EditDiagnosticRecord, GraphFuture, GraphRuntimePort, GraphValueFuture,
-    PlannedSourceEditFile,
+    EditDiagnosticRecord, GraphFuture, GraphRuntimePort, GraphValueFuture, PlannedSourceEditFile,
 };
 
 use crate::db::Database;
@@ -54,10 +53,6 @@ impl GraphRuntimePort for TraceDecay {
 
     fn is_read_only(&self) -> bool {
         TraceDecay::is_read_only(self)
-    }
-
-    fn branch_diagnostics(&self) -> BranchDiagnostics {
-        TraceDecay::branch_diagnostics(self)
     }
 
     fn get_node<'a>(&'a self, id: &'a str) -> GraphFuture<'a, Option<Node>> {

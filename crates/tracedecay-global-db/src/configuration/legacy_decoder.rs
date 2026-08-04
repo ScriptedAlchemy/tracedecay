@@ -18,9 +18,8 @@ use tracedecay_domain::configuration::{
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
     SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
     SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
@@ -257,14 +256,6 @@ pub fn decode_legacy_environment_overrides(
             "TRACEDECAY_SYNC_MAX_CONCURRENT_SYNCS" => Some((
                 SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
                 parse_legacy_usize(raw).map(ConfigurationValueV1::Unsigned),
-            )),
-            "TRACEDECAY_SYNC_BRANCH_GC_DAYS" => Some((
-                SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-                parse_legacy_u64(raw).map(ConfigurationValueV1::Unsigned),
-            )),
-            "TRACEDECAY_SYNC_ORPHAN_DB_GC_DAYS" => Some((
-                SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-                parse_legacy_u64(raw).map(ConfigurationValueV1::Unsigned),
             )),
             "TRACEDECAY_SYNC_AUTO_INIT" => Some((
                 SYNC_AUTO_INIT_SETTING_KEY,
@@ -507,22 +498,6 @@ fn decode_sync_fields(
         SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
         sync.get("max_concurrent_syncs"),
         decode_usize,
-    )?;
-    decode_config_field(
-        entries,
-        source_kind,
-        "sync.branch_gc_days",
-        SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-        sync.get("branch_gc_days"),
-        decode_unsigned,
-    )?;
-    decode_config_field(
-        entries,
-        source_kind,
-        "sync.orphan_db_gc_days",
-        SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-        sync.get("orphan_db_gc_days"),
-        decode_unsigned,
     )?;
     decode_config_field(
         entries,
@@ -794,8 +769,6 @@ fn is_known_sync_field(key: &str) -> bool {
             | "backstop_interval_mins"
             | "full_sync_escalation_files"
             | "max_concurrent_syncs"
-            | "branch_gc_days"
-            | "orphan_db_gc_days"
             | "auto_init"
             | "auto_track_pr_branches"
             | "auto_track_pr_poll_secs"

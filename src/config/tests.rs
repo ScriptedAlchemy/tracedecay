@@ -1192,14 +1192,6 @@ mod legacy_configuration_migration_input {
                 ConfigurationValueV1::Unsigned(sync.max_concurrent_syncs as u64),
             ),
             (
-                SettingKey::new("sync.branch_gc_days.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.branch_gc_days),
-            ),
-            (
-                SettingKey::new("sync.orphan_db_gc_days.v1").unwrap(),
-                ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
-            ),
-            (
                 SettingKey::new("sync.auto_init.v1").unwrap(),
                 ConfigurationValueV1::Boolean(sync.auto_init),
             ),
@@ -1227,6 +1219,18 @@ mod legacy_configuration_migration_input {
         let config = super::TraceDecayConfig::default();
         let values = legacy_values(&config);
         assert_eq!(values.len(), LEGACY_CONFIG_JSON_SETTING_KEYS_V1.len());
+
+        for retired_key in ["sync.branch_gc_days.v1", "sync.orphan_db_gc_days.v1"] {
+            let key = SettingKey::new(retired_key).unwrap();
+            assert!(
+                !values.contains_key(&key),
+                "branch-store retention must not materialize as final-V2 configuration"
+            );
+            assert!(
+                !LEGACY_CONFIG_JSON_SETTING_KEYS_V1.contains(&retired_key),
+                "retired branch-store retention must not remain a legacy migration input"
+            );
+        }
 
         for key in LEGACY_CONFIG_JSON_SETTING_KEYS_V1 {
             let key = SettingKey::new(*key).unwrap();
@@ -1305,6 +1309,35 @@ mod legacy_configuration_migration_input {
         let serialized = serde_json::to_string(&input).unwrap();
         assert!(!serialized.contains("/private/repo"));
         assert!(!serialized.contains("root_dir\""));
+    }
+
+    #[test]
+    fn retired_branch_store_inputs_are_quarantined() {
+        let config = decode_legacy_config_json(
+            r#"{"sync":{"branch_gc_days":14,"orphan_db_gc_days":7}}"#,
+            &target(),
+        )
+        .unwrap();
+        let environment = decode_legacy_environment_overrides(
+            &BTreeMap::from([
+                ("TRACEDECAY_SYNC_BRANCH_GC_DAYS".to_owned(), "14".to_owned()),
+                (
+                    "TRACEDECAY_SYNC_ORPHAN_DB_GC_DAYS".to_owned(),
+                    "7".to_owned(),
+                ),
+            ]),
+            &target(),
+        )
+        .unwrap();
+
+        for input in [&config, &environment] {
+            assert_eq!(input.entries.len(), 2);
+            assert!(input.entries.iter().all(|entry| {
+                entry.setting_key.is_none()
+                    && entry.quarantine_reason
+                        == Some(ConfigurationMigrationQuarantineReasonV1::UnknownKey)
+            }));
+        }
     }
 
     #[test]

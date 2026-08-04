@@ -18,8 +18,7 @@ use tracedecay_domain::configuration::{
     SEMANTIC_RUNTIME_SETTING_KEY, SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_INIT_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY, SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY, SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
+    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
     SYNC_READ_COOLDOWN_SECS_SETTING_KEY, SYNC_READ_REFRESH_SETTING_KEY,
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
@@ -41,7 +40,7 @@ pub(crate) mod legacy_decoder;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
-pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 2;
+pub const CONFIGURATION_REGISTRY_SCHEMA_REVISION: u16 = 3;
 
 #[derive(Debug, Error)]
 pub enum ConfigurationRegistryError {
@@ -331,8 +330,6 @@ struct LegacySyncDefaults {
     backstop_interval_mins: u64,
     full_sync_escalation_files: usize,
     max_concurrent_syncs: usize,
-    branch_gc_days: u64,
-    orphan_db_gc_days: u64,
     auto_init: bool,
     auto_track_pr_branches: bool,
     auto_track_pr_poll_secs: u64,
@@ -352,8 +349,6 @@ impl Default for LegacySyncDefaults {
             backstop_interval_mins: 15,
             full_sync_escalation_files: 500,
             max_concurrent_syncs: 2,
-            branch_gc_days: 14,
-            orphan_db_gc_days: 7,
             auto_init: true,
             auto_track_pr_branches: false,
             auto_track_pr_poll_secs: 300,
@@ -502,18 +497,6 @@ fn register_legacy_project_settings(
         (
             SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
             ConfigurationValueV1::Unsigned(sync.max_concurrent_syncs as u64),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.branch_gc_days),
-            SettingSensitivityV1::Public,
-            RestartRequirementV1::DaemonRestart,
-        ),
-        (
-            SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(sync.orphan_db_gc_days),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),

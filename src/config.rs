@@ -14,9 +14,8 @@ use tracedecay_domain::configuration::{
     INDEX_MAX_FILE_SIZE_SETTING_KEY, INDEX_TRACK_CALL_SITES_SETTING_KEY,
     SYNC_AUTO_INIT_SETTING_KEY, SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
     SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
+    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY, SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
+    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY, SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
     SYNC_READ_REFRESH_SETTING_KEY, SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
     SYNC_SESSION_START_SYNC_SETTING_KEY, SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY, SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingKey,
@@ -221,12 +220,6 @@ fn default_sync_full_sync_escalation_files() -> usize {
 }
 fn default_sync_max_concurrent_syncs() -> usize {
     2
-}
-fn default_sync_branch_gc_days() -> u64 {
-    14
-}
-fn default_sync_orphan_db_gc_days() -> u64 {
-    7
 }
 fn default_sync_auto_init() -> bool {
     true
@@ -458,12 +451,6 @@ pub struct SyncConfig {
     /// Daemon-wide cap on concurrent syncs.
     #[serde(default = "default_sync_max_concurrent_syncs")]
     pub max_concurrent_syncs: usize,
-    /// Grace period before a dead tracked-branch store is GC'd (days).
-    #[serde(default = "default_sync_branch_gc_days")]
-    pub branch_gc_days: u64,
-    /// Grace period before an orphan branch DB is GC'd (days).
-    #[serde(default = "default_sync_orphan_db_gc_days")]
-    pub orphan_db_gc_days: u64,
     /// Auto-initialise never-indexed repos on first contact.
     #[serde(default = "default_sync_auto_init")]
     pub auto_init: bool,
@@ -505,8 +492,6 @@ impl Default for SyncConfig {
             backstop_interval_mins: default_sync_backstop_interval_mins(),
             full_sync_escalation_files: default_sync_full_sync_escalation_files(),
             max_concurrent_syncs: default_sync_max_concurrent_syncs(),
-            branch_gc_days: default_sync_branch_gc_days(),
-            orphan_db_gc_days: default_sync_orphan_db_gc_days(),
             auto_init: default_sync_auto_init(),
             auto_track_pr_branches: default_sync_auto_track_pr_branches(),
             auto_track_pr_poll_secs: default_sync_auto_track_pr_poll_secs(),
@@ -576,12 +561,6 @@ impl SyncConfig {
         }
         if let Some(value) = env_parse("SYNC_MAX_CONCURRENT_SYNCS") {
             self.max_concurrent_syncs = value;
-        }
-        if let Some(value) = env_parse("SYNC_BRANCH_GC_DAYS") {
-            self.branch_gc_days = value;
-        }
-        if let Some(value) = env_parse("SYNC_ORPHAN_DB_GC_DAYS") {
-            self.orphan_db_gc_days = value;
         }
         if let Some(value) = env_bool("SYNC_AUTO_INIT") {
             self.auto_init = value;
@@ -1476,8 +1455,6 @@ pub fn runtime_config_from_snapshot(
                 SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
             )?,
             max_concurrent_syncs: required_usize(snapshot, SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY)?,
-            branch_gc_days: required_unsigned(snapshot, SYNC_BRANCH_GC_DAYS_SETTING_KEY)?,
-            orphan_db_gc_days: required_unsigned(snapshot, SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY)?,
             auto_init: required_bool(snapshot, SYNC_AUTO_INIT_SETTING_KEY)?,
             auto_track_pr_branches: required_bool(
                 snapshot,
@@ -1742,20 +1719,6 @@ fn direct_mutation_for_runtime_config_diff(
         SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
         ConfigurationValueV1::Unsigned(before.sync.max_concurrent_syncs as u64),
         ConfigurationValueV1::Unsigned(after.sync.max_concurrent_syncs as u64),
-    )?;
-    push_runtime_change(
-        &mut mutations,
-        project_id,
-        SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-        ConfigurationValueV1::Unsigned(before.sync.branch_gc_days),
-        ConfigurationValueV1::Unsigned(after.sync.branch_gc_days),
-    )?;
-    push_runtime_change(
-        &mut mutations,
-        project_id,
-        SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-        ConfigurationValueV1::Unsigned(before.sync.orphan_db_gc_days),
-        ConfigurationValueV1::Unsigned(after.sync.orphan_db_gc_days),
     )?;
     push_runtime_change(
         &mut mutations,
