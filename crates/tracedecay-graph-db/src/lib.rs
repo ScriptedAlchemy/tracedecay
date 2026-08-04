@@ -1,3 +1,4 @@
+mod backup;
 mod error;
 mod location;
 mod point_read;
@@ -8,6 +9,7 @@ mod state;
 mod traversal;
 mod vector;
 
+pub use backup::GraphBackupReceipt;
 pub use error::GraphDbError;
 pub use location::{GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphFormatVersion};
 pub use projection::{

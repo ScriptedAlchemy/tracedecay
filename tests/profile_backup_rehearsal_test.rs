@@ -43,10 +43,19 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
         "user-memory.db-shm",
         "enrollment.json",
         "config.toml",
-        "profile-identity.json",
     ] {
         fs::write(profile.join(name), format!("released fixture: {name}")).unwrap();
     }
+    fs::write(
+        profile.join("profile-identity.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "brain_id": "brain.released-copy-test",
+            "profile_id": "profile.released-copy-test",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     fs::create_dir(profile.join("migration-inventory")).unwrap();
     fs::write(
         profile.join("migration-inventory/released.json"),
@@ -317,7 +326,12 @@ fn released_copy_rehearsal_rejects_same_id_from_another_backup_root() {
     let foreign_fixture = seed_released_profile(&foreign_temp);
     fs::write(
         foreign_fixture.profile.join("profile-identity.json"),
-        b"foreign profile identity",
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "brain_id": "brain.foreign-rehearsal",
+            "profile_id": "profile.foreign-rehearsal",
+        }))
+        .unwrap(),
     )
     .unwrap();
     let foreign_backup = create_backup(&foreign_temp, &foreign_fixture);

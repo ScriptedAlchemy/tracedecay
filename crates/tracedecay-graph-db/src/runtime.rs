@@ -33,6 +33,7 @@ struct Inner {
     // The database write lock prevents readers from observing a cache/database skew.
     state: RwLock<StateCache>,
     durability: GraphDurability,
+    expected_format: crate::GraphFormatVersion,
     closed: AtomicBool,
     poisoned: AtomicBool,
 }
@@ -159,6 +160,7 @@ impl GraphDb {
                 database: RwLock::new(Some(database)),
                 state: RwLock::new(state),
                 durability: validated.durability,
+                expected_format: validated.expected_format,
                 closed: AtomicBool::new(false),
                 poisoned: AtomicBool::new(false),
             }),
@@ -178,6 +180,15 @@ impl GraphDb {
             database: Arc::new(snapshot),
             state: Arc::new(state),
         })
+    }
+
+    pub fn backup_full(
+        &self,
+        destination: &std::path::Path,
+    ) -> Result<crate::GraphBackupReceipt, GraphDbError> {
+        let guard = self.write_guard()?;
+        let database = guard.as_ref().ok_or(GraphDbError::Closed)?;
+        crate::backup::create_full(database, self.inner.expected_format, destination)
     }
 
     pub fn apply(&self, mut batch: GraphWriteBatch) -> Result<GraphCommit, GraphDbError> {
