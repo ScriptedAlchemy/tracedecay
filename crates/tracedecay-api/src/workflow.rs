@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 use std::future::Future;
 use std::pin::Pin;
+use std::str::FromStr;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{DefaultBodyLimit, Extension, Path, State};
@@ -106,11 +107,20 @@ impl WorkflowOperation {
         }
     }
 
-    fn parse(segment: &str) -> Option<Self> {
+    pub fn from_route_segment(segment: &str) -> Option<Self> {
         Self::ALL
             .iter()
             .copied()
             .find(|operation| operation.route_segment() == segment)
+    }
+}
+
+impl FromStr for WorkflowOperation {
+    type Err = String;
+
+    fn from_str(segment: &str) -> Result<Self, Self::Err> {
+        Self::from_route_segment(segment)
+            .ok_or_else(|| format!("unknown Workflow operation route segment: {segment}"))
     }
 }
 
@@ -158,7 +168,7 @@ async fn operation<O>(
 where
     O: WorkflowApplicationOwner,
 {
-    let Some(operation) = WorkflowOperation::parse(&segment) else {
+    let Some(operation) = WorkflowOperation::from_route_segment(&segment) else {
         return application_problem_response(adapter_problem(
             request_id,
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
