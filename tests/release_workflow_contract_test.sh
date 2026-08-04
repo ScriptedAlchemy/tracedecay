@@ -36,6 +36,8 @@ if config.get("release-type") != "simple":
     raise SystemExit("release automation must use package-neutral tag versioning")
 if config.get("include-v-in-tag") is not True:
     raise SystemExit("GitHub release tags must use the v prefix")
+if config.get("include-component-in-tag") is not False:
+    raise SystemExit("GitHub release tags must not include the package component")
 
 root_release = config.get("packages", {}).get(".")
 if root_release is None:
