@@ -1,24 +1,16 @@
 ---
-description: Compare or search Git refs through the project-wide code graph without switching the checkout.
-argument-hint: "[ref | base head]"
+description: Compare or search another git branch's code graph without switching your checkout.
+argument-hint: "[branch | base head]"
 ---
 
-# Compare Git refs
+# Compare branches
 
-Interpret `$ARGUMENTS` as one target ref versus the current worktree, or
-`<base> <head>` for an exact comparison.
+Interpret `$ARGUMENTS` as either a single target branch to compare against the current branch, or "<base> <head>" to diff two branches. If absent, start with `tracedecay_branch_list` and ask what to search or compare.
 
-1. Resolve refs and available indexed generations through the daemon's Git/code
-   application operations.
-2. Search an exact ref snapshot with `tracedecay_branch_search`.
-3. Compare exact snapshots with `tracedecay_branch_diff`.
-4. Preserve commit, worktree, generation, freshness, and coverage provenance.
+1. What's tracked → `tracedecay_branch_list`.
+2. Search another branch → `tracedecay_branch_search` (`branch`, `query`).
+3. Compare branches → `tracedecay_branch_diff` (`base`, `head`, optional `file`, `kind`) — added / removed / changed symbols, read-only and never touching your checkout.
 
-All graph generations live in the canonical project Grafeo store. Do not create
-or request a branch database, run `branch add`, silently serve an ancestor, or
-switch the user's checkout. If the requested snapshot is absent or indexing,
-return that typed state and the explicit indexing/refresh operation the user
-may choose.
+Branch tracking is opt-in per branch. If a target branch isn't tracked, tell the user to run `tracedecay branch add <branch>` in the terminal first. A branch-fallback `WARNING` prefix means results came from the nearest tracked ancestor — surface that to the user.
 
-Output the hits or added/removed/changed symbols with their exact snapshot
-provenance. Report any `tracedecay_metrics:` observation.
+Output: the cross-branch search hits or the added/removed/changed symbol lists, with any branch-fallback warning surfaced. If any result includes a `tracedecay_metrics:` line, report the savings.
