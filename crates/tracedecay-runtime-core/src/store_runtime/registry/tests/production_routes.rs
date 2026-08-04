@@ -1,4 +1,4 @@
-//! Behavioral S8 production route coverage: profile/project/session shards
+//! Behavioral production route coverage: profile/project/session shards
 //! mount through [`LifecycleShardRuntimePublisher`] and serve health over the
 //! reserved reader data port.
 
@@ -65,7 +65,7 @@ impl StoreRuntimeResolver for FileResolver {
             .unwrap()
             .get(call)
             .cloned()
-            .unwrap_or_else(|| PathBuf::from("/missing-s8-route.db"));
+            .unwrap_or_else(|| PathBuf::from("/missing-runtime-route.db"));
         let locator = VerifiedStoreLocatorV1::new(
             key.shard_id.clone(),
             key.incarnation,
@@ -79,11 +79,11 @@ fn health_request(
     binding: &tracedecay_store::StoreRuntimeBindingV1,
 ) -> (RuntimeReadRequestV1, Probe) {
     let cancellation = RuntimeCancellationIdentityV1 {
-        cancellation_id: RuntimeCancellationIdV1::new("cancel.s8-production-health").unwrap(),
+        cancellation_id: RuntimeCancellationIdV1::new("cancel.runtime-production-health").unwrap(),
         generation: 1,
     };
     let deadline = RuntimeDeadlineV1 {
-        deadline_id: RuntimeDeadlineIdV1::new("deadline.s8-production-health").unwrap(),
+        deadline_id: RuntimeDeadlineIdV1::new("deadline.runtime-production-health").unwrap(),
     };
     let control = RuntimeRequestControlV1 {
         requested_at: UtcMicros(1),
@@ -131,7 +131,7 @@ async fn assert_health_route(handle: &StoreRuntimeHandle) {
             handle.binding().shard_id.scope,
             StoreShardScopeV1::Code { .. }
         ),
-        "S8 production routes must not mount code shards"
+        "repository routes must not mount code-shard executors"
     );
     let snapshot = handle.physical_snapshot();
     assert!(snapshot.healthy, "mounted runtime must report healthy");
@@ -178,8 +178,8 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
         ProfileAuthorityPinResult::Pinned(pin) => pin,
         other => panic!("profile was not pinned: {other:?}"),
     };
-    let project = open_published(&registry, project_request("project.s8-route", &pin)).await;
-    let sessions = open_published(&registry, sessions_request("project.s8-route", &pin)).await;
+    let project = open_published(&registry, project_request("project.runtime-route", &pin)).await;
+    let sessions = open_published(&registry, sessions_request("project.runtime-route", &pin)).await;
 
     assert_health_route(&profile).await;
     assert_health_route(&project).await;

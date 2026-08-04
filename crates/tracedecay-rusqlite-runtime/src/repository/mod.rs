@@ -7,7 +7,7 @@
 //! [`ConcreteRepositoryReadExecutor`]; see
 //! `crates/tracedecay-runtime-core/src/store_runtime/registry/ports.rs`. The
 //! executors still contain no
-//! locator, opener, migration installer, registry binding, cutover selector, or
+//! locator, opener, migration installer, registry binding, or
 //! generic SQL surface — the attachment supplies all of those.
 //!
 //! Which operations are live is a separate question from whether the executors
@@ -25,11 +25,9 @@
 //! - [`RepositoryWritePayloadV1::DiagnosticSupersession`] and the
 //!   `Stale`/`SupersessionChain` diagnostic reads, whose live engine is still
 //!   `src/diagnostics_store.rs`;
-//! - `PreCutoverRepositoryAttachmentBundle`, an inert bundle used only by the
-//!   cutover acceptance suite.
 //!
-//! `Code` and `Effects` operations are owned by the graph shard and the writer
-//! ledger; both dispatch arms here reject them explicitly.
+//! `Code` operations cross the graph-db boundary, while `Effects` operations
+//! are owned by the writer ledger; both dispatch arms here reject them.
 
 mod attachment;
 mod configuration;
@@ -37,7 +35,6 @@ mod diagnostics;
 pub(crate) mod evidence_assembly;
 mod external_source;
 mod fact;
-mod fixtures;
 mod observation;
 mod project;
 mod retrieval_anchor;
@@ -62,7 +59,6 @@ pub use evidence_assembly::EvidenceAssemblyExecutor;
 pub use evidence_assembly::tests::write_fixture_for_project;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
-pub use fixtures::{AdapterParityFixtureV1, PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1};
 pub use observation::ObservationExecutor;
 pub use project::ProjectExecutor;
 pub use retrieval_anchor::RetrievalAnchorExecutor;
@@ -184,20 +180,5 @@ impl ConcreteRepositoryReadExecutor {
                 "repository attachment does not own effects reads".to_owned(),
             )),
         }
-    }
-}
-
-/// One inert attachment bundle for the later registry-mount stage.
-///
-/// Constructing this value does not open a database or bind any authority.
-#[derive(Default)]
-pub struct PreCutoverRepositoryAttachmentBundle {
-    pub write: ConcreteRepositoryWriteExecutor,
-    pub read: ConcreteRepositoryReadExecutor,
-}
-
-impl PreCutoverRepositoryAttachmentBundle {
-    pub fn new() -> Self {
-        Self::default()
     }
 }

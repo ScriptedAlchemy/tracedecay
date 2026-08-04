@@ -3,21 +3,16 @@ use std::time::Duration;
 use tracedecay_rusqlite_runtime::{
     WriterState, reader::ReaderPool, runtime::SqliteDoctorHealthLane,
 };
-use tracedecay_store::{AdmissionConfigV1, StoreRuntimeBindingV1};
+use tracedecay_store::AdmissionConfigV1;
 
-use crate::cutover_support::{
-    CountExecutor, Probe, TestDatabase, fixture, read_request, reader_locator,
+use crate::runtime_test_support::{
+    CountExecutor, Probe, TestDatabase, maintenance_binding, read_request, reader_locator,
 };
 
 #[test]
 fn checkpoint_health_exposes_wal_pressure_while_a_snapshot_blocks_progress() {
-    let telemetry = fixture().s6.maintenance_telemetry;
-    let binding = StoreRuntimeBindingV1::new(
-        telemetry.shard_id,
-        telemetry.incarnation,
-        telemetry.authority_epoch,
-    );
-    let database = TestDatabase::new("s6-checkpoint.sqlite3");
+    let binding = maintenance_binding();
+    let database = TestDatabase::new("runtime-checkpoint.sqlite3");
     let mut writer = database.connect();
     writer
         .execute_batch(
@@ -26,22 +21,22 @@ fn checkpoint_health_exposes_wal_pressure_while_a_snapshot_blocks_progress() {
              CREATE TABLE acceptance_rows(value INTEGER NOT NULL);
              INSERT INTO acceptance_rows(value) VALUES (1);",
         )
-        .expect("seed S6 checkpoint authority");
+        .expect("seed checkpoint authority");
     let pool = ReaderPool::start(
         reader_locator(&binding, &database.path),
         AdmissionConfigV1::default().readers,
         CountExecutor,
     )
-    .expect("start S6 reader pool");
+    .expect("start reader pool");
     let request = read_request(&binding, "foreground");
     let probe = Probe::for_read(&request);
     let mut reader = pool
         .acquire(&request, &probe, Duration::ZERO)
-        .expect("acquire S6 snapshot blocker");
-    let mut snapshot = reader.begin_snapshot().expect("begin S6 pinned snapshot");
+        .expect("acquire snapshot blocker");
+    let mut snapshot = reader.begin_snapshot().expect("begin pinned snapshot");
     snapshot
         .execute(request, &probe)
-        .expect("establish S6 snapshot");
+        .expect("establish snapshot");
 
     let transaction = writer.transaction().expect("begin WAL pressure write");
     for value in 0..4096 {

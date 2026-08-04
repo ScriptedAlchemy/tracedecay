@@ -55,7 +55,7 @@ pub trait PhysicalRuntimeAttachment: Send + Sync {
     /// by the registry after a successful drain has been verified.
     fn close_and_join(&self) -> Result<(), String>;
 
-    /// Transitional S11 SQL facade bound to this already-verified attachment.
+    /// Exact SQL channel bound to this already-verified attachment.
     ///
     /// Implementations must return a handle over their owned writer/readers;
     /// they must never reopen the locator path.

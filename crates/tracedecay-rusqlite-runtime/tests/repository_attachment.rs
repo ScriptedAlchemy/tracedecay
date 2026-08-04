@@ -9,9 +9,7 @@ use tracedecay_rusqlite_runtime::repository::{
     ConcreteRepositoryWriteExecutor, RepositoryAttachmentStartError,
     RepositoryPhysicalAttachmentFactory,
 };
-use tracedecay_rusqlite_runtime::{
-    OpenedDatabaseFileError, StorageOperationExecutor, graph::GraphPhysicalAttachmentStartError,
-};
+use tracedecay_rusqlite_runtime::{OpenedDatabaseFileError, StorageOperationExecutor};
 use tracedecay_store::{
     AdmissionConfigV1, ConsistencyModeV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
     OperationPriorityV1, ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1,
@@ -131,12 +129,10 @@ fn health_request(binding: StoreRuntimeBindingV1) -> (RuntimeReadRequestV1, Prob
 }
 
 #[test]
-fn attachment_identity_errors_preserve_the_public_source() {
+fn repository_attachment_identity_error_preserves_the_public_source() {
     let source = OpenedDatabaseFileError::Open;
-    let graph = GraphPhysicalAttachmentStartError::Identity(source);
     let repository = RepositoryAttachmentStartError::Identity(source);
 
-    assert!(graph.source().is_some());
     assert!(repository.source().is_some());
 }
 
