@@ -99,8 +99,7 @@ impl Database {
     ) -> Result<()> {
         // Pull every Contains edge out: build target_id -> parent_id map, then
         // filter the surviving edges list. When a node has multiple incoming
-        // Contains rows (extractor anomaly), the first one wins — matching
-        // the migration's `LIMIT 1` backfill behavior.
+        // Contains rows (extractor anomaly), the first one wins deterministically.
         let mut parent_map: std::collections::HashMap<&str, &str> =
             std::collections::HashMap::new();
         let mut surviving_edges: Vec<&Edge> = Vec::with_capacity(edges.len());

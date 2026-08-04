@@ -13,7 +13,6 @@ mod maintenance;
 mod memory_connection;
 mod memory_v2;
 mod metadata;
-pub mod migrations;
 mod nodes;
 #[cfg(test)]
 mod oversized_scan_tests;
@@ -21,6 +20,7 @@ mod redundancy_pairs;
 mod retrieval_anchor_authority;
 pub mod retrieval_anchor_schema;
 mod rows;
+pub mod schema;
 mod search;
 mod sql;
 mod stats;
@@ -54,11 +54,6 @@ pub use file_identity::{SqliteFileIdentityError, sqlite_generation_identity};
 pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
-pub(crate) use memory_v2::MemoryV2LegacyPurgeReceipt;
-pub use memory_v2::{
-    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
-    list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
-};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,

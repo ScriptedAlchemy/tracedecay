@@ -1,15 +1,10 @@
-//! Owner-scoped V2 fact-lineage schema installers.
-//!
-//! Re-exports below preserve every `schema::` path relied on by the rest of
-//! `memory_v2`.
+//! Owner-scoped final-V2 fact-lineage schema installers.
 
-mod baseline;
-mod compatibility;
+mod feedback;
+mod install;
+#[cfg(test)]
 mod introspection;
-mod proposals;
-mod upgrades;
 
-pub(in crate::db) use baseline::create_schema;
+pub(in crate::db) use install::create_schema;
 #[cfg(test)]
 pub(in crate::db::memory_v2) use introspection::{table_exists, table_has_column};
-pub(in crate::db) use upgrades::{install_v22_fresh_schema, install_v23_fresh_schema};

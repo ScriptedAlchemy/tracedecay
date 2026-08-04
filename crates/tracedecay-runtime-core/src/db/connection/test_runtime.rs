@@ -306,7 +306,7 @@ impl Database {
                 }
             }
         };
-        let _schema_initialized = runtime.schema_migrated();
+        let _schema_initialized = runtime.schema_installed();
         let access = if mode == TestDatabaseRuntimeMode::ReadOnly {
             DatabaseAccessMode::ReadOnly
         } else {
@@ -315,7 +315,7 @@ impl Database {
         let database = Self::publish_runtime(runtime, access).await?;
         // Writable GRAPH test runtimes assert the store already carries the
         // schema this binary creates; there is no ladder to step, so nothing
-        // is ever reported as migrated. Registered (global/session) shards are
+        // is ever reported as schema-installed. Registered shards are
         // a different schema family: they carry their own installer and sit at
         // user_version 0 by design, so the graph identity check must not run
         // against them.
@@ -324,7 +324,7 @@ impl Database {
             TestDatabaseRuntimeMode::Initialize | TestDatabaseRuntimeMode::Existing
                 if graph_shard =>
             {
-                crate::db::migrations::ensure_schema_current(&database).await?;
+                crate::db::schema::ensure_schema_current(&database).await?;
             }
             _ => {}
         }

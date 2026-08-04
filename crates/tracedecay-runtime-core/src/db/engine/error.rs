@@ -76,7 +76,7 @@ impl From<tracedecay_rusqlite_runtime::exact_sql::ExactSqlError> for Error {
             ExactSqlError::TransactionClosed => Self::TransactionClosed,
             ExactSqlError::TransactionExpired => Self::TransactionExpired,
             ExactSqlError::RequestLimitExceeded => {
-                Self::InvalidOperation("SQL request exceeds migration limits".to_owned())
+                Self::InvalidOperation("SQL request exceeds execution limits".to_owned())
             }
             ExactSqlError::AuthorityDenied(message) => Self::InvalidOperation(message),
             ExactSqlError::Sqlite {

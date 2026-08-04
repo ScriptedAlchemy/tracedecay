@@ -190,9 +190,7 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
 }
 
-/// The creation DDL installs the whole final shape in one transaction: graph,
-/// holographic memory, memory V2 lineage, the V22/V23 compatibility
-/// projections, evidence assembly, and external sources.
+/// The creation DDL installs the whole final shape in one transaction.
 #[tokio::test]
 async fn fresh_creation_installs_every_stage_of_the_final_shape() {
     let (conn, _dir) = create_schema_db().await;
@@ -212,19 +210,11 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         "memory_v2_assertions",
         "memory_v2_lineage_events",
         "memory_v2_current_facts",
-        "memory_v2_proposals",
-        "memory_v2_proposal_transitions",
-        "memory_v2_proposal_current",
-        "memory_v2_fact_relations",
     ] {
         assert!(table_exists(&conn, table).await, "missing table {table}");
     }
 
-    // Columns the retired v20/v21 upgrades used to add are born with the table.
-    assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
-    assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
-    assert!(column_exists(&conn, "memory_v2_proposal_transitions", "origin").await);
-    assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
+    // Final-shape columns are born with their tables.
     for column in [
         "retrieval_count",
         "access_count",
@@ -242,16 +232,5 @@ async fn fresh_creation_installs_every_stage_of_the_final_shape() {
         );
     }
 
-    // The proposal projection is born at its V22 shape.
-    assert_eq!(
-        scalar_i64(
-            &conn,
-            "SELECT COUNT(*) FROM sqlite_master
-             WHERE type = 'trigger'
-               AND name = 'memory_v2_proposal_transitions_no_new_applying'",
-        )
-        .await,
-        1
-    );
     assert_eq!(get_user_version(&conn).await, SCHEMA_VERSION);
 }

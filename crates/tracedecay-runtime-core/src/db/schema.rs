@@ -267,8 +267,6 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
 
     create_holographic_memory_schema(conn, "create_schema").await?;
     super::memory_v2::create_schema(conn, "create_schema").await?;
-    super::memory_v2::install_v22_fresh_schema(conn, "create_schema").await?;
-    super::memory_v2::install_v23_fresh_schema(conn, "create_schema").await?;
     super::evidence_assembly::install_evidence_assembly_schema(conn, "create_schema").await?;
     super::external_source::install_external_source_schema(conn, "create_schema").await?;
     set_version(conn, SCHEMA_VERSION).await?;
@@ -305,7 +303,7 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
     TraceDecayError::Database {
         message: format!(
             "database schema v{current} is not the v{SCHEMA_VERSION} shape this binary creates; \
-             this store was created by an incompatible binary and cannot be upgraded in place. \
+             this store was created by an incompatible binary and cannot be opened in place. \
              Remove the store directory and let this binary create a fresh one."
         ),
         operation: "ensure_schema_current".to_string(),
@@ -315,7 +313,7 @@ fn unsupported_schema_version(current: u32) -> TraceDecayError {
 /// Verifies an opened store carries the schema this binary creates, creating it
 /// when the file is still empty.
 ///
-/// This binary has no upgrade ladder: a store stamped with any other version is
+/// This binary has no schema ladder: a store stamped with any other version is
 /// refused with the fresh-start remedy rather than stepped forward.
 pub async fn ensure_schema_current(database: &crate::db::Database) -> Result<()> {
     let writer = database.writer_connection("ensure schema current").await?;
@@ -331,19 +329,6 @@ pub(crate) async fn ensure_schema_current_connection(conn: &Connection) -> Resul
         return create_schema_connection(conn).await;
     }
     Err(unsupported_schema_version(current))
-}
-
-/// Compatibility alias for `crates/tracedecay-migrate`, which still names the
-/// schema door `migrate`. It performs no migration: see
-/// [`ensure_schema_current`].
-pub async fn migrate(database: &crate::db::Database) -> Result<()> {
-    ensure_schema_current(database).await
-}
-
-/// Connection-level compatibility alias. See [`migrate`].
-#[cfg(any(test, feature = "test-helpers"))]
-pub async fn migrate_connection(conn: &Connection) -> Result<()> {
-    ensure_schema_current_connection(conn).await
 }
 
 async fn create_memory_fact_relations_schema(conn: &impl Executor, operation: &str) -> Result<()> {
@@ -414,7 +399,7 @@ const MEMORY_OPLOG_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS memory_oplog (
     CREATE INDEX IF NOT EXISTS idx_memory_oplog_ts ON memory_oplog(ts);";
 
 // ---------------------------------------------------------------------------
-// Migration V1: initial schema
+// Final schema installed for a fresh store.
 // ---------------------------------------------------------------------------
 
 async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str) -> Result<()> {
@@ -475,19 +460,6 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
             updated_at INTEGER NOT NULL DEFAULT 0
         );
 
-        CREATE TABLE IF NOT EXISTS memory_feedback_events (
-            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fact_id INTEGER NOT NULL,
-            action TEXT NOT NULL CHECK (action IN ('helpful', 'unhelpful')),
-            trust_delta REAL NOT NULL,
-            old_trust REAL NOT NULL,
-            new_trust REAL NOT NULL,
-            created_at INTEGER NOT NULL DEFAULT 0,
-            source TEXT NOT NULL DEFAULT 'mcp',
-            note TEXT,
-            FOREIGN KEY (fact_id) REFERENCES memory_facts(fact_id) ON DELETE CASCADE
-        );
-
         CREATE INDEX IF NOT EXISTS idx_memory_facts_category
             ON memory_facts(category);
         CREATE INDEX IF NOT EXISTS idx_memory_facts_updated_at
@@ -502,10 +474,6 @@ async fn create_holographic_memory_schema(conn: &impl Executor, operation: &str)
             ON memory_fact_entities(entity_id);
         CREATE INDEX IF NOT EXISTS idx_memory_banks_updated_at
             ON memory_banks(updated_at);
-        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_fact_id
-            ON memory_feedback_events(fact_id);
-        CREATE INDEX IF NOT EXISTS idx_memory_feedback_events_created_at
-            ON memory_feedback_events(created_at);
 
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
             content, tags,
