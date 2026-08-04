@@ -14,6 +14,7 @@ use super::*;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectServerKey {
     pub(super) owner: StoreOwnerKey,
+    pub(super) project_root: PathBuf,
     pub(super) scope_prefix: Option<String>,
 }
 
@@ -27,8 +28,9 @@ pub(super) struct StoreOwnerKey {
 }
 
 /// A client route known before any project database is opened. This is the
-/// cache/singleflight key; [`ProjectServerKey`] remains the post-open physical
-/// owner key so linked aliases and branch DBs still converge correctly.
+/// cache/singleflight key; [`ProjectServerKey`] remains the post-open server
+/// key so filesystem aliases converge while distinct linked worktrees retain
+/// exact root-bound servers over one shared [`StoreOwnerKey`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct ProjectRouteKey {
     pub(super) profile_root: PathBuf,
@@ -504,6 +506,7 @@ impl ProjectServerKey {
                 &layout.data_root,
                 &cg.db_path(),
             )?,
+            project_root: authority::canonical_identity_path(cg.project_root())?,
             scope_prefix: handshake.scope_prefix.clone(),
         })
     }
