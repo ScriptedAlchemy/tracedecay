@@ -22,7 +22,6 @@
 pub mod consolidate;
 pub mod durability;
 pub mod final_v2;
-pub mod hermes;
 pub mod inventory;
 pub mod memory_cutover;
 pub mod profile_backup;
