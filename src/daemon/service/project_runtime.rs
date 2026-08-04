@@ -17,9 +17,9 @@ use crate::application::primitives::Pr12PrimitiveProjectRuntime;
 
 use super::invocation::{
     DaemonAdvisoryCycleInvocationOwner, DaemonFeedbackInvocationOwner, DaemonLspInvocationOwner,
-    Pr13HookOrchestrationPortV1, RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime,
-    RegisteredFeedbackRuntime, RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1,
-    UnavailableFeedbackCycleRuntimeV1,
+    RegisteredAdvisoryHookOrchestrationRuntimeV1, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 mod reaper;
@@ -116,7 +116,7 @@ pub(crate) struct ProjectRuntime {
     work: Option<RegisteredWorkRuntime>,
     lsp_owner: Option<DaemonLspInvocationOwner>,
     advisory: Option<Arc<dyn Any + Send + Sync>>,
-    advisory_hook_orchestrator: Option<Arc<dyn Pr13HookOrchestrationPortV1>>,
+    advisory_hook_orchestrator: Option<RegisteredAdvisoryHookOrchestrationRuntimeV1>,
     semantic: Option<crate::semantic_code::DaemonSemanticRuntimeHandleV1>,
     reservations: Vec<TypeId>,
     #[cfg(test)]
@@ -199,7 +199,7 @@ project_runtime_components!(
     RegisteredWorkRuntime => work,
     DaemonLspInvocationOwner => lsp_owner,
     Arc<dyn Any + Send + Sync> => advisory,
-    Arc<dyn Pr13HookOrchestrationPortV1> => advisory_hook_orchestrator,
+    RegisteredAdvisoryHookOrchestrationRuntimeV1 => advisory_hook_orchestrator,
     crate::semantic_code::DaemonSemanticRuntimeHandleV1 => semantic,
 );
 

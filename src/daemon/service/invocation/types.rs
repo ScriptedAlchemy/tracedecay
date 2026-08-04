@@ -4,30 +4,31 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Pr13HookOrchestrationAdmissionV1 {
+pub(crate) enum AdvisoryHookOrchestrationAdmissionV1 {
     Enqueued,
+    Warming,
     Backpressured,
     UnsupportedTrigger,
     Unavailable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pr13HookOrchestrationTriggerV1 {
+pub(crate) enum AdvisoryHookOrchestrationTriggerV1 {
     SavedEdit,
     Stop,
     Explicit,
 }
 
 #[derive(Clone)]
-pub(crate) struct Pr13HookOrchestrationRequestV1 {
+pub(crate) struct AdvisoryHookOrchestrationRequestV1 {
     pub hook: AdmittedContextScoutHookV1,
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
-    pub trigger: Pr13HookOrchestrationTriggerV1,
+    pub trigger: AdvisoryHookOrchestrationTriggerV1,
     pub(super) completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 }
 
-impl Pr13HookOrchestrationRequestV1 {
+impl AdvisoryHookOrchestrationRequestV1 {
     pub(in crate::daemon) fn from_envelope(
         envelope: HookEventEnvelopeV2,
         binding: &HookScopeBindingV1,
@@ -37,13 +38,13 @@ impl Pr13HookOrchestrationRequestV1 {
     ) -> Option<Self> {
         let hook = AdmittedContextScoutHookV1::new(envelope, binding)?;
         let trigger = if explicit {
-            Pr13HookOrchestrationTriggerV1::Explicit
+            AdvisoryHookOrchestrationTriggerV1::Explicit
         } else {
             match &hook.envelope().event {
-                HookEventV2::SavedEdit { .. } => Pr13HookOrchestrationTriggerV1::SavedEdit,
+                HookEventV2::SavedEdit { .. } => AdvisoryHookOrchestrationTriggerV1::SavedEdit,
                 HookEventV2::SessionBoundary {
                     boundary: HookBoundaryV1::End | HookBoundaryV1::TurnComplete,
-                } => Pr13HookOrchestrationTriggerV1::Stop,
+                } => AdvisoryHookOrchestrationTriggerV1::Stop,
                 _ => return None,
             }
         };
@@ -60,84 +61,385 @@ impl Pr13HookOrchestrationRequestV1 {
 /// Process-local bridge from an authenticated Hook V2 callback to the
 /// project-open advisory owner. Implementations must return before provider,
 /// retrieval, or model work begins.
-pub(crate) trait Pr13HookOrchestrationPortV1: Send + Sync {
-    fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1;
+pub(crate) trait AdvisoryHookOrchestrationPortV1: Send + Sync {
+    fn admit(
+        &self,
+        request: AdvisoryHookOrchestrationRequestV1,
+    ) -> AdvisoryHookOrchestrationAdmissionV1;
 }
 
-type Pr13HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type Pr13HookOrchestrationWorkV1 =
-    dyn Fn(Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationFutureV1 + Send + Sync;
+type AdvisoryHookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+type AdvisoryHookOrchestrationWorkV1 =
+    dyn Fn(AdvisoryHookOrchestrationRequestV1) -> AdvisoryHookOrchestrationFutureV1 + Send + Sync;
+type AdvisoryHookOrchestrationKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type AdvisoryHookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
+type AdvisoryHookOrchestrationInFlightV1 =
+    StdMutex<BTreeMap<AdvisoryHookOrchestrationKeyV1, Vec<AdvisoryHookOrchestrationCompletionV1>>>;
+pub(in crate::daemon::service) const MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS: usize = 32;
 
-pub(crate) struct BoundedPr13HookOrchestratorV1 {
+pub(crate) struct BoundedAdvisoryHookOrchestratorV1 {
     permits: Arc<Semaphore>,
-    work: Arc<Pr13HookOrchestrationWorkV1>,
+    work: Arc<AdvisoryHookOrchestrationWorkV1>,
+    in_flight: Arc<AdvisoryHookOrchestrationInFlightV1>,
+    cancellation: crate::application::context::CancellationToken,
 }
 
-impl BoundedPr13HookOrchestratorV1 {
+impl BoundedAdvisoryHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(Pr13HookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        F: Fn(AdvisoryHookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
-        let work: Arc<Pr13HookOrchestrationWorkV1> =
+        let work: Arc<AdvisoryHookOrchestrationWorkV1> =
             Arc::new(move |request| Box::pin(work(request)));
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
+                in_flight: Arc::new(StdMutex::new(BTreeMap::new())),
+                cancellation: crate::application::context::CancellationToken::new(),
             })
         })
     }
 }
 
-impl Pr13HookOrchestrationPortV1 for BoundedPr13HookOrchestratorV1 {
-    fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1 {
-        let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-            return Pr13HookOrchestrationAdmissionV1::Backpressured;
+impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
+    fn admit(
+        &self,
+        mut request: AdvisoryHookOrchestrationRequestV1,
+    ) -> AdvisoryHookOrchestrationAdmissionV1 {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+        };
+        let envelope = request.hook.envelope();
+        let key = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let completion = request.completion.take();
+        let permit = {
+            let Ok(mut in_flight) = self.in_flight.lock() else {
+                return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+            };
+            if let Some(completions) = in_flight.get_mut(&key) {
+                if let Some(completion) = completion {
+                    if completions.len() >= MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS {
+                        return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+                    }
+                    completions.push(completion);
+                }
+                return AdvisoryHookOrchestrationAdmissionV1::Enqueued;
+            }
+            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+            };
+            in_flight.insert(key, completion.into_iter().collect());
+            permit
         };
         let work = Arc::clone(&self.work);
-        let completion = request.completion.clone();
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
-            return Pr13HookOrchestrationAdmissionV1::Unavailable;
-        };
+        let in_flight = Arc::clone(&self.in_flight);
+        let cancellation = self.cancellation.clone();
         handle.spawn(async move {
-            (work)(request).await;
-            if let Some(completion) = completion {
-                completion();
+            let completed = tokio::select! {
+                () = cancellation.cancelled() => false,
+                () = (work)(request) => true,
+            };
+            let completions = in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+            match completions {
+                Some(completions) if completed => {
+                    for completion in completions {
+                        completion();
+                    }
+                }
+                Some(_) => {}
+                None => tracing::error!(
+                    event = "advisory_hook_orchestration_completion_missing",
+                    "daemon-owned advisory work finished without its in-flight admission"
+                ),
             }
             drop(permit);
         });
-        Pr13HookOrchestrationAdmissionV1::Enqueued
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
     }
 }
 
-type Pr13HookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
-type Pr13HookOrchestrationRegistry =
-    StdMutex<BTreeMap<Pr13HookOrchestrationRegistryKey, Weak<dyn Pr13HookOrchestrationPortV1>>>;
+impl Drop for BoundedAdvisoryHookOrchestratorV1 {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
 
-pub(super) fn pr13_hook_orchestration_registry() -> &'static Pr13HookOrchestrationRegistry {
-    static REGISTRY: OnceLock<Pr13HookOrchestrationRegistry> = OnceLock::new();
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AdvisoryRuntimeUnavailableReasonV1 {
+    Cancelled,
+    DeadlineExceeded,
+    RegistrationFailed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum AdvisoryRuntimeReadinessV1 {
+    Warming {
+        started_at: UtcMicros,
+    },
+    Ready {
+        started_at: UtcMicros,
+        finished_at: UtcMicros,
+    },
+    Unavailable {
+        started_at: UtcMicros,
+        finished_at: UtcMicros,
+        reason: AdvisoryRuntimeUnavailableReasonV1,
+    },
+}
+
+enum DeferredAdvisoryHookOrchestratorStateV1 {
+    Warming,
+    Ready {
+        runtime: Arc<dyn AdvisoryHookOrchestrationPortV1>,
+        finished_at: UtcMicros,
+    },
+    Unavailable {
+        reason: AdvisoryRuntimeUnavailableReasonV1,
+        finished_at: UtcMicros,
+    },
+}
+
+/// Retained post-open gateway for one project's advisory and Scout work.
+///
+/// The gateway is published before provider/model setup begins, so hook
+/// admission distinguishes a live warming owner from a terminally unavailable
+/// one. Setup has one claim and project-runtime retirement cancels that claim.
+pub(crate) struct DeferredAdvisoryHookOrchestratorV1 {
+    started_at: UtcMicros,
+    state: StdMutex<DeferredAdvisoryHookOrchestratorStateV1>,
+    setup_claimed: AtomicBool,
+    cancellation: crate::application::context::CancellationToken,
+}
+
+impl DeferredAdvisoryHookOrchestratorV1 {
+    pub(crate) fn new(started_at: UtcMicros) -> Arc<Self> {
+        Arc::new(Self {
+            started_at,
+            state: StdMutex::new(DeferredAdvisoryHookOrchestratorStateV1::Warming),
+            setup_claimed: AtomicBool::new(false),
+            cancellation: crate::application::context::CancellationToken::new(),
+        })
+    }
+
+    pub(crate) fn claim_setup(&self) -> bool {
+        if self.cancellation.is_cancelled()
+            || !matches!(
+                self.state.lock().as_deref(),
+                Ok(DeferredAdvisoryHookOrchestratorStateV1::Warming)
+            )
+        {
+            return false;
+        }
+        self.setup_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn cancellation(&self) -> crate::application::context::CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub(crate) fn readiness(&self) -> AdvisoryRuntimeReadinessV1 {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*state {
+            DeferredAdvisoryHookOrchestratorStateV1::Warming => {
+                AdvisoryRuntimeReadinessV1::Warming {
+                    started_at: self.started_at,
+                }
+            }
+            DeferredAdvisoryHookOrchestratorStateV1::Ready { finished_at, .. } => {
+                AdvisoryRuntimeReadinessV1::Ready {
+                    started_at: self.started_at,
+                    finished_at: *finished_at,
+                }
+            }
+            DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+                reason,
+                finished_at,
+            } => AdvisoryRuntimeReadinessV1::Unavailable {
+                started_at: self.started_at,
+                finished_at: *finished_at,
+                reason: *reason,
+            },
+        }
+    }
+
+    pub(crate) fn mark_ready(
+        &self,
+        runtime: Arc<dyn AdvisoryHookOrchestrationPortV1>,
+        finished_at: UtcMicros,
+    ) -> bool {
+        if self.cancellation.is_cancelled() {
+            self.mark_unavailable(AdvisoryRuntimeUnavailableReasonV1::Cancelled, finished_at);
+            return false;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, DeferredAdvisoryHookOrchestratorStateV1::Warming) {
+            return false;
+        }
+        *state = DeferredAdvisoryHookOrchestratorStateV1::Ready {
+            runtime,
+            finished_at,
+        };
+        true
+    }
+
+    pub(crate) fn mark_unavailable(
+        &self,
+        reason: AdvisoryRuntimeUnavailableReasonV1,
+        finished_at: UtcMicros,
+    ) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(*state, DeferredAdvisoryHookOrchestratorStateV1::Warming) {
+            return false;
+        }
+        *state = DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+            reason,
+            finished_at,
+        };
+        true
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+        let finished_at = now_micros();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            *state,
+            DeferredAdvisoryHookOrchestratorStateV1::Warming
+                | DeferredAdvisoryHookOrchestratorStateV1::Ready { .. }
+        ) {
+            *state = DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+                reason: AdvisoryRuntimeUnavailableReasonV1::Cancelled,
+                finished_at,
+            };
+        }
+    }
+}
+
+impl AdvisoryHookOrchestrationPortV1 for DeferredAdvisoryHookOrchestratorV1 {
+    fn admit(
+        &self,
+        request: AdvisoryHookOrchestrationRequestV1,
+    ) -> AdvisoryHookOrchestrationAdmissionV1 {
+        match self.readiness() {
+            AdvisoryRuntimeReadinessV1::Warming { .. } => {
+                return AdvisoryHookOrchestrationAdmissionV1::Warming;
+            }
+            AdvisoryRuntimeReadinessV1::Unavailable { .. } => {
+                return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+            }
+            AdvisoryRuntimeReadinessV1::Ready { .. } => {}
+        }
+        let runtime = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match &*state {
+                DeferredAdvisoryHookOrchestratorStateV1::Ready { runtime, .. } => {
+                    Arc::clone(runtime)
+                }
+                DeferredAdvisoryHookOrchestratorStateV1::Warming
+                | DeferredAdvisoryHookOrchestratorStateV1::Unavailable { .. } => {
+                    return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+                }
+            }
+        };
+        runtime.admit(request)
+    }
+}
+
+pub(in crate::daemon::service) struct RegisteredAdvisoryHookOrchestrationRuntimeV1 {
+    project_id: [u8; 16],
+    worktree_id: [u8; 16],
+    runtime: Arc<DeferredAdvisoryHookOrchestratorV1>,
+}
+
+impl RegisteredAdvisoryHookOrchestrationRuntimeV1 {
+    pub(in crate::daemon::service) fn new(
+        project_id: [u8; 16],
+        worktree_id: [u8; 16],
+        runtime: Arc<DeferredAdvisoryHookOrchestratorV1>,
+    ) -> Self {
+        Self {
+            project_id,
+            worktree_id,
+            runtime,
+        }
+    }
+
+    pub(in crate::daemon::service) fn matches(
+        &self,
+        project_id: [u8; 16],
+        worktree_id: [u8; 16],
+    ) -> bool {
+        self.project_id == project_id && self.worktree_id == worktree_id
+    }
+
+    pub(in crate::daemon::service) fn runtime(&self) -> Arc<DeferredAdvisoryHookOrchestratorV1> {
+        Arc::clone(&self.runtime)
+    }
+}
+
+impl Drop for RegisteredAdvisoryHookOrchestrationRuntimeV1 {
+    fn drop(&mut self) {
+        self.runtime.cancel();
+    }
+}
+
+type AdvisoryHookOrchestrationRegistryKey = ([u8; 16], [u8; 16]);
+type AdvisoryHookOrchestrationRegistry = StdMutex<
+    BTreeMap<AdvisoryHookOrchestrationRegistryKey, Weak<dyn AdvisoryHookOrchestrationPortV1>>,
+>;
+
+pub(super) fn advisory_hook_orchestration_registry() -> &'static AdvisoryHookOrchestrationRegistry {
+    static REGISTRY: OnceLock<AdvisoryHookOrchestrationRegistry> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
-pub(crate) fn admit_registered_pr13_hook_orchestration(
+pub(crate) fn admit_registered_advisory_hook_orchestration(
     envelope: HookEventEnvelopeV2,
     binding: HookScopeBindingV1,
     lifecycle: Option<ContextScoutLifecycleAddressV1>,
     configuration_revision: u64,
     explicit: bool,
     completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
-) -> Pr13HookOrchestrationAdmissionV1 {
-    let Some(mut request) = Pr13HookOrchestrationRequestV1::from_envelope(
+) -> AdvisoryHookOrchestrationAdmissionV1 {
+    let Some(mut request) = AdvisoryHookOrchestrationRequestV1::from_envelope(
         envelope,
         &binding,
         lifecycle,
         configuration_revision,
         explicit,
     ) else {
-        return Pr13HookOrchestrationAdmissionV1::UnsupportedTrigger;
+        return AdvisoryHookOrchestrationAdmissionV1::UnsupportedTrigger;
     };
-    let Some(runtime) = pr13_hook_orchestration_registry()
+    let Some(runtime) = advisory_hook_orchestration_registry()
         .lock()
         .ok()
         .and_then(|registry| {
@@ -150,7 +452,7 @@ pub(crate) fn admit_registered_pr13_hook_orchestration(
         })
         .and_then(|runtime| runtime.upgrade())
     else {
-        return Pr13HookOrchestrationAdmissionV1::Unavailable;
+        return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
     };
     request.completion = completion;
     runtime.admit(request)

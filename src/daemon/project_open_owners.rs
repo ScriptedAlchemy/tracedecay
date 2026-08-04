@@ -1,4 +1,4 @@
-//! Project-open registration for PR11–PR13 production owners.
+//! Project-open registration for feedback, advisory, and Context Scout production owners.
 //!
 //! After Scout bootstrap and successful cache publication, the daemon mounts
 //! concrete feedback, cycle, primitive, LSP, advisory, and Hook/Scout host-
@@ -45,12 +45,13 @@ use tracedecay_lsp::{
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
-    BoundedPr13HookOrchestratorV1, DaemonAdvisoryCycleInvocationFuture,
-    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
-    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrationError,
-    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, advisory_cycle_invocation_result,
+    AdvisoryHookOrchestrationPortV1, AdvisoryHookOrchestrationRequestV1,
+    AdvisoryHookOrchestrationTriggerV1, BoundedAdvisoryHookOrchestratorV1,
+    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
+    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
+    DaemonAdvisoryRuntimeRegistrationError, DaemonContextScoutRuntimeRegistrationError,
+    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationState,
+    DaemonPrimitiveRuntimeRegistrationError, advisory_cycle_invocation_result,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -1308,23 +1309,31 @@ pub(super) async fn register_project_open_dependent_owners(
     );
 
     if let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle {
-        // P3: the advisory owner (Context Scout config install, GitHub provider
-        // resolution — potentially network — CI stores, and code-index-coupled
-        // anchors) is NOT required for the project to be servable: when the
-        // feedback cycle above resolves to `None`, advisory is skipped entirely
-        // and the project still fully publishes and answers queries. Awaiting it
-        // on the open critical path coupled open to the starved reconcile lane
-        // and to network stalls (observed 924 s). Register it as a background
-        // upgrade so open returns as soon as the graph is mounted; the advisory
-        // registrars are idempotent (AlreadyRegistered) and self-contained.
+        // Network-backed advisory setup is optional for serving and once
+        // blocked project open for 924 seconds. The retained deferred gateway
+        // coalesces and cancels this background upgrade.
         let advisory_invocation = invocation.clone();
         let advisory_project_root = project_root.to_path_buf();
         let advisory_session_db = Arc::clone(&session_db);
         let advisory_graph = Arc::clone(&graph);
         let advisory_scope = scope.clone();
         let advisory_scout_configuration = scout_configuration.clone();
-        tokio::spawn(async move {
-            let outcome = register_production_advisory_owner(
+        let (hook_project_id, hook_worktree_id) =
+            crate::hooks::hook_v2_scope_locators(&advisory_scope);
+        let deferred = invocation
+            .advisory_runtime_registrar()
+            .register_deferred_hook_orchestrator(
+                advisory_project_root.clone(),
+                hook_project_id,
+                hook_worktree_id,
+            )
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open deferred advisory registration failed: {error}"),
+            })?;
+        let setup_project_root = advisory_project_root.clone();
+        let setup = async move {
+            register_production_advisory_owner(
                 &advisory_invocation,
                 &advisory_project_root,
                 database,
@@ -1341,22 +1350,19 @@ pub(super) async fn register_project_open_dependent_owners(
                 admitted_root_uri,
                 indexed_files,
             )
-            .await;
-            match outcome {
-                Ok(_) => tracing::info!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_registered",
-                    deferred = true,
-                ),
-                Err(error) => tracing::warn!(
-                    event = "project_open_owner_phase",
-                    project = %advisory_project_root.display(),
-                    phase = "advisory_owner_deferred_failed",
-                    error = %error,
-                ),
-            }
-        });
+            .await
+        };
+        if !crate::daemon::project_open_advisory::schedule_bounded_post_open_advisory_setup(
+            setup_project_root,
+            deferred,
+            setup,
+        ) {
+            tracing::info!(
+                event = "project_open_owner_phase",
+                project = %project_root.display(),
+                phase = "advisory_owner_setup_joined",
+            );
+        }
         tracing::info!(
             event = "project_open_owner_phase",
             project = %project_root.display(),
@@ -1719,7 +1725,7 @@ async fn register_production_advisory_owner(
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
     root_uri: String,
     indexed_files: Vec<String>,
-) -> Result<Option<()>> {
+) -> Result<Arc<dyn AdvisoryHookOrchestrationPortV1>> {
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&scout_configuration)
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
@@ -1771,7 +1777,7 @@ async fn register_production_advisory_owner(
             })?,
     ) as _;
     let ci_code_anchors = Arc::new(
-        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+        ProjectCiCodeAnchorStoreV1::new(
             graph.clone(),
             feedback_scope.clone(),
             Arc::new(invocation.code_index_schedulers.clone()),
@@ -1862,7 +1868,12 @@ async fn register_production_advisory_owner(
         .await
     {
         Ok(registration) => registration,
-        Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered) => return Ok(Some(())),
+        Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered) => {
+            return Err(TraceDecayError::Config {
+                message: "project-open advisory runtime already registered without its retained deferred owner"
+                    .to_owned(),
+            });
+        }
         Err(error) => {
             return Err(TraceDecayError::Config {
                 message: format!("project-open advisory runtime registration failed: {error}"),
@@ -1897,9 +1908,9 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory cycle registration failed: {error}"),
         })?;
-    let registered_root = project_root.to_path_buf();
-    let work_root = registered_root.clone();
-    let work = move |request: Pr13HookOrchestrationRequestV1| {
+    let work_root = project_root.to_path_buf();
+    let work_scout_configuration = scout_configuration.clone();
+    let work = move |request: AdvisoryHookOrchestrationRequestV1| {
         let registration = Arc::clone(&registration);
         let feedback_lsp_input = Arc::clone(&feedback_lsp_input);
         let graph = Arc::clone(&scout_claim_graph);
@@ -1912,8 +1923,9 @@ async fn register_production_advisory_owner(
         let project_root = work_root.clone();
         let root_uri = root_uri.clone();
         let indexed_files = indexed_files.clone();
+        let scout_configuration = work_scout_configuration.clone();
         async move {
-            run_production_pr13_hook_cycle(
+            run_daemon_owned_advisory_work(
                 request,
                 registration,
                 feedback_lsp_input,
@@ -1927,32 +1939,22 @@ async fn register_production_advisory_owner(
                 project_root,
                 root_uri,
                 indexed_files,
+                scout_configuration,
             )
             .await;
         }
     };
     let orchestrator =
-        BoundedPr13HookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
-            message: "project-open PR13 Hook orchestration capacity is invalid".to_owned(),
+        BoundedAdvisoryHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
+            message: "project-open advisory Hook orchestration capacity is invalid".to_owned(),
         })?;
-    invocation
-        .advisory_runtime_registrar()
-        .register_hook_orchestrator(
-            registered_root,
-            hook_project_id,
-            hook_worktree_id,
-            orchestrator,
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open PR13 Hook orchestration failed: {error}"),
-        })?;
-    Ok(Some(()))
+    let orchestrator: Arc<dyn AdvisoryHookOrchestrationPortV1> = orchestrator;
+    Ok(orchestrator)
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_production_pr13_hook_cycle(
-    request: Pr13HookOrchestrationRequestV1,
+async fn run_daemon_owned_advisory_work(
+    request: AdvisoryHookOrchestrationRequestV1,
     registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
     feedback_lsp_input: Pr12FeedbackCycleLspInput,
     graph: Arc<crate::tracedecay::TraceDecay>,
@@ -1965,6 +1967,7 @@ async fn run_production_pr13_hook_cycle(
     project_root: std::path::PathBuf,
     root_uri: String,
     indexed_files: Vec<String>,
+    scout_configuration: ContextScoutConfigurationPinV1,
 ) {
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &project_root,
@@ -1975,8 +1978,8 @@ async fn run_production_pr13_hook_cycle(
         return;
     };
     let diagnostic_trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
-        Pr13HookOrchestrationTriggerV1::Stop | Pr13HookOrchestrationTriggerV1::Explicit => {
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit => DiagnosticTrigger::DocumentSave,
+        AdvisoryHookOrchestrationTriggerV1::Stop | AdvisoryHookOrchestrationTriggerV1::Explicit => {
             DiagnosticTrigger::ExplicitDocumentDiagnostics
         }
     };
@@ -1997,7 +2000,7 @@ async fn run_production_pr13_hook_cycle(
             return;
         }
     };
-    if request.trigger == Pr13HookOrchestrationTriggerV1::Stop {
+    if request.trigger == AdvisoryHookOrchestrationTriggerV1::Stop {
         invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
         let Ok(validated) =
             Pr12FeedbackCycleInvocation::new(invocation.context, invocation.request)
@@ -2081,33 +2084,7 @@ async fn run_production_pr13_hook_cycle(
         );
         return;
     }
-    let Ok(pinned_configuration) = graph.configuration_runtime().client().current().await else {
-        return;
-    };
-    let current_configuration = crate::application::configuration::ConfigurationCurrentStateV1 {
-        revision_id: pinned_configuration.revision_id,
-        snapshot: pinned_configuration.snapshot,
-    };
-    let Some(scout_configuration) =
-        ContextScoutConfigurationPinV1::from_current(&current_configuration)
-    else {
-        return;
-    };
-    let Some(profile_root) = graph.open_options().profile_root else {
-        return;
-    };
     if scout_configuration.configuration_digest() != &feedback_configuration_digest {
-        return;
-    }
-    if install_project_open_context_scout_configuration(
-        scout_owner.as_ref(),
-        scout_configuration.clone(),
-        &profile_root,
-        &graph.store_layout().dashboard_root,
-    )
-    .await
-    .is_err()
-    {
         return;
     }
     let Some(lifecycle) = request.lifecycle else {
@@ -2138,9 +2115,9 @@ async fn run_production_pr13_hook_cycle(
         return;
     };
     let trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
-        Pr13HookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
-        Pr13HookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
+        AdvisoryHookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
+        AdvisoryHookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
     };
     let recent = scout_owner.recent_exact(canonical.address, 32).await.ok();
     let has_recent_delivery = recent
@@ -2207,14 +2184,14 @@ async fn run_production_pr13_hook_cycle(
 
 fn observe_hook_feedback_cycle_terminal(
     observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &AdvisoryHookOrchestrationRequestV1,
     outcome: Plan26FeedbackOutcomeV1,
 ) {
     let envelope = request.hook.envelope();
     let trigger = match request.trigger {
-        Pr13HookOrchestrationTriggerV1::SavedEdit => "saved_edit",
-        Pr13HookOrchestrationTriggerV1::Stop => "stop",
-        Pr13HookOrchestrationTriggerV1::Explicit => "explicit",
+        AdvisoryHookOrchestrationTriggerV1::SavedEdit => "saved_edit",
+        AdvisoryHookOrchestrationTriggerV1::Stop => "stop",
+        AdvisoryHookOrchestrationTriggerV1::Explicit => "explicit",
     };
     let Ok(subject) = canonical_sha256(&(
         "tracedecay.feedback.accepted-hook-cycle.v1",
@@ -2243,7 +2220,7 @@ fn observe_hook_feedback_cycle_terminal(
 fn hook_feedback_document_uri_or_observe(
     project_root: &Path,
     indexed_files: &[String],
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &AdvisoryHookOrchestrationRequestV1,
     observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
 ) -> Option<String> {
     let document_uri = hook_feedback_document_uri(project_root, indexed_files, request);
@@ -2264,7 +2241,7 @@ fn hook_feedback_document_uri_or_observe(
 fn hook_feedback_document_uri(
     project_root: &Path,
     indexed_files: &[String],
-    request: &Pr13HookOrchestrationRequestV1,
+    request: &AdvisoryHookOrchestrationRequestV1,
 ) -> Option<String> {
     let logical_path = match &request.hook.envelope().event {
         tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } => {
@@ -3043,7 +3020,7 @@ mod tests {
         }
     }
 
-    fn saved_edit_hook_request(file_id: [u8; 16]) -> Pr13HookOrchestrationRequestV1 {
+    fn saved_edit_hook_request(file_id: [u8; 16]) -> AdvisoryHookOrchestrationRequestV1 {
         let capabilities = vec![tracedecay_hooks::HookCapabilityV1 {
             family: tracedecay_hooks::HookEventFamily::SavedEdit,
             support: tracedecay_hooks::stock_event_support(
@@ -3060,7 +3037,7 @@ mod tests {
             binding_token: [6; 32],
             capabilities,
         };
-        Pr13HookOrchestrationRequestV1::from_envelope(
+        AdvisoryHookOrchestrationRequestV1::from_envelope(
             tracedecay_hooks::HookEventEnvelopeV2 {
                 schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
                 event_id: [1; 16],

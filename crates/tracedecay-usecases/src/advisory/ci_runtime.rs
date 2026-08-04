@@ -331,6 +331,9 @@ where
                 CiFailureLocalizationStateV1::Unavailable => {
                     return CiFailureLocalizationPortOutcomeV1::Unavailable;
                 }
+                CiFailureLocalizationStateV1::Stale if read.record.is_none() => {
+                    return CiFailureLocalizationPortOutcomeV1::Stale;
+                }
                 CiFailureLocalizationStateV1::Failed => {
                     return match read.source_degradation {
                         Some(CiFailureSourceDegradationV1::RateLimited(checkpoint)) => {
@@ -338,6 +341,9 @@ where
                         }
                         Some(CiFailureSourceDegradationV1::Failed(cause)) => {
                             CiFailureLocalizationPortOutcomeV1::Failed(cause)
+                        }
+                        Some(CiFailureSourceDegradationV1::Stale) => {
+                            CiFailureLocalizationPortOutcomeV1::Unavailable
                         }
                         None => CiFailureLocalizationPortOutcomeV1::Failed(
                             CiFailureSourceFailureV1::Schema,

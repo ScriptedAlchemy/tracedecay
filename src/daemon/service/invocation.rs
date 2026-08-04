@@ -225,9 +225,11 @@ pub(crate) use primitive::{
 };
 pub(in crate::daemon) use types::observe_accepted_feedback_cycle_terminal;
 pub(crate) use types::{
-    BoundedPr13HookOrchestratorV1, DaemonLspInvocationOwner, Pr13HookOrchestrationAdmissionV1,
-    Pr13HookOrchestrationPortV1, Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
-    admit_registered_pr13_hook_orchestration,
+    AdvisoryHookOrchestrationAdmissionV1, AdvisoryHookOrchestrationPortV1,
+    AdvisoryHookOrchestrationRequestV1, AdvisoryHookOrchestrationTriggerV1,
+    AdvisoryRuntimeReadinessV1, AdvisoryRuntimeUnavailableReasonV1,
+    BoundedAdvisoryHookOrchestratorV1, DaemonLspInvocationOwner,
+    DeferredAdvisoryHookOrchestratorV1, admit_registered_advisory_hook_orchestration,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant
 // "visible to `daemon::service`" (their home's actual parent); nesting them
@@ -242,8 +244,9 @@ pub(crate) use registrars::{
     DoctorConfigurationOutcomeV1,
 };
 pub(in crate::daemon::service) use types::{
-    RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,
-    RegisteredWorkRuntime, SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
+    RegisteredAdvisoryHookOrchestrationRuntimeV1, RegisteredCallableCodeRuntime,
+    RegisteredConfigurationRuntime, RegisteredFeedbackRuntime, RegisteredWorkRuntime,
+    SwitchableFeedbackCycleRuntimeV1, UnavailableFeedbackCycleRuntimeV1,
 };
 
 #[derive(Clone)]

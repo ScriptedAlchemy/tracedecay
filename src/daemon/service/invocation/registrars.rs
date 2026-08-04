@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod advisory_background;
+
 #[derive(Clone)]
 pub(super) struct DaemonConfigurationGrantAuthority {
     actor: ActorId,
@@ -1103,56 +1105,5 @@ impl DaemonAdvisoryRuntimeRegistrar {
             hook_delivery_port,
         )
         .await
-    }
-
-    pub(crate) async fn register_hook_orchestrator(
-        &self,
-        project_root: PathBuf,
-        project_id: [u8; 16],
-        worktree_id: [u8; 16],
-        runtime: Arc<dyn Pr13HookOrchestrationPortV1>,
-    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
-        if project_id == [0; 16]
-            || worktree_id == [0; 16]
-            || !self
-                .service
-                .project_runtimes
-                .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-                .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
-        }
-        self.service
-            .project_runtimes
-            .register(project_root.clone(), Arc::clone(&runtime))
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        let runtime_weak: Weak<dyn Pr13HookOrchestrationPortV1> = Arc::downgrade(&runtime);
-        let registered = match pr13_hook_orchestration_registry().lock() {
-            Ok(mut registry) => {
-                registry.retain(|_, runtime| runtime.strong_count() > 0);
-                let key = (project_id, worktree_id);
-                if registry
-                    .get(&key)
-                    .and_then(Weak::upgrade)
-                    .is_some_and(|existing| !Arc::ptr_eq(&existing, &runtime))
-                {
-                    false
-                } else {
-                    registry.insert(key, runtime_weak);
-                    true
-                }
-            }
-            Err(_) => false,
-        };
-        if registered {
-            Ok(())
-        } else {
-            self.service
-                .project_runtimes
-                .withdraw::<Arc<dyn Pr13HookOrchestrationPortV1>>(&project_root)
-                .await;
-            Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
-        }
     }
 }
