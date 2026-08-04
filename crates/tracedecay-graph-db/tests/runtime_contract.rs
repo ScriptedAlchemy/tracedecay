@@ -918,6 +918,23 @@ fn vector_upsert_clears_prior_dimension_and_metric_keys() {
         })
         .unwrap();
     assert!(stale.matches.is_empty());
+    let current_index = GraphVectorIndexRequest {
+        namespace: namespace(),
+        projection: projection("vectors"),
+        property: GraphPropertyName::new("embedding").unwrap(),
+        dimension: 2,
+        metric: VectorMetric::Euclidean,
+        cancellation: live(),
+    };
+    assert_eq!(
+        db.vector_index_status(current_index.clone()).unwrap(),
+        GraphVectorIndexStatus::Missing,
+        "a new vector shape must wait for the retained index owner"
+    );
+    assert_eq!(
+        db.ensure_vector_index(current_index).unwrap(),
+        GraphVectorIndexStatus::Available
+    );
     let current = db
         .vector_search(vector_request(VectorMetric::Euclidean, vec![1.0, 0.0]))
         .unwrap();
@@ -1183,6 +1200,69 @@ fn large_vector_corpus_reopens_without_synchronous_index_rebuild() {
             .unwrap(),
         GraphVectorIndexStatus::Missing,
         "GraphDb admission must not synchronously rebuild a corpus index"
+    );
+}
+
+#[test]
+fn vector_write_after_reopen_leaves_index_activation_to_background_owner() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("background-vector-index.grafeo");
+    let db = GraphDb::open(persistent_options(path.clone())).unwrap();
+    db.apply(batch(
+        "vectors",
+        "g1",
+        "w1",
+        vec![GraphMutation::UpsertEntity(vector_entity(
+            "before",
+            vec![1.0, 0.0],
+            VectorMetric::Cosine,
+        ))],
+    ))
+    .unwrap();
+    db.close().unwrap();
+
+    let reopened = GraphDb::open(persistent_options(path)).unwrap();
+    let index = GraphVectorIndexRequest {
+        namespace: namespace(),
+        projection: projection("vectors"),
+        property: GraphPropertyName::new("embedding").unwrap(),
+        dimension: 2,
+        metric: VectorMetric::Cosine,
+        cancellation: live(),
+    };
+    assert_eq!(
+        reopened.vector_index_status(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Missing
+    );
+    reopened
+        .apply(batch(
+            "vectors",
+            "g2",
+            "w2",
+            vec![GraphMutation::UpsertEntity(vector_entity(
+                "after",
+                vec![0.0, 1.0],
+                VectorMetric::Cosine,
+            ))],
+        ))
+        .unwrap();
+    assert_eq!(
+        reopened.vector_index_status(index.clone()).unwrap(),
+        GraphVectorIndexStatus::Missing,
+        "ordinary writes must not synchronously rebuild a missing corpus index"
+    );
+    assert_eq!(
+        reopened.ensure_vector_index(index).unwrap(),
+        GraphVectorIndexStatus::Available
+    );
+    assert_eq!(
+        reopened
+            .vector_search(vector_request(VectorMetric::Cosine, vec![0.0, 1.0]))
+            .unwrap()
+            .matches[0]
+            .entity
+            .as_str(),
+        "after"
     );
 }
 

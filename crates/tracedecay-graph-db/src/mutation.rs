@@ -13,7 +13,7 @@ use crate::schema::{
     relation_locator_labels, relation_properties, relation_type_for_kind, stable_key,
 };
 use crate::state::{
-    StateCache, StoredEntity, StoredRelation, latest_projection, load_entity, load_relation,
+    FormatState, StoredEntity, StoredRelation, latest_projection, load_entity, load_relation,
     relations_for_entity,
 };
 use crate::{
@@ -26,7 +26,7 @@ type RelationChange = Option<(GraphProjectionId, GraphEntityId, GraphEntityId)>;
 
 pub(crate) fn apply(
     database: &GrafeoDB,
-    state: &mut StateCache,
+    state: &mut FormatState,
     batch: GraphWriteBatch,
     digest: String,
     publication_record: Option<(GraphIdempotencyKey, String)>,
@@ -78,7 +78,7 @@ pub(crate) fn apply(
 fn apply_in_transaction(
     database: &GrafeoDB,
     session: &Session,
-    state: &StateCache,
+    state: &FormatState,
     batch: &GraphWriteBatch,
     commit: &GraphCommit,
     previous_projection: Option<grafeo_common::types::NodeId>,
