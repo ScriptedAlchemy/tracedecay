@@ -282,8 +282,6 @@ mod project_open_orchestration;
 mod project_routing;
 mod project_server_lifecycle;
 use project_open_orchestration::ensure_registered_project_route;
-#[cfg(not(unix))]
-use project_open_orchestration::shutdown_portable_project_open_tasks;
 #[cfg(any(not(unix), test))]
 use project_open_orchestration::{
     portable_cached_project_open_failure, portable_cached_project_server,

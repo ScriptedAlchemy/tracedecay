@@ -82,22 +82,8 @@ impl CodexAppServerCancellation {
     }
 }
 
-#[cfg_attr(
-    windows,
-    allow(
-        dead_code,
-        reason = "Windows daemon shutdown does not use this guard yet"
-    )
-)]
 pub struct CodexAppServerShutdownGuard;
 
-#[cfg_attr(
-    windows,
-    allow(
-        dead_code,
-        reason = "Windows daemon shutdown does not use this guard yet"
-    )
-)]
 pub fn begin_codex_app_server_shutdown() -> CodexAppServerShutdownGuard {
     let process_groups = {
         let mut active = active_codex_children()

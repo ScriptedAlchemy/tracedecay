@@ -180,6 +180,10 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     ];
     let endpoint_cleanup = authority.cleanup_owned_endpoint();
     let server_store_administration = store_administration.clone();
+    // Keep auxiliary process creation blocked until every scheduler and client
+    // task is drained or abandoned. Otherwise an app-server call can respawn
+    // after the first child tree is terminated but before daemon exit.
+    let _codex_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
     let shutdown = shutdown_orchestration::coordinate_daemon_shutdown(
         &lifecycle,
         shutdown_deadline,
