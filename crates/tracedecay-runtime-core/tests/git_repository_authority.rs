@@ -229,6 +229,34 @@ fn authority_observes_dirty_files_without_sync() {
 }
 
 #[test]
+fn authority_honors_repository_included_ignore_configuration() {
+    let fixture = Fixture::init("sha1");
+    fixture.write("README.md", "initial\n");
+    fixture.commit("initial");
+
+    let config_dir = tempfile::tempdir().unwrap();
+    let excludes = config_dir.path().join("ignored");
+    std::fs::write(&excludes, "from-included-config.txt\n").unwrap();
+    let config = config_dir.path().join("gitconfig");
+    std::fs::write(
+        &config,
+        format!("[core]\n\texcludesFile = {}\n", excludes.display()),
+    )
+    .unwrap();
+    fixture.git(&["config", "include.path", config.to_str().unwrap()]);
+    fixture.write("from-included-config.txt", "ignored\n");
+
+    let status = GitRepositoryAuthority::discover(fixture.path())
+        .unwrap()
+        .status()
+        .unwrap();
+    assert!(status.entries.iter().any(|entry| matches!(
+        entry,
+        GitStatusEntryV1::Ignored { path } if path == "from-included-config.txt"
+    )));
+}
+
+#[test]
 fn authority_keeps_linked_worktree_common_identity_and_exact_head() {
     let fixture = Fixture::init("sha1");
     fixture.write("README.md", "main\n");
