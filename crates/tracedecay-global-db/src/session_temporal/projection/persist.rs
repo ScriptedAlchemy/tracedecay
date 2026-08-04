@@ -1143,52 +1143,6 @@ pub(super) const fn assertion_kind_for_relation(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) async fn require_edge_json(
-    conn: &impl Executor,
-    sql: &str,
-    batch: &SessionTemporalProjectionBatchV1,
-    left: &str,
-    right: &str,
-    expected: &str,
-    edge: &str,
-) -> SessionStoreResult<()> {
-    let mut rows = conn
-        .query(
-            sql,
-            params![
-                batch.session_id().as_str(),
-                generation_i64(batch.generation(), PERSIST_OPERATION)?,
-                left,
-                right
-            ],
-        )
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    let actual: String = rows
-        .next()
-        .await
-        .map_err(|error| storage(PERSIST_OPERATION, error))?
-        .ok_or_else(|| {
-            storage_message(
-                PERSIST_OPERATION,
-                format!("{edge} insert was ignored without an existing row"),
-            )
-        })?
-        .get(0)
-        .map_err(|error| storage(PERSIST_OPERATION, error))?;
-    if serde_json::from_str::<Value>(&actual).map_err(|error| storage(PERSIST_OPERATION, error))?
-        != serde_json::from_str::<Value>(expected)
-            .map_err(|error| storage(PERSIST_OPERATION, error))?
-    {
-        return Err(storage_message(
-            PERSIST_OPERATION,
-            format!("{edge} conflicts with an existing immutable row"),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn rebuild_current_occurrences(
     conn: &impl Executor,
     batch: &SessionTemporalProjectionBatchV1,

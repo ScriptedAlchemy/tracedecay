@@ -331,7 +331,7 @@ fn stale_closure(
         if depth > MAX_LINEAGE_DEPTH {
             return Err(lineage_limit(conflict_id, "lineage_depth_exceeded"));
         }
-        if !expanded.insert(node.clone()) {
+        if !expanded.insert(node) {
             continue;
         }
         if expanded.len() > MAX_LINEAGE_NODES {
