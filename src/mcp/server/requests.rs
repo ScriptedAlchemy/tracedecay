@@ -1710,7 +1710,9 @@ impl McpServer {
     }
 
     fn message_search_worker_is_unavailable(&self, tool_name: &str, arguments: &Value) -> bool {
-        if tool_name != "tracedecay_message_search" {
+        if tool_name != "tracedecay_message_search"
+            || arguments.get("catch_up").and_then(Value::as_bool) != Some(true)
+        {
             return false;
         }
         let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");

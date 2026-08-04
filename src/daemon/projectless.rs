@@ -346,13 +346,6 @@ async fn projectless_user_lcm_tools_call_response(
             Arc::clone(&user_session_db),
         )
         .await;
-    if tool_name == "tracedecay_message_search" {
-        // Joining retained temporal projection is part of reopening the mounted
-        // profile store. It does not ingest provider history or widen scope.
-        let _ = refresh_wake
-            .wake_and_wait_until_idle(std::time::Duration::from_secs(5))
-            .await;
-    }
     let retrieval_calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let retrieval_service = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
         .and_then(|root| root.with_profile_runtime_shard(profile_identity))
