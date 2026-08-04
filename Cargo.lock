@@ -5849,8 +5849,10 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tracedecay-application",
  "tracedecay-code-extraction",
  "tracedecay-domain",
+ "tracedecay-graph-db",
 ]
 
 [[package]]
@@ -6032,9 +6034,6 @@ name = "tracedecay-query"
 version = "0.1.0"
 dependencies = [
  "fst",
- "grafeo-adapters",
- "grafeo-common",
- "grafeo-core",
  "hex",
  "hmac 0.13.0",
  "roaring",
@@ -6042,6 +6041,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "static_assertions",
+ "tempfile",
  "thiserror",
  "tracedecay-application",
  "tracedecay-code-extraction",
