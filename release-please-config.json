@@ -14,9 +14,8 @@
           "jsonpath": "$.package.version"
         },
         {
-          "type": "toml",
-          "path": "Cargo.lock",
-          "jsonpath": "$.package[?(@.name == 'tracedecay')].version"
+          "type": "generic",
+          "path": "Cargo.lock"
         }
       ]
     }
