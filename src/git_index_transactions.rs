@@ -208,8 +208,10 @@ impl FixedGitIndexRunner {
         I: IntoIterator<Item = P>,
         P: AsRef<OsStr>,
     {
+        let (_transaction, index) = self.private_index_copy()?;
         let mut command = self.command();
         command
+            .env("GIT_INDEX_FILE", index)
             .arg("diff")
             .arg("--patch")
             .arg("-M")
@@ -383,16 +385,22 @@ impl FixedGitIndexRunner {
     }
 
     pub(crate) fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let output = self.run_git(
+        let (_transaction, index) = self.private_index_copy()?;
+        let mut command = self.command();
+        command.env("GIT_INDEX_FILE", index).args([
             "diff",
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-color",
-                "--binary",
-                "--full-index",
-            ],
-        )?;
+            "--no-ext-diff",
+            "--no-color",
+            "--binary",
+            "--full-index",
+        ]);
+        let output = self.process.output(command, None)?;
+        if !output.status.success() {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "diff",
+                status: output.status.to_string(),
+            });
+        }
         canonical_sha256(&output.stdout).map_err(Into::into)
     }
 
@@ -904,6 +912,15 @@ impl FixedGitIndexRunner {
 
     fn command(&self) -> Command {
         self.process.command(&self.repository_root)
+    }
+
+    fn private_index_copy(&self) -> Result<(tempfile::TempDir, PathBuf), NativeGitIndexError> {
+        let transaction =
+            tempfile::tempdir().map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        let index = transaction.path().join("index");
+        std::fs::write(&index, self.index_bytes()?)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
+        Ok((transaction, index))
     }
 
     fn quarantine_command(&self, index_path: &Path, object_path: &Path) -> Command {
