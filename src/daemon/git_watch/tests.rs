@@ -3,6 +3,7 @@ use super::*;
 
 use notify::event::EventAttributes;
 use std::process::Command;
+use tokio::sync::Notify;
 
 #[test]
 fn debris_retention_enables_maintenance_without_orphan_gc() {
@@ -738,7 +739,100 @@ async fn disabled_watcher_never_registers() {
         watcher.ensure_watching(repo.path()).await,
         GitWatcherAdmission::Disabled
     );
+    assert_eq!(watcher.spawn().await, GitWatcherStart::Disabled);
     assert!(watcher.health_report().await.is_empty());
+}
+
+#[tokio::test]
+async fn concurrent_spawn_retains_one_backstop_task() {
+    let mut config = fast_watch_config();
+    config.backstop_interval_mins = 1;
+    let watcher = GitWatcher::new(config);
+
+    let retained = watcher.inner.backstop_task.lock().await;
+    let mut left = Box::pin(watcher.spawn());
+    let mut right = Box::pin(watcher.spawn());
+    assert!(futures_util::poll!(&mut left).is_pending());
+    assert!(futures_util::poll!(&mut right).is_pending());
+    drop(retained);
+    let (left, right) = tokio::join!(left, right);
+    assert!(
+        matches!(
+            (left, right),
+            (GitWatcherStart::Started, GitWatcherStart::AlreadyStarted)
+                | (GitWatcherStart::AlreadyStarted, GitWatcherStart::Started)
+        ),
+        "exactly one concurrent caller must start the backstop: {left:?}, {right:?}"
+    );
+    let first_task = watcher
+        .inner
+        .backstop_task
+        .lock()
+        .await
+        .as_ref()
+        .expect("first start must retain its backstop task")
+        .id();
+    let (repeated_left, repeated_right) = tokio::join!(watcher.spawn(), watcher.spawn());
+    assert_eq!(repeated_left, GitWatcherStart::AlreadyStarted);
+    assert_eq!(repeated_right, GitWatcherStart::AlreadyStarted);
+    let repeated_task = watcher
+        .inner
+        .backstop_task
+        .lock()
+        .await
+        .as_ref()
+        .expect("repeated start must retain the backstop task")
+        .id();
+
+    assert_eq!(
+        repeated_task, first_task,
+        "repeated start must not overwrite and detach the retained backstop"
+    );
+    watcher.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_repository_admission_retains_one_supervisor_task() {
+    let repo = temp_repo();
+    let watcher = GitWatcher::new(fast_watch_config());
+
+    assert_eq!(
+        watcher.ensure_watching(repo.path()).await,
+        GitWatcherAdmission::Ready
+    );
+    let state = ready_registered_state(&watcher, repo.path()).await;
+    let first_task = state
+        .task
+        .lock()
+        .await
+        .as_ref()
+        .expect("repository admission must retain its supervisor")
+        .id();
+
+    let (left, right) = tokio::join!(
+        watcher.ensure_watching(repo.path()),
+        watcher.ensure_watching(repo.path())
+    );
+    assert_eq!(left, GitWatcherAdmission::Ready);
+    assert_eq!(right, GitWatcherAdmission::Ready);
+    let repeated_task = state
+        .task
+        .lock()
+        .await
+        .as_ref()
+        .expect("repeated admission must retain the supervisor")
+        .id();
+
+    assert_eq!(
+        repeated_task, first_task,
+        "repeated admission must not overwrite and detach the retained supervisor"
+    );
+    assert_eq!(
+        watcher.inner.projects.lock().await.len(),
+        1,
+        "one common repository must retain one watcher authority"
+    );
+    watcher.shutdown().await;
 }
 
 #[tokio::test]
@@ -764,6 +858,48 @@ async fn missing_or_dangling_project_identity_is_rejected() {
 }
 
 #[tokio::test]
+async fn concurrent_shutdown_waits_for_retained_join_completion() {
+    let repo = temp_repo();
+    let watcher = GitWatcher::new(fast_watch_config());
+    let state = Arc::new(WatchState::new(
+        crate::worktree::git_common_dir(repo.path()).expect("git common directory"),
+        repo.path().canonicalize().expect("canonical project root"),
+        worktree_git_dir(repo.path()).expect("worktree git directory"),
+        MaintenanceCoordinator::default(),
+    ));
+    let task_release = Arc::new(Notify::new());
+    let owned_task = {
+        let task_release = Arc::clone(&task_release);
+        tokio::spawn(async move {
+            task_release.notified().await;
+        })
+    };
+    *state.task.lock().await = Some(owned_task);
+    watcher
+        .inner
+        .projects
+        .lock()
+        .await
+        .insert(state.common_dir.clone(), Arc::clone(&state));
+
+    let mut first = Box::pin(watcher.shutdown());
+    assert!(
+        futures_util::poll!(&mut first).is_pending(),
+        "the first shutdown caller must wait for the retained join"
+    );
+    let mut repeated = Box::pin(watcher.shutdown());
+    assert!(
+        futures_util::poll!(&mut repeated).is_pending(),
+        "a concurrent shutdown caller must wait for the retained join"
+    );
+
+    task_release.notify_one();
+    first.await;
+    repeated.await;
+    assert!(state.task.lock().await.is_none());
+}
+
+#[tokio::test]
 async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
     let repo = temp_repo();
     let watcher = GitWatcher::new(fast_watch_config());
@@ -780,6 +916,7 @@ async fn shutdown_cancels_and_joins_repository_watcher_tasks() {
         GitWatcherAdmission::ShuttingDown,
         "shutdown admission must remain distinct from a disabled watcher"
     );
+    assert_eq!(watcher.spawn().await, GitWatcherStart::ShuttingDown);
     let drained_before = state.drained_plans.load(Ordering::Acquire);
     git(
         repo.path(),
