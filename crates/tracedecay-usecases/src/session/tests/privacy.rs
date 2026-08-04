@@ -368,11 +368,14 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
         "describe",
     );
     let description = execution
-        .render_lcm_describe(LcmDescribeRequest {
-            provider: "provider.application".to_owned(),
-            session_id: "session.temporal.application".to_owned(),
-            target: LcmDescribeTarget::Session,
-        })
+        .render_lcm_describe(
+            LcmDescribeRequest {
+                provider: "provider.application".to_owned(),
+                session_id: "session.temporal.application".to_owned(),
+                target: LcmDescribeTarget::Session,
+            },
+            None,
+        )
         .await
         .expect("authorized describe render");
     let description = serde_json::to_value(description).expect("describe response JSON");
@@ -428,6 +431,7 @@ async fn registered_lcm_describe_expand_and_expand_query_reauthorize_without_sto
                 source_limit: None,
             },
             &canonical_content,
+            expanded.snapshot.request().execution_control(),
         )
         .await
         .expect("authorized expand render");

@@ -23,7 +23,7 @@ mod schema;
 mod sql;
 pub mod store;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -46,9 +46,10 @@ use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_curso
 use tracedecay_temporal_query::execute_temporal_kernel;
 use tracedecay_temporal_query::hydration::hydrate_selected;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
-    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
-    TemporalParticipantManifest, TemporalRetrievalScope, TemporalSourceAccess, TemporalWatermarks,
+    BindingDigest, ExecutionControl, KernelVersions, MAX_TEMPORAL_PARTICIPANTS,
+    TemporalAuthorizedRoot, TemporalExecutionSnapshot, TemporalParticipantAuthorization,
+    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalRetrievalScope,
+    TemporalSourceAccess, TemporalWatermarks,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
@@ -182,13 +183,20 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
     pub async fn render_lcm_describe(
         &self,
         request: LcmDescribeRequest,
+        control: Option<&ExecutionControl>,
     ) -> Result<LcmDescribeResponse, SessionTemporalExecutionError> {
         let snapshot = self
             .db
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        registered_lcm_render::describe(&snapshot, request)
+        let summary_ids = registered_lcm_render::describe_relation_summary_ids(&snapshot, &request)
+            .await
+            .map_err(map_lcm_error)?;
+        let relations = self
+            .lcm_summary_relations(&request.session_id, summary_ids, control)
+            .await?;
+        registered_lcm_render::describe(&snapshot, request, &relations)
             .await
             .map_err(map_lcm_error)
     }
@@ -197,15 +205,81 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         &self,
         request: LcmExpandRequest,
         canonical_content: &str,
+        control: &ExecutionControl,
     ) -> Result<LcmExpandResponse, SessionTemporalExecutionError> {
         let snapshot = self
             .db
             .read_snapshot()
             .await
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
-        registered_lcm_render::expand(&snapshot, request, canonical_content)
+        let summary_ids = registered_lcm_render::expand_relation_summary_ids(&request);
+        let relations = self
+            .lcm_summary_relations(&request.session_id, summary_ids, Some(control))
+            .await?;
+        registered_lcm_render::expand(&snapshot, request, canonical_content, &relations)
             .await
             .map_err(map_lcm_error)
+    }
+
+    async fn lcm_summary_relations(
+        &self,
+        session_id: &str,
+        summary_ids: Vec<String>,
+        control: Option<&ExecutionControl>,
+    ) -> Result<Vec<relations::SummaryRelationRead>, SessionTemporalExecutionError> {
+        const MAX_RELATIONS: usize = 4_096;
+        if summary_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let control = control.ok_or(SessionTemporalExecutionError::Unavailable)?;
+        control.checkpoint().map_err(map_control_error)?;
+        let session_id =
+            SessionId::new(session_id).map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let cancellation = store::execution_control_graph_cancellation(control);
+        let first = self
+            .db
+            .active_session_summary_relations(
+                &session_id,
+                &summary_ids,
+                MAX_RELATIONS,
+                cancellation,
+            )
+            .await;
+        control.checkpoint().map_err(map_control_error)?;
+        let (_, mut relations) = first.map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+
+        let known = relations
+            .iter()
+            .map(|relation| relation.summary_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let child_ids = relations
+            .iter()
+            .flat_map(|relation| relation.sources.iter())
+            .filter_map(|source| match source {
+                relations::SummarySourceRef::Summary { summary_id }
+                    if !known.contains(summary_id.as_str()) =>
+                {
+                    Some(summary_id.clone())
+                }
+                relations::SummarySourceRef::Anchor { .. }
+                | relations::SummarySourceRef::Summary { .. } => None,
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if child_ids.is_empty() {
+            return Ok(relations);
+        }
+        control.checkpoint().map_err(map_control_error)?;
+        let cancellation = store::execution_control_graph_cancellation(control);
+        let children = self
+            .db
+            .active_session_summary_relations(&session_id, &child_ids, MAX_RELATIONS, cancellation)
+            .await;
+        control.checkpoint().map_err(map_control_error)?;
+        let (_, children) = children.map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        relations.extend(children);
+        Ok(relations)
     }
 
     pub async fn hydrate_lcm_summary_sources(

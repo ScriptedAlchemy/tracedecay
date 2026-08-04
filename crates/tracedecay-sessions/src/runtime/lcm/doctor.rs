@@ -351,67 +351,12 @@ async fn summary_integrity(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<Value, LcmError> {
-    let broken_sources = count_broken_summary_sources(conn, provider, session_id).await?;
     let hash_mismatches = count_summary_hash_mismatches(conn, provider, session_id).await?;
     Ok(json!({
-        "broken_sources": broken_sources,
+        "broken_sources": Value::Null,
+        "relation_integrity": "native_graph_authority",
         "hash_mismatches": hash_mismatches,
     }))
-}
-
-async fn count_broken_summary_sources(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<i64, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT COUNT(*)
-             FROM lcm_summary_sources src
-             LEFT JOIN lcm_summary_nodes owner ON owner.node_id = src.node_id
-             LEFT JOIN lcm_raw_messages raw
-               ON src.source_kind = 'raw_message'
-              AND CAST(raw.store_id AS TEXT) = src.source_id
-             LEFT JOIN lcm_summary_nodes child
-               ON src.source_kind = 'summary_node'
-              AND child.node_id = src.source_id
-             WHERE (
-                    owner.provider = ?1
-                AND (?2 IS NULL OR owner.session_id = ?2)
-                AND (
-                       (src.source_kind = 'raw_message'
-                        AND (
-                              raw.store_id IS NULL
-                           OR raw.provider != owner.provider
-                           OR raw.session_id != owner.session_id
-                        ))
-                    OR (src.source_kind = 'summary_node'
-                        AND (
-                              child.node_id IS NULL
-                           OR child.provider != owner.provider
-                           OR child.session_id != owner.session_id
-                        ))
-                )
-             )
-             OR (
-                    owner.node_id IS NULL
-                AND (
-                       (src.source_kind = 'raw_message'
-                        AND raw.provider = ?1
-                        AND (?2 IS NULL OR raw.session_id = ?2))
-                    OR (src.source_kind = 'summary_node'
-                        AND child.provider = ?1
-                        AND (?2 IS NULL OR child.session_id = ?2))
-                )
-             )",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    let row = rows
-        .next()
-        .await?
-        .ok_or_else(|| LcmError::Db("summary source count returned no rows".to_string()))?;
-    row.get(0).map_err(|err| LcmError::Db(err.to_string()))
 }
 
 async fn count_summary_hash_mismatches(
@@ -623,8 +568,6 @@ async fn cleanup_candidates(
     let ignore_message_patterns =
         security::compile_message_patterns(&clean_config.ignore_message_patterns);
     let summary_counts = summary_counts_by_session(conn, provider, session_id).await?;
-    let protected_raw_sources =
-        raw_store_ids_with_summary_sources(conn, provider, session_id).await?;
 
     let mut rows = conn
         .query(
@@ -694,7 +637,10 @@ async fn cleanup_candidates(
         else {
             continue;
         };
-        if protected_raw_sources.contains(&store_id) {
+        if summary_counts
+            .get(&row_session_id)
+            .is_some_and(|summary_count| *summary_count > 0)
+        {
             protected_noise_count += 1;
             continue;
         }
@@ -767,29 +713,4 @@ async fn summary_counts_by_session(
         counts.insert(session_id, count);
     }
     Ok(counts)
-}
-
-async fn raw_store_ids_with_summary_sources(
-    conn: &(impl QueryExecutor + ?Sized),
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<BTreeSet<i64>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT DISTINCT raw.store_id
-             FROM lcm_summary_sources src
-             JOIN lcm_raw_messages raw
-               ON src.source_kind = 'raw_message'
-              AND raw.store_id = CAST(src.source_id AS INTEGER)
-             WHERE raw.provider = ?1
-               AND (?2 IS NULL OR raw.session_id = ?2)",
-            params![provider, util::opt_text(session_id)],
-        )
-        .await?;
-    let mut store_ids = BTreeSet::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        store_ids.insert(store_id);
-    }
-    Ok(store_ids)
 }
