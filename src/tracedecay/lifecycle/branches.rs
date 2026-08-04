@@ -299,7 +299,6 @@ impl TraceDecay {
             project_root,
             &open_options,
             profile_database.as_ref(),
-            false,
         )
         .await?;
         if store_layout.data_root != expected_data_root {
@@ -531,7 +530,6 @@ impl TraceDecay {
             project_root,
             &open_options,
             profile_database.as_ref(),
-            true,
         )
         .await?;
         let project_id = Self::registered_project_id(&store_layout)?;

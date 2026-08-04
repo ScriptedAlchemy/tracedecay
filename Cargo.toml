@@ -54,9 +54,6 @@ ignored-paths = [
 edition = "2024"
 
 [workspace.dependencies]
-grafeo-common = { version = "=0.5.42", default-features = false }
-grafeo-core = { version = "=0.5.42", default-features = false, features = ["lpg", "vector-index"] }
-grafeo-engine = { version = "=0.5.42", default-features = false, features = ["lpg", "wal", "grafeo-file", "vector-index"] }
 
 [package]
 name = "tracedecay"

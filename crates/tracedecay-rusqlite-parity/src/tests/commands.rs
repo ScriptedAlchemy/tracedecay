@@ -1,12 +1,12 @@
 use tracedecay_sqlite_parity_protocol::{
-    Command, EffectiveJournalMode, GraphFtsTable, GraphTable, IntegrityCheck, JournalModeMetadata,
-    JournalModeNormalization, Output, RowParity, SourceHeaderJournalMode, SourceJournalMode,
+    Command, EffectiveJournalMode, IntegrityCheck, JournalModeMetadata, JournalModeNormalization,
+    Output, SourceHeaderJournalMode, SourceJournalMode,
 };
 
 use super::support::{execute, fixture};
 
 #[test]
-fn metadata_schema_integrity_graph_rows_and_unicode_fts() {
+fn metadata_schema_and_integrity() {
     let fixture = fixture();
     let Output::Metadata(metadata) = execute(&fixture.path, Command::Metadata) else {
         panic!("metadata output expected");
@@ -35,7 +35,12 @@ fn metadata_schema_integrity_graph_rows_and_unicode_fts() {
         panic!("schema output expected");
     };
     assert_eq!(schema.user_version, 7);
-    assert!(schema.objects.iter().any(|object| object.name == "nodes"));
+    assert!(
+        schema
+            .objects
+            .iter()
+            .any(|object| object.name == "observations")
+    );
     assert!(matches!(
         execute(&fixture.path, Command::ForeignKeys),
         Output::ForeignKeys { .. }
@@ -66,40 +71,4 @@ fn metadata_schema_integrity_graph_rows_and_unicode_fts() {
         panic!("integrity output expected");
     };
     assert_eq!(report.findings, ["ok"]);
-    assert_eq!(
-        execute(
-            &fixture.path,
-            Command::RowParity {
-                table: GraphTable::Nodes,
-            },
-        ),
-        Output::RowParity(RowParity {
-            table: GraphTable::Nodes,
-            row_count: Some(1),
-        })
-    );
-    assert_eq!(
-        execute(
-            &fixture.path,
-            Command::RowParity {
-                table: GraphTable::Vectors,
-            },
-        ),
-        Output::RowParity(RowParity {
-            table: GraphTable::Vectors,
-            row_count: None,
-        })
-    );
-    let Output::FtsParity(fts) = execute(
-        &fixture.path,
-        Command::FtsParity {
-            table: GraphFtsTable::Nodes,
-            query: "東京".to_string(),
-            limit: 10,
-        },
-    ) else {
-        panic!("FTS output expected");
-    };
-    assert_eq!(fts.matches.len(), 1);
-    assert!(fts.matches[0].snippet.contains("<mark>東京</mark>"));
 }

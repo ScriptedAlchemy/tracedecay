@@ -911,10 +911,7 @@ async fn retained_project_graph(
 ) -> Option<Arc<TraceDecay>> {
     let server = {
         let servers = engine.store_administration.project_servers().lock().await;
-        let owner = servers
-            .keys()
-            .find(|candidate| same_scheduler_owner(candidate, key))?;
-        servers.get(owner).cloned()
+        servers.get(key).cloned()
     }?;
     Some(server.cg().await)
 }
