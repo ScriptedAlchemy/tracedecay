@@ -202,6 +202,48 @@ async fn session_replay_slice_bounds_head_tail_and_summaries() {
 }
 
 #[tokio::test]
+async fn session_replay_slice_rejects_tampered_summary_content() {
+    let tmp = TempDir::new().unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-replay-integrity",
+        &["canonical replay source".into()],
+    )
+    .await;
+    let summary = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-replay-integrity",
+            "canonical replay summary",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            }],
+        ))
+        .await
+        .expect("summary should insert");
+    const TAMPERED_CONTENT: &str = "replay-summary-private-canary";
+    replace_summary_content_without_updating_hash(&db, &summary.node_id, TAMPERED_CONTENT).await;
+
+    let error = db
+        .lcm_session_replay_slice_for_test(&LcmSessionReplayRequest {
+            provider: "cursor".to_string(),
+            session_id: "session-replay-integrity".to_string(),
+            head_limit: 1,
+            tail_limit: 0,
+            max_snippet_chars: 500,
+            summary_limit: 1,
+            max_summary_chars: 500,
+        })
+        .await
+        .expect_err("tampered replay summary content must fail closed");
+
+    assert_eq!(error, LcmError::PayloadIntegrityMismatch);
+    assert!(!error.to_string().contains(TAMPERED_CONTENT));
+}
+
+#[tokio::test]
 async fn session_replay_slice_short_session_has_no_tail_overlap() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;

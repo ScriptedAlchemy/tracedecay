@@ -229,7 +229,7 @@ async fn replay_slice_summary_nodes(
     }
     let mut rows = conn
         .query(
-            "SELECT node_id, depth, created_at, summary_text
+            "SELECT node_id, depth, created_at, summary_text, summary_hash
              FROM lcm_summary_nodes
              WHERE provider = ?1 AND session_id = ?2
              ORDER BY depth DESC, created_at DESC, node_id
@@ -244,6 +244,8 @@ async fn replay_slice_summary_nodes(
     let mut nodes = Vec::new();
     while let Some(row) = rows.next().await? {
         let summary_text: String = row.get(3)?;
+        let summary_hash: String = row.get(4)?;
+        dag::verify_summary_content(&summary_text, &summary_hash)?;
         let (snippet, truncated) = bounded_replay_snippet(&summary_text, request.max_summary_chars);
         nodes.push(LcmReplaySummaryNode {
             node_id: row.get(0)?,

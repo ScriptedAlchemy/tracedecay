@@ -319,6 +319,120 @@ async fn expand_paginates_summary_sources_with_offset_and_limit() {
 }
 
 #[tokio::test]
+async fn paginated_summary_sources_reject_tampered_inline_content() {
+    let tmp = TempDir::new().unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "first canonical source".into(),
+            "second canonical source".into(),
+            "third canonical source".into(),
+        ],
+    )
+    .await;
+    let summary = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "paginated integrity summary",
+            store_ids
+                .iter()
+                .map(|store_id| LcmSourceRef::RawMessage {
+                    store_id: *store_id,
+                })
+                .collect(),
+        ))
+        .await
+        .expect("summary should insert");
+    const TAMPERED_CONTENT: &str = "second-page-private-canary";
+    replace_inline_content_without_updating_hash(&db, store_ids[1], TAMPERED_CONTENT).await;
+
+    let error = db
+        .lcm_expand_for_test(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmExpandTarget::SummaryNode {
+                node_id: summary.node_id,
+            },
+            content_slice: None,
+            source_offset: 1,
+            source_limit: Some(1),
+        })
+        .await
+        .expect_err("tampered source content must fail closed");
+
+    assert_eq!(error, LcmError::PayloadIntegrityMismatch);
+    assert!(!error.to_string().contains(TAMPERED_CONTENT));
+}
+
+#[tokio::test]
+async fn paginated_summary_sources_reject_tampered_child_summary_content() {
+    let tmp = TempDir::new().unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-1",
+        &[
+            "first canonical source".into(),
+            "child canonical source".into(),
+        ],
+    )
+    .await;
+    let child = db
+        .lcm_insert_summary_node(summary_draft(
+            "cursor",
+            "session-1",
+            "canonical child summary",
+            vec![LcmSourceRef::RawMessage {
+                store_id: store_ids[1],
+            }],
+        ))
+        .await
+        .expect("child summary should insert");
+    let mut parent_draft = summary_draft(
+        "cursor",
+        "session-1",
+        "parent integrity summary",
+        vec![
+            LcmSourceRef::RawMessage {
+                store_id: store_ids[0],
+            },
+            LcmSourceRef::SummaryNode {
+                node_id: child.node_id.clone(),
+            },
+        ],
+    );
+    parent_draft.depth = 1;
+    let parent = db
+        .lcm_insert_summary_node(parent_draft)
+        .await
+        .expect("parent summary should insert");
+    const TAMPERED_CONTENT: &str = "second-page-summary-private-canary";
+    replace_summary_content_without_updating_hash(&db, &child.node_id, TAMPERED_CONTENT).await;
+
+    let error = db
+        .lcm_expand_for_test(LcmExpandRequest {
+            provider: "cursor".into(),
+            session_id: "session-1".into(),
+            target: LcmExpandTarget::SummaryNode {
+                node_id: parent.node_id,
+            },
+            content_slice: None,
+            source_offset: 1,
+            source_limit: Some(1),
+        })
+        .await
+        .expect_err("tampered child summary content must fail closed");
+
+    assert_eq!(error, LcmError::PayloadIntegrityMismatch);
+    assert!(!error.to_string().contains(TAMPERED_CONTENT));
+}
+
+#[tokio::test]
 async fn expand_allows_cross_session_raw_store_id_with_provenance() {
     let tmp = TempDir::new().unwrap();
     let db = registered_lcm_runtime(&tmp).await;

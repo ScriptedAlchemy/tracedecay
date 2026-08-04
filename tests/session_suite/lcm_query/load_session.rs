@@ -158,6 +158,38 @@ async fn load_session_accepts_multiple_roles_and_slices_to_caller_limit() {
     );
 }
 
+#[tokio::test]
+async fn load_session_rejects_tampered_inline_content() {
+    let tmp = TempDir::new().unwrap();
+    let db = registered_lcm_runtime(&tmp).await;
+    let store_ids = insert_raw_messages(
+        &db,
+        "cursor",
+        "session-integrity",
+        &["canonical private message".into()],
+    )
+    .await;
+    const TAMPERED_CONTENT: &str = "load-session-private-canary";
+    replace_inline_content_without_updating_hash(&db, store_ids[0], TAMPERED_CONTENT).await;
+
+    let error = db
+        .lcm_load_session_for_test(LcmLoadSessionRequest {
+            provider: "cursor".into(),
+            session_id: "session-integrity".into(),
+            after_store_id: None,
+            limit: 10,
+            roles: Vec::new(),
+            start_time: None,
+            end_time: None,
+            content_slice: None,
+        })
+        .await
+        .expect_err("tampered message content must fail closed");
+
+    assert_eq!(error, LcmError::PayloadIntegrityMismatch);
+    assert!(!error.to_string().contains(TAMPERED_CONTENT));
+}
+
 // Hermes load_session paging only hands back a resume cursor while more rows
 // remain: a final page that exactly fills the limit terminates the cursor, and
 // resuming past the last row yields an empty page instead of an error.
