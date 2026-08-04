@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_domain::{ProjectId, RetrievalAnchorId, SessionId, ThreadId};
 use tracedecay_global_db::session_temporal::relations::{
     SessionRelationError, SessionRelationGraphStore, SessionRelationProjection,
-    SummaryRelationNode, SummarySourceRef, SummarySourceVisitKind, ThreadHierarchyRelation,
+    SessionRelationScope, SummaryRelationNode, SummarySourceRef, SummarySourceVisitKind,
+    ThreadHierarchyRelation, WorkflowAgentMembership,
 };
 use tracedecay_graph_db::GraphCancellation;
 
@@ -27,7 +28,7 @@ where
 
 fn projection(generation: u64) -> SessionRelationProjection {
     SessionRelationProjection {
-        project_id: id::<ProjectId>("project.session-relations"),
+        scope: SessionRelationScope::project(id::<ProjectId>("project.session-relations")),
         session_id: id::<SessionId>("session.relations"),
         generation,
         summaries: vec![
@@ -54,6 +55,8 @@ fn projection(generation: u64) -> SessionRelationProjection {
         logical_copies: Vec::new(),
         thread_hierarchy: Vec::new(),
         agent_hierarchy: Vec::new(),
+        parent_session_id: None,
+        workflow_agents: Vec::new(),
     }
 }
 
@@ -67,7 +70,7 @@ fn summary_source_walk_is_generation_scoped_ordered_and_bounded() {
 
     let visits = store
         .summary_sources(
-            &first.project_id,
+            &first.scope,
             &first.session_id,
             1,
             "summary.root",
@@ -91,7 +94,7 @@ fn summary_source_walk_is_generation_scoped_ordered_and_bounded() {
 
     assert_eq!(
         store.summary_sources(
-            &first.project_id,
+            &first.scope,
             &first.session_id,
             1,
             "summary.root",
@@ -117,7 +120,7 @@ fn summary_source_walk_observes_cancellation_and_rejects_mutation() {
     let cancelled = Arc::new(TestCancellation(AtomicBool::new(true)));
     assert_eq!(
         store.summary_sources(
-            &relation_projection.project_id,
+            &relation_projection.scope,
             &relation_projection.session_id,
             1,
             "summary.root",
@@ -141,17 +144,15 @@ fn projection_rejects_cycles_without_overwriting_the_last_good_graph() {
     let good = projection(1);
     store.replace(&good).expect("good projection");
     let mut cyclic = good.clone();
-    cyclic.summaries[1]
-        .sources
-        .push(SummarySourceRef::Summary {
-            summary_id: "summary.root".to_owned(),
-        });
+    cyclic.summaries[1].sources.push(SummarySourceRef::Summary {
+        summary_id: "summary.root".to_owned(),
+    });
     assert_eq!(store.replace(&cyclic), Err(SessionRelationError::Cycle));
 
     assert_eq!(
         store
             .summary_sources(
-                &good.project_id,
+                &good.scope,
                 &good.session_id,
                 1,
                 "summary.root",
@@ -181,4 +182,44 @@ fn projection_rejects_thread_hierarchy_cycles() {
         },
     ];
     assert_eq!(store.replace(&cyclic), Err(SessionRelationError::Cycle));
+}
+
+#[test]
+fn session_context_reads_parent_and_workflow_membership_from_graph() {
+    let store = SessionRelationGraphStore::memory().expect("graph");
+    let mut relation_projection = projection(3);
+    relation_projection.parent_session_id = Some(id::<SessionId>("session.parent"));
+    relation_projection.workflow_agents = vec![
+        WorkflowAgentMembership {
+            run_id: "run.alpha".to_owned(),
+            agent_label: "review".to_owned(),
+        },
+        WorkflowAgentMembership {
+            run_id: "run.alpha".to_owned(),
+            agent_label: "implement".to_owned(),
+        },
+    ];
+    store.replace(&relation_projection).expect("publication");
+
+    let context = store
+        .session_context(
+            &relation_projection.scope,
+            &relation_projection.session_id,
+            3,
+            3,
+            Arc::new(TestCancellation(AtomicBool::new(false))),
+        )
+        .expect("session context");
+    assert_eq!(
+        context.parent_session_id.as_ref().map(SessionId::as_str),
+        Some("session.parent")
+    );
+    assert_eq!(
+        context
+            .workflow_agents
+            .iter()
+            .map(|membership| membership.agent_label.as_str())
+            .collect::<Vec<_>>(),
+        vec!["implement", "review"]
+    );
 }

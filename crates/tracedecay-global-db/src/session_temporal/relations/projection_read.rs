@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use tracedecay_domain::{
-    AgentInstanceId, MessageOccurrenceIdV1, ProjectId, RetrievalAnchorId, SessionId, ThreadId,
-    UtcMicros,
+    AgentInstanceId, MessageOccurrenceIdV1, RetrievalAnchorId, SessionId, ThreadId, UtcMicros,
 };
 use tracedecay_graph_db::{
     GraphCancellation, GraphLabel, GraphProjectionReadRequest, GraphProperty, GraphPropertyName,
@@ -11,10 +10,11 @@ use tracedecay_graph_db::{
 
 use super::{
     AGENT_PARENT_KIND, COPY_PROOF_PROPERTY, KNOWLEDGE_AT_PROPERTY, LOGICAL_COPY_KIND,
-    OCCURRENCE_KIND, ORDINAL_PROPERTY, SUMMARY_ANCHOR_SOURCE_KIND, SUMMARY_KIND,
-    SUMMARY_SOURCE_KIND, SUMMARY_SUCCESSOR_KIND, SessionRelationError, SessionRelationGraphStore,
-    SessionRelationProjection, SummaryRelationNode, SummarySourceRef, THREAD_KIND,
-    THREAD_PARENT_KIND, VALID_TIME_PROPERTY, map_graph_error, namespace, parse_entity_id,
+    OCCURRENCE_KIND, ORDINAL_PROPERTY, SESSION_KIND, SESSION_PARENT_KIND,
+    SUMMARY_ANCHOR_SOURCE_KIND, SUMMARY_KIND, SUMMARY_SOURCE_KIND, SUMMARY_SUCCESSOR_KIND,
+    SessionRelationError, SessionRelationGraphStore, SessionRelationProjection,
+    SummaryRelationNode, SummarySourceRef, THREAD_KIND, THREAD_PARENT_KIND, VALID_TIME_PROPERTY,
+    WORKFLOW_AGENT_ENTITY_KIND, WORKFLOW_AGENT_KIND, map_graph_error, namespace, parse_entity_id,
     projection, relation_ordinal,
 };
 
@@ -24,7 +24,7 @@ impl SessionRelationGraphStore {
     #[allow(clippy::too_many_arguments)]
     pub fn load_projection(
         &self,
-        project_id: &ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &SessionId,
         generation: u64,
         max_entities: usize,
@@ -34,7 +34,7 @@ impl SessionRelationGraphStore {
         if max_entities == 0 || max_relations == 0 {
             return Err(SessionRelationError::BudgetExhausted);
         }
-        let namespace = namespace(project_id)?;
+        let namespace = namespace(scope)?;
         let projection_id = projection(session_id, generation)?;
         let page = self
             .database
@@ -51,12 +51,12 @@ impl SessionRelationGraphStore {
         if page.next_entity.is_some() || page.next_relation.is_some() {
             return Err(SessionRelationError::BudgetExhausted);
         }
-        decode_projection(project_id, session_id, generation, page.entities, page.relations)
+        decode_projection(scope, session_id, generation, page.entities, page.relations)
     }
 }
 
 fn decode_projection(
-    project_id: &ProjectId,
+    scope: &super::SessionRelationScope,
     session_id: &SessionId,
     generation: u64,
     entities: Vec<tracedecay_graph_db::GraphEntity>,
@@ -66,9 +66,13 @@ fn decode_projection(
     let mut summaries = BTreeMap::<String, SummaryRelationNode>::new();
     for entity in entities {
         if entity.labels.contains(&summary_label) {
-            let summary_id =
-                parse_entity_id(entity.identity.as_str(), session_id, generation, SUMMARY_KIND)?
-                    .to_owned();
+            let summary_id = parse_entity_id(
+                entity.identity.as_str(),
+                session_id,
+                generation,
+                SUMMARY_KIND,
+            )?
+            .to_owned();
             summaries.insert(
                 summary_id.clone(),
                 SummaryRelationNode {
@@ -79,10 +83,8 @@ fn decode_projection(
             );
         }
     }
-    let ordinal_property =
-        GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
-    let proof_property =
-        GraphPropertyName::new(COPY_PROOF_PROPERTY).map_err(map_graph_error)?;
+    let ordinal_property = GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
+    let proof_property = GraphPropertyName::new(COPY_PROOF_PROPERTY).map_err(map_graph_error)?;
     let knowledge_property =
         GraphPropertyName::new(KNOWLEDGE_AT_PROPERTY).map_err(map_graph_error)?;
     let valid_time_property =
@@ -91,6 +93,8 @@ fn decode_projection(
     let mut logical_copies = Vec::new();
     let mut thread_hierarchy = Vec::new();
     let mut agent_hierarchy = Vec::new();
+    let mut parent_session_id = None;
+    let mut workflow_agents = Vec::new();
     for relation in relations {
         match relation.kind.as_str() {
             SUMMARY_SOURCE_KIND | SUMMARY_ANCHOR_SOURCE_KIND => {
@@ -206,6 +210,32 @@ fn decode_projection(
                     ordinal: ordinal(&relation, &ordinal_property)?,
                 });
             }
+            SESSION_PARENT_KIND => {
+                let parent = SessionId::new(parse_entity_id(
+                    relation.to.as_str(),
+                    session_id,
+                    generation,
+                    SESSION_KIND,
+                )?)
+                .map_err(|_| SessionRelationError::Corrupt)?;
+                if parent_session_id.replace(parent).is_some() {
+                    return Err(SessionRelationError::Corrupt);
+                }
+            }
+            WORKFLOW_AGENT_KIND => {
+                let encoded = parse_entity_id(
+                    relation.to.as_str(),
+                    session_id,
+                    generation,
+                    WORKFLOW_AGENT_ENTITY_KIND,
+                )?;
+                let (run_id, agent_label): (String, String) =
+                    serde_json::from_str(encoded).map_err(|_| SessionRelationError::Corrupt)?;
+                workflow_agents.push(super::WorkflowAgentMembership {
+                    run_id,
+                    agent_label,
+                });
+            }
             // Reverse indexes are derived from the canonical relation above.
             super::SUMMARY_PREDECESSOR_KIND
             | super::THREAD_CHILD_OF_KIND
@@ -221,13 +251,15 @@ fn decode_projection(
             .sources = sources.into_iter().map(|(_, source)| source).collect();
     }
     Ok(SessionRelationProjection {
-        project_id: project_id.clone(),
+        scope: scope.clone(),
         session_id: session_id.clone(),
         generation,
         summaries: summaries.into_values().collect(),
         logical_copies,
         thread_hierarchy,
         agent_hierarchy,
+        parent_session_id,
+        workflow_agents,
     })
 }
 

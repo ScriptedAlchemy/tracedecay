@@ -12,14 +12,14 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
     AgentInstanceId, CopyProofV1, MessageOccurrenceIdV1, ProjectId, RetrievalAnchorId, SessionId,
-    TemporalValidityV1, ThreadId, UtcMicros,
+    TemporalValidityV1, ThreadId, UserProfileId, UtcMicros,
 };
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions,
-    GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion, GraphLabel, GraphNamespace,
-    GraphProjectionId, GraphProjectionTelemetryRequest, GraphProperty, GraphPropertyName,
-    GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled,
-    ProjectionReplacement, SourceGeneration,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
+    GraphEntity, GraphEntityId, GraphFormatVersion, GraphLabel, GraphNamespace, GraphProjectionId,
+    GraphProjectionTelemetryRequest, GraphProperty, GraphPropertyName, GraphRelation,
+    GraphRelationId, GraphRelationKind, GraphWatermark, NeverCancelled, ProjectionReplacement,
+    SourceGeneration,
 };
 
 const GRAPH_FORMAT_VERSION: u32 = 2;
@@ -32,6 +32,8 @@ const THREAD_PARENT_KIND: &str = "session-thread-parent";
 const THREAD_CHILD_OF_KIND: &str = "session-thread-child-of";
 const AGENT_PARENT_KIND: &str = "session-agent-parent";
 const AGENT_CHILD_OF_KIND: &str = "session-agent-child-of";
+const SESSION_PARENT_KIND: &str = "session-parent";
+const WORKFLOW_AGENT_KIND: &str = "session-workflow-agent";
 const ORDINAL_PROPERTY: &str = "ordinal";
 const COPY_PROOF_PROPERTY: &str = "copy-proof";
 const KNOWLEDGE_AT_PROPERTY: &str = "knowledge-at";
@@ -41,9 +43,11 @@ const SUMMARY_KIND: &str = "summary";
 const OCCURRENCE_KIND: &str = "occurrence";
 const THREAD_KIND: &str = "thread";
 const AGENT_KIND: &str = "agent";
+const SESSION_KIND: &str = "session";
+const WORKFLOW_AGENT_ENTITY_KIND: &str = "workflow-agent";
 
-mod read;
 mod projection_read;
+mod read;
 pub use read::SummaryRelationRead;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -84,14 +88,54 @@ pub struct AgentHierarchyRelation {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkflowAgentMembership {
+    pub run_id: String,
+    pub agent_label: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionContextRelations {
+    pub parent_session_id: Option<SessionId>,
+    pub workflow_agents: Vec<WorkflowAgentMembership>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum SessionRelationScope {
+    Project { project_id: ProjectId },
+    Profile { profile_id: UserProfileId },
+}
+
+impl SessionRelationScope {
+    #[must_use]
+    pub fn project(project_id: ProjectId) -> Self {
+        Self::Project { project_id }
+    }
+
+    #[must_use]
+    pub fn profile(profile_id: UserProfileId) -> Self {
+        Self::Profile { profile_id }
+    }
+
+    pub fn identity(&self) -> &str {
+        match self {
+            Self::Project { project_id } => project_id.as_str(),
+            Self::Profile { profile_id } => profile_id.as_str(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionRelationProjection {
-    pub project_id: ProjectId,
+    pub scope: SessionRelationScope,
     pub session_id: SessionId,
     pub generation: u64,
     pub summaries: Vec<SummaryRelationNode>,
     pub logical_copies: Vec<LogicalCopyRelation>,
     pub thread_hierarchy: Vec<ThreadHierarchyRelation>,
     pub agent_hierarchy: Vec<AgentHierarchyRelation>,
+    pub parent_session_id: Option<SessionId>,
+    pub workflow_agents: Vec<WorkflowAgentMembership>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,25 +211,27 @@ impl SessionRelationGraphStore {
         &self,
         relation_projection: &SessionRelationProjection,
     ) -> Result<GraphWatermark, SessionRelationError> {
+        self.replace_with_cancellation(relation_projection, Arc::new(NeverCancelled))
+    }
+
+    pub fn replace_with_cancellation(
+        &self,
+        relation_projection: &SessionRelationProjection,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<GraphWatermark, SessionRelationError> {
         validate_projection(relation_projection)?;
-        let namespace = namespace(&relation_projection.project_id)?;
+        let namespace = namespace(&relation_projection.scope)?;
         let projection = projection(
             &relation_projection.session_id,
             relation_projection.generation,
         )?;
-        let encoded =
-            serde_json::to_vec(relation_projection).map_err(|_| SessionRelationError::Invalid)?;
-        let watermark = GraphWatermark::new(format!(
-            "session-relations:{}",
-            hex::encode(Sha256::digest(encoded))
-        ))
-        .map_err(map_graph_error)?;
+        let watermark = projection_watermark(relation_projection)?;
         if let Some(existing) = self
             .database
             .projection_telemetry(GraphProjectionTelemetryRequest {
                 namespace: namespace.clone(),
                 projection: projection.clone(),
-                cancellation: Arc::new(NeverCancelled),
+                cancellation: Arc::clone(&cancellation),
             })
             .map_err(map_graph_error)?
         {
@@ -209,7 +255,7 @@ impl SessionRelationGraphStore {
                 next_watermark: watermark.clone(),
                 entities,
                 relations,
-                cancellation: Arc::new(NeverCancelled),
+                cancellation,
             })
             .map_err(map_graph_error)?;
         Ok(watermark)
@@ -218,7 +264,7 @@ impl SessionRelationGraphStore {
     #[allow(clippy::too_many_arguments)]
     pub fn summary_sources(
         &self,
-        project_id: &ProjectId,
+        scope: &SessionRelationScope,
         session_id: &SessionId,
         generation: u64,
         root_summary_id: &str,
@@ -228,7 +274,7 @@ impl SessionRelationGraphStore {
         if max_relations == 0 {
             return Err(SessionRelationError::BudgetExhausted);
         }
-        let namespace = namespace(project_id)?;
+        let namespace = namespace(scope)?;
         let projection = projection(session_id, generation)?;
         let snapshot = self.database.snapshot().map_err(map_graph_error)?;
         if snapshot
@@ -247,8 +293,7 @@ impl SessionRelationGraphStore {
             GraphRelationKind::new(SUMMARY_SOURCE_KIND).map_err(map_graph_error)?,
             GraphRelationKind::new(SUMMARY_ANCHOR_SOURCE_KIND).map_err(map_graph_error)?,
         ]);
-        let ordinal_property =
-            GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
+        let ordinal_property = GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
         let mut pending = VecDeque::from([(root, 1_usize)]);
         let mut visits = Vec::new();
         while let Some((parent, depth)) = pending.pop_front() {
@@ -285,14 +330,13 @@ impl SessionRelationGraphStore {
                     .and_then(|value| u32::try_from(value).ok())
                     .ok_or(SessionRelationError::Corrupt)?;
                 if relation.kind.as_str() == SUMMARY_SOURCE_KIND {
-                    let summary_id =
-                        parse_entity_id(
-                            relation.to.as_str(),
-                            session_id,
-                            generation,
-                            SUMMARY_KIND,
-                        )?
-                            .to_owned();
+                    let summary_id = parse_entity_id(
+                        relation.to.as_str(),
+                        session_id,
+                        generation,
+                        SUMMARY_KIND,
+                    )?
+                    .to_owned();
                     visits.push(SummarySourceVisit {
                         parent_summary_id: parent_summary_id.clone(),
                         source: SummarySourceVisitKind::Summary {
@@ -326,13 +370,13 @@ impl SessionRelationGraphStore {
 
     pub fn has_summary_successor(
         &self,
-        project_id: &ProjectId,
+        scope: &SessionRelationScope,
         session_id: &SessionId,
         generation: u64,
         summary_id: &str,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<bool, SessionRelationError> {
-        let namespace = namespace(project_id)?;
+        let namespace = namespace(scope)?;
         let projection = projection(session_id, generation)?;
         let snapshot = self.database.snapshot().map_err(map_graph_error)?;
         if snapshot
@@ -357,6 +401,42 @@ impl SessionRelationGraphStore {
     }
 }
 
+pub(crate) fn projection_watermark(
+    projection: &SessionRelationProjection,
+) -> Result<GraphWatermark, SessionRelationError> {
+    let mut canonical = projection.clone();
+    canonical
+        .summaries
+        .sort_by(|left, right| left.summary_id.cmp(&right.summary_id));
+    canonical.logical_copies.sort_by(|left, right| {
+        left.occurrence_id.cmp(&right.occurrence_id).then_with(|| {
+            left.copied_from_occurrence_id
+                .cmp(&right.copied_from_occurrence_id)
+        })
+    });
+    canonical.thread_hierarchy.sort_by(|left, right| {
+        left.parent_thread_id
+            .cmp(&right.parent_thread_id)
+            .then_with(|| left.child_thread_id.cmp(&right.child_thread_id))
+    });
+    canonical.agent_hierarchy.sort_by(|left, right| {
+        left.parent_agent_id
+            .cmp(&right.parent_agent_id)
+            .then_with(|| left.child_agent_id.cmp(&right.child_agent_id))
+    });
+    canonical.workflow_agents.sort_by(|left, right| {
+        left.run_id
+            .cmp(&right.run_id)
+            .then_with(|| left.agent_label.cmp(&right.agent_label))
+    });
+    let encoded = serde_json::to_vec(&canonical).map_err(|_| SessionRelationError::Invalid)?;
+    GraphWatermark::new(format!(
+        "session-relations:{}",
+        hex::encode(Sha256::digest(encoded))
+    ))
+    .map_err(map_graph_error)
+}
+
 pub(crate) fn validate_projection(
     projection: &SessionRelationProjection,
 ) -> Result<(), SessionRelationError> {
@@ -369,7 +449,9 @@ pub(crate) fn validate_projection(
         .map(|summary| (summary.summary_id.as_str(), summary))
         .collect::<BTreeMap<_, _>>();
     if summaries.len() != projection.summaries.len()
-        || summaries.keys().any(|summary_id| summary_id.trim().is_empty())
+        || summaries
+            .keys()
+            .any(|summary_id| summary_id.trim().is_empty())
     {
         return Err(SessionRelationError::Invalid);
     }
@@ -396,12 +478,31 @@ pub(crate) fn validate_projection(
             edge.child_thread_id.as_str(),
         )
     }))?;
-    ensure_acyclic(projection.agent_hierarchy.iter().map(|edge| {
-        (
-            edge.parent_agent_id.as_str(),
-            edge.child_agent_id.as_str(),
-        )
-    }))?;
+    ensure_acyclic(
+        projection
+            .agent_hierarchy
+            .iter()
+            .map(|edge| (edge.parent_agent_id.as_str(), edge.child_agent_id.as_str())),
+    )?;
+    if projection
+        .parent_session_id
+        .as_ref()
+        .is_some_and(|parent| parent == &projection.session_id)
+    {
+        return Err(SessionRelationError::Cycle);
+    }
+    let workflow_agents = projection
+        .workflow_agents
+        .iter()
+        .map(|membership| (membership.run_id.as_str(), membership.agent_label.as_str()))
+        .collect::<BTreeSet<_>>();
+    if workflow_agents.len() != projection.workflow_agents.len()
+        || workflow_agents
+            .iter()
+            .any(|(run_id, agent_label)| run_id.trim().is_empty() || agent_label.trim().is_empty())
+    {
+        return Err(SessionRelationError::Invalid);
+    }
     Ok(())
 }
 
@@ -552,7 +653,7 @@ fn build_graph(
         let from = entity_id(
             &projection.session_id,
             projection.generation,
-                        OCCURRENCE_KIND,
+            OCCURRENCE_KIND,
             copy.occurrence_id.as_str(),
         )?;
         let to = entity_id(
@@ -561,11 +662,7 @@ fn build_graph(
             "occurrence",
             copy.copied_from_occurrence_id.as_str(),
         )?;
-        insert_entity(
-            &mut entities,
-            from.clone(),
-            "session-occurrence-reference",
-        )?;
+        insert_entity(&mut entities, from.clone(), "session-occurrence-reference")?;
         insert_entity(&mut entities, to.clone(), "session-occurrence-reference")?;
         relations.push(property_relation(
             &projection.session_id,
@@ -604,7 +701,7 @@ fn build_graph(
         let from = entity_id(
             &projection.session_id,
             projection.generation,
-                        THREAD_KIND,
+            THREAD_KIND,
             edge.parent_thread_id.as_str(),
         )?;
         let to = entity_id(
@@ -646,7 +743,7 @@ fn build_graph(
         let from = entity_id(
             &projection.session_id,
             projection.generation,
-                        AGENT_KIND,
+            AGENT_KIND,
             edge.parent_agent_id.as_str(),
         )?;
         let to = entity_id(
@@ -682,6 +779,49 @@ fn build_graph(
             to,
             from,
             AGENT_CHILD_OF_KIND,
+        )?);
+    }
+    let session = session_entity_id(
+        &projection.session_id,
+        projection.generation,
+        &projection.session_id,
+    )?;
+    if let Some(parent_session_id) = &projection.parent_session_id {
+        let parent = session_entity_id(
+            &projection.session_id,
+            projection.generation,
+            parent_session_id,
+        )?;
+        insert_entity(&mut entities, session.clone(), "session-reference")?;
+        insert_entity(&mut entities, parent.clone(), "session-reference")?;
+        relations.push(ordered_relation(
+            &projection.session_id,
+            projection.generation,
+            parent_session_id.as_str(),
+            0,
+            session.clone(),
+            parent,
+            SESSION_PARENT_KIND,
+        )?);
+    }
+    for (ordinal, membership) in projection.workflow_agents.iter().enumerate() {
+        let ordinal = u32::try_from(ordinal).map_err(|_| SessionRelationError::Invalid)?;
+        let workflow = workflow_agent_entity_id(
+            &projection.session_id,
+            projection.generation,
+            &membership.run_id,
+            &membership.agent_label,
+        )?;
+        insert_entity(&mut entities, session.clone(), "session-reference")?;
+        insert_entity(&mut entities, workflow.clone(), "workflow-agent-reference")?;
+        relations.push(ordered_relation(
+            &projection.session_id,
+            projection.generation,
+            &format!("{}:{}", membership.run_id, membership.agent_label),
+            ordinal,
+            session.clone(),
+            workflow,
+            WORKFLOW_AGENT_KIND,
         )?);
     }
     Ok((entities.into_values().collect(), relations))
@@ -755,8 +895,12 @@ fn property_relation(
     .map_err(map_graph_error)
 }
 
-fn namespace(project_id: &ProjectId) -> Result<GraphNamespace, SessionRelationError> {
-    GraphNamespace::new(format!("project:{}", project_id.as_str())).map_err(map_graph_error)
+fn namespace(scope: &SessionRelationScope) -> Result<GraphNamespace, SessionRelationError> {
+    let prefix = match scope {
+        SessionRelationScope::Project { .. } => "project",
+        SessionRelationScope::Profile { .. } => "profile",
+    };
+    GraphNamespace::new(format!("{prefix}:{}", scope.identity())).map_err(map_graph_error)
 }
 
 fn projection(
@@ -813,6 +957,37 @@ fn agent_entity_id(
     entity_id(session_id, generation, AGENT_KIND, agent_id.as_str())
 }
 
+fn session_entity_id(
+    projection_session_id: &SessionId,
+    generation: u64,
+    session_id: &SessionId,
+) -> Result<GraphEntityId, SessionRelationError> {
+    entity_id(
+        projection_session_id,
+        generation,
+        SESSION_KIND,
+        session_id.as_str(),
+    )
+}
+
+fn workflow_agent_entity_id(
+    session_id: &SessionId,
+    generation: u64,
+    run_id: &str,
+    agent_label: &str,
+) -> Result<GraphEntityId, SessionRelationError> {
+    if run_id.trim().is_empty() || agent_label.trim().is_empty() {
+        return Err(SessionRelationError::Invalid);
+    }
+    entity_id(
+        session_id,
+        generation,
+        WORKFLOW_AGENT_ENTITY_KIND,
+        &serde_json::to_string(&(run_id, agent_label))
+            .map_err(|_| SessionRelationError::Invalid)?,
+    )
+}
+
 fn entity_id(
     session_id: &SessionId,
     generation: u64,
@@ -841,10 +1016,7 @@ fn parse_entity_id<'a>(
         .ok_or(SessionRelationError::Corrupt)
 }
 
-fn relation_ordinal(
-    relation: &GraphRelation,
-    ordinal_property: &GraphPropertyName,
-) -> Option<i64> {
+fn relation_ordinal(relation: &GraphRelation, ordinal_property: &GraphPropertyName) -> Option<i64> {
     match relation.properties.get(ordinal_property) {
         Some(GraphProperty::I64(value)) => Some(*value),
         _ => None,

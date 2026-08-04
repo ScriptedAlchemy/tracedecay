@@ -750,13 +750,20 @@ pub(super) async fn production_project_server(
                 .await?;
             let session_relation_graph = invocation
                 .embedded_graph_runtime
-                .resolve_project(&code_search_project_id, &cg.store_layout().data_root)
+                .resolve_scope(
+                    &tracedecay_global_db::session_temporal::relations::SessionRelationScope::project(
+                        code_search_project_id.clone(),
+                    ),
+                    &cg.store_layout().data_root,
+                )
                 .map_err(|error| TraceDecayError::Config {
                     message: format!("mount native project relation graph: {error}"),
                 })?;
             registered_project_session_db
                 .bind_session_relation_graph(
-                    code_search_project_id.clone(),
+                    tracedecay_global_db::session_temporal::relations::SessionRelationScope::project(
+                        code_search_project_id.clone(),
+                    ),
                     session_relation_graph,
                 )
                 .map_err(|error| TraceDecayError::Config {
@@ -777,6 +784,26 @@ pub(super) async fn production_project_server(
             let registered_user_session_db = store_administration
                 .registered_profile_session_database()
                 .await?;
+            let profile_relation_scope =
+                tracedecay_global_db::session_temporal::relations::SessionRelationScope::profile(
+                    profile_identity.profile_id().clone(),
+                );
+            let profile_session_root = registered_user_session_db.db_path().parent().ok_or_else(
+                || TraceDecayError::Config {
+                    message: "profile session database has no storage root".to_owned(),
+                },
+            )?;
+            let profile_relation_graph = invocation
+                .embedded_graph_runtime
+                .resolve_scope(&profile_relation_scope, profile_session_root)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("mount native profile relation graph: {error}"),
+                })?;
+            registered_user_session_db
+                .bind_session_relation_graph(profile_relation_scope, profile_relation_graph)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("bind profile session relation graph: {error}"),
+                })?;
             log_daemon_event(
                 "project_open_phase",
                 &[

@@ -104,7 +104,8 @@ pub(super) const TABLES: &[Table] = &[
         "project_aliases",
         [
             column("alias_path", "TEXT", false, None, 1),
-            column("project_id", "TEXT", true, None, 0),
+            column("scope_kind", "TEXT", true, None, 0),
+            column("scope_id", "TEXT", true, None, 0),
             column("last_seen_at", "INTEGER", true, None, 0),
         ],
         [foreign_key(
@@ -750,6 +751,20 @@ pub(super) const TABLES: &[Table] = &[
             "anchor_id",
             "NO ACTION"
         )]
+    ),
+    table!(
+        "session_relation_receipts",
+        [
+            column("session_id", "TEXT", true, None, 1),
+            column("generation", "INTEGER", true, None, 2),
+            column("project_id", "TEXT", true, None, 0),
+            column("expected_graph_watermark", "TEXT", true, None, 0),
+            column("state", "TEXT", true, None, 0),
+            column("graph_watermark", "TEXT", false, None, 0),
+            column("created_at", "INTEGER", true, None, 0),
+            column("applied_at", "INTEGER", false, None, 0),
+        ],
+        []
     ),
     table!(
         "session_summary_sources",
@@ -1974,6 +1989,13 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["session_id", "terminal_at"],
+    },
+    Index {
+        table: "session_relation_receipts",
+        name: Some("idx_session_relation_receipts_pending"),
+        unique: false,
+        origin: "c",
+        columns: &["state", "created_at", "session_id", "generation"],
     },
     Index {
         table: "session_query_cursor_keys",

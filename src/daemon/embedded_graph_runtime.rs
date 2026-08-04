@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
-use tracedecay_domain::ProjectId;
+use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
 use tracedecay_graph_db::{
     GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
     GraphFormatVersion, NeverCancelled,
@@ -56,7 +56,7 @@ struct MountedProjectGraph {
 
 #[derive(Clone, Default)]
 pub(super) struct EmbeddedGraphRuntimeRegistry {
-    mounted: Arc<Mutex<BTreeMap<ProjectId, MountedProjectGraph>>>,
+    mounted: Arc<Mutex<BTreeMap<SessionRelationScope, MountedProjectGraph>>>,
 }
 
 impl std::fmt::Debug for EmbeddedGraphRuntimeRegistry {
@@ -68,18 +68,15 @@ impl std::fmt::Debug for EmbeddedGraphRuntimeRegistry {
 }
 
 impl EmbeddedGraphRuntimeRegistry {
-    pub(super) fn resolve_project(
+    pub(super) fn resolve_scope(
         &self,
-        project_id: &ProjectId,
-        project_store_root: &Path,
+        scope: &SessionRelationScope,
+        session_store_root: &Path,
     ) -> Result<Arc<GraphDb>, EmbeddedGraphRuntimeError> {
-        project_id
-            .validate()
-            .map_err(|error| EmbeddedGraphRuntimeError::Unavailable(error.to_string()))?;
-        let store_root = project_store_root.canonicalize().map_err(|error| {
+        let store_root = session_store_root.canonicalize().map_err(|error| {
             EmbeddedGraphRuntimeError::Unavailable(format!(
-                "canonical project store {} is unavailable: {error}",
-                project_store_root.display()
+                "canonical session store {} is unavailable: {error}",
+                session_store_root.display()
             ))
         })?;
         let graph_directory = store_root.join(GRAPH_DIRECTORY);
@@ -95,7 +92,7 @@ impl EmbeddedGraphRuntimeRegistry {
                 "embedded graph registry lock is poisoned".to_owned(),
             )
         })?;
-        if let Some(existing) = mounted.get(project_id) {
+        if let Some(existing) = mounted.get(scope) {
             return if existing.store_root == store_root && existing.graph_path == graph_path {
                 Ok(Arc::clone(&existing.database))
             } else {
@@ -115,7 +112,7 @@ impl EmbeddedGraphRuntimeRegistry {
             cancellation: Arc::new(NeverCancelled),
         })?);
         mounted.insert(
-            project_id.clone(),
+            scope.clone(),
             MountedProjectGraph {
                 store_root,
                 graph_path,

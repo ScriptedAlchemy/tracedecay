@@ -24,7 +24,7 @@ pub struct RegisteredGlobalDb {
     runtime: StoreRuntimeHandle,
     authority: DatabaseAuthority,
     session_relation_graph: OnceLock<(
-        tracedecay_domain::ProjectId,
+        crate::session_temporal::relations::SessionRelationScope,
         Arc<tracedecay_graph_db::GraphDb>,
     )>,
 }
@@ -272,47 +272,50 @@ impl RegisteredGlobalDb {
         self.runtime.binding()
     }
 
-    /// Mounts the daemon-owned native graph handle for this exact project
-    /// session shard. Rebinding is accepted only for the same identity and
-    /// allocation.
+    /// Mounts the daemon-owned native graph handle for this exact session
+    /// shard. Rebinding is accepted only for the same identity and allocation.
     pub fn bind_session_relation_graph(
         &self,
-        project_id: tracedecay_domain::ProjectId,
+        scope: crate::session_temporal::relations::SessionRelationScope,
         graph: Arc<tracedecay_graph_db::GraphDb>,
     ) -> tracedecay_runtime_core::errors::Result<()> {
-        let bound_project = self
-            .binding()
-            .shard_id
-            .scope
-            .project_id()
-            .ok_or_else(|| {
-                registered_error(
-                    "bind session relation graph",
-                    "session relation graphs require a project session shard",
-                )
-            })?;
-        if bound_project != &project_id {
+        use crate::session_temporal::relations::SessionRelationScope;
+        use tracedecay_store::StoreShardScopeV1;
+        let shard = &self.binding().shard_id;
+        let exact = match (&shard.scope, &scope) {
+            (
+                StoreShardScopeV1::ProjectSessions {
+                    project_id: expected,
+                },
+                SessionRelationScope::Project { project_id: actual },
+            ) => expected == actual,
+            (StoreShardScopeV1::ProfileSessions, SessionRelationScope::Profile { profile_id }) => {
+                &shard.profile_id == profile_id
+            }
+            _ => false,
+        };
+        if !exact {
             return Err(registered_error(
                 "bind session relation graph",
-                "graph identity does not match the registered project session shard",
+                "graph scope does not match the registered session shard",
             ));
         }
-        if let Some((existing_project, existing_graph)) = self.session_relation_graph.get() {
-            return if existing_project == &project_id && Arc::ptr_eq(existing_graph, &graph) {
+        if let Some((existing_scope, existing_graph)) = self.session_relation_graph.get() {
+            return if existing_scope == &scope && Arc::ptr_eq(existing_graph, &graph) {
                 Ok(())
             } else {
                 Err(registered_error(
                     "bind session relation graph",
-                    "registered project session shard already has a different graph owner",
+                    "registered session shard already has a different graph owner",
                 ))
             };
         }
         self.session_relation_graph
-            .set((project_id, graph))
+            .set((scope, graph))
             .map_err(|_| {
                 registered_error(
                     "bind session relation graph",
-                    "registered project session shard graph binding raced",
+                    "registered session shard graph binding raced",
                 )
             })
     }
@@ -320,26 +323,29 @@ impl RegisteredGlobalDb {
     pub(crate) fn session_relation_graph(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<(
-        &tracedecay_domain::ProjectId,
+        &crate::session_temporal::relations::SessionRelationScope,
         &Arc<tracedecay_graph_db::GraphDb>,
     )> {
-        self.session_relation_graph.get().map(|(project, graph)| (project, graph)).ok_or_else(|| {
-            registered_error(
-                "resolve session relation graph",
-                "daemon-owned session relation graph is unavailable",
-            )
-        })
+        self.session_relation_graph
+            .get()
+            .map(|(scope, graph)| (scope, graph))
+            .ok_or_else(|| {
+                registered_error(
+                    "resolve session relation graph",
+                    "daemon-owned session relation graph is unavailable",
+                )
+            })
     }
 
     pub(crate) fn session_relation_store(
         &self,
     ) -> tracedecay_runtime_core::errors::Result<(
-        &tracedecay_domain::ProjectId,
+        &crate::session_temporal::relations::SessionRelationScope,
         crate::session_temporal::relations::SessionRelationGraphStore,
     )> {
-        let (project_id, graph) = self.session_relation_graph()?;
+        let (scope, graph) = self.session_relation_graph()?;
         Ok((
-            project_id,
+            scope,
             crate::session_temporal::relations::SessionRelationGraphStore::new(Arc::clone(graph)),
         ))
     }

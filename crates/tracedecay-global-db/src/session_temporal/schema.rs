@@ -44,6 +44,26 @@ const TEMPORAL_SCHEMA_DDL: &str = r"
     CREATE INDEX IF NOT EXISTS idx_session_summary_nodes_root_created_order
         ON session_summary_nodes(created_at, session_id, summary_id);
 
+    CREATE TABLE IF NOT EXISTS session_relation_receipts (
+        session_id TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK(generation > 0),
+        scope_kind TEXT NOT NULL CHECK(scope_kind IN ('project', 'profile')),
+        scope_id TEXT NOT NULL,
+        expected_graph_watermark TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('pending', 'applied')),
+        graph_watermark TEXT,
+        created_at INTEGER NOT NULL,
+        applied_at INTEGER,
+        PRIMARY KEY(session_id, generation),
+        CHECK(
+            (state = 'pending' AND graph_watermark IS NULL AND applied_at IS NULL)
+            OR (state = 'applied' AND graph_watermark = expected_graph_watermark
+                AND applied_at IS NOT NULL)
+        )
+    );
+    CREATE INDEX IF NOT EXISTS idx_session_relation_receipts_pending
+        ON session_relation_receipts(state, created_at, session_id, generation);
+
     CREATE TABLE IF NOT EXISTS session_summary_sources (
         summary_id TEXT NOT NULL,
         source_ordinal INTEGER NOT NULL CHECK(source_ordinal >= 0),
@@ -673,6 +693,20 @@ pub(super) const TEMPORAL_TABLE_COLUMNS: &[(&str, &[&str])] = &[
             "source_horizon_json",
             "publication_json",
             "created_at",
+        ],
+    ),
+    (
+        "session_relation_receipts",
+        &[
+            "session_id",
+            "generation",
+            "scope_kind",
+            "scope_id",
+            "expected_graph_watermark",
+            "state",
+            "graph_watermark",
+            "created_at",
+            "applied_at",
         ],
     ),
     (

@@ -238,6 +238,33 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         .store_administration
         .registered_profile_database()
         .await?;
+    let profile_session_database = engine
+        .store_administration
+        .registered_profile_session_database()
+        .await?;
+    let profile_relation_scope =
+        tracedecay_global_db::session_temporal::relations::SessionRelationScope::profile(
+            authority.profile_identity().profile_id().clone(),
+        );
+    let profile_session_root =
+        profile_session_database
+            .db_path()
+            .parent()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "profile session database has no storage root".to_owned(),
+            })?;
+    let profile_relation_graph = engine
+        .invocation
+        .embedded_graph_runtime
+        .resolve_scope(&profile_relation_scope, profile_session_root)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("mount native profile relation graph: {error}"),
+        })?;
+    profile_session_database
+        .bind_session_relation_graph(profile_relation_scope, profile_relation_graph)
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("bind profile session relation graph: {error}"),
+        })?;
     let maintenance = maintenance::MaintenanceCoordinator::spawn(
         profile_root.clone(),
         Arc::clone(&profile_database),

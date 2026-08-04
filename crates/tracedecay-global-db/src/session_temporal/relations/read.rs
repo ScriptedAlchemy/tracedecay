@@ -8,13 +8,14 @@ use tracedecay_graph_db::{
 };
 
 use super::{
-    AGENT_CHILD_OF_KIND, AGENT_KIND, AGENT_PARENT_KIND, COPY_PROOF_PROPERTY,
-    KNOWLEDGE_AT_PROPERTY, LOGICAL_COPY_KIND, OCCURRENCE_KIND, ORDINAL_PROPERTY,
+    AGENT_CHILD_OF_KIND, AGENT_KIND, AGENT_PARENT_KIND, COPY_PROOF_PROPERTY, KNOWLEDGE_AT_PROPERTY,
+    LOGICAL_COPY_KIND, OCCURRENCE_KIND, ORDINAL_PROPERTY, SESSION_KIND, SESSION_PARENT_KIND,
     SUMMARY_ANCHOR_SOURCE_KIND, SUMMARY_KIND, SUMMARY_PREDECESSOR_KIND, SUMMARY_SOURCE_KIND,
     SUMMARY_SUCCESSOR_KIND, SessionRelationError, SessionRelationGraphStore, SummarySourceRef,
-    THREAD_CHILD_OF_KIND, THREAD_KIND, THREAD_PARENT_KIND, VALID_TIME_PROPERTY, agent_entity_id,
-    map_graph_error, namespace, occurrence_entity_id, parse_entity_id, projection,
-    relation_ordinal, summary_entity_id, thread_entity_id,
+    THREAD_CHILD_OF_KIND, THREAD_KIND, THREAD_PARENT_KIND, VALID_TIME_PROPERTY,
+    WORKFLOW_AGENT_ENTITY_KIND, WORKFLOW_AGENT_KIND, agent_entity_id, map_graph_error, namespace,
+    occurrence_entity_id, parse_entity_id, projection, relation_ordinal, session_entity_id,
+    summary_entity_id, thread_entity_id,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,9 +27,75 @@ pub struct SummaryRelationRead {
 }
 
 impl SessionRelationGraphStore {
+    pub fn session_context(
+        &self,
+        scope: &super::SessionRelationScope,
+        session_id: &tracedecay_domain::SessionId,
+        generation: u64,
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<super::SessionContextRelations, SessionRelationError> {
+        require_budget(max_relations)?;
+        self.require_projection(scope, session_id, generation, Arc::clone(&cancellation))?;
+        let starts = [session_entity_id(session_id, generation, session_id)?];
+        let mut batches = self
+            .database
+            .outgoing_relations(
+                &namespace(scope)?,
+                &starts,
+                &relation_kinds(&[SESSION_PARENT_KIND, WORKFLOW_AGENT_KIND])?,
+                max_relations,
+                cancellation,
+            )
+            .map_err(map_graph_error)?;
+        let relations = batches.pop().ok_or(SessionRelationError::Corrupt)?;
+        let mut parent_session_id = None;
+        let mut workflow_agents = Vec::new();
+        for relation in relations {
+            match relation.kind.as_str() {
+                SESSION_PARENT_KIND => {
+                    let parent = tracedecay_domain::SessionId::new(parse_entity_id(
+                        relation.to.as_str(),
+                        session_id,
+                        generation,
+                        SESSION_KIND,
+                    )?)
+                    .map_err(|_| SessionRelationError::Corrupt)?;
+                    if parent_session_id.replace(parent).is_some() {
+                        return Err(SessionRelationError::Corrupt);
+                    }
+                }
+                WORKFLOW_AGENT_KIND => {
+                    let encoded = parse_entity_id(
+                        relation.to.as_str(),
+                        session_id,
+                        generation,
+                        WORKFLOW_AGENT_ENTITY_KIND,
+                    )?;
+                    let (run_id, agent_label): (String, String) =
+                        serde_json::from_str(encoded).map_err(|_| SessionRelationError::Corrupt)?;
+                    workflow_agents.push(super::WorkflowAgentMembership {
+                        run_id,
+                        agent_label,
+                    });
+                }
+                _ => return Err(SessionRelationError::Corrupt),
+            }
+        }
+        workflow_agents.sort_by(|left, right| {
+            left.run_id
+                .cmp(&right.run_id)
+                .then_with(|| left.agent_label.cmp(&right.agent_label))
+        });
+        Ok(super::SessionContextRelations {
+            parent_session_id,
+            workflow_agents,
+        })
+    }
+
     pub fn summary_relations(
         &self,
-        project_id: &tracedecay_domain::ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &tracedecay_domain::SessionId,
         generation: u64,
         summary_ids: &[String],
@@ -36,13 +103,8 @@ impl SessionRelationGraphStore {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<SummaryRelationRead>, SessionRelationError> {
         require_budget(max_relations)?;
-        self.require_projection(
-            project_id,
-            session_id,
-            generation,
-            Arc::clone(&cancellation),
-        )?;
-        let namespace = namespace(project_id)?;
+        self.require_projection(scope, session_id, generation, Arc::clone(&cancellation))?;
+        let namespace = namespace(scope)?;
         let starts = summary_ids
             .iter()
             .map(|summary_id| summary_entity_id(session_id, generation, summary_id))
@@ -55,16 +117,9 @@ impl SessionRelationGraphStore {
         ])?;
         let batches = self
             .database
-            .outgoing_relations(
-                &namespace,
-                &starts,
-                &kinds,
-                max_relations,
-                cancellation,
-            )
+            .outgoing_relations(&namespace, &starts, &kinds, max_relations, cancellation)
             .map_err(map_graph_error)?;
-        let ordinal_property =
-            GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
+        let ordinal_property = GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
         summary_ids
             .iter()
             .zip(batches)
@@ -88,17 +143,15 @@ impl SessionRelationGraphStore {
                             )?
                             .to_owned(),
                         }),
-                        SUMMARY_ANCHOR_SOURCE_KIND => {
-                            sources.push(SummarySourceRef::Anchor {
-                                anchor_id: RetrievalAnchorId::new(parse_entity_id(
-                                    relation.to.as_str(),
-                                    session_id,
-                                    generation,
-                                    "anchor",
-                                )?)
-                                .map_err(|_| SessionRelationError::Corrupt)?,
-                            })
-                        }
+                        SUMMARY_ANCHOR_SOURCE_KIND => sources.push(SummarySourceRef::Anchor {
+                            anchor_id: RetrievalAnchorId::new(parse_entity_id(
+                                relation.to.as_str(),
+                                session_id,
+                                generation,
+                                "anchor",
+                            )?)
+                            .map_err(|_| SessionRelationError::Corrupt)?,
+                        }),
                         SUMMARY_PREDECESSOR_KIND => {
                             if predecessor_summary_id
                                 .replace(
@@ -139,7 +192,7 @@ impl SessionRelationGraphStore {
 
     pub fn logical_copies(
         &self,
-        project_id: &tracedecay_domain::ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &tracedecay_domain::SessionId,
         generation: u64,
         occurrence_ids: &[MessageOccurrenceIdV1],
@@ -147,12 +200,7 @@ impl SessionRelationGraphStore {
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<Vec<Vec<super::LogicalCopyRelation>>, SessionRelationError> {
         require_budget(max_relations)?;
-        self.require_projection(
-            project_id,
-            session_id,
-            generation,
-            Arc::clone(&cancellation),
-        )?;
+        self.require_projection(scope, session_id, generation, Arc::clone(&cancellation))?;
         let starts = occurrence_ids
             .iter()
             .map(|occurrence_id| occurrence_entity_id(session_id, generation, occurrence_id))
@@ -160,7 +208,7 @@ impl SessionRelationGraphStore {
         let batches = self
             .database
             .outgoing_relations(
-                &namespace(project_id)?,
+                &namespace(scope)?,
                 &starts,
                 &relation_kinds(&[LOGICAL_COPY_KIND])?,
                 max_relations,
@@ -180,15 +228,14 @@ impl SessionRelationGraphStore {
                 relations
                     .into_iter()
                     .map(|relation| {
-                        let copied_from_occurrence_id = MessageOccurrenceIdV1::new(
-                            parse_entity_id(
+                        let copied_from_occurrence_id =
+                            MessageOccurrenceIdV1::new(parse_entity_id(
                                 relation.to.as_str(),
                                 session_id,
                                 generation,
                                 OCCURRENCE_KIND,
-                            )?,
-                        )
-                        .map_err(|_| SessionRelationError::Corrupt)?;
+                            )?)
+                            .map_err(|_| SessionRelationError::Corrupt)?;
                         let proof = string_property(&relation, &proof_property)
                             .and_then(|value| serde_json::from_str(value).ok())
                             .ok_or(SessionRelationError::Corrupt)?;
@@ -214,7 +261,7 @@ impl SessionRelationGraphStore {
 
     pub fn thread_relations(
         &self,
-        project_id: &tracedecay_domain::ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &tracedecay_domain::SessionId,
         generation: u64,
         thread_ids: &[ThreadId],
@@ -226,7 +273,7 @@ impl SessionRelationGraphStore {
             .map(|thread_id| thread_entity_id(session_id, generation, thread_id))
             .collect::<Result<Vec<_>, _>>()?;
         self.hierarchy_relations(
-            project_id,
+            scope,
             session_id,
             generation,
             &starts,
@@ -262,7 +309,7 @@ impl SessionRelationGraphStore {
 
     pub fn agent_relations(
         &self,
-        project_id: &tracedecay_domain::ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &tracedecay_domain::SessionId,
         generation: u64,
         agent_ids: &[AgentInstanceId],
@@ -274,7 +321,7 @@ impl SessionRelationGraphStore {
             .map(|agent_id| agent_entity_id(session_id, generation, agent_id))
             .collect::<Result<Vec<_>, _>>()?;
         self.hierarchy_relations(
-            project_id,
+            scope,
             session_id,
             generation,
             &starts,
@@ -311,7 +358,7 @@ impl SessionRelationGraphStore {
     #[allow(clippy::too_many_arguments)]
     fn hierarchy_relations<T>(
         &self,
-        project_id: &tracedecay_domain::ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &tracedecay_domain::SessionId,
         generation: u64,
         starts: &[GraphEntityId],
@@ -321,24 +368,18 @@ impl SessionRelationGraphStore {
         decode: impl Fn(&GraphRelation, u32) -> Result<T, SessionRelationError>,
     ) -> Result<Vec<Vec<T>>, SessionRelationError> {
         require_budget(max_relations)?;
-        self.require_projection(
-            project_id,
-            session_id,
-            generation,
-            Arc::clone(&cancellation),
-        )?;
+        self.require_projection(scope, session_id, generation, Arc::clone(&cancellation))?;
         let batches = self
             .database
             .outgoing_relations(
-                &namespace(project_id)?,
+                &namespace(scope)?,
                 starts,
                 &relation_kinds(kind_names)?,
                 max_relations,
                 cancellation,
             )
             .map_err(map_graph_error)?;
-        let ordinal_property =
-            GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
+        let ordinal_property = GraphPropertyName::new(ORDINAL_PROPERTY).map_err(map_graph_error)?;
         batches
             .into_iter()
             .map(|relations| {
@@ -357,7 +398,7 @@ impl SessionRelationGraphStore {
 
     fn require_projection(
         &self,
-        project_id: &tracedecay_domain::ProjectId,
+        scope: &super::SessionRelationScope,
         session_id: &tracedecay_domain::SessionId,
         generation: u64,
         cancellation: Arc<dyn GraphCancellation>,
@@ -365,7 +406,7 @@ impl SessionRelationGraphStore {
         let exists = self
             .database
             .projection_telemetry(GraphProjectionTelemetryRequest {
-                namespace: namespace(project_id)?,
+                namespace: namespace(scope)?,
                 projection: projection(session_id, generation)?,
                 cancellation,
             })

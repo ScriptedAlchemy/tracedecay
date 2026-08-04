@@ -12,6 +12,8 @@ mod refresh;
 /// LCM compatibility rendering over one frozen registered-store snapshot. The
 /// DB-free shaping it applies is owned by [`self::render`].
 mod registered_lcm_render;
+mod relation_projection;
+mod relation_receipts;
 pub mod relations;
 pub mod render;
 mod retrieval;

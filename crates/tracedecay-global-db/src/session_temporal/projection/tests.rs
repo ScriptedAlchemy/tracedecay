@@ -573,7 +573,7 @@ async fn parent_resolver_pages_live_sized_observation_history() {
 }
 
 #[tokio::test]
-async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_ids() {
+async fn validated_copy_retains_bitemporality_without_materializing_a_sql_relation() {
     let tmp = TempDir::new().unwrap();
     let runtime = HostAdmissionTestRuntimeV1::profile(tmp.path())
         .await
@@ -688,13 +688,14 @@ async fn persisted_copy_edge_retains_bitemporality_and_rejects_forged_assertion_
         .persist_session_refresh_projection_batch(progress, batch.clone())
         .await
         .unwrap();
-    let (knowledge_at, valid_time) = runtime
+    let legacy_relation = runtime
         .session_temporal_copy_edge_for_test(HostAdmissionScope::Profile, &session_id)
         .await
-        .unwrap()
-        .expect("copy edge");
-    assert_eq!(knowledge_at, batch.copies()[0].knowledge_at.0);
-    assert_eq!(valid_time, batch.copies()[0].valid_time);
+        .unwrap();
+    assert!(
+        legacy_relation.is_none(),
+        "validated relation topology must be materialized only in the mounted graph"
+    );
 }
 
 #[tokio::test]

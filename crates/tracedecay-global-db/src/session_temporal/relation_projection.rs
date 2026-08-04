@@ -1,0 +1,695 @@
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use tracedecay_domain::{
+    AgentInstanceId, CanonicalObservationEnvelopeV1, CopyProofV1, DurableObservationV1, MessageId,
+    MessageOccurrenceIdV1, RetrievalAnchorId, SessionId, SessionProjectionGenerationV1,
+    TemporalValidityV1, UtcMicros,
+};
+use tracedecay_graph_db::{GraphCancellation, GraphWatermark};
+use tracedecay_runtime_core::db::engine::{QueryExecutor, params};
+use tracedecay_store::SessionStoreResult;
+
+use super::operations::CanonicalPublicationManifest;
+use super::query::{generation_i64, storage, storage_message};
+use super::relations::{
+    AgentHierarchyRelation, LogicalCopyRelation, SessionRelationError, SessionRelationProjection,
+    SessionRelationScope, SummaryRelationNode, SummaryRelationRead, SummarySourceRef,
+    WorkflowAgentMembership,
+};
+use crate::RegisteredGlobalDb;
+
+const RECONSTRUCT_OPERATION: &str = "reconstruct native session relation projection";
+const DEFAULT_MAX_ENTITIES: usize = 100_000;
+const DEFAULT_MAX_RELATIONS: usize = 100_000;
+
+struct CanonicalOccurrence {
+    occurrence_id: MessageOccurrenceIdV1,
+    message_id: Option<MessageId>,
+    agent_id: Option<AgentInstanceId>,
+    parent_message_id: Option<MessageId>,
+    parent_agent_id: Option<AgentInstanceId>,
+    parent_session_id: Option<SessionId>,
+    ordinal: u32,
+    knowledge_at: UtcMicros,
+    valid_time: TemporalValidityV1,
+}
+
+impl RegisteredGlobalDb {
+    pub async fn active_session_summary_relations(
+        &self,
+        session_id: &SessionId,
+        summary_ids: &[String],
+        max_relations: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<(SessionProjectionGenerationV1, Vec<SummaryRelationRead>)> {
+        let generation = self.active_relation_generation(session_id).await?;
+        let (scope, store) = self
+            .session_relation_store()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let relations = match store.summary_relations(
+            scope,
+            session_id,
+            generation.value(),
+            summary_ids,
+            max_relations,
+            Arc::clone(&cancellation),
+        ) {
+            Ok(relations) => relations,
+            Err(SessionRelationError::NotFound) => {
+                self.apply_active_session_relation_projection(
+                    session_id,
+                    Arc::clone(&cancellation),
+                )
+                .await?;
+                store
+                    .summary_relations(
+                        scope,
+                        session_id,
+                        generation.value(),
+                        summary_ids,
+                        max_relations,
+                        cancellation,
+                    )
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+            }
+            Err(error) => return Err(storage(RECONSTRUCT_OPERATION, error)),
+        };
+        Ok((generation, relations))
+    }
+
+    pub async fn apply_active_session_relation_projection(
+        &self,
+        session_id: &SessionId,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<GraphWatermark> {
+        let generation = self.active_relation_generation(session_id).await?;
+        let (scope, _) = self
+            .session_relation_store()
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let projection = reconstruct_session_relation_projection(
+            &snapshot,
+            scope,
+            session_id,
+            generation,
+            DEFAULT_MAX_ENTITIES,
+            DEFAULT_MAX_RELATIONS,
+            Arc::clone(&cancellation),
+        )
+        .await?;
+        super::relation_receipts::apply_relation_projection(self, &projection, cancellation).await
+    }
+
+    pub async fn recover_active_session_relation_projections(
+        &self,
+        limit: usize,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> SessionStoreResult<usize> {
+        if limit == 0 {
+            return Err(storage(
+                RECONSTRUCT_OPERATION,
+                SessionRelationError::BudgetExhausted,
+            ));
+        }
+        require_not_cancelled(&cancellation)?;
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut rows = snapshot
+            .query(
+                "SELECT session_id
+                 FROM session_relation_receipts
+                 WHERE state = 'pending'
+                 ORDER BY created_at, session_id, generation
+                 LIMIT ?1",
+                params![
+                    i64::try_from(limit).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                ],
+            )
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let mut sessions = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        {
+            require_not_cancelled(&cancellation)?;
+            sessions.push(
+                SessionId::new(
+                    row.get::<String>(0)
+                        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+                )
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            );
+        }
+        drop(rows);
+        drop(snapshot);
+        for session_id in &sessions {
+            self.apply_active_session_relation_projection(session_id, Arc::clone(&cancellation))
+                .await?;
+        }
+        Ok(sessions.len())
+    }
+
+    async fn active_relation_generation(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionStoreResult<SessionProjectionGenerationV1> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        active_generation(&snapshot, session_id).await
+    }
+}
+
+pub(crate) async fn seed_session_relation_projection(
+    database: &RegisteredGlobalDb,
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<SessionRelationProjection> {
+    let (scope, store) = database
+        .session_relation_store()
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let Some(generation) = optional_active_generation(conn, session_id).await? else {
+        return reconstruct_session_context(scope, session_id, 1, conn, cancellation).await;
+    };
+    match store.load_projection(
+        scope,
+        session_id,
+        generation.value(),
+        DEFAULT_MAX_ENTITIES,
+        DEFAULT_MAX_RELATIONS,
+        Arc::clone(&cancellation),
+    ) {
+        Ok(projection) => Ok(projection),
+        Err(SessionRelationError::NotFound) => {
+            reconstruct_session_relation_projection(
+                conn,
+                scope,
+                session_id,
+                generation,
+                DEFAULT_MAX_ENTITIES,
+                DEFAULT_MAX_RELATIONS,
+                cancellation,
+            )
+            .await
+        }
+        Err(error) => Err(storage(RECONSTRUCT_OPERATION, error)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn reconstruct_session_relation_projection(
+    conn: &impl QueryExecutor,
+    scope: &SessionRelationScope,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_entities: usize,
+    max_relations: usize,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<SessionRelationProjection> {
+    if max_entities == 0 || max_relations == 0 {
+        return Err(storage(
+            RECONSTRUCT_OPERATION,
+            SessionRelationError::BudgetExhausted,
+        ));
+    }
+    require_not_cancelled(&cancellation)?;
+    let summaries =
+        reconstruct_summaries(conn, session_id, generation, max_relations, &cancellation).await?;
+    let occurrences =
+        reconstruct_occurrences(conn, session_id, generation, max_entities, &cancellation).await?;
+    let (logical_copies, agent_hierarchy, observed_parent) = occurrence_relations(&occurrences)?;
+    let (parent_session_id, workflow_agents) =
+        reconstruct_session_metadata(conn, session_id, observed_parent, &cancellation).await?;
+    let projection = SessionRelationProjection {
+        scope: scope.clone(),
+        session_id: session_id.clone(),
+        generation: generation.value(),
+        summaries,
+        logical_copies,
+        thread_hierarchy: Vec::new(),
+        agent_hierarchy,
+        parent_session_id,
+        workflow_agents,
+    };
+    enforce_projection_bounds(&projection, max_entities, max_relations)?;
+    super::relations::validate_projection(&projection)
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    Ok(projection)
+}
+
+async fn reconstruct_session_context(
+    scope: &SessionRelationScope,
+    session_id: &SessionId,
+    generation: u64,
+    conn: &impl QueryExecutor,
+    cancellation: Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<SessionRelationProjection> {
+    let (parent_session_id, workflow_agents) =
+        reconstruct_session_metadata(conn, session_id, None, &cancellation).await?;
+    Ok(SessionRelationProjection {
+        scope: scope.clone(),
+        session_id: session_id.clone(),
+        generation,
+        summaries: Vec::new(),
+        logical_copies: Vec::new(),
+        thread_hierarchy: Vec::new(),
+        agent_hierarchy: Vec::new(),
+        parent_session_id,
+        workflow_agents,
+    })
+}
+
+async fn reconstruct_summaries(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_relations: usize,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<Vec<SummaryRelationNode>> {
+    let mut rows = conn
+        .query(
+            "SELECT node.summary_id, node.publication_json
+             FROM session_summary_availability AS availability
+             JOIN session_summary_nodes AS node
+               ON node.summary_id = availability.summary_id
+              AND node.session_id = availability.session_id
+             WHERE availability.session_id = ?1
+               AND availability.generation = ?2
+             ORDER BY node.created_at, node.summary_id
+             LIMIT ?3",
+            params![
+                session_id.as_str(),
+                generation_i64(generation, RECONSTRUCT_OPERATION)?,
+                bounded_query_limit(max_relations)?
+            ],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let mut summaries = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+    {
+        require_not_cancelled(cancellation)?;
+        if summaries.len() == max_relations {
+            return Err(storage(
+                RECONSTRUCT_OPERATION,
+                SessionRelationError::BudgetExhausted,
+            ));
+        }
+        let summary_id: String = row
+            .get(0)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let encoded: String = row
+            .get(1)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let manifest: CanonicalPublicationManifest = serde_json::from_str(&encoded)
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let sources = manifest
+            .canonical_sources
+            .into_iter()
+            .map(|source| match source.kind.as_str() {
+                "summary" => Ok(SummarySourceRef::Summary {
+                    summary_id: source.id,
+                }),
+                "anchor" => RetrievalAnchorId::new(source.id)
+                    .map(|anchor_id| SummarySourceRef::Anchor { anchor_id })
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error)),
+                _ => Err(storage_message(
+                    RECONSTRUCT_OPERATION,
+                    "canonical summary manifest has an invalid source kind",
+                )),
+            })
+            .collect::<SessionStoreResult<Vec<_>>>()?;
+        summaries.push(SummaryRelationNode {
+            summary_id,
+            sources,
+            predecessor_summary_id: manifest.predecessor_summary_id,
+        });
+    }
+    Ok(summaries)
+}
+
+async fn reconstruct_occurrences(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    generation: SessionProjectionGenerationV1,
+    max_entities: usize,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<Vec<CanonicalOccurrence>> {
+    let mut rows = conn
+        .query(
+            "SELECT occurrence.occurrence_id, occurrence.message_id,
+                    occurrence.agent_id, occurrence.projection_output_ordinal,
+                    occurrence.knowledge_at, occurrence.valid_time_json,
+                    observation.observation_json
+             FROM session_occurrences AS occurrence
+             JOIN observations AS observation
+               ON observation.observation_id = occurrence.source_observation_id
+             WHERE occurrence.session_id = ?1 AND occurrence.generation = ?2
+             ORDER BY occurrence.projection_output_ordinal, occurrence.occurrence_id
+             LIMIT ?3",
+            params![
+                session_id.as_str(),
+                generation_i64(generation, RECONSTRUCT_OPERATION)?,
+                bounded_query_limit(max_entities)?
+            ],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let mut occurrences = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+    {
+        require_not_cancelled(cancellation)?;
+        if occurrences.len() == max_entities {
+            return Err(storage(
+                RECONSTRUCT_OPERATION,
+                SessionRelationError::BudgetExhausted,
+            ));
+        }
+        let observation: DurableObservationV1 = serde_json::from_str(
+            &row.get::<String>(6)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        )
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        let envelope: CanonicalObservationEnvelopeV1 =
+            serde_json::from_value(observation.payload().clone())
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+        occurrences.push(CanonicalOccurrence {
+            occurrence_id: MessageOccurrenceIdV1::new(
+                row.get::<String>(0)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            message_id: row
+                .get::<Option<String>>(1)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                .map(MessageId::new)
+                .transpose()
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            agent_id: row
+                .get::<Option<String>>(2)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+                .map(AgentInstanceId::new)
+                .transpose()
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            parent_message_id: envelope
+                .relations()
+                .parent_message_id()
+                .map(|id| MessageId::new(id.as_str()))
+                .transpose()
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            parent_agent_id: envelope
+                .relations()
+                .parent_agent_id()
+                .map(|id| AgentInstanceId::new(id.as_str()))
+                .transpose()
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            parent_session_id: envelope.relations().parent_session_id().cloned(),
+            ordinal: u32::try_from(
+                row.get::<i64>(3)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            knowledge_at: UtcMicros(
+                row.get(4)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            ),
+            valid_time: serde_json::from_str(
+                &row.get::<String>(5)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        });
+    }
+    Ok(occurrences)
+}
+
+fn occurrence_relations(
+    occurrences: &[CanonicalOccurrence],
+) -> SessionStoreResult<(
+    Vec<LogicalCopyRelation>,
+    Vec<AgentHierarchyRelation>,
+    Option<SessionId>,
+)> {
+    let message_occurrences = occurrences
+        .iter()
+        .filter_map(|occurrence| {
+            occurrence
+                .message_id
+                .as_ref()
+                .map(|message| (message.as_str(), occurrence))
+        })
+        .fold(
+            BTreeMap::<_, Vec<_>>::new(),
+            |mut index, (message, occurrence)| {
+                index.entry(message).or_default().push(occurrence);
+                index
+            },
+        );
+    let mut copies = Vec::new();
+    let mut agents = BTreeMap::new();
+    let mut parent_session_id = None;
+    for occurrence in occurrences {
+        if let (Some(message), Some(parent)) =
+            (&occurrence.message_id, &occurrence.parent_message_id)
+            && message == parent
+            && let Some(source) = message_occurrences
+                .get(parent.as_str())
+                .into_iter()
+                .flatten()
+                .find(|candidate| candidate.occurrence_id != occurrence.occurrence_id)
+        {
+            copies.push(LogicalCopyRelation {
+                occurrence_id: occurrence.occurrence_id.clone(),
+                copied_from_occurrence_id: source.occurrence_id.clone(),
+                proof: CopyProofV1::ParentMessageLinkage {
+                    source_occurrence_id: source.occurrence_id.clone(),
+                    parent_message_id: parent.clone(),
+                },
+                knowledge_at: occurrence.knowledge_at,
+                valid_time: occurrence.valid_time,
+            });
+        }
+        if let (Some(parent), Some(child)) = (&occurrence.parent_agent_id, &occurrence.agent_id) {
+            agents.insert(
+                (parent.as_str().to_owned(), child.as_str().to_owned()),
+                AgentHierarchyRelation {
+                    parent_agent_id: parent.clone(),
+                    child_agent_id: child.clone(),
+                    ordinal: occurrence.ordinal,
+                },
+            );
+        }
+        if let Some(parent) = &occurrence.parent_session_id {
+            match &parent_session_id {
+                Some(existing) if existing != parent => {
+                    return Err(storage_message(
+                        RECONSTRUCT_OPERATION,
+                        "canonical observations disagree on parent session identity",
+                    ));
+                }
+                Some(_) => {}
+                None => parent_session_id = Some(parent.clone()),
+            }
+        }
+    }
+    Ok((copies, agents.into_values().collect(), parent_session_id))
+}
+
+async fn reconstruct_session_metadata(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+    observed_parent: Option<SessionId>,
+    cancellation: &Arc<dyn GraphCancellation>,
+) -> SessionStoreResult<(Option<SessionId>, Vec<WorkflowAgentMembership>)> {
+    require_not_cancelled(cancellation)?;
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT parent_session_id
+             FROM sessions
+             WHERE session_id = ?1 AND parent_session_id IS NOT NULL
+             ORDER BY parent_session_id",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let stored_parent = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .map(|row| {
+            SessionId::new(
+                row.get::<String>(0)
+                    .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+        })
+        .transpose()?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .is_some()
+    {
+        return Err(storage_message(
+            RECONSTRUCT_OPERATION,
+            "session identity has more than one parent",
+        ));
+    }
+    let parent = match (observed_parent, stored_parent) {
+        (Some(observed), Some(stored)) if observed != stored => {
+            return Err(storage_message(
+                RECONSTRUCT_OPERATION,
+                "canonical observation and session parent identities disagree",
+            ));
+        }
+        (Some(parent), _) | (_, Some(parent)) => Some(parent),
+        (None, None) => None,
+    };
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT agent.run_id, agent.agent_label
+             FROM workflow_agents AS agent
+             LEFT JOIN sessions AS session
+               ON session.session_id = ?1
+              AND agent.transcript_path = session.transcript_path
+             WHERE agent.agent_session_id = ?1 OR session.session_id IS NOT NULL
+             ORDER BY agent.run_id, agent.agent_label",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let mut memberships = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+    {
+        require_not_cancelled(cancellation)?;
+        memberships.push(WorkflowAgentMembership {
+            run_id: row
+                .get(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            agent_label: row
+                .get(1)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+        });
+    }
+    Ok((parent, memberships))
+}
+
+fn enforce_projection_bounds(
+    projection: &SessionRelationProjection,
+    max_entities: usize,
+    max_relations: usize,
+) -> SessionStoreResult<()> {
+    let relation_count = projection
+        .summaries
+        .iter()
+        .map(|summary| {
+            summary.sources.len() + usize::from(summary.predecessor_summary_id.is_some())
+        })
+        .sum::<usize>()
+        .saturating_add(projection.logical_copies.len())
+        .saturating_add(projection.thread_hierarchy.len())
+        .saturating_add(projection.agent_hierarchy.len())
+        .saturating_add(usize::from(projection.parent_session_id.is_some()))
+        .saturating_add(projection.workflow_agents.len());
+    let entity_count = projection
+        .summaries
+        .len()
+        .saturating_add(relation_count.saturating_mul(2));
+    if relation_count > max_relations || entity_count > max_entities {
+        return Err(storage(
+            RECONSTRUCT_OPERATION,
+            SessionRelationError::BudgetExhausted,
+        ));
+    }
+    Ok(())
+}
+
+async fn optional_active_generation(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+) -> SessionStoreResult<Option<SessionProjectionGenerationV1>> {
+    let mut rows = conn
+        .query(
+            "SELECT generation
+             FROM session_temporal_generations
+             WHERE session_id = ?1 AND state = 'active'
+             ORDER BY generation",
+            params![session_id.as_str()],
+        )
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+    let generation = rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .map(|row| {
+            let raw: i64 = row
+                .get(0)
+                .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?;
+            SessionProjectionGenerationV1::new(
+                u64::try_from(raw).map_err(|error| storage(RECONSTRUCT_OPERATION, error))?,
+            )
+            .map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+        })
+        .transpose()?;
+    if rows
+        .next()
+        .await
+        .map_err(|error| storage(RECONSTRUCT_OPERATION, error))?
+        .is_some()
+    {
+        return Err(storage_message(
+            RECONSTRUCT_OPERATION,
+            "session has more than one active relation generation receipt",
+        ));
+    }
+    Ok(generation)
+}
+
+async fn active_generation(
+    conn: &impl QueryExecutor,
+    session_id: &SessionId,
+) -> SessionStoreResult<SessionProjectionGenerationV1> {
+    optional_active_generation(conn, session_id)
+        .await?
+        .ok_or_else(|| {
+            storage_message(
+                RECONSTRUCT_OPERATION,
+                "active session relation generation receipt is unavailable",
+            )
+        })
+}
+
+fn bounded_query_limit(limit: usize) -> SessionStoreResult<i64> {
+    i64::try_from(limit.saturating_add(1)).map_err(|error| storage(RECONSTRUCT_OPERATION, error))
+}
+
+fn require_not_cancelled(cancellation: &Arc<dyn GraphCancellation>) -> SessionStoreResult<()> {
+    if cancellation.is_cancelled() {
+        Err(storage(
+            RECONSTRUCT_OPERATION,
+            SessionRelationError::Cancelled,
+        ))
+    } else {
+        Ok(())
+    }
+}
