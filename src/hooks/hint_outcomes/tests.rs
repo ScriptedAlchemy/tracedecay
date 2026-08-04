@@ -1,15 +1,95 @@
 use tempfile::TempDir;
+use tracedecay_application::{
+    HintEmissionV1, HintOutcomeCorrelationPortV1, HintOutcomeObservationV1, HintOutcomePortErrorV1,
+    HintOutcomePortFuture, HintOutcomePortOperationV1, HintToolActivityV1,
+};
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery};
 use crate::sessions::{SessionMessageRecord, SessionRecord};
 
 use super::{
-    HORIZON_TOOL_STEPS, HintOutcomeStats, Resolution, ToolStep, resolve, tool_matches_expected,
+    HORIZON_TOOL_STEPS, HintOutcomeStats, Resolution, ToolStep, correlate_hint_outcomes, resolve,
+    tool_matches_expected,
 };
 
 const PROJECT: &str = "proj_hint_outcomes";
 const HINT_TS: i64 = 1_000_000;
+
+struct FailingPort {
+    operation: HintOutcomePortOperationV1,
+}
+
+impl FailingPort {
+    fn result<T>(
+        &self,
+        operation: HintOutcomePortOperationV1,
+        value: T,
+    ) -> Result<T, HintOutcomePortErrorV1> {
+        if self.operation == operation {
+            Err(HintOutcomePortErrorV1::new(operation, "injected failure"))
+        } else {
+            Ok(value)
+        }
+    }
+}
+
+impl HintOutcomeCorrelationPortV1 for FailingPort {
+    fn resolved_hint_ids<'a>(
+        &'a self,
+        _project_id: &'a str,
+        _limit: u32,
+    ) -> HintOutcomePortFuture<'a, Vec<String>> {
+        Box::pin(
+            async move { self.result(HintOutcomePortOperationV1::QueryResolvedHints, Vec::new()) },
+        )
+    }
+
+    fn emitted_hints<'a>(
+        &'a self,
+        project_id: &'a str,
+        _limit: u32,
+    ) -> HintOutcomePortFuture<'a, Vec<HintEmissionV1>> {
+        Box::pin(async move {
+            self.result(
+                HintOutcomePortOperationV1::QueryEmittedHints,
+                vec![HintEmissionV1 {
+                    provider: "hook_claude".to_owned(),
+                    project_id: project_id.to_owned(),
+                    session_id: "session-1".to_owned(),
+                    timestamp: HINT_TS,
+                    category: "search".to_owned(),
+                    hint_id: "hint-1".to_owned(),
+                }],
+            )
+        })
+    }
+
+    fn session_tool_activity<'a>(
+        &'a self,
+        _provider: &'a str,
+        _session_id: &'a str,
+        _after_timestamp: i64,
+        _limit: u32,
+    ) -> HintOutcomePortFuture<'a, Vec<HintToolActivityV1>> {
+        Box::pin(async move {
+            self.result(
+                HintOutcomePortOperationV1::QuerySessionActivity,
+                vec![HintToolActivityV1 {
+                    timestamp: HINT_TS + 1,
+                    tool_names: vec!["tracedecay_context".to_owned()],
+                }],
+            )
+        })
+    }
+
+    fn append_outcomes<'a>(
+        &'a self,
+        _outcomes: &'a [HintOutcomeObservationV1],
+    ) -> HintOutcomePortFuture<'a, ()> {
+        Box::pin(async move { self.result(HintOutcomePortOperationV1::AppendOutcomes, ()) })
+    }
+}
 
 async fn open_db(dir: &TempDir) -> HostAdmissionTestRuntimeV1 {
     HostAdmissionTestRuntimeV1::profile(dir.path())
@@ -160,6 +240,7 @@ async fn outcome_events(
 async fn correlate(db: &HostAdmissionTestRuntimeV1, now_secs: i64) -> HintOutcomeStats {
     db.correlate_hint_outcomes_for_test(HostAdmissionScope::Profile, PROJECT, now_secs)
         .await
+        .expect("correlate hint outcomes through application port")
 }
 
 #[tokio::test]
@@ -330,6 +411,38 @@ async fn correlation_is_idempotent_across_runs() {
         }
     );
     assert_eq!(outcome_events(&db).await.len(), 1);
+}
+
+#[tokio::test]
+async fn query_failure_is_typed_instead_of_becoming_an_empty_pass() {
+    let error = correlate_hint_outcomes(
+        &FailingPort {
+            operation: HintOutcomePortOperationV1::QueryResolvedHints,
+        },
+        PROJECT,
+        HINT_TS + 120,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.operation(), "query_resolved_hints");
+    assert_eq!(error.detail(), "injected failure");
+}
+
+#[tokio::test]
+async fn append_failure_is_typed_after_a_resolved_observation() {
+    let error = correlate_hint_outcomes(
+        &FailingPort {
+            operation: HintOutcomePortOperationV1::AppendOutcomes,
+        },
+        PROJECT,
+        HINT_TS + 120,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.operation(), "append_outcomes");
+    assert_eq!(error.detail(), "injected failure");
 }
 
 #[test]

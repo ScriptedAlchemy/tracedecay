@@ -510,7 +510,7 @@ async fn run_startup_session_post_ingest(
             crate::analytics_bridge::import_hook_analytics(analytics_db.as_ref(), sources).await;
         let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
         let now = crate::tracedecay::current_timestamp();
-        let _ = crate::hooks::hint_outcomes::correlate_hint_outcomes(
+        crate::application::hint_outcomes::observe_registered_hint_outcomes(
             analytics_db.as_ref(),
             db.as_ref(),
             project_id.as_str(),

@@ -18,6 +18,8 @@
 
 pub use tracedecay_usecases::*;
 
+pub(crate) mod hint_outcomes;
+
 // The use-case crate owns transport-independent admission behavior. The root
 // composition crate augments that surface with the registered daemon-backed
 // fixture required by root and integration tests.
