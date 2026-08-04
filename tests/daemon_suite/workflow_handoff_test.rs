@@ -180,6 +180,12 @@ async fn workflow_definition_handoff_and_execution_survive_a_daemon_restart() {
                     id::<AttemptId>("attempt.workflow.daemon-restart.child"),
                 )
                 .unwrap(),
+                lease: WorkLeaseFenceV1::new(
+                    id::<WorkLeaseId>("lease.workflow.daemon-restart.child"),
+                    WorkFenceEpochV1::new(1).unwrap(),
+                )
+                .unwrap(),
+                receipt: None,
             }],
         };
         WorkflowExecutionAuthorityPort::checkpoint(
@@ -248,13 +254,19 @@ async fn workflow_definition_handoff_and_execution_survive_a_daemon_restart() {
                 id::<AttemptId>("attempt.workflow.daemon-restart.child"),
             )
             .unwrap(),
+            lease: WorkLeaseFenceV1::new(
+                id::<WorkLeaseId>("lease.workflow.daemon-restart.child"),
+                WorkFenceEpochV1::new(1).unwrap(),
+            )
+            .unwrap(),
+            receipt: None,
         }],
     };
     assert_eq!(
         WorkflowExecutionAuthorityPort::begin(
             &authority,
             &identity,
-            &fence(2, "attempt.workflow.daemon-restart.2"),
+            &fence(2, "attempt.workflow.daemon-restart.1"),
             &plan,
         )
         .unwrap(),

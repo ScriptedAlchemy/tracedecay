@@ -86,9 +86,18 @@ pub struct WorkflowFanOutRequestV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct WorkflowChildReceiptV1 {
+    pub observation_digest: ManifestDigest,
+    pub terminal_receipt_digest: ManifestDigest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowChildRecordV1 {
     pub task_id: TaskId,
     pub attempt_identity: WorkAttemptIdentityV1,
+    pub lease: WorkLeaseFenceV1,
+    pub receipt: Option<WorkflowChildReceiptV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -401,6 +410,8 @@ pub fn validate_workflow_checkpoint(
         return Err(WorkflowFanOutRuntimeError::InvalidPlan);
     }
     let mut seen = BTreeSet::new();
+    let mut attempts = BTreeSet::new();
+    let mut leases = BTreeSet::new();
     for record in &checkpoint.children {
         let planned = plan
             .children
@@ -408,7 +419,10 @@ pub fn validate_workflow_checkpoint(
             .find(|child| child.task_id == record.task_id)
             .ok_or(WorkflowFanOutRuntimeError::InvalidPlan)?;
         if record.attempt_identity != planned.attempt_identity
+            || record.task_id != *record.attempt_identity.task_id()
             || !seen.insert(record.task_id.clone())
+            || !attempts.insert(record.attempt_identity.clone())
+            || !leases.insert(record.lease.lease_id().clone())
         {
             return Err(WorkflowFanOutRuntimeError::InvalidPlan);
         }
@@ -448,7 +462,7 @@ pub fn workflow_truth(
         else {
             return Err(WorkflowFanOutRuntimeError::InvalidPlan);
         };
-        if record.task_id != *attempt.identity().task_id() {
+        if record.task_id != *attempt.identity().task_id() || record.receipt.is_none() {
             return Err(WorkflowFanOutRuntimeError::InvalidPlan);
         }
         match attempt.terminal() {

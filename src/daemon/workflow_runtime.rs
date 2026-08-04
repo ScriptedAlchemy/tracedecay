@@ -9,11 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tracedecay_application::{
     AcceptProposalCommand, AdmitExecutionCommand, AttachRuntimeEvidenceCommand, CreateWorkCommand,
     RequestContext, ReviewProposalCommand, WORKFLOW_CANONICAL_WORK_OPERATION_V1,
-    WorkExecutionError, WorkflowChildRecordV1, WorkflowExecutionAdmissionV1,
-    WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort, WorkflowExecutionTruthV1,
-    WorkflowFailurePolicyV1, WorkflowFanOutPlanV1, WorkflowFanOutRequestV1,
-    WorkflowFanOutRuntimeError, WorkflowPlannedChildV1, prepare_workflow_fan_out,
-    validate_workflow_checkpoint, workflow_checkpoint, workflow_truth,
+    WorkExecutionError, WorkflowChildReceiptV1, WorkflowChildRecordV1,
+    WorkflowExecutionAdmissionV1, WorkflowExecutionAuthorityError, WorkflowExecutionAuthorityPort,
+    WorkflowExecutionTruthV1, WorkflowFailurePolicyV1, WorkflowFanOutPlanV1,
+    WorkflowFanOutRequestV1, WorkflowFanOutRuntimeError, WorkflowPlannedChildV1,
+    prepare_workflow_fan_out, validate_workflow_checkpoint, workflow_checkpoint, workflow_truth,
 };
 use tracedecay_domain::{
     ManifestDigest, TaskId, UtcMicros, WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1,
@@ -126,14 +126,14 @@ pub(crate) async fn execute_canonical_workflow(
                     &RunningChild {
                         child: child.clone(),
                         identity: child.attempt_identity.clone(),
-                        lease,
+                        lease: lease.clone(),
                     },
                 )
                 .await?;
             }
             attach_terminal_evidence(database, context, &request, child, &attempt)?;
-            let record = child_record(child);
-            records.insert(record.task_id.clone(), record);
+            let record = child_record(&plan.plan_digest, child, attempt.lease(), Some(&attempt))?;
+            upsert_child_record(&mut records, record)?;
         }
         let checkpoint = workflow_checkpoint(plan.plan_digest, records.into_values().collect());
         let truth = WorkflowExecutionTruthV1::Cancelled {
@@ -172,8 +172,9 @@ pub(crate) async fn execute_canonical_workflow(
             .await?
             {
                 PreparedChild::Running(running) => {
-                    let record = child_record(&running.child);
-                    records.insert(record.task_id.clone(), record);
+                    let record =
+                        child_record(&plan.plan_digest, &running.child, &running.lease, None)?;
+                    upsert_child_record(&mut records, record)?;
                     checkpoint_children(
                         &authority,
                         &plan.identity,
@@ -193,8 +194,9 @@ pub(crate) async fn execute_canonical_workflow(
                 }
                 PreparedChild::Terminal { child, attempt } => {
                     attach_terminal_evidence(database, context, &request, &child, &attempt)?;
-                    let record = child_record(&child);
-                    records.insert(record.task_id.clone(), record);
+                    let record =
+                        child_record(&plan.plan_digest, &child, attempt.lease(), Some(&attempt))?;
+                    upsert_child_record(&mut records, record)?;
                     terminal_attempts.push(*attempt);
                     fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicyV1::FailFast)
                         && !matches!(
@@ -218,6 +220,7 @@ pub(crate) async fn execute_canonical_workflow(
         }
 
         for running in active {
+            let child = running.child.clone();
             let attempt = if fail_fast {
                 cancel_child(runtime, &running).await?
             } else {
@@ -228,13 +231,15 @@ pub(crate) async fn execute_canonical_workflow(
                     attempt.terminal(),
                     Some(WorkTerminalEvidenceV1::Succeeded { .. })
                 );
-            terminal_attempts.push(attempt);
             #[cfg(test)]
             if CRASH_AFTER_SETTLEMENT_BEFORE_CHECKPOINT.swap(false, Ordering::AcqRel) {
                 return Err(child_unavailable(
                     "injected crash after Work settlement before Workflow checkpoint",
                 ));
             }
+            let record = child_record(&plan.plan_digest, &child, attempt.lease(), Some(&attempt))?;
+            upsert_child_record(&mut records, record)?;
+            terminal_attempts.push(attempt);
             checkpoint_children(
                 &authority,
                 &plan.identity,
@@ -304,6 +309,10 @@ async fn admit_child(
     let lease = child_lease(&request.fence, &child)?;
     if let Some(mut attempt) = runtime.attempt(&identity).map_err(work_error)? {
         validate_existing_attempt(context, project_root, request, operation, &child, &attempt)?;
+        if attempt.lease().lease_id() != lease.lease_id() || attempt.lease().epoch() > lease.epoch()
+        {
+            return Err(WorkflowFanOutRuntimeError::StaleFence);
+        }
         if attempt.is_terminal() {
             return Ok(PreparedChild::Terminal {
                 child,
@@ -322,10 +331,6 @@ async fn admit_child(
             return Err(child_unavailable(
                 "running Work attempt requires effect reconciliation before resume",
             ));
-        }
-        if attempt.lease().lease_id() != lease.lease_id() || attempt.lease().epoch() > lease.epoch()
-        {
-            return Err(WorkflowFanOutRuntimeError::StaleFence);
         }
         if attempt.lease().epoch() < lease.epoch() {
             attempt = runtime
@@ -553,11 +558,75 @@ fn attach_terminal_evidence(
     Ok(())
 }
 
-fn child_record(child: &WorkflowPlannedChildV1) -> WorkflowChildRecordV1 {
-    WorkflowChildRecordV1 {
+fn child_record(
+    plan_digest: &ManifestDigest,
+    child: &WorkflowPlannedChildV1,
+    lease: &WorkLeaseFenceV1,
+    attempt: Option<&WorkAttemptV1>,
+) -> Result<WorkflowChildRecordV1, WorkflowFanOutRuntimeError> {
+    let receipt = match attempt {
+        Some(attempt)
+            if attempt.identity() == &child.attempt_identity && attempt.lease() == lease =>
+        {
+            let terminal = attempt
+                .terminal()
+                .ok_or_else(|| child_unavailable("Work checkpoint lacks terminal evidence"))?;
+            Some(WorkflowChildReceiptV1 {
+                observation_digest: canonical_sha256(&(
+                    "tracedecay.daemon.workflow-child-checkpoint.v1",
+                    plan_digest,
+                    &child.attempt_identity,
+                    lease,
+                    terminal,
+                    attempt.artifacts(),
+                ))
+                .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
+                terminal_receipt_digest: canonical_sha256(&(
+                    "tracedecay.daemon.workflow-child-terminal.v1",
+                    plan_digest,
+                    &child.attempt_identity,
+                    lease,
+                    terminal,
+                ))
+                .map_err(|_| WorkflowFanOutRuntimeError::InvalidPlan)?,
+            })
+        }
+        Some(_) => {
+            return Err(child_unavailable(
+                "Work checkpoint conflicts with the planned child fence",
+            ));
+        }
+        None => None,
+    };
+    Ok(WorkflowChildRecordV1 {
         task_id: child.task_id.clone(),
         attempt_identity: child.attempt_identity.clone(),
+        lease: lease.clone(),
+        receipt,
+    })
+}
+
+fn upsert_child_record(
+    records: &mut BTreeMap<TaskId, WorkflowChildRecordV1>,
+    candidate: WorkflowChildRecordV1,
+) -> Result<(), WorkflowFanOutRuntimeError> {
+    if let Some(stored) = records.get(&candidate.task_id) {
+        let advances = stored.attempt_identity == candidate.attempt_identity
+            && stored.lease.lease_id() == candidate.lease.lease_id()
+            && stored.lease.epoch().get() <= candidate.lease.epoch().get()
+            && match (&stored.receipt, &candidate.receipt) {
+                (None, _) => true,
+                (Some(stored_receipt), Some(candidate_receipt)) => {
+                    stored.lease == candidate.lease && stored_receipt == candidate_receipt
+                }
+                (Some(_), None) => false,
+            };
+        if !advances {
+            return Err(WorkflowFanOutRuntimeError::PlanConflict);
+        }
     }
+    records.insert(candidate.task_id.clone(), candidate);
+    Ok(())
 }
 
 fn checkpoint_children(
@@ -610,6 +679,13 @@ fn validate_terminal_replay(
                 "terminal workflow replay references a non-terminal Work attempt",
             ));
         }
+        let canonical_record =
+            child_record(&plan.plan_digest, child, attempt.lease(), Some(&attempt))?;
+        if &canonical_record != record {
+            return Err(child_unavailable(
+                "terminal workflow replay conflicts with its durable child receipt",
+            ));
+        }
         attempts.push(attempt);
     }
     validate_terminal_attempts(checkpoint, &attempts)?;
@@ -632,7 +708,9 @@ fn validate_terminal_attempts(
     if attempts.len() != checkpoint.children.len()
         || checkpoint.children.iter().any(|record| {
             !attempts.iter().any(|attempt| {
-                attempt.identity() == &record.attempt_identity && attempt.is_terminal()
+                attempt.identity() == &record.attempt_identity
+                    && attempt.is_terminal()
+                    && record.receipt.is_some()
             })
         })
     {
@@ -682,7 +760,9 @@ fn child_lease(
     child: &WorkflowPlannedChildV1,
 ) -> Result<WorkLeaseFenceV1, WorkflowFanOutRuntimeError> {
     let digest = canonical_sha256(&(
-        "tracedecay.daemon.workflow-work-lease.v2",
+        "tracedecay.daemon.workflow-work-lease.v3",
+        &workflow_fence.attempt_id,
+        workflow_fence.lease.lease_id(),
         &child.attempt_identity,
     ))
     .map_err(|_| child_unavailable("Work lease identity could not be derived"))?;
