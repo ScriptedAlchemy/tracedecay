@@ -5,15 +5,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
-use tracedecay_global_db::session_temporal::relations::SessionRelationScope;
-use tracedecay_graph_db::{
-    GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphFormatVersion, NeverCancelled,
+use tracedecay_global_db::session_temporal::relations::{
+    SessionRelationScope, open_persistent_session_relation_graph,
+    persistent_session_relation_graph_path,
 };
-
-const GRAPH_DIRECTORY: &str = "graph";
-const GRAPH_FILE: &str = "graph.grafeo";
-const GRAPH_FORMAT_VERSION: u32 = 2;
+use tracedecay_graph_db::{GraphDb, GraphDbError};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub(super) enum EmbeddedGraphRuntimeError {
@@ -79,14 +75,18 @@ impl EmbeddedGraphRuntimeRegistry {
                 session_store_root.display()
             ))
         })?;
-        let graph_directory = store_root.join(GRAPH_DIRECTORY);
+        let graph_path = persistent_session_relation_graph_path(&store_root);
+        let graph_directory = graph_path.parent().ok_or_else(|| {
+            EmbeddedGraphRuntimeError::Unavailable(
+                "embedded graph path has no storage directory".to_owned(),
+            )
+        })?;
         std::fs::create_dir_all(&graph_directory).map_err(|error| {
             EmbeddedGraphRuntimeError::Unavailable(format!(
                 "embedded graph directory {} is unavailable: {error}",
                 graph_directory.display()
             ))
         })?;
-        let graph_path = graph_directory.join(GRAPH_FILE);
         let mut mounted = self.mounted.lock().map_err(|_| {
             EmbeddedGraphRuntimeError::Unavailable(
                 "embedded graph registry lock is poisoned".to_owned(),
@@ -105,12 +105,7 @@ impl EmbeddedGraphRuntimeRegistry {
         {
             return Err(EmbeddedGraphRuntimeError::IdentityConflict);
         }
-        let database = Arc::new(GraphDb::open(GraphDbOpenOptions {
-            location: GraphDbLocation::Persistent(graph_path.clone()),
-            expected_format: GraphFormatVersion::new(GRAPH_FORMAT_VERSION)?,
-            durability: GraphDurability::Sync,
-            cancellation: Arc::new(NeverCancelled),
-        })?);
+        let database = open_persistent_session_relation_graph(graph_path.clone())?;
         mounted.insert(
             scope.clone(),
             MountedProjectGraph {

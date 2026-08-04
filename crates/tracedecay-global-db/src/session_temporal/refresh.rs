@@ -1481,9 +1481,22 @@ async fn projection_receipt_item_count(
 ) -> SessionStoreResult<usize> {
     let mut rows = conn
         .query(
-            "SELECT occurrence_count + copy_count + assertion_count
-             FROM session_temporal_projection_receipts
-             WHERE session_id = ?1 AND generation = ?2 AND batch_ordinal = ?3",
+            "SELECT
+                current.occurrence_count + current.copy_count + current.assertion_count
+                - COALESCE(
+                    previous.occurrence_count
+                    + previous.copy_count
+                    + previous.assertion_count,
+                    0
+                )
+             FROM session_temporal_projection_receipts AS current
+             LEFT JOIN session_temporal_projection_receipts AS previous
+               ON previous.session_id = current.session_id
+              AND previous.generation = current.generation
+              AND previous.batch_ordinal = current.batch_ordinal - 1
+             WHERE current.session_id = ?1
+               AND current.generation = ?2
+               AND current.batch_ordinal = ?3",
             params![
                 session_id.as_str(),
                 generation_i64(generation, PERSIST_REFRESH)?,

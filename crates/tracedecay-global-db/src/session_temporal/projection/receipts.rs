@@ -641,28 +641,11 @@ pub(super) async fn projection_coverage(
             UNION ALL
             SELECT 'member:' || json_array(turn_id, occurrence_id, ordinal)
             FROM session_turn_members WHERE session_id = ?1 AND generation = ?2
-            UNION ALL
-            SELECT 'agent-edge:' || json_array(parent_agent_id, child_agent_id, ordinal)
-            FROM session_agent_hierarchy_edges WHERE session_id = ?1 AND generation = ?2
-            UNION ALL
-            SELECT 'thread-edge:' || json_array(parent_thread_id, child_thread_id, ordinal)
-            FROM session_thread_hierarchy_edges WHERE session_id = ?1 AND generation = ?2
          ) ORDER BY encoded",
         batch,
     )
     .await?;
-    let copies = digest_query_rows(
-        conn,
-        "SELECT json_array(
-            occurrence_id, copied_from_occurrence_id, proof_json,
-            knowledge_at, valid_time_json, created_at
-         )
-         FROM session_logical_copy_edges
-         WHERE session_id = ?1 AND generation = ?2
-         ORDER BY occurrence_id, copied_from_occurrence_id",
-        batch,
-    )
-    .await?;
+    let copies = copy_identity_coverage(conn, batch).await?;
     let assertions = digest_query_rows(
         conn,
         "SELECT json_array(assertion_id, assertion_kind, subject_anchor_id,
@@ -709,6 +692,63 @@ pub(super) async fn projection_coverage(
         current,
         fts,
     })
+}
+
+async fn copy_identity_coverage(
+    conn: &impl Executor,
+    batch: &SessionTemporalProjectionBatchV1,
+) -> SessionStoreResult<(usize, String)> {
+    let mut rows = conn
+        .query(
+            "SELECT copy_count, copy_digest
+             FROM session_temporal_projection_receipts
+             WHERE session_id = ?1 AND generation = ?2
+             ORDER BY batch_ordinal DESC
+             LIMIT 1",
+            params![
+                batch.session_id().as_str(),
+                generation_i64(batch.generation(), PERSIST_OPERATION)?,
+            ],
+        )
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    let previous = match rows
+        .next()
+        .await
+        .map_err(|error| storage(PERSIST_OPERATION, error))?
+    {
+        Some(row) => {
+            let count = usize::try_from(
+                row.get::<i64>(0)
+                    .map_err(|error| storage(PERSIST_OPERATION, error))?,
+            )
+            .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            let digest = row
+                .get::<String>(1)
+                .map_err(|error| storage(PERSIST_OPERATION, error))?;
+            Some((count, digest))
+        }
+        None => None,
+    };
+    drop(rows);
+
+    let previous_count = previous.as_ref().map_or(0, |coverage| coverage.0);
+    let previous_digest = previous
+        .as_ref()
+        .map_or_else(|| digest_bytes(&[]), |coverage| coverage.1.clone());
+    if batch.copies().is_empty() {
+        return Ok((previous_count, previous_digest));
+    }
+
+    let count = previous_count
+        .checked_add(batch.copies().len())
+        .ok_or_else(|| storage_message(PERSIST_OPERATION, "copy receipt count overflow"))?;
+    let encoded = serde_json::to_vec(&json!({
+        "copies": sorted_json(batch.copies())?,
+        "previous_digest": previous_digest,
+    }))
+    .map_err(|error| storage(PERSIST_OPERATION, error))?;
+    Ok((count, digest_bytes(&encoded)))
 }
 
 pub(super) async fn insert_projection_receipt(

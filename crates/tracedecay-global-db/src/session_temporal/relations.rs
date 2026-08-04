@@ -5,6 +5,7 @@
 //! their owning session store and are hydrated there after graph traversal.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,8 @@ use tracedecay_graph_db::{
 };
 
 const GRAPH_FORMAT_VERSION: u32 = 2;
+const GRAPH_DIRECTORY: &str = "graph";
+const GRAPH_FILE: &str = "graph.grafeo";
 const SUMMARY_SOURCE_KIND: &str = "session-summary-source";
 const SUMMARY_ANCHOR_SOURCE_KIND: &str = "session-summary-anchor-source";
 const SUMMARY_SUCCESSOR_KIND: &str = "session-summary-successor";
@@ -125,6 +128,23 @@ impl SessionRelationScope {
             Self::Profile { profile_id } => profile_id.as_str(),
         }
     }
+}
+
+#[must_use]
+pub fn persistent_session_relation_graph_path(session_store_root: &Path) -> PathBuf {
+    session_store_root.join(GRAPH_DIRECTORY).join(GRAPH_FILE)
+}
+
+pub fn open_persistent_session_relation_graph(
+    graph_path: PathBuf,
+) -> Result<Arc<GraphDb>, GraphDbError> {
+    GraphDb::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Persistent(graph_path),
+        expected_format: GraphFormatVersion::new(GRAPH_FORMAT_VERSION)?,
+        durability: GraphDurability::Sync,
+        cancellation: Arc::new(NeverCancelled),
+    })
+    .map(Arc::new)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

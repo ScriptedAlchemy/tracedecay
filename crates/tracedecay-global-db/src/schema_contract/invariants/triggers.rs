@@ -876,15 +876,9 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             AND receipt.projection_through =
                                 json_extract(NEW.frontier_json, '$.committed_through')
                             AND NEW.committed_records =
-                                (SELECT COUNT(*) FROM session_occurrences
-                                 WHERE session_id = binding.session_id
-                                   AND generation = binding.generation)
-                                + (SELECT COUNT(*) FROM session_logical_copy_edges
-                                   WHERE session_id = binding.session_id
-                                     AND generation = binding.generation)
-                                + (SELECT COUNT(*) FROM session_assertions
-                                   WHERE session_id = binding.session_id
-                                     AND generation = binding.generation)
+                                receipt.occurrence_count
+                                + receipt.copy_count
+                                + receipt.assertion_count
                             AND (
                               (
                                 NEW.progress_ordinal = 0
@@ -1054,15 +1048,9 @@ const SESSION_REFRESH_STATE_GUARDS: &[Trigger] = &[
                             AND receipt.projection_through =
                                 json_extract(progress.frontier_json, '$.committed_through')
                             AND progress.committed_records =
-                                (SELECT COUNT(*) FROM session_occurrences
-                                 WHERE session_id = binding.session_id
-                                   AND generation = binding.generation)
-                                + (SELECT COUNT(*) FROM session_logical_copy_edges
-                                   WHERE session_id = binding.session_id
-                                     AND generation = binding.generation)
-                                + (SELECT COUNT(*) FROM session_assertions
-                                   WHERE session_id = binding.session_id
-                                     AND generation = binding.generation)
+                                receipt.occurrence_count
+                                + receipt.copy_count
+                                + receipt.assertion_count
                       )
                     )
                   )

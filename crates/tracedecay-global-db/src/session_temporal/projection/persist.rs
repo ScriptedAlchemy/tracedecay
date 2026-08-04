@@ -32,7 +32,14 @@ pub async fn session_temporal_projection_record_count(
                 (SELECT COUNT(*) FROM session_occurrences
                  WHERE session_id = ?1 AND generation = ?2)
               + (SELECT COUNT(*) FROM session_assertions
-                 WHERE session_id = ?1 AND generation = ?2)",
+                 WHERE session_id = ?1 AND generation = ?2)
+              + COALESCE((
+                    SELECT copy_count
+                    FROM session_temporal_projection_receipts
+                    WHERE session_id = ?1 AND generation = ?2
+                    ORDER BY batch_ordinal DESC
+                    LIMIT 1
+                ), 0)",
             params![
                 session_id.as_str(),
                 generation_i64(generation, MATERIALIZE_REFRESH)?,

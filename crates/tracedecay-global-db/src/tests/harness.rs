@@ -73,6 +73,7 @@ impl RegisteredGlobalDbTestRuntime {
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await?;
+        bind_test_session_relation_graph(&profile_registered)?;
         let project_registered = match project {
             Some((project_root, project_id)) => {
                 let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
@@ -84,15 +85,15 @@ impl RegisteredGlobalDbTestRuntime {
                     profile_root,
                     &marker,
                 )?;
-                Some(
-                    open_registered_test_database(
-                        &layout.sessions_db_path,
-                        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
-                            project_id,
-                        },
-                    )
-                    .await?,
+                let registered = open_registered_test_database(
+                    &layout.sessions_db_path,
+                    tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                        project_id,
+                    },
                 )
+                .await?;
+                bind_test_session_relation_graph(&registered)?;
+                Some(registered)
             }
             None => None,
         };
@@ -295,6 +296,7 @@ impl HostAdmissionTestRuntimeV1 {
             tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
         )
         .await?;
+        bind_test_session_relation_graph(&profile_registered)?;
         let project_registered = match project {
             Some((project_root, project_id)) => {
                 let marker = tracedecay_runtime_core::storage::EnrollmentMarker {
@@ -306,15 +308,15 @@ impl HostAdmissionTestRuntimeV1 {
                     profile_root,
                     &marker,
                 )?;
-                Some(
-                    open_registered_test_database(
-                        &layout.sessions_db_path,
-                        tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
-                            project_id,
-                        },
-                    )
-                    .await?,
+                let registered = open_registered_test_database(
+                    &layout.sessions_db_path,
+                    tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                        project_id,
+                    },
                 )
+                .await?;
+                bind_test_session_relation_graph(&registered)?;
+                Some(registered)
             }
             None => None,
         };
@@ -712,6 +714,54 @@ impl HostAdmissionTestRuntimeV1 {
             .await?;
         Ok(())
     }
+}
+
+#[cfg(any(test, feature = "test-helpers"))]
+fn bind_test_session_relation_graph(
+    database: &RegisteredGlobalDb,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    use crate::session_temporal::relations::{
+        SessionRelationScope, open_persistent_session_relation_graph,
+        persistent_session_relation_graph_path,
+    };
+    use tracedecay_store::StoreShardScopeV1;
+
+    let binding = database.binding();
+    let scope = match &binding.shard_id.scope {
+        StoreShardScopeV1::ProjectSessions { project_id } => {
+            SessionRelationScope::project(project_id.clone())
+        }
+        StoreShardScopeV1::ProfileSessions => {
+            SessionRelationScope::profile(binding.shard_id.profile_id.clone())
+        }
+        _ => {
+            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
+                operation: "bind test session relation graph".to_owned(),
+                message: "registered test database is not a session shard".to_owned(),
+            });
+        }
+    };
+    let store_root = database.db_path().parent().ok_or_else(|| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "bind test session relation graph".to_owned(),
+            message: "registered session database has no storage root".to_owned(),
+        }
+    })?;
+    let graph_path = persistent_session_relation_graph_path(store_root);
+    let graph_directory = graph_path.parent().ok_or_else(|| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "bind test session relation graph".to_owned(),
+            message: "session relation graph path has no storage directory".to_owned(),
+        }
+    })?;
+    std::fs::create_dir_all(graph_directory)?;
+    let graph = open_persistent_session_relation_graph(graph_path).map_err(|error| {
+        tracedecay_runtime_core::errors::TraceDecayError::Database {
+            operation: "open test session relation graph".to_owned(),
+            message: error.to_string(),
+        }
+    })?;
+    database.bind_session_relation_graph(scope, graph)
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
