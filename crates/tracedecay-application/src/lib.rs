@@ -121,13 +121,17 @@ pub use feedback::{
 #[cfg(feature = "native-git")]
 pub use git::NativeHistoricalBlobReaderV1;
 pub use git::{
-    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
-    GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest,
-    GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
-    GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
-    GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
-    GitIndexTransactionPortError, GitIndexTransactionService, GitIntelligenceError, GitReadPort,
-    git_index_catalog_contribution, git_index_effect_class, git_index_handler_descriptors,
+    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitApplySurfaceRequest,
+    GitBlameRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest, GitHistoricalBlobReadPort,
+    GitHistoricalBlobRequestV1, GitHistoricalBlobV1, GitHistoryRequest, GitHistorySurfaceRequest,
+    GitHunksSurfaceRequest, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
+    GitIndexEffectProofV1, GitIndexOperationBindingV1, GitIndexPreviewPortResultV1,
+    GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError,
+    GitIndexTransactionPort, GitIndexTransactionPortError, GitIndexTransactionService,
+    GitIntelligenceError, GitPreviewSurfaceRequest, GitQueryEnvelopeV1, GitReadPort,
+    GitReadRequestV1, GitReadResultV1, GitReadSurfaceRequest, GitStatusSummaryV1,
+    GitStatusSurfaceRequest, GitSurfaceDiffScopeV1, git_index_catalog_contribution,
+    git_index_effect_class, git_index_handler_descriptors, git_sdk_executable_binding_registry,
     git_surface_catalog_contribution, git_surface_handler_descriptors,
     is_canonical_repository_relative_path,
 };

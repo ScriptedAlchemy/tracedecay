@@ -11,7 +11,10 @@ use tracedecay_tool_catalog::{
     SurfaceOperationName,
 };
 
-use crate::{work_executable_binding_registry, workflow_executable_binding_registry};
+use crate::{
+    git_sdk_executable_binding_registry, work_executable_binding_registry,
+    workflow_executable_binding_registry,
+};
 
 /// Canonical SDK bindings for every currently mounted typed application route.
 ///
@@ -22,11 +25,13 @@ pub fn sdk_executable_binding_registry()
 -> Result<SdkExecutableBindingRegistryV1, CatalogValidationError> {
     let work = work_executable_binding_registry()?;
     let workflow = workflow_executable_binding_registry()?;
-    let bindings = work
+    let git = git_sdk_executable_binding_registry()?;
+    let mut bindings = work
         .iter()
         .chain(workflow.iter())
         .map(project_http_binding)
         .collect::<Result<Vec<_>, _>>()?;
+    bindings.extend(git.iter().cloned());
     SdkExecutableBindingRegistryV1::new(bindings)
 }
 

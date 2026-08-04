@@ -47,6 +47,11 @@ use tracedecay_application::{
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
     WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
 };
+use tracedecay_application::{
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
+    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest,
+    GitReadRequestV1, GitReadSurfaceRequest, GitStatusSurfaceRequest, GitSurfaceDiffScopeV1,
+};
 use tracedecay_domain::configuration::{
     ConfigurationAuditEventId, ConfigurationLayerIdV1, ConfigurationRevisionId,
     ConfigurationValueV1, CredentialKindV1, CredentialReferenceId, RollbackModeV1, SettingKey,
@@ -752,36 +757,6 @@ impl ContextScoutSurfaceRequest {
             )
         )
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitPreviewSurfaceRequest {
-    pub operation: GitIndexTransactionOperationV1,
-    /// Compatibility input only. The daemon always replaces this value with a
-    /// freshly minted preview identity before application admission.
-    #[serde(default)]
-    pub preview_id: GitIndexPreviewId,
-    pub repository_snapshot: RepositoryStateSnapshotV1,
-    #[serde(default)]
-    pub selected_hunks: Vec<HunkRefV1>,
-    #[serde(default)]
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitApplySurfaceRequest {
-    pub preview: GitIndexPreviewV1,
-    pub idempotency_key: IdempotencyKey,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitReadSurfaceRequest {
-    pub request: crate::application::git_reads::GitReadRequestV1,
-    pub max_entries: u32,
-    pub max_bytes: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2745,127 +2720,90 @@ fn parse_git_read_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
 ) -> Result<GitReadSurfaceRequest, ApplicationSurfaceAdapterError> {
-    let object = value
+    if value
         .as_object()
-        .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
-    let bounded_u64 = |name: &str, default: u64, maximum: u64| match object.get(name) {
-        None => Ok(default),
-        Some(value) => value
-            .as_u64()
-            .filter(|value| (1..=maximum).contains(value))
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-    };
-    let boolean = |name: &str, default: bool| match object.get(name) {
-        None => Ok(default),
-        Some(value) => value
-            .as_bool()
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-    };
-    let optional_string = |name: &str| match object.get(name) {
-        None => Ok(None),
-        Some(value) => value
-            .as_str()
-            .map(|value| Some(value.to_owned()))
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-    };
-    let max_entries = bounded_u64(
-        "max_entries",
-        u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
-        u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
-    )? as u32;
-    let max_bytes = bounded_u64(
-        "max_bytes",
-        crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
-        crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES,
-    )?;
-    let string = |name: &str| {
-        object
-            .get(name)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty() && value.trim() == *value)
-            .map(str::to_owned)
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
-    };
-    let scope_name = match object.get("scope") {
-        None => "working_tree",
-        Some(value) => value
-            .as_str()
-            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
-    };
-    let scope = |allow_commit_range: bool| match scope_name {
-        "working_tree" if !object.contains_key("base") && !object.contains_key("head") => {
-            Ok(GitDiffScopeV1::WorkingTree)
-        }
-        "staged" if !object.contains_key("base") && !object.contains_key("head") => {
-            Ok(GitDiffScopeV1::Staged)
-        }
-        "commit_range" if allow_commit_range => Ok(GitDiffScopeV1::CommitRange {
-            base: GitOidV1::new(string("base")?)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
-            head: GitOidV1::new(string("head")?)
-                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
-        }),
-        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-    };
-    let request = match operation {
+        .is_some_and(|fields| fields.values().any(Value::is_null))
+    {
+        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
+    match operation {
         ApplicationSurfaceOperation::GitStatus => {
-            crate::application::git_reads::GitReadRequestV1::Status
+            let request: GitStatusSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            git_read_surface_request(
+                GitReadRequestV1::Status,
+                request.max_entries,
+                request.max_bytes,
+            )
         }
         ApplicationSurfaceOperation::GitDiff => {
-            crate::application::git_reads::GitReadRequestV1::Diff {
-                scope: scope(true)?,
-            }
+            let request: GitDiffSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            git_read_surface_request(
+                GitReadRequestV1::Diff {
+                    scope: git_surface_scope(request.scope, request.base, request.head, true)?,
+                },
+                request.max_entries,
+                request.max_bytes,
+            )
         }
         ApplicationSurfaceOperation::GitHistory => {
-            crate::application::git_reads::GitReadRequestV1::History {
-                max_count: bounded_u64("count", 100, 1_000)? as u32,
-                path: optional_string("path")?,
-                follow: boolean("follow", false)?,
-                first_parent: boolean("first_parent", false)?,
+            let request: GitHistorySurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            let max_count = request.count.unwrap_or(100);
+            if !(1..=1_000).contains(&max_count) {
+                return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
             }
+            git_read_surface_request(
+                GitReadRequestV1::History {
+                    max_count,
+                    path: request.path,
+                    follow: request.follow,
+                    first_parent: request.first_parent,
+                },
+                request.max_entries,
+                request.max_bytes,
+            )
         }
         ApplicationSurfaceOperation::GitBlame => {
-            crate::application::git_reads::GitReadRequestV1::Blame {
-                path: string("path")?,
-                follow_renames: boolean("follow_renames", false)?,
-            }
+            let request: GitBlameSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            git_read_surface_request(
+                GitReadRequestV1::Blame {
+                    path: canonical_git_surface_string(request.path)?,
+                    follow_renames: request.follow_renames,
+                },
+                request.max_entries,
+                request.max_bytes,
+            )
         }
         ApplicationSurfaceOperation::GitHunks => {
-            crate::application::git_reads::GitReadRequestV1::Hunks {
-                scope: scope(false)?,
-                preview_id: string("preview_id")?,
-                snapshot_digest: ManifestDigest::new(string("snapshot_digest")?)
-                    .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
-            }
+            let request: GitHunksSurfaceRequest = serde_json::from_value(value)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+            git_read_surface_request(
+                GitReadRequestV1::Hunks {
+                    scope: git_surface_scope(request.scope, None, None, false)?,
+                    preview_id: canonical_git_surface_string(request.preview_id)?,
+                    snapshot_digest: request.snapshot_digest,
+                },
+                request.max_entries,
+                request.max_bytes,
+            )
         }
-        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
-    };
-    let allowed = match operation {
-        ApplicationSurfaceOperation::GitStatus => &["max_entries", "max_bytes"][..],
-        ApplicationSurfaceOperation::GitDiff => {
-            &["scope", "base", "head", "max_entries", "max_bytes"][..]
-        }
-        ApplicationSurfaceOperation::GitHistory => &[
-            "count",
-            "path",
-            "follow",
-            "first_parent",
-            "max_entries",
-            "max_bytes",
-        ][..],
-        ApplicationSurfaceOperation::GitBlame => {
-            &["path", "follow_renames", "max_entries", "max_bytes"][..]
-        }
-        ApplicationSurfaceOperation::GitHunks => &[
-            "scope",
-            "preview_id",
-            "snapshot_digest",
-            "max_entries",
-            "max_bytes",
-        ][..],
-        _ => &[],
-    };
-    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    }
+}
+
+fn git_read_surface_request(
+    request: GitReadRequestV1,
+    max_entries: Option<u32>,
+    max_bytes: Option<u64>,
+) -> Result<GitReadSurfaceRequest, ApplicationSurfaceAdapterError> {
+    let max_entries = max_entries.unwrap_or(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES);
+    let max_bytes = max_bytes.unwrap_or(crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES);
+    if !(1..=crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES).contains(&max_entries)
+        || !(1..=crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES).contains(&max_bytes)
+    {
         return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
     }
     Ok(GitReadSurfaceRequest {
@@ -2873,6 +2811,29 @@ fn parse_git_read_surface_request(
         max_entries,
         max_bytes,
     })
+}
+
+fn git_surface_scope(
+    scope: GitSurfaceDiffScopeV1,
+    base: Option<GitOidV1>,
+    head: Option<GitOidV1>,
+    allow_commit_range: bool,
+) -> Result<GitDiffScopeV1, ApplicationSurfaceAdapterError> {
+    match (scope, base, head) {
+        (GitSurfaceDiffScopeV1::WorkingTree, None, None) => Ok(GitDiffScopeV1::WorkingTree),
+        (GitSurfaceDiffScopeV1::Staged, None, None) => Ok(GitDiffScopeV1::Staged),
+        (GitSurfaceDiffScopeV1::CommitRange, Some(base), Some(head)) if allow_commit_range => {
+            Ok(GitDiffScopeV1::CommitRange { base, head })
+        }
+        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    }
+}
+
+fn canonical_git_surface_string(value: String) -> Result<String, ApplicationSurfaceAdapterError> {
+    if value.is_empty() || value.trim() != value {
+        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
+    Ok(value)
 }
 
 pub fn parse_application_surface_request(

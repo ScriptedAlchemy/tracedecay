@@ -30,6 +30,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+pub use tracedecay_application::{GitQueryEnvelopeV1, GitStatusSummaryV1};
 use tracedecay_domain::code_intelligence::CodeGenerationId;
 use tracedecay_domain::git::{
     GitBlameV1, GitChangeKindV1, GitCoverageV1, GitDegradationV1, GitDiffScopeV1, GitDiffV1,
@@ -135,37 +136,6 @@ pub enum GitQueryError {
     /// The result could not be serialized for byte measurement.
     #[error("git query result serialization failed: {0}")]
     Serialization(String),
-}
-
-/// One typed query result with its merged coverage. `coverage` is the
-/// adapter-reported coverage plus any query-level degradation (entry-bound
-/// truncation); `truncated_by_bound` distinguishes query-level truncation
-/// from adapter-level capture bounds.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitQueryEnvelopeV1<T> {
-    pub value: T,
-    pub coverage: GitCoverageV1,
-    pub truncated_by_bound: bool,
-}
-
-/// Bounded status summary derived from the typed [`tracedecay_domain::git::GitStatusV1`]:
-/// HEAD and operation state, per-class counts, and a bounded sorted sample of
-/// changed paths.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitStatusSummaryV1 {
-    pub repository: RepositoryId,
-    pub head: GitHeadStateV1,
-    pub operation: GitOperationStateV1,
-    pub staged: u32,
-    pub unstaged: u32,
-    pub conflicted: u32,
-    pub untracked: u32,
-    pub ignored: u32,
-    /// Sorted, de-duplicated changed paths, truncated at the query entry bound.
-    pub changed_paths: Vec<String>,
-    pub schema_version: String,
 }
 
 /// A generation-bound query: the generation under audit plus the revision

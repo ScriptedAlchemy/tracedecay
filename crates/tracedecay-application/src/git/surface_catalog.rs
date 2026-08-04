@@ -5,18 +5,28 @@
 //! and `git_apply`; query status/diff/history/blame/hunk reads are callable
 //! independently and expose no mutation capability.
 
+use schemars::JsonSchema;
+use tracedecay_domain::{GitIndexPreviewV1, GitIndexTransactionReceiptV1};
 use tracedecay_tool_catalog::{
     AuthorityRequirement, AvailabilityContract, BindingId, BindingSurface, CancellationContract,
     CancellationPoint, CapabilityId, CapabilityManifestInputV1, CapabilityManifestV1,
-    CatalogContributionInputV1, CatalogContributionV1, ContributionId, DeadlineBehavior,
-    DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract, LifecycleClass,
-    PrivacyClass, ProfileId, ReceiptContract, ReconciliationContract, RevalidationContract,
-    RevalidationPoint, RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement,
-    StreamingContract, TerminalState, TerminalStateContract, UseCaseId,
+    CatalogContributionInputV1, CatalogContributionV1, CatalogValidationError, CodecBindingKey,
+    ContributionId, DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass,
+    ExecutableBindingV1, IdempotencyContract, LifecycleClass, OperationId, PrivacyClass, ProfileId,
+    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
+    RouteExposureV1, RoutingContractV1, SchemaBodyAuthorityV1, SchemaId, SchemaRef, ScopeDimension,
+    ScopeRequirement, SdkExecutableBindingAvailabilityV1, SdkExecutableBindingRegistryV1,
+    SdkExecutableBindingV1, SdkTransportBindingV1, ServiceId, StreamingContract,
+    SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::current_bindings;
 use crate::error::ApplicationContractError;
+use crate::git::{
+    GitApplySurfaceRequest, GitBlameSurfaceRequest, GitDiffSurfaceRequest,
+    GitHistorySurfaceRequest, GitHunksSurfaceRequest, GitPreviewSurfaceRequest, GitReadResultV1,
+    GitStatusSurfaceRequest,
+};
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
@@ -27,6 +37,8 @@ struct SurfaceSpec {
     request_schema: &'static str,
     result_schema: &'static str,
     operation: &'static str,
+    sdk_operation_id: &'static str,
+    mcp_tool_name: &'static str,
     effect: EffectClass,
     summary: &'static str,
     description: &'static str,
@@ -47,6 +59,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.status.request",
         result_schema: "schema.application.git.status.result",
         operation: "git_status",
+        sdk_operation_id: "operation.application.git.status",
+        mcp_tool_name: "tracedecay_git_status",
         effect: EffectClass::Read,
         summary: "Read typed Git status",
         description: "Read bounded typed status for one exact admitted project worktree.",
@@ -59,6 +73,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.diff.request",
         result_schema: "schema.application.git.diff.result",
         operation: "git_diff",
+        sdk_operation_id: "operation.application.git.diff",
+        mcp_tool_name: "tracedecay_git_diff",
         effect: EffectClass::Read,
         summary: "Read a typed Git diff",
         description: "Read one bounded working-tree, staged, or exact commit-range diff.",
@@ -71,6 +87,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.history.request",
         result_schema: "schema.application.git.history.result",
         operation: "git_history",
+        sdk_operation_id: "operation.application.git.history",
+        mcp_tool_name: "tracedecay_git_history",
         effect: EffectClass::Read,
         summary: "Read bounded Git history",
         description: "Read bounded typed commit history for one exact admitted project worktree.",
@@ -83,6 +101,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.blame.request",
         result_schema: "schema.application.git.blame.result",
         operation: "git_blame",
+        sdk_operation_id: "operation.application.git.blame",
+        mcp_tool_name: "tracedecay_git_blame",
         effect: EffectClass::Read,
         summary: "Read typed Git blame",
         description: "Read bounded typed line provenance for one admitted path.",
@@ -95,6 +115,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.hunks.request",
         result_schema: "schema.application.git.hunks.result",
         operation: "git_hunks",
+        sdk_operation_id: "operation.application.git.hunks",
+        mcp_tool_name: "tracedecay_git_hunks",
         effect: EffectClass::Read,
         summary: "Read typed Git hunk references",
         description: "Mint bounded HunkRef evidence from one working-tree or staged diff.",
@@ -107,6 +129,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.preview.request",
         result_schema: "schema.application.git.preview.result",
         operation: "git_preview",
+        sdk_operation_id: "operation.application.git.preview",
+        mcp_tool_name: "tracedecay_git_preview",
         effect: EffectClass::Preview,
         summary: "Preview Git index mutations",
         description: "Build an immutable preview for selected index mutations with CAS evidence.",
@@ -119,6 +143,8 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         request_schema: "schema.application.git.apply.request",
         result_schema: "schema.application.git.apply.result",
         operation: "git_apply",
+        sdk_operation_id: "operation.application.git.apply",
+        mcp_tool_name: "tracedecay_git_apply",
         // Public apply is a facade over preview-bound stage/unstage/commit.
         // The exact Git-index effect class is fixed by the preview identity.
         effect: EffectClass::Administrative,
@@ -153,6 +179,134 @@ pub fn git_surface_catalog_contribution() -> Result<CatalogContributionV1, Appli
         retrieval_primitives: Vec::new(),
         bindings,
     })?)
+}
+
+/// Schema-backed named SDK bindings for every public Git surface.
+///
+/// Git's generated SDK invokes the mounted MCP tools. The embedded executable
+/// records remain internal because no Git HTTP route is being introduced by
+/// this SDK projection.
+pub fn git_sdk_executable_binding_registry()
+-> Result<SdkExecutableBindingRegistryV1, CatalogValidationError> {
+    let contribution =
+        git_surface_catalog_contribution().map_err(|_| CatalogValidationError::InvalidValue {
+            field: "Git SDK catalog",
+            reason: "could not build the canonical Git surface contribution",
+        })?;
+    let bindings = SURFACE_SPECS
+        .iter()
+        .map(|spec| git_sdk_binding(&contribution, spec))
+        .collect::<Result<Vec<_>, _>>()?;
+    SdkExecutableBindingRegistryV1::new(bindings)
+}
+
+fn git_sdk_binding(
+    contribution: &CatalogContributionV1,
+    spec: &SurfaceSpec,
+) -> Result<SdkExecutableBindingAvailabilityV1, CatalogValidationError> {
+    let capability_id =
+        CapabilityId::new(spec.capability).map_err(|_| CatalogValidationError::InvalidValue {
+            field: "Git SDK capability ID",
+            reason: "is not a canonical capability identifier",
+        })?;
+    let manifest = contribution
+        .capabilities()
+        .iter()
+        .find(|manifest| manifest.capability_id() == &capability_id)
+        .ok_or(CatalogValidationError::InvalidValue {
+            field: "Git SDK capability",
+            reason: "is missing from the canonical Git contribution",
+        })?;
+    let binding_id = contribution
+        .bindings()
+        .iter()
+        .find(|binding| {
+            binding.capability_id() == manifest.capability_id()
+                && binding.surface() == BindingSurface::Mcp
+                && binding.operation().as_str() == spec.operation
+        })
+        .map(|binding| binding.binding_id().clone())
+        .ok_or(CatalogValidationError::InvalidCapability {
+            capability_id,
+            reason: "is missing its mounted MCP binding",
+        })?;
+
+    match spec.operation {
+        "git_status" => git_mcp_sdk_binding::<GitStatusSurfaceRequest, GitReadResultV1>(
+            manifest, spec, binding_id,
+        ),
+        "git_diff" => git_mcp_sdk_binding::<GitDiffSurfaceRequest, GitReadResultV1>(
+            manifest, spec, binding_id,
+        ),
+        "git_history" => git_mcp_sdk_binding::<GitHistorySurfaceRequest, GitReadResultV1>(
+            manifest, spec, binding_id,
+        ),
+        "git_blame" => git_mcp_sdk_binding::<GitBlameSurfaceRequest, GitReadResultV1>(
+            manifest, spec, binding_id,
+        ),
+        "git_hunks" => git_mcp_sdk_binding::<GitHunksSurfaceRequest, GitReadResultV1>(
+            manifest, spec, binding_id,
+        ),
+        "git_preview" => git_mcp_sdk_binding::<GitPreviewSurfaceRequest, GitIndexPreviewV1>(
+            manifest, spec, binding_id,
+        ),
+        "git_apply" => git_mcp_sdk_binding::<GitApplySurfaceRequest, GitIndexTransactionReceiptV1>(
+            manifest, spec, binding_id,
+        ),
+        _ => Err(CatalogValidationError::InvalidValue {
+            field: "Git SDK operation",
+            reason: "is absent from the canonical Git schema registry",
+        }),
+    }
+}
+
+fn git_mcp_sdk_binding<Request, Output>(
+    manifest: &CapabilityManifestV1,
+    spec: &SurfaceSpec,
+    binding_id: BindingId,
+) -> Result<SdkExecutableBindingAvailabilityV1, CatalogValidationError>
+where
+    Request: JsonSchema,
+    Output: JsonSchema,
+{
+    let executable = ExecutableBindingV1::daemon_owned(
+        manifest,
+        OperationId::new(spec.sdk_operation_id).map_err(|_| {
+            CatalogValidationError::InvalidValue {
+                field: "Git SDK operation ID",
+                reason: "is not a canonical operation identifier",
+            }
+        })?,
+        ServiceId::new("service.application.git").map_err(|_| {
+            CatalogValidationError::InvalidValue {
+                field: "Git SDK service ID",
+                reason: "is not a canonical service identifier",
+            }
+        })?,
+        SchemaBodyAuthorityV1::for_type::<Request>(manifest.request_schema().clone())?,
+        SchemaBodyAuthorityV1::for_type::<Output>(manifest.result_schema().clone())?,
+        CodecBindingKey::new(format!("codec.application.git.{}.json.v1", spec.operation)).map_err(
+            |_| CatalogValidationError::InvalidValue {
+                field: "Git SDK codec binding",
+                reason: "is not a canonical codec identifier",
+            },
+        )?,
+        RouteExposureV1::Internal,
+    )?;
+    let binding = SdkExecutableBindingV1::new(
+        executable,
+        binding_id,
+        SurfaceOperationName::new(spec.operation).map_err(|_| {
+            CatalogValidationError::InvalidValue {
+                field: "Git SDK method",
+                reason: "is not a canonical surface operation name",
+            }
+        })?,
+        SdkTransportBindingV1::McpTool {
+            tool_name: spec.mcp_tool_name.to_owned(),
+        },
+    )?;
+    Ok(SdkExecutableBindingAvailabilityV1::available(binding))
 }
 
 pub fn git_surface_handler_descriptors()

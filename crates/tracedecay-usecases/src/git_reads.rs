@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::{AuthorizedScopeSet, ResolvedScope};
-use tracedecay_domain::git::{GitBlameV1, GitDiffScopeV1, GitDiffV1, GitHistoryV1, HunkRefV1};
+pub use tracedecay_application::{GitReadRequestV1, GitReadResultV1};
 use tracedecay_domain::{
     ManifestDigest, RootScopeOutcomeV1, ScopeOutcome, ScopePartialReasonV1, ScopeSetId,
     ScopeSetRevision, ScopeUnavailableReasonV1,
@@ -22,8 +22,10 @@ use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelli
 // (`src/git_intelligence.rs`). See `SEAMS.md`.
 use crate::git_intelligence::NativeGitIntelligence;
 use crate::git_query::{
-    GitQueryBounds, GitQueryEngine, GitQueryEnvelopeV1, GitQueryError, GitStatusSummaryV1,
+    GitQueryBounds, GitQueryEngine, GitQueryError,
 };
+#[cfg(test)]
+use crate::git_query::GitQueryEnvelopeV1;
 // The historical outcome projection moved down beside the adapter that
 // produces it; both this owner and the extracted search evaluator mount the
 // same values.
@@ -33,62 +35,6 @@ use tracedecay_application::historical_query::{
 pub use tracedecay_application::historical_query::{
     HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
 };
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "query", rename_all = "snake_case")]
-pub enum GitReadRequestV1 {
-    Status,
-    Diff {
-        scope: GitDiffScopeV1,
-    },
-    History {
-        max_count: u32,
-        path: Option<String>,
-        follow: bool,
-        first_parent: bool,
-    },
-    Blame {
-        path: String,
-        follow_renames: bool,
-    },
-    Hunks {
-        scope: GitDiffScopeV1,
-        preview_id: String,
-        snapshot_digest: ManifestDigest,
-    },
-}
-
-impl GitReadRequestV1 {
-    pub fn capability_id(&self) -> &'static str {
-        match self {
-            Self::Status => "capability.application.git.status",
-            Self::Diff { .. } => "capability.application.git.diff",
-            Self::History { .. } => "capability.application.git.history",
-            Self::Blame { .. } => "capability.application.git.blame",
-            Self::Hunks { .. } => "capability.application.git.hunks",
-        }
-    }
-
-    pub fn use_case_id(&self) -> &'static str {
-        match self {
-            Self::Status => "use-case.application.git.status",
-            Self::Diff { .. } => "use-case.application.git.diff",
-            Self::History { .. } => "use-case.application.git.history",
-            Self::Blame { .. } => "use-case.application.git.blame",
-            Self::Hunks { .. } => "use-case.application.git.hunks",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "query", content = "result", rename_all = "snake_case")]
-pub enum GitReadResultV1 {
-    Status(GitQueryEnvelopeV1<GitStatusSummaryV1>),
-    Diff(GitQueryEnvelopeV1<GitDiffV1>),
-    History(GitQueryEnvelopeV1<GitHistoryV1>),
-    Blame(GitQueryEnvelopeV1<GitBlameV1>),
-    Hunks(GitQueryEnvelopeV1<Vec<HunkRefV1>>),
-}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
