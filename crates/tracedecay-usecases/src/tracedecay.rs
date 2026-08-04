@@ -20,8 +20,9 @@ use tracedecay_application::source_edit::{
     AstGrepResult, EditResult, InsertResult, MoveResult, MultiEditResult,
 };
 use tracedecay_application::{ApiMigrationApplyResultV1, ApiMigrationPlanV1};
+use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_global_db::RegisteredGlobalDb;
-use tracedecay_runtime_core::db::Database;
+use tracedecay_runtime_core::db::{Database, DependencyImportUse};
 use tracedecay_runtime_core::errors::Result;
 use tracedecay_runtime_core::path_safety::{
     normalize_source_edit_relative_path, source_edit_path_error, source_edit_unsafe_path,
@@ -33,6 +34,12 @@ pub type GraphFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a
 pub type GraphValueFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub type GraphCallChain = Vec<(Node, Option<Edge>)>;
 pub type ComplexityRankedNode = (Node, u32, u64, u64, u64);
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GraphRequestControl<'a> {
+    pub deadline: Option<&'a Deadline>,
+    pub cancellation: Option<&'a CancellationSignal>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TrackedBranchDiagnostic {
@@ -149,6 +156,13 @@ pub trait GraphRuntimePort: Send + Sync {
     ) -> GraphFuture<'a, Option<Node>>;
     fn last_synced_commit(&self) -> GraphValueFuture<'_, Option<String>>;
     fn storage_page_counts(&self) -> GraphFuture<'_, (u64, u64, u64)>;
+    fn dependency_import_uses<'a>(
+        &'a self,
+        query: &'a str,
+        limit: usize,
+        path_prefix: Option<&'a str>,
+        control: GraphRequestControl<'a>,
+    ) -> GraphFuture<'a, Vec<DependencyImportUse>>;
     fn get_complexity_ranked<'a>(
         &'a self,
         node_kind: Option<&'a NodeKind>,

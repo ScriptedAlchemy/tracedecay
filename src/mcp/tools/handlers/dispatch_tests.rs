@@ -829,6 +829,56 @@ fn deadline_from_now(offset_micros: i64) -> tracedecay_application::Deadline {
     .expect("deadline")
 }
 
+/// Cancellation is carried from MCP dispatch into the graph-runtime read.
+/// Replacing the port call with a handler-local database open makes this
+/// return a successful hint instead of the typed cancellation below.
+#[tokio::test]
+async fn dependency_hint_dispatch_preserves_transport_cancellation() {
+    let _env_lock = lock_user_data_dir_test_env();
+    let dir = TempDir::new().unwrap();
+    let _env = SelectorEnv::new(dir.path());
+    let project = dir.path().join("dependency-hint-cancelled");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/app.ts"),
+        "import type { BranchOnly } from \"branch-pkg\";\nexport const value = 1;\n",
+    )
+    .unwrap();
+    let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+        &project,
+        "project.mcp-dependency-hint-cancelled",
+    )
+    .await
+    .unwrap();
+    cg.index_all().await.unwrap();
+    let cancellation =
+        tracedecay_application::CancellationSignal::active("cancel.dependency-hint-dispatch")
+            .unwrap();
+    assert!(cancellation.cancel(tracedecay_domain::UtcMicros(1)));
+
+    let error = dispatch_graph_tools(
+        "tracedecay_find_exact_symbol",
+        &cg,
+        json!({
+            "name": "BranchOnly",
+            "lazy_index_ignored_dependencies": true,
+        }),
+        None,
+        None,
+        None,
+        None,
+        Some(cancellation),
+    )
+    .await
+    .expect_err("cancelled dependency hint dispatch");
+    assert_eq!(
+        error.project_route_context().map(|context| context.0),
+        Some("dependency_hint_cancelled")
+    );
+
+    cg.close();
+}
+
 /// An already-elapsed deadline must short-circuit *before* the expensive body
 /// runs, so neither the `pr_context` walk nor the `admin_branch_add` index
 /// build can proceed once the horizon is gone.

@@ -154,7 +154,14 @@ pub(super) async fn dispatch_graph_tools(
         }
         "tracedecay_callers_for" => graph::handle_callers_for(cg, args).await,
         "tracedecay_find_exact_symbol" => {
-            graph::handle_find_exact_symbol(cg, args, selected_scope_prefix).await
+            graph::handle_find_exact_symbol(
+                cg,
+                args,
+                selected_scope_prefix,
+                deadline.as_ref(),
+                cancellation.as_ref(),
+            )
+            .await
         }
         "tracedecay_by_qualified_name" => graph::handle_by_qualified_name(cg, args).await,
         "tracedecay_signature" => graph::handle_signature(cg, args).await,
@@ -209,7 +216,16 @@ pub(super) async fn dispatch_info_tools(
         "tracedecay_port_order" => info::handle_port_order(cg, args).await,
         "tracedecay_simplify_scan" => info::handle_simplify_scan(cg, args, scope_prefix).await,
         "tracedecay_type_hierarchy" => info::handle_type_hierarchy(cg, args).await,
-        "tracedecay_body" => info::handle_body(cg, args, selected_scope_prefix).await,
+        "tracedecay_body" => {
+            info::handle_body(
+                cg,
+                args,
+                selected_scope_prefix,
+                options.application_deadline.as_ref(),
+                options.application_cancellation.as_ref(),
+            )
+            .await
+        }
         "tracedecay_todos" => info::handle_todos(cg, args, scope_prefix).await,
         "tracedecay_read" => info::handle_read(cg, args).await,
         "tracedecay_outline" => info::handle_outline(cg, args).await,

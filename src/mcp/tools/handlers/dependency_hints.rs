@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::{Value, json};
+use tracedecay_usecases::tracedecay::{GraphRequestControl, GraphRuntimePort};
 
 use crate::dependency_imports::{DependencyImportCandidate, candidates_from_type_only_import};
 use crate::errors::Result;
@@ -23,8 +24,12 @@ pub(super) async fn ignored_dependency_hint(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Option<Value>> {
-    let candidates = ignored_dependency_candidates(cg, query, limit, scope_prefix).await?;
+    let candidates =
+        ignored_dependency_candidates(cg, query, limit, scope_prefix, deadline, cancellation)
+            .await?;
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -45,12 +50,16 @@ pub(super) async fn lazy_index_ignored_dependency_candidates(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Vec<String>> {
     if cg.is_read_only() {
         return Ok(Vec::new());
     }
 
-    let candidates = ignored_dependency_candidates(cg, query, limit, scope_prefix).await?;
+    let candidates =
+        ignored_dependency_candidates(cg, query, limit, scope_prefix, deadline, cancellation)
+            .await?;
     let mut seen = BTreeSet::new();
     let mut paths = Vec::new();
     for candidate in candidates {
@@ -70,21 +79,26 @@ async fn ignored_dependency_candidates(
     query: &str,
     limit: usize,
     scope_prefix: Option<&str>,
+    deadline: Option<&tracedecay_application::Deadline>,
+    cancellation: Option<&tracedecay_application::CancellationSignal>,
 ) -> Result<Vec<DependencyImportCandidate>> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
     }
     let candidate_limit = limit.clamp(1, 20);
-    let db = if cg.is_read_only() {
-        cg.open_project_store_db_read_only().await?
-    } else {
-        cg.open_project_store_db().await?
-    };
     let query_lower = query.to_ascii_lowercase();
-    let imports = db
-        .dependency_import_uses(query, candidate_limit, scope_prefix)
-        .await?;
+    let imports = GraphRuntimePort::dependency_import_uses(
+        cg,
+        query,
+        candidate_limit,
+        scope_prefix,
+        GraphRequestControl {
+            deadline,
+            cancellation,
+        },
+    )
+    .await?;
     let mut seen = BTreeSet::new();
     let mut candidates = Vec::new();
     for candidate in imports.into_iter().flat_map(|import_use| {
@@ -170,4 +184,75 @@ pub(super) fn append_ignored_dependency_hint_md(md: &mut Md, value: &Value) {
 
 fn user_line(line: u32) -> u32 {
     line.saturating_add(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tracedecay_application::{CancellationSignal, Deadline};
+    use tracedecay_domain::UtcMicros;
+
+    use super::*;
+    use crate::tracedecay::TraceDecayOpenOptions;
+
+    async fn indexed_import_graph() -> (TraceDecay, tempfile::TempDir) {
+        let isolation = tempfile::tempdir().expect("isolated profile");
+        let project = isolation.path().join("project");
+        let profile = isolation.path().join("profile");
+        fs::create_dir_all(project.join("src")).expect("source directory");
+        fs::write(
+            project.join("src/app.ts"),
+            "import type { BranchOnly } from \"branch-pkg\";\nexport const value = 1;\n",
+        )
+        .expect("source file");
+        let graph = TraceDecay::init_with_options(
+            &project,
+            TraceDecayOpenOptions {
+                profile_root: Some(profile.clone()),
+                global_db_path: Some(profile.join("global.db")),
+            },
+        )
+        .await
+        .expect("graph");
+        graph.index_all().await.expect("index");
+        (graph, isolation)
+    }
+
+    #[tokio::test]
+    async fn dependency_hint_read_honors_transport_deadline() {
+        let (graph, _isolation) = indexed_import_graph().await;
+        let deadline = Deadline::new(UtcMicros(1)).expect("expired deadline");
+
+        let error = ignored_dependency_hint(&graph, "BranchOnly", 5, None, Some(&deadline), None)
+            .await
+            .expect_err("expired dependency read");
+        assert_eq!(
+            error.project_route_context().map(|context| context.0),
+            Some("dependency_hint_deadline_exceeded")
+        );
+    }
+
+    #[tokio::test]
+    async fn dependency_hint_read_uses_the_admitted_graph_runtime() {
+        let (graph, _isolation) = indexed_import_graph().await;
+        let deadline = Deadline::new(UtcMicros(i64::MAX)).expect("live deadline");
+        let cancellation =
+            CancellationSignal::active("cancel.dependency-hint-active").expect("cancellation");
+
+        let hint = ignored_dependency_hint(
+            &graph,
+            "BranchOnly",
+            5,
+            None,
+            Some(&deadline),
+            Some(&cancellation),
+        )
+        .await
+        .expect("dependency read")
+        .expect("dependency hint");
+        assert_eq!(hint["candidates"][0]["module"], "branch-pkg");
+        assert_eq!(hint["candidates"][0]["symbol"], "BranchOnly");
+        assert_eq!(hint["candidates"][0]["import_file"], "src/app.ts");
+    }
 }
