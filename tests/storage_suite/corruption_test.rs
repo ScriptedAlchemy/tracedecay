@@ -587,9 +587,10 @@ async fn dirty_open_reuses_recovery_lock_for_migration_reindex()
     std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
 
     let reopened = TraceDecay::open_with_options(&project_root, open_options).await?;
-    assert!(
-        reopened.get_nodes_by_name("migrated").await?.len() == 1,
-        "migration re-index must complete after dirty recovery"
+    assert_eq!(
+        reopened.get_nodes_by_name("migrated").await?.len(),
+        1,
+        "migration reindex must complete after dirty recovery"
     );
     assert!(!layout.dirty_path.exists());
     reopened.close();
