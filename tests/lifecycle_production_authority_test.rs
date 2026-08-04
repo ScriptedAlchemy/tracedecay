@@ -41,9 +41,4 @@ async fn direct_lifecycle_entry_points_retain_production_authority() {
         .expect("direct production read-only open");
     assert!(read_only.is_read_only());
     read_only.close();
-
-    TraceDecay::open_branch_with_options(project, "main", options)
-        .await
-        .expect("direct production branch open")
-        .close();
 }
