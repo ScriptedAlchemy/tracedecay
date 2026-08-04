@@ -214,7 +214,7 @@ impl Pr13AdvisoryContributionsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13AdvisoryCycleRequestV1 {
+pub struct AdvisoryCycleRequest {
     pub feedback: FeedbackCycleExecutionRequest,
     pub github: Option<GitHubReviewReadRequestV1>,
     pub ci: ProductionCiFailureDiscoveryOutcomeV1,
@@ -222,7 +222,7 @@ pub struct Pr13AdvisoryCycleRequestV1 {
     pub validity: AdvisoryFindingValidityWindowV1,
 }
 
-impl Pr13AdvisoryCycleRequestV1 {
+impl AdvisoryCycleRequest {
     fn validate_for(&self, scope: &FeedbackScopeV1) -> Result<(), ApplicationContractError> {
         self.feedback.validate()?;
         if self.feedback.input.request.scope != *scope
@@ -248,7 +248,7 @@ impl Pr13AdvisoryCycleRequestV1 {
 
 /// Operation-stream cancellation and the root application's monotonic
 /// deadline are shared by every provider await.
-pub struct Pr13AdvisoryCycleControlV1 {
+pub struct AdvisoryCycleControl {
     pub operation: OperationEmitter,
     pub deadline: MonotonicDeadline,
 }
@@ -257,7 +257,7 @@ pub struct Pr13AdvisoryCycleControlV1 {
 // Boxing the large variant would ripple through in-flight construction/match
 // sites; the size gap is accepted here.
 #[allow(clippy::large_enum_variant)]
-pub enum Pr13AdvisoryCycleOutcomeV1 {
+pub enum AdvisoryCycleOutcome {
     Completed {
         cycle: Pr12CanonicalFeedbackResultV1,
         contributions: Pr13AdvisoryContributionsV1,
@@ -271,7 +271,7 @@ pub enum Pr13AdvisoryCycleOutcomeV1 {
     },
 }
 
-impl Pr13AdvisoryCycleOutcomeV1 {
+impl AdvisoryCycleOutcome {
     /// Returns the exact shared-store publication only after its atomic insert
     /// completed. Delivery callers receive no value for duplicate, failed,
     /// cancelled, timed-out, or otherwise unpublished cycles.
@@ -382,9 +382,9 @@ where
     pub async fn run_once(
         &self,
         context: &RequestContext,
-        mut control: Pr13AdvisoryCycleControlV1,
-        request: Pr13AdvisoryCycleRequestV1,
-    ) -> Result<Pr13AdvisoryCycleOutcomeV1, ApplicationContractError> {
+        mut control: AdvisoryCycleControl,
+        request: AdvisoryCycleRequest,
+    ) -> Result<AdvisoryCycleOutcome, ApplicationContractError> {
         if let Err(error) = request.validate_for(&self.feedback_scope) {
             self.observations.observe_source_event(
                 &request.feedback.input,
@@ -453,6 +453,13 @@ where
                             Pr13AdvisoryProviderV1::GitHub,
                             ingress.advisory_findings(request.validity),
                         );
+                    }
+                    GitHubReviewRefreshOutcomeV1::Cancelled => {
+                        return Ok(self.finish_interruption(
+                            &request.feedback.input,
+                            AdvisoryCycleInterruption::Cancelled,
+                            contributions,
+                        ));
                     }
                     GitHubReviewRefreshOutcomeV1::Denied => {
                         self.observe_github_terminal(
@@ -649,14 +656,14 @@ where
                 Pr13ProximityRuntimeOutcomeV1::Cancelled => {
                     return Ok(self.finish_interruption(
                         &request.feedback.input,
-                        Pr13AdvisoryInterruptionV1::Cancelled,
+                        AdvisoryCycleInterruption::Cancelled,
                         contributions,
                     ));
                 }
                 Pr13ProximityRuntimeOutcomeV1::TimedOut => {
                     return Ok(self.finish_interruption(
                         &request.feedback.input,
-                        Pr13AdvisoryInterruptionV1::TimedOut,
+                        AdvisoryCycleInterruption::TimedOut,
                         contributions,
                     ));
                 }
@@ -676,26 +683,26 @@ where
     fn finish_interruption(
         &self,
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
-        interruption: Pr13AdvisoryInterruptionV1,
+        interruption: AdvisoryCycleInterruption,
         contributions: Pr13AdvisoryContributionsV1,
-    ) -> Pr13AdvisoryCycleOutcomeV1 {
+    ) -> AdvisoryCycleOutcome {
         self.observations.observe_source_event(
             input,
             Plan26FeedbackSourceEventV1::Cancellation {
                 operation: Plan26FeedbackOperationV1::FeedbackCycle,
                 outcome: match interruption {
-                    Pr13AdvisoryInterruptionV1::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
-                    Pr13AdvisoryInterruptionV1::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
+                    AdvisoryCycleInterruption::Cancelled => Plan26FeedbackOutcomeV1::Cancelled,
+                    AdvisoryCycleInterruption::TimedOut => Plan26FeedbackOutcomeV1::TimedOut,
                 },
             },
         );
         let outcome = interruption.finish(contributions);
         match &outcome {
-            Pr13AdvisoryCycleOutcomeV1::Cancelled { contributions }
-            | Pr13AdvisoryCycleOutcomeV1::TimedOut { contributions } => {
+            AdvisoryCycleOutcome::Cancelled { contributions }
+            | AdvisoryCycleOutcome::TimedOut { contributions } => {
                 self.observe_provider_states(input, contributions);
             }
-            Pr13AdvisoryCycleOutcomeV1::Completed { .. } => {}
+            AdvisoryCycleOutcome::Completed { .. } => {}
         }
         outcome
     }
@@ -945,7 +952,7 @@ where
         context: &RequestContext,
         request: FeedbackCycleExecutionRequest,
         contributions: Pr13AdvisoryContributionsV1,
-    ) -> Result<Pr13AdvisoryCycleOutcomeV1, ApplicationContractError> {
+    ) -> Result<AdvisoryCycleOutcome, ApplicationContractError> {
         let observation_input = request.input.clone();
         let advisory = contributions.as_plan09()?;
         self.observe_provider_states(&observation_input, &contributions);
@@ -953,7 +960,7 @@ where
             .feedback_cycle
             .run_once_with_advisory(context, request, advisory)
             .await?;
-        Ok(Pr13AdvisoryCycleOutcomeV1::Completed {
+        Ok(AdvisoryCycleOutcome::Completed {
             cycle,
             contributions,
             observation_input,
@@ -993,42 +1000,40 @@ where
 }
 
 #[derive(Clone, Copy)]
-enum Pr13AdvisoryInterruptionV1 {
+enum AdvisoryCycleInterruption {
     Cancelled,
     TimedOut,
 }
 
-impl Pr13AdvisoryInterruptionV1 {
-    fn finish(self, mut contributions: Pr13AdvisoryContributionsV1) -> Pr13AdvisoryCycleOutcomeV1 {
+impl AdvisoryCycleInterruption {
+    fn finish(self, mut contributions: Pr13AdvisoryContributionsV1) -> AdvisoryCycleOutcome {
         match self {
             Self::Cancelled => {
                 contributions.terminalize_pending(ProviderEvaluationStateV1::Cancelled);
-                Pr13AdvisoryCycleOutcomeV1::Cancelled { contributions }
+                AdvisoryCycleOutcome::Cancelled { contributions }
             }
             Self::TimedOut => {
                 contributions.terminalize_pending(ProviderEvaluationStateV1::TimedOut);
-                Pr13AdvisoryCycleOutcomeV1::TimedOut { contributions }
+                AdvisoryCycleOutcome::TimedOut { contributions }
             }
         }
     }
 }
 
-fn interruption_before_await(
-    control: &Pr13AdvisoryCycleControlV1,
-) -> Option<Pr13AdvisoryInterruptionV1> {
+fn interruption_before_await(control: &AdvisoryCycleControl) -> Option<AdvisoryCycleInterruption> {
     if control.operation.is_cancelled() {
-        Some(Pr13AdvisoryInterruptionV1::Cancelled)
+        Some(AdvisoryCycleInterruption::Cancelled)
     } else if control.deadline.is_elapsed_at(Instant::now()) {
-        Some(Pr13AdvisoryInterruptionV1::TimedOut)
+        Some(AdvisoryCycleInterruption::TimedOut)
     } else {
         None
     }
 }
 
 async fn await_provider<T>(
-    control: &mut Pr13AdvisoryCycleControlV1,
+    control: &mut AdvisoryCycleControl,
     future: impl Future<Output = T>,
-) -> Result<T, Pr13AdvisoryInterruptionV1> {
+) -> Result<T, AdvisoryCycleInterruption> {
     if let Some(interruption) = interruption_before_await(control) {
         return Err(interruption);
     }
@@ -1040,8 +1045,8 @@ async fn await_provider<T>(
     tokio::pin!(deadline);
     tokio::select! {
         biased;
-        () = &mut cancelled => Err(Pr13AdvisoryInterruptionV1::Cancelled),
-        () = &mut deadline => Err(Pr13AdvisoryInterruptionV1::TimedOut),
+        () = &mut cancelled => Err(AdvisoryCycleInterruption::Cancelled),
+        () = &mut deadline => Err(AdvisoryCycleInterruption::TimedOut),
         outcome = &mut future => Ok(outcome),
     }
 }
@@ -1160,7 +1165,7 @@ mod tests {
 
     #[test]
     fn interrupted_cycle_has_no_delivery_publication() {
-        let outcome = Pr13AdvisoryCycleOutcomeV1::Cancelled {
+        let outcome = AdvisoryCycleOutcome::Cancelled {
             contributions: Pr13AdvisoryContributionsV1::absent(),
         };
         assert!(outcome.publication().is_none());

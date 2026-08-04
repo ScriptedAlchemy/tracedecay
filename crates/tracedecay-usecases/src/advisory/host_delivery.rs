@@ -34,7 +34,7 @@ use tracedecay_host_integration::{
 };
 
 use super::runtime::{
-    Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleOutcomeV1, Pr13AdvisoryCycleRequestV1,
+    AdvisoryCycleControl, AdvisoryCycleOutcome, AdvisoryCycleRequest,
     Pr13AdvisoryDaemonRegistrationV1, Pr13AdvisoryProviderAuthoritiesV1,
     Pr13AdvisoryRuntimeOpenErrorV1, Pr13AdvisoryRuntimeOpenV1,
     open_pr13_advisory_daemon_registration,
@@ -329,7 +329,7 @@ pub enum Pr13AdvisoryRunErrorV1 {
 }
 
 pub struct Pr13AdvisoryRunResultV1 {
-    pub outcome: Pr13AdvisoryCycleOutcomeV1,
+    pub outcome: AdvisoryCycleOutcome,
     pub delivery: Option<Pr13AdvisoryCompletedDeliveryV1>,
 }
 
@@ -379,7 +379,7 @@ where
     pub fn consume_completed_publication(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
         self.host_delivery
@@ -391,8 +391,8 @@ where
     pub async fn run_once(
         &self,
         context: &RequestContext,
-        control: Pr13AdvisoryCycleControlV1,
-        request: Pr13AdvisoryCycleRequestV1,
+        control: AdvisoryCycleControl,
+        request: AdvisoryCycleRequest,
         host: HostKindV1,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryRunResultV1, Pr13AdvisoryRunErrorV1> {
@@ -430,9 +430,9 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     /// committed it; this method never reconstructs, polls, or persists it.
     pub fn hook_lookup_notice(
         &self,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
     ) -> Result<Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHostDeliveryErrorV1> {
-        let Pr13AdvisoryCycleOutcomeV1::Completed {
+        let AdvisoryCycleOutcome::Completed {
             cycle,
             observation_input,
             ..
@@ -506,14 +506,14 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub fn deliver_hook_lookup_notice<P>(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
         port: &P,
     ) -> Result<Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1>
     where
         P: HookFeedbackDeliveryPortV1<Pr13AdvisoryHookLookupNoticeV1> + ?Sized,
     {
-        let Pr13AdvisoryCycleOutcomeV1::Completed {
+        let AdvisoryCycleOutcome::Completed {
             observation_input, ..
         } = outcome
         else {
@@ -632,7 +632,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub fn deliver_registered_hook_lookup_notice(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryHookDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
         self.deliver_hook_lookup_notice(host, outcome, rollback, self.hook_delivery_port.as_ref())
@@ -645,7 +645,7 @@ impl Pr13AdvisoryHostDeliveryRegistrationV1 {
     pub fn consume_completed_publication(
         &self,
         host: HostKindV1,
-        outcome: &Pr13AdvisoryCycleOutcomeV1,
+        outcome: &AdvisoryCycleOutcome,
         rollback: HookFeedbackRollbackSwitchV1,
     ) -> Result<Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryHostDeliveryErrorV1> {
         let hook = self.deliver_registered_hook_lookup_notice(host, outcome, rollback)?;
