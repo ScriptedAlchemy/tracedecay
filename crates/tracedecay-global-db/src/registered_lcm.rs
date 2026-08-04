@@ -21,6 +21,7 @@ use tracedecay_sessions::runtime::{
         compression,
         dag::{self, LcmSummaryPublicationPort},
         doctor, gc, payload, query, raw, schema,
+        types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt},
     },
 };
 use tracedecay_temporal_query::ports::{ExecutionControl, TemporalPortError};
@@ -461,21 +462,11 @@ impl RegisteredGlobalDb {
             );
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
-        let session_id = SessionId::new(draft.session_id.clone()).map_err(|error| {
-            LcmError::Db(format!(
-                "invalid Codex compaction session identity '{}': {error}",
-                draft.session_id
-            ))
-        })?;
         drop(snapshot);
         check_execution(control)?;
 
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
         let summary_hash = projected_content_hash(&draft.summary_text);
-        let mut successor_id = tracedecay_sessions::runtime::lcm::dag::summary_node_id(
+        let mut successor_id = dag::summary_node_id(
             &draft.provider,
             &draft.session_id,
             draft.depth,
@@ -491,6 +482,41 @@ impl RegisteredGlobalDb {
                 ))
             );
         }
+        self.lcm_publish_immutable_summary_guarded(
+            LcmImmutableSummaryPublication {
+                summary_id: successor_id,
+                predecessor_summary_id: Some(node_id.to_string()),
+                draft,
+            },
+            control,
+            before_commit,
+        )
+        .await
+        .map(|receipt| receipt.summary)
+    }
+
+    /// Publishes one immutable summary and advances its native relation
+    /// projection in the same controlled mutation journey.
+    pub async fn lcm_publish_immutable_summary_guarded<F>(
+        &self,
+        publication: LcmImmutableSummaryPublication,
+        control: &ExecutionControl,
+        before_commit: F,
+    ) -> Result<LcmSummaryPublicationReceipt, LcmError>
+    where
+        F: FnOnce() -> Result<(), LcmError>,
+    {
+        check_execution(control)?;
+        let session_id = SessionId::new(publication.draft.session_id.clone()).map_err(|error| {
+            LcmError::Db(format!(
+                "invalid LCM summary session identity '{}': {error}",
+                publication.draft.session_id
+            ))
+        })?;
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| LcmError::Db(error.to_string()))?;
         let relation_projection = seed_session_relation_projection(
             self,
             &transaction,
@@ -500,7 +526,7 @@ impl RegisteredGlobalDb {
         .await
         .map_err(|error| {
             LcmError::Db(format!(
-                "seed native Codex compaction relation projection: {error}"
+                "seed native LCM summary relation projection: {error}"
             ))
         })?;
         check_execution(control)?;
@@ -508,15 +534,7 @@ impl RegisteredGlobalDb {
             &transaction,
             relation_projection,
         );
-        let receipt = publisher
-            .publish_immutable_summary(
-                tracedecay_sessions::runtime::lcm::types::LcmImmutableSummaryPublication {
-                    summary_id: successor_id,
-                    predecessor_summary_id: Some(node_id.to_string()),
-                    draft,
-                },
-            )
-            .await?;
+        let receipt = publisher.publish_immutable_summary(publication).await?;
         check_execution(control)?;
         before_commit()?;
         transaction.commit().await?;
@@ -528,11 +546,11 @@ impl RegisteredGlobalDb {
         .await
         .map_err(|error| {
             LcmError::Db(format!(
-                "apply native Codex compaction relation projection: {error}"
+                "apply native LCM summary relation projection: {error}"
             ))
         })?;
         check_execution(control)?;
-        Ok(receipt.summary)
+        Ok(receipt)
     }
 
     pub async fn lcm_doctor(

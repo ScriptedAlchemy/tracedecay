@@ -173,8 +173,9 @@ pub(super) async fn codex_compact(
                 .find_map(|key| value.get(*key).and_then(Value::as_str))
                 .map(str::to_string)
         });
+    let control = tracedecay_temporal_query::ports::ExecutionControl::default();
     let mut pending = db
-        .pending_codex_compaction_summary_requests(session_id.as_deref(), 1)
+        .pending_codex_compaction_summary_requests(session_id.as_deref(), 1, &control)
         .await
         .map_err(|error| config_error(format!("load Codex compaction request failed: {error}")))?;
     let Some(pending) = pending.pop() else {
@@ -196,6 +197,8 @@ pub(super) async fn codex_compact(
             &summary.text,
             "codex_app_server",
             summary.model.as_deref().or(config.model.as_deref()),
+            &control,
+            || Ok(()),
         )
         .await
         .map_err(|error| config_error(format!("store Codex compaction summary failed: {error}")))?;
@@ -238,16 +241,21 @@ pub(super) async fn cursor_compact(
         .map(|(count, compact)| count.saturating_sub(compact));
     let current_tokens = event_i64(&parsed, &["context_tokens", "current_tokens", "tokens"]);
     let context_length = event_i64(&parsed, &["context_window_size", "context_length"]);
+    let control = tracedecay_temporal_query::ports::ExecutionControl::default();
     let first = db
-        .lcm_compress(cursor_lcm_request(
-            session_id,
-            current_tokens,
-            context_length,
-            messages_to_compact,
-            fresh_tail_count,
-            crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
-            None,
-        ))
+        .lcm_compress_guarded(
+            cursor_lcm_request(
+                session_id,
+                current_tokens,
+                context_length,
+                messages_to_compact,
+                fresh_tail_count,
+                crate::sessions::lcm::LcmSummarizerMode::HermesAuxiliary,
+                None,
+            ),
+            &control,
+            || Ok(()),
+        )
         .await
         .map_err(|error| config_error(format!("prepare Cursor compaction failed: {error}")))?;
     let Some(summary_request) = first.summary_request else {
@@ -258,18 +266,22 @@ pub(super) async fn cursor_compact(
         crate::sessions::cursor_agent::summarize_with_cursor_agent(&summary_request, &config)
             .map_err(|error| config_error(format!("cursor-agent summary failed: {error}")))?;
     let second = db
-        .lcm_compress(cursor_lcm_request(
-            session_id,
-            current_tokens,
-            context_length,
-            messages_to_compact,
-            fresh_tail_count,
-            crate::sessions::lcm::LcmSummarizerMode::Provided {
-                summary_text: summary,
-                route: Some("cursor_agent".to_string()),
-            },
-            first.frontier.current_frontier_store_id.or(Some(0)),
-        ))
+        .lcm_compress_guarded(
+            cursor_lcm_request(
+                session_id,
+                current_tokens,
+                context_length,
+                messages_to_compact,
+                fresh_tail_count,
+                crate::sessions::lcm::LcmSummarizerMode::Provided {
+                    summary_text: summary,
+                    route: Some("cursor_agent".to_string()),
+                },
+                first.frontier.current_frontier_store_id.or(Some(0)),
+            ),
+            &control,
+            || Ok(()),
+        )
         .await
         .map_err(|error| config_error(format!("store Cursor compaction failed: {error}")))?;
     Ok(json!({

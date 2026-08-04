@@ -631,17 +631,28 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let transaction = database
-            .begin_write_transaction()
+        let summary_hash =
+            tracedecay_sessions::compatibility::projected_content_hash(&draft.summary_text);
+        let summary_id = crate::sessions::lcm::dag::summary_node_id(
+            &draft.provider,
+            &draft.session_id,
+            draft.depth,
+            &draft.source_refs,
+            &summary_hash,
+        );
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(
+                crate::sessions::lcm::types::LcmImmutableSummaryPublication {
+                    summary_id,
+                    predecessor_summary_id: None,
+                    draft,
+                },
+                &control,
+                || Ok(()),
+            )
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let publisher =
-            crate::global_db::session_temporal_operations::GlobalDbLcmSummaryPublication::new(
-                &transaction,
-            );
-        let summary = crate::sessions::lcm::dag::insert_summary_node(&publisher, draft).await?;
-        transaction.commit().await?;
-        Ok(summary)
+            .map(|receipt| receipt.summary)
     }
 
     #[doc(hidden)]
@@ -676,17 +687,10 @@ impl HostAdmissionTestRuntimeV1 {
         let database = self
             .session_database_for_test(scope)
             .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let transaction = database
-            .begin_write_transaction()
+        let control = tracedecay_temporal_query::ports::ExecutionControl::default();
+        database
+            .lcm_publish_immutable_summary_guarded(publication, &control, || Ok(()))
             .await
-            .map_err(|error| crate::sessions::lcm::LcmError::Db(error.to_string()))?;
-        let receipt = crate::global_db::session_temporal_operations::publish_immutable_summary(
-            &transaction,
-            publication,
-        )
-        .await?;
-        transaction.commit().await?;
-        Ok(receipt)
     }
 
     #[doc(hidden)]
