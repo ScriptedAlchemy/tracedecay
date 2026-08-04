@@ -142,7 +142,7 @@ fn hook_event_waits_for_registered_project_authority_publication() {
 }
 
 #[cfg(unix)]
-fn run_git(root: &std::path::Path, args: &[&str]) {
+pub(super) fn run_git(root: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)
         .current_dir(root)
@@ -410,72 +410,6 @@ async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
             .is_none(),
         "rejection must not write a linked-worktree enrollment marker"
     );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn same_identity_worktree_and_primary_register_one_project_authority() {
-    let home = TempDir::new().expect("isolated home");
-    let root = home.path().canonicalize().expect("canonical home");
-    let primary = root.join("primary");
-    let linked = root.join("linked");
-    let profile_root = root.join("profile");
-    std::fs::create_dir_all(&primary).expect("create primary repository");
-    run_git(&primary, &["init", "-b", "main", "--quiet"]);
-    std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
-    run_git(&primary, &["add", "."]);
-    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
-    run_git(
-        &primary,
-        &[
-            "worktree",
-            "add",
-            "--force",
-            linked.to_str().expect("utf-8 linked path"),
-            "main",
-        ],
-    );
-
-    let client_identity = test_client_identity_for(profile_root.clone());
-    initialize_test_project(&primary, &client_identity).await;
-    let _database_scope =
-        enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
-    let engine = test_daemon_engine_for_profile(&profile_root);
-    let primary_handshake = DaemonHandshake {
-        project_path: Some(primary.clone()),
-        client_identity: client_identity.clone(),
-        ..test_handshake_defaults()
-    };
-    let linked_handshake = DaemonHandshake {
-        project_path: Some(linked.clone()),
-        client_identity,
-        ..test_handshake_defaults()
-    };
-
-    let primary_server = engine
-        .project_server(&primary_handshake)
-        .await
-        .expect("primary project must open");
-    let linked_server = engine
-        .project_server(&linked_handshake)
-        .await
-        .expect("linked worktree must reuse the primary authority");
-
-    assert!(
-        Arc::ptr_eq(&primary_server, &linked_server),
-        "both routes must resolve one retained project server"
-    );
-    let servers = engine.store_administration.project_servers().lock().await;
-    assert_eq!(servers.servers.len(), 1, "one physical project server key");
-    assert_eq!(servers.aliases.len(), 2, "primary and linked route aliases");
-    drop(servers);
-    assert!(
-        crate::storage::read_enrollment_marker(&linked)
-            .expect("read linked marker")
-            .is_none(),
-        "linked route must not acquire a second enrollment marker"
-    );
-    engine.shutdown_all().await;
 }
 
 #[tokio::test]
@@ -941,37 +875,30 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
+async fn project_open_shutdown_waits_for_inflight_unit_then_joins() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("cooperative-shutdown");
     let lifecycle = DaemonLifecycle::default();
-    let store_administration = StoreAdministration::default();
     let (cancellation_tx, cancellation_rx) = tokio::sync::oneshot::channel();
     let (unit_started_tx, unit_started_rx) = tokio::sync::oneshot::channel();
     let (unit_release_tx, unit_release_rx) = tokio::sync::oneshot::channel();
     let (unit_finished_tx, unit_finished_rx) = tokio::sync::oneshot::channel();
 
     let task_lifecycle = lifecycle.clone();
-    let task_administration = store_administration.clone();
     let state = match tasks
         .start_cancellable(route, move |cancellation| async move {
             let _activity = task_lifecycle
                 .try_enter()
                 .expect("project open lifecycle activity");
             let published_cancellation = cancellation.clone();
-            task_administration
-                .with_writer_until_cancelled(&cancellation, move || async move {
-                    cancellation_tx
-                        .send(published_cancellation)
-                        .expect("publish project-open cancellation");
-                    unit_started_tx.send(()).expect("publish safe unit start");
-                    unit_release_rx.await.expect("release safe unit");
-                    unit_finished_tx
-                        .send(())
-                        .expect("publish safe unit completion");
-                })
-                .await
-                .expect("safe unit acquired writer administration");
+            cancellation_tx
+                .send(published_cancellation)
+                .expect("publish project-open cancellation");
+            unit_started_tx.send(()).expect("publish safe unit start");
+            unit_release_rx.await.expect("release safe unit");
+            unit_finished_tx
+                .send(())
+                .expect("publish safe unit completion");
             cancellation.cancelled().await;
             Err(crate::errors::TraceDecayError::Config {
                 message: "project open cancelled after safe unit".to_string(),
@@ -1017,12 +944,6 @@ async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
     )
     .await
     .expect("client-drain lifecycle activity must be released");
-    tokio::time::timeout(
-        tokio::time::Duration::from_secs(1),
-        store_administration.with_writer(|| async {}),
-    )
-    .await
-    .expect("server shutdown must reacquire writer administration");
     assert_eq!(tasks.tracked_route_count().await, 0);
     super::super::ProjectOpenTasks::wait_for_completion(state)
         .await

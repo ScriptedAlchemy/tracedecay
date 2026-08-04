@@ -55,6 +55,7 @@ impl StoreRuntimeRegistryConfig {
         Ok(config)
     }
 
+    #[cfg(test)]
     pub(crate) const fn project_code_open_runtime_budget(self) -> usize {
         self.project_code_open_runtime_budget
     }

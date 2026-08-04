@@ -45,14 +45,14 @@ fn exclusive_maintenance_budget_accepts_any_nonzero_exact_count() {
 
 #[tokio::test]
 async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
-    for round in 0..8 {
+    for clients in [1, 8, 32, 64] {
         let (registry, resolver, publisher) = registry(StoreRuntimeRegistryConfig::default());
         let pin = profile_pin(&registry).await;
         publisher.block.store(true, Ordering::SeqCst);
-        let request = project_request(&format!("project.singleflight-{round}"), &pin);
+        let request = project_request(&format!("project.singleflight-{clients}"), &pin);
 
         let mut joins = Vec::new();
-        for index in 0..64 {
+        for index in 0..clients {
             match registry.begin_or_join_open(&request) {
                 StoreRuntimeOpenBegin::Started(join) if index == 0 => joins.push(join),
                 StoreRuntimeOpenBegin::Joined(join) => joins.push(join),
@@ -81,6 +81,7 @@ async fn concurrent_openers_publish_one_concrete_runtime_and_one_locator() {
             handles[0].runtime().maintenance_state(),
             RuntimeMaintenanceStateV1::Ready
         );
+        eprintln!("store_runtime_open clients={clients} runtimes=1 locators=1 busy=0 locked=0");
     }
 }
 

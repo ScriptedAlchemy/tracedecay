@@ -504,6 +504,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
     .expect("owner");
     let shared_key = ProjectServerKey {
         owner: owner.clone(),
+        project_root: project.clone(),
         scope_prefix: None,
     };
     let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
@@ -534,6 +535,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
 
     let scoped_key = ProjectServerKey {
         owner: owner.clone(),
+        project_root: project.clone(),
         scope_prefix: Some("private".to_string()),
     };
     let mut scoped = test_handshake_defaults();
@@ -554,6 +556,7 @@ fn parallel_client_instances_share_one_engine_but_scope_and_profile_do_not() {
     .expect("other owner");
     let other_key = ProjectServerKey {
         owner: other_owner,
+        project_root: project.clone(),
         scope_prefix: None,
     };
     let mut other = test_handshake_defaults();
@@ -578,12 +581,14 @@ fn database_owner_registry_rekeys_and_evicts_stale_routes() {
     };
     let old = ProjectServerKey {
         owner: owner.clone(),
+        project_root: PathBuf::from("/project"),
         scope_prefix: Some("src".to_string()),
     };
     let mut feature_owner = owner;
     feature_owner.graph_db_path = PathBuf::from("/store/feature.db");
     let new = ProjectServerKey {
         owner: feature_owner,
+        project_root: PathBuf::from("/project"),
         scope_prefix: Some("src".to_string()),
     };
     let route = ProjectRouteKey {
@@ -623,6 +628,7 @@ fn database_owner_registry_race_keeps_first_server_and_binds_route() {
     };
     let key = ProjectServerKey {
         owner,
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let route = ProjectRouteKey {
@@ -652,6 +658,7 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
                 store_root: PathBuf::from(format!("/store/{name}")),
                 graph_db_path: PathBuf::from(format!("/store/{name}/graph.db")),
             },
+            project_root: PathBuf::from(format!("/project/{name}")),
             scope_prefix: None,
         }
     }
@@ -734,6 +741,7 @@ fn database_owner_registry_hides_bounded_insert_until_core_publication() {
             store_root: PathBuf::from("/store/pending"),
             graph_db_path: PathBuf::from("/store/pending/graph.db"),
         },
+        project_root: PathBuf::from("/project/pending"),
         scope_prefix: None,
     };
     let route = ProjectRouteKey {
@@ -770,6 +778,7 @@ fn database_owner_registry_upgrades_only_the_published_core_and_preserves_aliase
             store_root: PathBuf::from("/store/upgrade"),
             graph_db_path: PathBuf::from("/store/upgrade/graph.db"),
         },
+        project_root: PathBuf::from("/project/upgrade"),
         scope_prefix: None,
     };
     let route = |project_path: &str| ProjectRouteKey {
@@ -844,6 +853,7 @@ fn database_owner_registry_removal_retires_every_route_alias() {
             store_root: PathBuf::from("/store/unhealthy"),
             graph_db_path: PathBuf::from("/store/unhealthy/graph.db"),
         },
+        project_root: PathBuf::from("/project/unhealthy"),
         scope_prefix: None,
     };
     let route = |project_path: &str| ProjectRouteKey {
@@ -871,6 +881,7 @@ fn failed_core_upgrade_retires_the_rekeyed_owner_without_quarantine() {
             store_root: PathBuf::from("/store/upgrade-failure"),
             graph_db_path: PathBuf::from("/store/upgrade-failure/main.db"),
         },
+        project_root: PathBuf::from("/project/upgrade-failure"),
         scope_prefix: None,
     };
     let mut new = old.clone();
@@ -900,6 +911,7 @@ fn failed_optional_upgrade_restores_the_ready_core() {
             store_root: PathBuf::from("/store/degraded-upgrade"),
             graph_db_path: PathBuf::from("/store/degraded-upgrade/main.db"),
         },
+        project_root: PathBuf::from("/project/degraded-upgrade"),
         scope_prefix: None,
     };
     let route = ProjectRouteKey {
@@ -942,6 +954,7 @@ fn failed_deferred_health_quarantines_only_the_exact_store_owner() {
             store_root: PathBuf::from("/store/unhealthy"),
             graph_db_path: PathBuf::from("/store/unhealthy/graph.db"),
         },
+        project_root: PathBuf::from("/project/unhealthy"),
         scope_prefix: None,
     };
     let mut other = key.clone();
@@ -1021,6 +1034,7 @@ async fn project_rekey_awaits_stale_automation_owner_before_replacement() {
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/old.db"),
         },
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let mut new = old.clone();
@@ -1063,6 +1077,7 @@ async fn shutdown_waits_for_blocked_automation_retirement_reaper_and_is_idempote
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/automation.db"),
         },
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
@@ -1148,6 +1163,7 @@ async fn shutdown_waits_for_blocked_repair_retirement_reaper_and_is_idempotent()
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/repair.db"),
         },
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
@@ -1245,6 +1261,7 @@ async fn automation_retirement_timeout_retains_owner_tombstone_until_join_finish
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/old.db"),
         },
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let mut new = old.clone();
@@ -1368,6 +1385,7 @@ async fn repair_retirement_timeout_retains_owner_tombstone_until_join_finishes()
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/old.db"),
         },
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let mut new = old.clone();
@@ -1825,6 +1843,7 @@ async fn stale_cache_retirement_does_not_duplicate_canonical_repair_owner() {
             store_root: PathBuf::from("/store"),
             graph_db_path: PathBuf::from("/store/old.db"),
         },
+        project_root: PathBuf::from("/project"),
         scope_prefix: None,
     };
     let mut canonical = old.clone();

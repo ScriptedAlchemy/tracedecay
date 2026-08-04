@@ -300,8 +300,8 @@ use project_routing::{CatalogRefreshClientKey, maintenance_transition_gate};
 use project_routing::{
     bind_authenticated_profile_identity, project_open_cancellation_checkpoint,
     project_open_cancellation_error, project_open_gate, project_open_task_capacity_error,
-    project_open_tasks, project_open_writer_busy_error, project_route_for_handshake,
-    project_server_capacity_error, project_warming_error,
+    project_open_tasks, project_route_for_handshake, project_server_capacity_error,
+    project_warming_error,
 };
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;

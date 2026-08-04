@@ -437,23 +437,7 @@ async fn missing_daemon_authority_fails_closed_without_a_fallback_store() {
         !db_path.exists(),
         "no fallback database file may be created without an authority"
     );
-    let lock_root = root.join(".tracedecay-database-locks");
-    if lock_root.exists() {
-        let writer_owners = std::fs::read_dir(&lock_root)
-            .unwrap()
-            .filter_map(std::result::Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .ends_with(".writer.owner")
-            })
-            .count();
-        assert_eq!(
-            writer_owners, 0,
-            "a rejected open must not register a writer owner"
-        );
-    }
+    assert!(!root.join(".tracedecay-database-locks").exists());
 
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::remove_dir(root.parent().unwrap());
