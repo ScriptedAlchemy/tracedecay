@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.69](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.68...v0.0.69) (2026-08-04)
+
+
+### Bug Fixes
+
+* address unresolved review and release issues ([#492](https://github.com/ScriptedAlchemy/tracedecay/issues/492)) ([f4510b4](https://github.com/ScriptedAlchemy/tracedecay/commit/f4510b453ff9b8d6a789e6ef8edfb0d6fbc3670d))
+* **daemon:** close startup readiness races ([#494](https://github.com/ScriptedAlchemy/tracedecay/issues/494)) ([b9b8c25](https://github.com/ScriptedAlchemy/tracedecay/commit/b9b8c252284652d7a1844bbcc29b48c4e1e080c1))
+* **release:** keep root lockfile version aligned ([8a2018e](https://github.com/ScriptedAlchemy/tracedecay/commit/8a2018e8743de8a2852a169ca8a11db7020d9792))
+* **release:** switch stable distribution to GitHub assets ([6217363](https://github.com/ScriptedAlchemy/tracedecay/commit/6217363f0bacf0b033f5ab456f645615f6e54484))
+* **release:** update root lockfile deterministically ([#493](https://github.com/ScriptedAlchemy/tracedecay/issues/493)) ([3ee78a8](https://github.com/ScriptedAlchemy/tracedecay/commit/3ee78a8c9c39874548c1bb9220a3c45958e71641))
+* **release:** use package-neutral GitHub tags ([#495](https://github.com/ScriptedAlchemy/tracedecay/issues/495)) ([bf78342](https://github.com/ScriptedAlchemy/tracedecay/commit/bf7834235968f952d0eb4dc897494eaec19fbe08))
+
 ## [Unreleased]
 
 ## [0.0.68](https://github.com/ScriptedAlchemy/tracedecay/compare/v0.0.67...v0.0.68) - 2026-08-03
