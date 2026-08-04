@@ -773,6 +773,9 @@ impl FixedGitIndexRunner {
         if preview.candidate_index_tree.as_ref() != Some(&candidate_tree) {
             return Err(NativeGitIndexError::CandidateTreeMismatch);
         }
+        let candidate_permissions = std::fs::metadata(&candidate_index)
+            .map_err(|error| NativeGitIndexError::Io(error.to_string()))?
+            .permissions();
         let candidate_bytes = std::fs::read(&candidate_index)
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
         let index_parent = self
@@ -782,7 +785,9 @@ impl FixedGitIndexRunner {
         let mut durable_candidate = tempfile::NamedTempFile::new_in(index_parent)
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
         durable_candidate
-            .write_all(&candidate_bytes)
+            .as_file()
+            .set_permissions(candidate_permissions)
+            .and_then(|()| durable_candidate.write_all(&candidate_bytes))
             .and_then(|()| durable_candidate.as_file().sync_all())
             .map_err(|error| NativeGitIndexError::Io(error.to_string()))?;
         Ok(PreparedIndexMutation {
