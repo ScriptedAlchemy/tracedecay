@@ -113,10 +113,7 @@ impl DaemonEngine {
     ) -> MemoryRepairSchedulerReconcileOutcome {
         let server = {
             let servers = self.store_administration.project_servers().lock().await;
-            let owner = servers
-                .keys()
-                .find(|candidate| same_scheduler_owner(candidate, &key));
-            owner.and_then(|owner| servers.get(owner).cloned())
+            servers.get(&key).cloned()
         };
         let Some(server) = server else {
             return MemoryRepairSchedulerReconcileOutcome::LifecycleInactive;

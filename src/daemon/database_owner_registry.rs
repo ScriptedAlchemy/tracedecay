@@ -304,11 +304,6 @@ impl<Server> DatabaseOwnerRegistry<Server> {
     pub(super) fn values(&self) -> impl Iterator<Item = &Server> {
         self.servers.values().map(|entry| &entry.server)
     }
-
-    #[cfg(unix)]
-    pub(super) fn keys(&self) -> impl Iterator<Item = &ProjectServerKey> {
-        self.servers.keys()
-    }
 }
 
 /// Post-open FTS health for one project publication.
