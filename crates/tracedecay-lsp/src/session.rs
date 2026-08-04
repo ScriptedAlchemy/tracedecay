@@ -441,6 +441,14 @@ impl LspSessionRegistry {
         Ok(())
     }
 
+    /// Fail-closed daemon cleanup for a session whose paired runtime actor can
+    /// no longer honor its authenticated lifecycle transition.
+    pub fn reclaim(&mut self, session_id: &LspSessionId) {
+        if let Some(mut session) = self.sessions.remove(session_id) {
+            session.control.expire();
+        }
+    }
+
     pub fn reconnect(
         &mut self,
         access: &LspSessionAccess,

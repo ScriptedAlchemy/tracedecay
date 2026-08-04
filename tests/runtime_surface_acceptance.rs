@@ -194,7 +194,7 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     }
     std::fs::write(
         project.join("src/main.rs"),
-        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// PR12 transport parity\n",
+        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// Runtime surface parity\n",
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
