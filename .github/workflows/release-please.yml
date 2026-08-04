@@ -39,7 +39,12 @@ jobs:
         env:
           RELEASE_PR_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
         run: |
-          cargo metadata --format-version 1 --no-deps >/dev/null
+          release_version=$(tr -d '[:space:]' < version.txt)
+          if [[ -z "$release_version" ]]; then
+            echo "Release version is empty" >&2
+            exit 1
+          fi
+          cargo update -p tracedecay --precise "$release_version"
 
           if git diff --quiet -- Cargo.lock; then
             exit 0
