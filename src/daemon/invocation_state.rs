@@ -27,6 +27,8 @@ pub(super) struct DaemonInvocationState {
     pub(super) github_credential_lifecycle:
         github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     pub(super) code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    pub(super) embedded_graph_runtime:
+        embedded_graph_runtime::EmbeddedGraphRuntimeRegistry,
     query_authority_provider: query_authority_provider::DaemonQueryAuthorityProviderV1,
     semantic_projection_scheduler:
         crate::application::semantic_runtime::DaemonGlobalSemanticProjectionSchedulerV1,
@@ -46,6 +48,8 @@ impl Default for DaemonInvocationState {
             github_credential_lifecycle:
                 github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
+            embedded_graph_runtime:
+                embedded_graph_runtime::EmbeddedGraphRuntimeRegistry::default(),
             query_authority_provider:
                 query_authority_provider::DaemonQueryAuthorityProviderV1::default(),
             semantic_projection_scheduler:

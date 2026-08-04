@@ -748,6 +748,20 @@ pub(super) async fn production_project_server(
             let registered_project_session_db = store_administration
                 .registered_project_session_database(cg.project_root(), cg.store_layout())
                 .await?;
+            let session_relation_graph = invocation
+                .embedded_graph_runtime
+                .resolve_project(&code_search_project_id, &cg.store_layout().data_root)
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("mount native project relation graph: {error}"),
+                })?;
+            registered_project_session_db
+                .bind_session_relation_graph(
+                    code_search_project_id.clone(),
+                    session_relation_graph,
+                )
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("bind project session relation graph: {error}"),
+                })?;
             log_daemon_event(
                 "project_open_phase",
                 &[
