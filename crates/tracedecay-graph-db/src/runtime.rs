@@ -8,6 +8,7 @@ use grafeo_engine::GrafeoDB;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLock, RwLock as ParkingRwLock};
 
+use crate::error::rollback_failure;
 use crate::location::ValidatedOpen;
 use crate::schema::{
     FINAL_SCHEMA, FORMAT_LABEL, FORMAT_VERSION_PROPERTY, INDEXED_PROPERTIES, SCHEMA_PROPERTY,
@@ -417,6 +418,16 @@ impl GraphDb {
                     ),
                 },
             )?;
+            require_committed_vector_scalar(database, stored.node, &property, &value).inspect_err(
+                |_| {
+                    self.inner.poisoned.store(true, Ordering::Release);
+                },
+            )?;
+            // `mutation::apply` has already committed this exact scalar. Grafeo
+            // Session mutations do not maintain HNSW, so this identical direct
+            // write is index refresh only. The outer database write guard keeps
+            // readers excluded; after reopen the non-durable index is Missing
+            // until an explicit retained owner calls `ensure_vector_index`.
             database.set_node_property(stored.node, &property, value);
         }
         if self.inner.durability == GraphDurability::Sync
@@ -559,8 +570,14 @@ fn validate_or_initialize_format(
                 (SEQUENCE_PROPERTY, Value::from(0_i64)),
             ],
         ) {
-            let _ = session.rollback();
-            return Err(GraphDbError::unavailable(error.to_string()));
+            return match session.rollback() {
+                Ok(()) => Err(GraphDbError::unavailable(error.to_string())),
+                Err(rollback_error) => Err(rollback_failure(
+                    "format initialization",
+                    error,
+                    rollback_error,
+                )),
+            };
         }
         session
             .commit()
@@ -604,6 +621,27 @@ fn validate_or_initialize_format(
         });
     }
     Ok(())
+}
+
+fn require_committed_vector_scalar(
+    database: &GrafeoDB,
+    node: grafeo_common::types::NodeId,
+    property: &str,
+    expected: &Value,
+) -> Result<(), GraphDbError> {
+    let committed = database
+        .graph_store()
+        .get_node(node)
+        .and_then(|node| node.get_property(property).cloned());
+    if committed.as_ref() == Some(expected) {
+        Ok(())
+    } else {
+        Err(GraphDbError::DurabilityUncertain {
+            message: format!(
+                "committed vector scalar `{property}` differs before native index refresh"
+            ),
+        })
+    }
 }
 
 fn durability_uncertain() -> GraphDbError {
