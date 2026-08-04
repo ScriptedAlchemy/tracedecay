@@ -1,10 +1,7 @@
 //! Generated typed public operation descriptors. DO NOT EDIT.
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use tracedecay_api::HttpApplicationOperation;
-use tracedecay_tool_catalog::{
-    EffectClass, ExecutableUnavailableDispositionV1, IdempotencyContract,
-};
+use tracedecay_tool_catalog::{EffectClass, IdempotencyContract};
 pub trait TypedOperation {
     type Request: Serialize;
     type Result: DeserializeOwned;
@@ -41901,20 +41898,3 @@ typed_operation!(
     "schema.workflow.register_definition.result",
     1
 );
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BaseOperationCapability {
-    pub operation: HttpApplicationOperation,
-    pub route: String,
-    pub disposition: ExecutableUnavailableDispositionV1,
-}
-pub fn base_operation_capabilities() -> impl Iterator<Item = BaseOperationCapability> {
-    HttpApplicationOperation::ALL
-        .iter()
-        .copied()
-        .filter(|operation| operation.is_http_exposed())
-        .map(|operation| BaseOperationCapability {
-            route: format!("/application{}", operation.route_path()),
-            operation,
-            disposition: ExecutableUnavailableDispositionV1::SchemaUnavailable,
-        })
-}

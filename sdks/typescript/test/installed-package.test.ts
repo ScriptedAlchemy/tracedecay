@@ -235,13 +235,6 @@ import * as clientEntry from "@tracedecay/sdk/client";
 const callableOperations = new Set(sdk.OPERATIONS.map((operation) => operation.operation));
 if (typeof sdk.createClient !== "function" ||
     typeof clientEntry.createClient !== "function" ||
-    !Array.isArray(sdk.SERVER_OPERATIONS) ||
-    sdk.SERVER_OPERATIONS.length === 0 ||
-    !sdk.SERVER_OPERATIONS.every(
-      (operation) => operation.sdkAvailability === "unavailable" &&
-        operation.disposition === "schema_unavailable" &&
-        !callableOperations.has(operation.operation),
-    ) ||
     !Array.isArray(sdk.UNAVAILABLE_OPERATIONS)) {
   throw new Error("installed package exports are incomplete");
 }

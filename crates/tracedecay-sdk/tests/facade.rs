@@ -1,7 +1,7 @@
 use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish, WorkflowRegisterDefinition};
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    application, domain, operation, operations, remote, work, workflow,
+    application, domain, operation, remote, work, workflow,
 };
 
 #[test]
@@ -149,24 +149,6 @@ fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
         WorkflowRegisterDefinition::IDEMPOTENCY,
         binding.idempotency()
     );
-}
-
-#[test]
-fn generated_production_inventory_excludes_quarantined_multi_root_operations() {
-    let production_inventory: Vec<_> = operations::base_operation_capabilities()
-        .map(|capability| capability.operation.as_str())
-        .collect();
-
-    for operation in [
-        "multi_root_scope_set_read",
-        "multi_root_scope_set_compare_and_swap",
-        "multi_root_execute",
-    ] {
-        assert!(
-            !production_inventory.contains(&operation),
-            "{operation} must remain absent from the generated production inventory"
-        );
-    }
 }
 
 #[test]
