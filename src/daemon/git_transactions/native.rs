@@ -1,8 +1,4 @@
 //! Concrete bridge from daemon transaction orchestration to fixed native Git.
-//!
-//! Preview material stays only in daemon memory. A restart therefore forces a
-//! fresh preview for any unstarted apply; the durable journal handles only
-//! transactions that reached native admission.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -293,7 +289,7 @@ impl NativeGitIndexPreviewAssembler {
             }
             current_hunks.push(current.clone());
         }
-        let mut patches = extract_patches(runner, &scope, &current_hunks)?
+        let patches = extract_patches(runner, &scope, &current_hunks)?
             .into_iter()
             .zip(current_hunks)
             .map(|(bytes, hunk)| ValidatedIndexPatch::new(hunk, bytes).map_err(map_native_error))
@@ -358,9 +354,6 @@ impl GitIndexPreviewAssembler for DaemonProjectGitIndexPreviewAssembler {
     ) -> Result<MaterializedGitIndexPreview, GitIndexTransactionPortError> {
         let scope = request.context.scope();
         if scope.project_id != self.project_id {
-            // The daemon has no tracing subscriber; its diagnostic channel is
-            // this event line, so anything emitted through tracing here is
-            // unreadable in the process that runs it.
             eprintln!(
                 "[tracedecay] event=git_index_preview_project_mismatch requested={} mounted={}",
                 scope.project_id, self.project_id
@@ -814,30 +807,6 @@ fn unsupported_hunk_selection(
     intelligence: &NativeGitIntelligence,
     operation: GitIndexTransactionOperationV1,
 ) -> Option<GitIndexUnsupportedStateV1> {
-    let (scope, unreadable) = match operation {
-        GitIndexTransactionOperationV1::StageHunks => (
-            GitDiffScopeV1::WorkingTree,
-            GitIndexUnsupportedStateV1::UnreadableWorkingTree,
-        ),
-        GitIndexTransactionOperationV1::UnstageHunks => (
-            GitDiffScopeV1::Staged,
-            GitIndexUnsupportedStateV1::UnreadableIndex,
-        ),
-        GitIndexTransactionOperationV1::CommitIndex => {
-            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
-        }
-    };
-    let Ok(diff) = intelligence.diff(&scope) else {
-        return Some(unreadable);
-    };
-    if !diff.coverage.is_complete() {
-        return Some(unreadable);
-    }
-    match runner.paths_have_filters(selected_hunks.iter().map(|hunk| hunk.path.as_str())) {
-        Ok(true) => return Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine),
-        Ok(false) => {}
-        Err(_) => return Some(unreadable),
-    }
     for hunk in selected_hunks {
         if hunk.original_path.is_some() {
             return Some(GitIndexUnsupportedStateV1::RenameOrCopy);
@@ -864,7 +833,43 @@ fn unsupported_hunk_selection(
         if modes.iter().flatten().any(|mode| mode.is_symlink()) {
             return Some(GitIndexUnsupportedStateV1::Symlink);
         }
-        let Some(file) = diff.files.iter().find(|file| file.path == hunk.path) else {
+    }
+    unsupported_paths_state(
+        selected_hunks.iter().map(|hunk| hunk.path.as_str()),
+        runner,
+        intelligence,
+        operation,
+    )
+}
+
+fn unsupported_paths_state<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+    runner: &FixedGitIndexRunner,
+    intelligence: &NativeGitIntelligence,
+    operation: GitIndexTransactionOperationV1,
+) -> Option<GitIndexUnsupportedStateV1> {
+    let paths = paths.into_iter().collect::<Vec<_>>();
+    let (scope, unreadable) = match operation {
+        GitIndexTransactionOperationV1::StageHunks => (
+            GitDiffScopeV1::WorkingTree,
+            GitIndexUnsupportedStateV1::UnreadableWorkingTree,
+        ),
+        GitIndexTransactionOperationV1::UnstageHunks => (
+            GitDiffScopeV1::Staged,
+            GitIndexUnsupportedStateV1::UnreadableIndex,
+        ),
+        GitIndexTransactionOperationV1::CommitIndex => {
+            return Some(GitIndexUnsupportedStateV1::PartialHunkSelection);
+        }
+    };
+    let Ok(diff) = intelligence.diff(&scope) else {
+        return Some(unreadable);
+    };
+    if !diff.coverage.is_complete() {
+        return Some(unreadable);
+    }
+    for path in &paths {
+        let Some(file) = diff.files.iter().find(|file| file.path == *path) else {
             return Some(unreadable);
         };
         if file.original_path.is_some() {
@@ -887,7 +892,11 @@ fn unsupported_hunk_selection(
             return Some(GitIndexUnsupportedStateV1::FileModeOnly);
         }
     }
-    None
+    match runner.paths_have_filters(paths) {
+        Ok(true) => Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine),
+        Ok(false) => None,
+        Err(_) => Some(unreadable),
+    }
 }
 
 #[derive(Serialize)]
@@ -1391,8 +1400,6 @@ where
             created_commit.as_ref(),
         ) {
             Ok(result) => Ok(NativeGitIndexApplyOutcomeV1::Completed(Box::new(result))),
-            // Final observation happens after the native publication/commit
-            // operation, so failing to observe it is itself ambiguous.
             Err(_) => Ok(NativeGitIndexApplyOutcomeV1::CommitBoundaryUnknown),
         }
     }
@@ -1429,10 +1436,6 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
         | NativeGitIndexError::CandidateTreeMismatch
         | NativeGitIndexError::CommitIntentMismatch
         | NativeGitIndexError::StaleRepositoryState => GitIndexTransactionPortError::StalePreview,
-        // Native output we could not interpret is not evidence that the
-        // caller's snapshot moved. Reporting it as staleness told every caller
-        // to recapture and retry a request that will fail identically, and it
-        // made an adapter defect indistinguishable from ordinary contention.
         NativeGitIndexError::MalformedOutput { .. }
         | NativeGitIndexError::Domain(_)
         | NativeGitIndexError::Process(_) => GitIndexTransactionPortError::NativeFailure,
@@ -1462,8 +1465,6 @@ pub(crate) fn capture_exact_snapshot_for_test(
     worktree_id: WorktreeId,
     captured_at: UtcMicros,
 ) -> crate::errors::Result<RepositoryStateSnapshotV1> {
-    // Same canonical root the daemon owner mounts; alias paths must not mint a
-    // divergent snapshot that later fails exact preview CAS.
     let repository_root = super::canonicalize_repository_root(repository_root)?;
     let assembler = NativeGitIndexPreviewAssembler::new(
         &repository_root,
@@ -2003,20 +2004,20 @@ mod tests {
         fs::write(directory.path().join("packet.txt"), "after\nsecond\n")
             .expect("change text file");
         assert_eq!(
-            unsupported_path_state(
+            unsupported_paths_state(
+                ["missing.txt"],
                 &runner,
                 &assembler.read_authority(),
-                GitIndexTransactionOperationV1::StageHunks,
-                "missing.txt"
+                GitIndexTransactionOperationV1::StageHunks
             ),
             Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree)
         );
         assert_eq!(
-            unsupported_path_state(
+            unsupported_paths_state(
+                ["missing.txt"],
                 &runner,
                 &assembler.read_authority(),
-                GitIndexTransactionOperationV1::UnstageHunks,
-                "missing.txt"
+                GitIndexTransactionOperationV1::UnstageHunks
             ),
             Some(GitIndexUnsupportedStateV1::UnreadableIndex)
         );
@@ -2046,11 +2047,11 @@ mod tests {
 
         fs::write(directory.path().join("packet.txt"), [0_u8, 1, 2, 3]).expect("binary change");
         assert_eq!(
-            unsupported_path_state(
+            unsupported_paths_state(
+                ["packet.txt"],
                 &runner,
                 &assembler.read_authority(),
-                GitIndexTransactionOperationV1::StageHunks,
-                "packet.txt"
+                GitIndexTransactionOperationV1::StageHunks
             ),
             Some(GitIndexUnsupportedStateV1::BinaryHunk)
         );
@@ -2062,11 +2063,11 @@ mod tests {
         .expect("attributes");
         fs::write(directory.path().join("packet.txt"), "filtered\n").expect("filtered change");
         assert_eq!(
-            unsupported_path_state(
+            unsupported_paths_state(
+                ["packet.txt"],
                 &runner,
                 &assembler.read_authority(),
-                GitIndexTransactionOperationV1::StageHunks,
-                "packet.txt"
+                GitIndexTransactionOperationV1::StageHunks
             ),
             Some(GitIndexUnsupportedStateV1::FiltersOrEndOfLine)
         );
@@ -2085,11 +2086,11 @@ mod tests {
             fs::set_permissions(directory.path().join("mode.txt"), permissions)
                 .expect("mode change");
             assert_eq!(
-                unsupported_path_state(
+                unsupported_paths_state(
+                    ["mode.txt"],
                     &runner,
                     &assembler.read_authority(),
-                    GitIndexTransactionOperationV1::StageHunks,
-                    "mode.txt"
+                    GitIndexTransactionOperationV1::StageHunks
                 ),
                 Some(GitIndexUnsupportedStateV1::FileModeOnly)
             );
@@ -2097,11 +2098,11 @@ mod tests {
             symlink("packet.txt", directory.path().join("link.txt")).expect("symlink");
             git(directory.path(), &["add", "link.txt"]);
             assert_eq!(
-                unsupported_path_state(
+                unsupported_paths_state(
+                    ["link.txt"],
                     &runner,
                     &assembler.read_authority(),
-                    GitIndexTransactionOperationV1::UnstageHunks,
-                    "link.txt"
+                    GitIndexTransactionOperationV1::UnstageHunks
                 ),
                 Some(GitIndexUnsupportedStateV1::Symlink)
             );
