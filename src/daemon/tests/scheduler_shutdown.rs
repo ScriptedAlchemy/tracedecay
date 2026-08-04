@@ -756,3 +756,56 @@ async fn scheduler_cancellation_remains_synchronous_under_registry_contention() 
         super::super::shutdown_coordination::ShutdownStatus::Clean
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn daemon_shutdown_receipt_preserves_panicked_retirement_reaper_task() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/panicked-retirement-owner-test"),
+            global_db_path: PathBuf::from("/profiles/panicked-retirement-owner-test/global.db"),
+            project_id: Some("panicked-retirement-owner-test".to_owned()),
+            store_root: PathBuf::from("/stores/panicked-retirement-owner-test"),
+            graph_db_path: PathBuf::from("/stores/panicked-retirement-owner-test/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let task = tokio::spawn(async {
+        panic!("panicked retirement owner task");
+    });
+    tokio::task::yield_now().await;
+    let reservation = engine
+        .store_administration
+        .reserve_retirement_reaper()
+        .expect("retirement reaper reservation");
+    engine.store_administration.spawn_retirement_reaper(
+        reservation,
+        super::super::branch_admin::MaintenanceReaperKind::Automation,
+        key,
+        task,
+        std::sync::Arc::new(super::super::scheduler::MaintenanceTaskTermination::pending()),
+        async {},
+    );
+
+    let receipt = super::super::shutdown_coordination::join_shutdown_owner_phases(
+        tokio::time::Instant::now() + MAINTENANCE_TEST_DEADLINE,
+        engine.shutdown_owner_phases().await,
+    )
+    .await;
+    let retirement = receipt
+        .owners
+        .iter()
+        .find(|owner| owner.name == "retirement_reapers")
+        .expect("retirement reaper owner receipt");
+
+    assert!(
+        matches!(
+            &retirement.status,
+            super::super::shutdown_coordination::ShutdownStatus::Failed(error)
+                if error.contains("panicked retirement owner task")
+        ),
+        "the daemon receipt must retain the reaper task panic: {:?}",
+        retirement.status
+    );
+}

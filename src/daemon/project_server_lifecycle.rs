@@ -8,6 +8,7 @@
 //! or signatures changed. `use super::*` re-exposes every name the parent
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
+use super::shutdown_coordination::ShutdownStatus;
 use super::store_shutdown::{ShutdownTaskReceipt, join_shutdown_tasks_until};
 use super::*;
 
@@ -35,18 +36,78 @@ pub(super) async fn shutdown_project_servers(
     deadline: tokio::time::Instant,
     store_administration: &StoreAdministration,
 ) -> ShutdownTaskReceipt {
-    let servers =
+    let (detached, mut receipt) =
         match tokio::time::timeout_at(deadline, detach_project_servers(store_administration)).await
         {
-            Ok(servers) => servers,
-            Err(_) => return ShutdownTaskReceipt::timed_out("project_server_detach"),
+            Ok(servers) => (servers, ShutdownTaskReceipt::default()),
+            Err(_) => (
+                Vec::new(),
+                ShutdownTaskReceipt::timed_out("project_server_detach"),
+            ),
         };
-    let (mut retirements, servers) = tokio::join!(
+    let mut retained = {
+        let mut owners = store_administration
+            .retained_project_shutdown_owners
+            .lock()
+            .await;
+        let mut retained = std::mem::take(&mut *owners);
+        for server in detached {
+            if !retained
+                .iter()
+                .any(|owner| Arc::ptr_eq(&owner.server, &server))
+            {
+                retained.push(super::branch_admin::RetainedProjectShutdownOwner {
+                    server,
+                    status: ShutdownStatus::TimedOut,
+                });
+            }
+        }
+        retained
+    };
+    let mut attempted = Vec::new();
+    let mut replayed_failures = ShutdownTaskReceipt::default();
+    for owner in &retained {
+        match &owner.status {
+            ShutdownStatus::Clean => {}
+            ShutdownStatus::Failed(error) => {
+                replayed_failures
+                    .outcomes
+                    .push(super::store_shutdown::ShutdownTaskOutcome {
+                        owner: "retained_project_server".to_owned(),
+                        status: ShutdownStatus::Failed(error.clone()),
+                    })
+            }
+            ShutdownStatus::TimedOut => attempted.push(Arc::clone(&owner.server)),
+        }
+    }
+    let (retirements, server_attempts) = tokio::join!(
         store_administration.join_project_server_retirements_until(deadline),
-        shutdown_detached_project_servers(deadline, servers),
+        shutdown_detached_project_servers(deadline, attempted),
     );
-    retirements.extend(servers);
-    retirements
+    let mut statuses = server_attempts
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.status.clone());
+    retained.retain_mut(|owner| match &owner.status {
+        ShutdownStatus::Clean => false,
+        ShutdownStatus::Failed(_) => true,
+        ShutdownStatus::TimedOut => {
+            let status = statuses.next().unwrap_or(ShutdownStatus::TimedOut);
+            owner.status = status;
+            !owner.status.is_clean()
+        }
+    });
+    {
+        let mut owners = store_administration
+            .retained_project_shutdown_owners
+            .lock()
+            .await;
+        *owners = retained;
+    }
+    receipt.extend(replayed_failures);
+    receipt.extend(retirements);
+    receipt.extend(server_attempts);
+    receipt
 }
 
 pub(super) async fn detach_project_servers(
@@ -112,7 +173,7 @@ async fn wait_for_project_server_request_drains(servers: &[Arc<crate::mcp::McpSe
 async fn retire_project_servers(
     servers: Vec<Arc<crate::mcp::McpServer>>,
     route_registered: Option<Arc<AtomicBool>>,
-) {
+) -> ShutdownStatus {
     if let Some(route_registered) = route_registered {
         route_registered.store(false, Ordering::Release);
     }
@@ -152,6 +213,7 @@ async fn retire_project_servers(
     for server in servers {
         server.shutdown().await;
     }
+    ShutdownStatus::Clean
 }
 
 pub(super) async fn schedule_project_server_retirement(

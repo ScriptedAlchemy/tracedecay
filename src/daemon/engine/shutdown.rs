@@ -95,22 +95,24 @@ impl DaemonEngine {
                             .await
                     },
                 ),
-                ShutdownOwner::with_deadline(
+                ShutdownOwner::with_deadline_status(
                     "session_temporal_refresh",
                     move || session_cancel.cancel(),
-                    move |deadline| async move {
-                        session_join.shutdown_until(deadline).await;
-                    },
+                    move |deadline| async move { session_join.shutdown_until(deadline).await },
                 ),
-                ShutdownOwner::new(
+                ShutdownOwner::with_deadline_status(
                     "host_admission_replay",
                     move || replay_cancel.cancel_host_admission_replay(),
-                    async move { replay_join.shutdown_host_admission_replay().await },
+                    move |deadline| async move {
+                        replay_join
+                            .shutdown_host_admission_replay_until(deadline)
+                            .await
+                    },
                 ),
-                ShutdownOwner::new(
+                ShutdownOwner::with_deadline_status(
                     "maintenance",
                     move || maintenance_cancel.cancel(),
-                    async move { maintenance_join.shutdown().await },
+                    move |deadline| async move { maintenance_join.shutdown_until(deadline).await },
                 ),
                 ShutdownOwner::new("git_watcher", move || watcher_cancel.cancel(), async move {
                     watcher_join.shutdown().await
@@ -147,12 +149,12 @@ impl DaemonEngine {
                 move || invocation_cancel.cancel(),
                 async move { invocation_join.shutdown().await },
             )],
-            vec![ShutdownOwner::new(
+            vec![ShutdownOwner::with_deadline_status(
                 "retirement_reapers",
                 || {},
-                async move {
+                move |_| async move {
                     retirement_cancel.cancel_retirement_reapers();
-                    retirement_join.shutdown_retirement_reapers().await;
+                    retirement_join.shutdown_retirement_reapers().await
                 },
             )],
         ]

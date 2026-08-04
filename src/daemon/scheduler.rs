@@ -229,6 +229,13 @@ impl MaintenanceTaskTermination {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = status;
     }
+
+    pub(super) fn status(&self) -> ShutdownStatus {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 pub(super) struct AutomationSchedulerRetirement {

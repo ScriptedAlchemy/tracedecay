@@ -24,6 +24,11 @@ use super::store_writer_gate::StoreWriterGates;
 pub(super) use super::store_writer_gate::{StoreWriterClass, WriterScope};
 use super::{DaemonHandshake, DatabaseOwnerRegistry, authority, write_json_rpc_response};
 
+#[cfg(test)]
+mod retirement_reaper_test_support;
+#[cfg(test)]
+use retirement_reaper_test_support::RetirementReaperRegistrationBarrier;
+
 const BRANCH_ADMIN_TOOL_NAME: &str = "tracedecay_admin_branch";
 
 /// How long a *request-side* caller queues for writer administration before it
@@ -156,6 +161,7 @@ struct MaintenanceReaperRegistryState {
     pending: usize,
     next_generation: u64,
     reapers: HashMap<MaintenanceReaperKey, MaintenanceReaperHandle>,
+    failures: Vec<String>,
 }
 
 #[cfg(unix)]
@@ -179,6 +185,7 @@ impl Default for MaintenanceReaperRegistry {
                 pending: 0,
                 next_generation: 1,
                 reapers: HashMap::new(),
+                failures: Vec::new(),
             }),
             changed: tokio::sync::Notify::new(),
             #[cfg(test)]
@@ -240,8 +247,17 @@ impl MaintenanceReaperRegistry {
         }
     }
 
-    fn finish(&self, key: &MaintenanceReaperKey) {
-        self.state().reapers.remove(key);
+    fn finish(
+        &self,
+        key: &MaintenanceReaperKey,
+        status: super::shutdown_coordination::ShutdownStatus,
+    ) {
+        let mut state = self.state();
+        state.reapers.remove(key);
+        if let super::shutdown_coordination::ShutdownStatus::Failed(error) = status {
+            state.failures.push(error);
+        }
+        drop(state);
         self.changed.notify_waiters();
     }
 }
@@ -272,66 +288,7 @@ struct MaintenanceReaperFinalizer {
 impl Drop for MaintenanceReaperFinalizer {
     fn drop(&mut self) {
         self.termination.finish();
-        self.registry.finish(&self.key);
-    }
-}
-
-#[cfg(test)]
-#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
-pub(super) struct RetirementReaperRegistrationBarrier {
-    reached: tokio::sync::watch::Sender<bool>,
-    released: std::sync::Mutex<bool>,
-    released_changed: std::sync::Condvar,
-}
-
-#[cfg(test)]
-#[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
-impl RetirementReaperRegistrationBarrier {
-    fn new() -> Self {
-        let (reached, _) = tokio::sync::watch::channel(false);
-        Self {
-            reached,
-            released: std::sync::Mutex::new(false),
-            released_changed: std::sync::Condvar::new(),
-        }
-    }
-
-    fn block(&self) {
-        self.reached.send_replace(true);
-        let mut released = self
-            .released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        while !*released {
-            released = self
-                .released_changed
-                .wait(released)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-    }
-
-    pub(super) async fn wait_until_reached(&self) {
-        let mut reached = self.reached.subscribe();
-        while !*reached.borrow_and_update() {
-            if reached.changed().await.is_err() {
-                return;
-            }
-        }
-    }
-
-    pub(super) fn release(&self) {
-        *self
-            .released
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
-        self.released_changed.notify_all();
-    }
-}
-
-#[cfg(test)]
-impl Drop for RetirementReaperRegistrationBarrier {
-    fn drop(&mut self) {
-        self.release();
+        self.registry.finish(&self.key, self.termination.status());
     }
 }
 
@@ -480,8 +437,13 @@ pub(super) struct StoreAdministration {
     session_runtime_registries: SharedSessionRuntimeRegistries,
     gate: Arc<StoreWriterGates>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
-    pub(super) project_server_retirements:
-        Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    pub(super) project_server_retirements: Arc<
+        tokio::sync::Mutex<
+            Vec<tokio::task::JoinHandle<super::shutdown_coordination::ShutdownStatus>>,
+        >,
+    >,
+    pub(super) retained_project_shutdown_owners:
+        Arc<tokio::sync::Mutex<Vec<RetainedProjectShutdownOwner>>>,
     project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
@@ -504,6 +466,11 @@ pub(super) struct StoreAdministration {
     external_holder_verifier: Option<ExternalHolderVerifier>,
 }
 
+pub(super) struct RetainedProjectShutdownOwner {
+    pub(super) server: Arc<crate::mcp::McpServer>,
+    pub(super) status: super::shutdown_coordination::ShutdownStatus,
+}
+
 impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
@@ -512,6 +479,7 @@ impl Default for StoreAdministration {
             gate: Arc::new(StoreWriterGates::default()),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             project_server_retirements: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            retained_project_shutdown_owners: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -1001,10 +969,12 @@ impl StoreAdministration {
     }
 
     #[cfg(unix)]
-    pub(super) async fn shutdown_retirement_reapers(&self) {
+    pub(super) async fn shutdown_retirement_reapers(
+        &self,
+    ) -> super::shutdown_coordination::ShutdownStatus {
         loop {
             let changed = self.retirement_reapers.changed.notified();
-            let (pending, reapers) = {
+            let (pending, reapers, failures) = {
                 let mut state = self.retirement_reapers.state();
                 state.accepting = false;
                 (
@@ -1016,6 +986,7 @@ impl StoreAdministration {
                             (handle.retired_task.clone(), Arc::clone(&handle.termination))
                         })
                         .collect::<Vec<_>>(),
+                    state.failures.clone(),
                 )
             };
             #[cfg(test)]
@@ -1026,7 +997,11 @@ impl StoreAdministration {
                 self.retirement_reapers.shutdown_changed.notify_waiters();
             }
             if pending == 0 && reapers.is_empty() {
-                return;
+                return if failures.is_empty() {
+                    super::shutdown_coordination::ShutdownStatus::Clean
+                } else {
+                    super::shutdown_coordination::ShutdownStatus::Failed(failures.join("; "))
+                };
             }
             for (retired_task, _) in &reapers {
                 retired_task.abort();
