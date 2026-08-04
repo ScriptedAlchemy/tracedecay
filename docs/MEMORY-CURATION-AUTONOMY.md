@@ -260,8 +260,10 @@ do not share editable artifacts. The apply role consumes finalized plans only.
 - Treat hygiene candidates as evidence for review, not as automatic deletes.
 - Show content/source summaries before delete approval; avoid copying secrets
   verbatim into reports.
-- Require explicit manual approval immediately before every hard delete or merge
-  loser removal unless a future documented policy narrows a lower-risk case.
+- Interactive/manual workflows require explicit approval immediately before
+  every hard delete or merge-loser removal. Configured automation may apply
+  validated operations only when its `auto_apply_memory_ops` policy is enabled,
+  and must record the applied result.
 - Record partial failures and do not retry in a way that hides uncertainty.
 - After apply, verify the resulting fact set and report any failed or skipped
   operation.
