@@ -1331,7 +1331,7 @@ mod tests {
         let expectations = cursor_plugin_hook_expectations();
         assert_eq!(
             expectations.len(),
-            9,
+            4,
             "expected one entry per bundled lifecycle hook, got {expectations:?}"
         );
         assert!(expectations.contains(&(
@@ -1342,6 +1342,11 @@ mod tests {
             "afterFileEdit".to_string(),
             "hook-cursor-after-file-edit".to_string()
         )));
+        assert!(expectations.contains(&(
+            "preCompact".to_string(),
+            "hook-cursor-pre-compact".to_string()
+        )));
+        assert!(expectations.contains(&("stop".to_string(), "hook-cursor-stop".to_string())));
     }
 
     #[test]

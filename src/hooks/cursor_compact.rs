@@ -8,8 +8,9 @@
 
 use std::time::Duration;
 
-/// Overall budget for the `preCompact` hook (registered with a 120s timeout).
-const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
+/// A hook only waits for daemon acknowledgement; the daemon owns the eventual
+/// transcript capture and model-backed compaction work.
+const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CursorPreCompactOutcome {

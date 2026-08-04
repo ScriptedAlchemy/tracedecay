@@ -38,16 +38,16 @@ never replaced wholesale.
   checked-in host fixtures exist.
 - **Kimi Code:** the managed plugin manifest keeps MCP, skills, and commands
   together and registers native `PostToolUse` and `Stop` hooks. Hook commands
-  consume no host payload: edit completion triggers incremental sync and stop
-  triggers supported transcript ingest.
+  submit bounded native events to the daemon. Capture, sync, and session work
+  happen after daemon admission, never in the host adapter.
 - **OpenCode:** a typed `@opencode-ai/plugin` module under
   `~/.config/opencode/plugins/` (or `.opencode/plugins/` locally) consumes
-  `file.edited`, `tool.execute.after`, and `session.idle` without forwarding
-  event content. Its MCP and custom TraceDecay LSP entries are merged with the
-  existing JSON config. Upstream analyzer brokering is disabled by default so
-  OpenCode's built-ins and TraceDecay never claim the same analyzer. A globally
-  installed older TraceDecay binary may not recognize `lsp bridge --stdio`;
-  Doctor validates the installed
+  `file.edited`, `tool.execute.after`, and `session.idle`, schedules a bounded
+  daemon admission child, and returns without waiting for it. Its MCP and
+  custom TraceDecay LSP entries are merged with the existing JSON config.
+  Upstream analyzer brokering is disabled by default so OpenCode's built-ins
+  and TraceDecay never claim the same analyzer. A globally installed older
+  TraceDecay binary may not recognize `lsp bridge --stdio`; Doctor validates the installed
   configuration without relabeling the packaged capability unavailable.
 
 OpenCode command files are prompt-template command artifacts owned and

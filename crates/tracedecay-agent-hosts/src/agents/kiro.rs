@@ -44,11 +44,8 @@ const OWNED_AGENT_DESCRIPTION: &str =
 const KIRO_AGENT_ALL_TOOLS: &str = "*";
 const KIRO_ALLOWED_BUILTIN_TOOLS: &str = "@builtin";
 const KIRO_ALLOWED_TRACEDECAY_TOOLS: &str = "@tracedecay";
-const KIRO_PRE_TOOL_HOOK: &str = "hook-kiro-pre-tool-use";
 const KIRO_PROMPT_HOOK: &str = "hook-kiro-prompt-submit";
-const KIRO_POST_TOOL_HOOK: &str = "hook-kiro-post-tool-use";
 const KIRO_SHORT_HOOK_TIMEOUT_MS: u64 = 5_000;
-const KIRO_SYNC_HOOK_TIMEOUT_MS: u64 = 30_000;
 
 /// A hook the managed Kiro agent registers.
 struct KiroManagedHook {
@@ -73,32 +70,12 @@ struct KiroManagedHook {
 /// `Unavailable`, and no CLI subcommand or managed hook is wired. The catalog
 /// entry documents the unverified event rather than enabling it; see
 /// `docs/KIRO-INTEGRATION.md` ("Deliberate non-defaults").
-const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[
-    KiroManagedHook {
-        event: "userPromptSubmit",
-        matcher: None,
-        subcommand: KIRO_PROMPT_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "preToolUse",
-        matcher: Some("delegate"),
-        subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "preToolUse",
-        matcher: Some("subagent"),
-        subcommand: KIRO_PRE_TOOL_HOOK,
-        timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
-    },
-    KiroManagedHook {
-        event: "postToolUse",
-        matcher: Some("fs_write"),
-        subcommand: KIRO_POST_TOOL_HOOK,
-        timeout_ms: KIRO_SYNC_HOOK_TIMEOUT_MS,
-    },
-];
+const KIRO_MANAGED_HOOKS: &[KiroManagedHook] = &[KiroManagedHook {
+    event: "userPromptSubmit",
+    matcher: None,
+    subcommand: KIRO_PROMPT_HOOK,
+    timeout_ms: KIRO_SHORT_HOOK_TIMEOUT_MS,
+}];
 
 /// Builds the managed agent's `hooks` object from [`KIRO_MANAGED_HOOKS`],
 /// grouping entries per event in table order.

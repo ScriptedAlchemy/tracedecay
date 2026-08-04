@@ -40,10 +40,10 @@ tracedecay serve
 ```
 
 The manifest also registers Kimi's native `PostToolUse` and `Stop` hooks.
-Their stdin JSON is deliberately not forwarded or persisted: successful edit
-tools trigger `tracedecay sync`, while `Stop` triggers
-`tracedecay sessions ingest`. The installer renders both commands with the
-same absolute TraceDecay binary path used by MCP.
+Each sends one bounded native event to the daemon and returns. The daemon owns
+subsequent capture, indexing, and session work; the adapter does not run
+`tracedecay sync` or `tracedecay sessions ingest`. The installer renders both
+commands with the same absolute TraceDecay binary path used by MCP.
 
 `serve` resolves the active project by walking up from the working directory
 and then through the global project registry, so each indexed project keeps

@@ -15,8 +15,7 @@ use super::post_tool_use::{
     EmptyPathPolicy, captured_tool_output, notify_edited_paths, trusted_tool_failure,
 };
 use super::steering::{
-    append_context_block, append_context_recovery_hint, build_cursor_session_context,
-    cursor_index_signals_for_root, session_start_from_compaction,
+    append_context_block, build_cursor_session_context, cursor_index_signals_for_root,
 };
 use super::tool_hints::{HintAgent, ToolHint, ToolHintInput, decide_hint};
 use super::{
@@ -228,76 +227,33 @@ async fn hook_cursor_session_completion(hook_name: &str) -> i32 {
         }
         return 0;
     }
-    let outcome = ingest_cursor_transcript_for_event_inner(
-        &event,
-        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-        CURSOR_STOP_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    if outcome.user_scope && outcome.messages_upserted > 0 {
-        let session_id = event_session_id_from_json(&event);
-        super::schedule_user_session_review("cursor", session_id.as_deref());
-    }
     println!("{}", serde_json::json!({}));
     0
 }
 
 /// Cursor `stop` hook handler (fire-and-forget).
 ///
-/// Fires at the end of an agent turn and performs the primary transcript
-/// ingest: a time-boxed incremental catch-up that picks up bounded transcript
-/// tails appended during the turn. The `stop` output is informational only, so
-/// we emit an empty object and never ask the agent to continue. Fail-open.
+/// Fires at the end of an agent turn and submits its native session boundary to
+/// the daemon. The adapter stays fail-open and emits an empty object when the
+/// daemon has no immediate guidance.
 pub async fn hook_cursor_stop() -> i32 {
     hook_cursor_session_completion("stop").await
 }
 
 /// Cursor `preCompact` hook handler.
 ///
-/// Cursor's compaction event exposes pressure metadata but not Cursor's own
-/// generated summary text. The hook delegates to the daemon, which ingests the
-/// current transcript tail, asks LCM for the compactable raw-message backlog,
-/// generates a summary through `cursor-agent -p`, and stores that summary as a
-/// normal LCM summary node. The hook is fail-open and emits Cursor's empty
-/// object shape.
+/// Cursor's compaction event only requests the daemon-owned compaction path.
+/// The bounded acknowledgement never waits for transcript capture or model
+/// execution.
 pub async fn hook_cursor_pre_compact() -> i32 {
     let event = read_hook_event!();
-    let root = cursor_project_root_from_event_with_identity(&event).await;
-    let hook_telemetry =
-        record_hook_invoked(root.as_deref(), HintAgent::Cursor, "preCompact", &event);
-    if std::env::var(crate::sessions::cursor_agent::CURSOR_SUMMARY_CHILD_ENV).is_err() {
-        let outcome = super::cursor_compact::cursor_pre_compact_via_daemon_with_telemetry(
-            &event,
-            Some(&hook_telemetry),
-        )
-        .await;
-        if outcome.status == "error" {
-            eprintln!(
-                "tracedecay Cursor preCompact summary failed: {}",
-                outcome.reason
-            );
-        }
-    }
+    let _ = super::cursor_compact::cursor_pre_compact_via_daemon(&event).await;
     println!("{}", serde_json::json!({}));
     0
 }
 
-/// Cursor `afterFileEdit` hook handler.
-///
-/// Two jobs, both fail-open:
-/// 1. Keeps the graph fresh after Cursor Agent writes files by notifying the
-///    daemon about the edited path(s). The daemon owns targeted sync scheduling
-///    and the notification no-ops when no daemon is available.
-/// 2. Emits the edit-driven redundancy nudge ([`HintCategory::EditRedundancy`]),
-///    matching Claude's `PostToolUse` surface. `afterFileEdit` is the only
-///    Cursor hook whose recorded payload carries the *applied* edit body
-///    (`edits[].new_string`); Cursor's `postToolUse` edit payload carries only
-///    the target `file_path` (see the recorded fixtures in
-///    `tests/hooks_lsp_suite/hooks_test.rs`), so the redundancy classifier —
-///    which needs the added text — can only run here. The hint rides Cursor's
-///    documented `additional_context` output shape with the same per-session
-///    dedupe and initialized-store gating as `postToolUse`.
+/// Cursor `afterFileEdit` submits the native saved-edit event. The daemon
+/// schedules any indexing or advisory follow-up after the response returns.
 pub async fn hook_cursor_after_file_edit() -> i32 {
     let event = read_hook_event!();
     // One parse for the root, the analytics row, and the daemon notification.
@@ -325,54 +281,36 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         }
         return 0;
     }
-    notify_cursor_after_file_edit(&parsed, &hook_telemetry).await;
-    if let Some(decision) = cursor_after_file_edit_decision(&event) {
-        println!("{decision}");
-    }
     0
 }
 
 /// Cursor `sessionStart` hook handler (fire-and-forget).
 ///
-/// Emits Cursor's `sessionStart` output shape (`additional_context` + `env`)
-/// steering the agent toward tracedecay MCP tools and reporting index freshness
-/// for the resolved workspace. Never blocks session creation.
+/// Cursor `sessionStart` submits the native boundary without reading state or
+/// generating host-local context.
 pub async fn hook_cursor_session_start() -> i32 {
     let event = read_hook_event!();
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "sessionStart", &event);
-    if let (Some(root), Some(event)) = (root.as_ref(), cursor_session_start_hook_event(&parsed)) {
-        super::notify_hook_event_with_telemetry(root, event, &hook_telemetry).await;
-    }
-    ingest_cursor_transcript_for_event_inner(
-        &event,
-        Some(CURSOR_CATCH_UP_INGEST_MAX_BYTES),
-        CURSOR_SESSION_INGEST_BUDGET,
-        Some(&hook_telemetry),
-    )
-    .await;
-    let mut context = cursor_session_context_for_root(root.as_deref()).await;
-    let session_id = event_session_id(&parsed);
-    let digest = match root.as_deref() {
-        Some(root) => {
-            memory_inject::combined_session_memory_digest(root, session_id.as_deref()).await
-        }
-        None => memory_inject::user_session_memory_digest(session_id.as_deref()).await,
-    };
-    if let Some(digest) = digest {
-        append_context_block(&mut context, &digest);
-    }
-    if let Some(root) = root.as_deref() {
-        memory_inject::regenerate_cursor_memory_rule(root).await;
+    let guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
+            tracedecay_hooks::HookHostV1::CursorDesktop,
+            &event,
+            root,
+            Some(&hook_telemetry),
+        )
+        .await
+        .into_recorded_guidance(&hook_telemetry)
+        .flatten()
     } else {
-        memory_inject::regenerate_cursor_user_memory_rule().await;
-    }
-    if session_start_from_compaction(&event) {
-        append_context_recovery_hint(&mut context);
-    }
-    println!("{}", cursor_session_start_json(root.as_deref(), &context));
+        None
+    };
+    println!(
+        "{}",
+        cursor_session_start_json(None, guidance.as_deref().unwrap_or(""))
+    );
     0
 }
 

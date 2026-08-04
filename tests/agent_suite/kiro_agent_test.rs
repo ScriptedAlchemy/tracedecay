@@ -171,26 +171,9 @@ fn test_install_creates_global_mcp_steering_agent_and_default() {
         "hook-kiro-prompt-submit",
         5_000,
     );
-    assert_hook(
-        &agent,
-        "preToolUse",
-        Some("delegate"),
-        "hook-kiro-pre-tool-use",
-        5_000,
-    );
-    assert_hook(
-        &agent,
-        "preToolUse",
-        Some("subagent"),
-        "hook-kiro-pre-tool-use",
-        5_000,
-    );
-    assert_hook(
-        &agent,
-        "postToolUse",
-        Some("fs_write"),
-        "hook-kiro-post-tool-use",
-        30_000,
+    assert!(
+        agent["hooks"].get("preToolUse").is_none() && agent["hooks"].get("postToolUse").is_none(),
+        "Kiro must not install generic routing or hook-local sync handlers"
     );
 
     let cli_path = home.join(".kiro/settings/cli.json");

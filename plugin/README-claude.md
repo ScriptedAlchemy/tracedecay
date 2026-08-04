@@ -17,12 +17,11 @@ Claude Code.
   recalling project memory and session context, and more. Claude Code
   auto-discovers each `SKILL.md` by its `name`/`description` frontmatter and
   loads the body only when the workflow matches.
-- **Lifecycle hooks** (`hooks/hooks.json`): `SessionStart`,
-  `UserPromptSubmit`, `Stop`, `PreToolUse`, and `PostToolUse` handlers that
-  inject index status and tool-routing steering, keep the graph/session store
-  warm, redirect explore-agent calls toward the tracedecay tools, and nudge
-  Grep/Glob/Read-style searches toward `tracedecay_grep`, `tracedecay_search`,
-  `tracedecay_context`, and bounded graph reads.
+- **Lifecycle hooks** (`hooks/hooks.json`): `SessionStart`, `Stop`, and saved
+  edit `PostToolUse` events. Each handler submits one bounded native envelope
+  to the daemon and returns. The daemon owns follow-up capture, indexing,
+  staleness work, and any advisory delivery; hooks never read stores, route
+  tools, or run a model.
 
 ## Install
 
