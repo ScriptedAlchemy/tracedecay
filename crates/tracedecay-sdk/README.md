@@ -1,7 +1,7 @@
 # TraceDecay Rust SDK
 
-Blocking local and remote clients for typed Work operations, cancellation,
-paging, and resumable SSE streams.
+Blocking local and remote clients for typed Work and Workflow operations,
+cancellation, paging, and resumable SSE streams.
 
 ```rust
 use serde_json::json;
@@ -20,6 +20,7 @@ let snapshot = client.execute::<WorkSnapshot>(&request)?;
 # Ok::<(), tracedecay_sdk::client::ClientError>(())
 ```
 
-The 18 mounted Work routes use generated request/result wire models. The 64
-older production routes remain discovery-only `SchemaUnavailable` capabilities
-until their canonical catalog exports schema bodies.
+All 18 mounted Work routes and 5 mounted Workflow routes use generated
+request/result wire models. The 64 older production routes remain
+discovery-only `SchemaUnavailable` capabilities until their canonical catalog
+exports schema bodies.

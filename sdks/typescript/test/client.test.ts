@@ -259,7 +259,7 @@ describe("canonical JSON Schema decoding", () => {
 });
 
 describe("TraceDecayClient generated operation bindings", () => {
-  it("publishes typed Work methods and fail-closed base discovery", () => {
+  it("publishes typed Work and Workflow methods with fail-closed base discovery", () => {
     expectTypeOf<
       Parameters<ReturnType<typeof createClient>["operations"]["work_snapshot"]>[0]
     >().toEqualTypeOf<{ readonly page_size: number }>();
@@ -340,7 +340,7 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(Reflect.get(client, "requestOperation")).toBeUndefined();
   });
 
-  it("publishes all mounted Work routes as executable operations", () => {
+  it("publishes all mounted Work and Workflow routes as executable operations", () => {
     const available: string[] = OPERATIONS.map((operation) => operation.operation);
     const unavailable = (
       UNAVAILABLE_OPERATIONS as readonly { readonly operation: string }[]
@@ -365,6 +365,11 @@ describe("TraceDecayClient generated operation bindings", () => {
         "work_admit_execution",
         "work_attach_runtime_evidence",
         "work_accept_task",
+        "workflow_register_definition",
+        "workflow_activate_definition",
+        "workflow_execute_fan_out",
+        "workflow_handoff_issue",
+        "workflow_handoff_redeem",
       ]),
     );
     expect(
@@ -410,6 +415,8 @@ describe("TraceDecayClient generated operation bindings", () => {
     expect(descriptor?.operationId).toBe("operation.work.attempt_finish");
     expect(descriptor?.route).toBe("/application/work/attempt/finish");
     expect(descriptor?.method).toBe("POST");
+    expect(descriptor?.effect).toBe("administrative");
+    expect(descriptor?.idempotency).toBe("required");
     expect(descriptor?.bindingId).toBe("binding.http.work.attempt_finish");
     expect(descriptor?.requestSchema).toEqual({
       schemaId: "schema.work.attempt_finish.request",

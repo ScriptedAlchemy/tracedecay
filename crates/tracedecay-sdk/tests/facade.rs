@@ -1,7 +1,7 @@
-use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish};
+use tracedecay_sdk::operations::{TypedOperation, WorkAttemptFinish, WorkflowRegisterDefinition};
 use tracedecay_sdk::{
     CancellationContext, CancellationSignal, CancellationState, CancellationTokenId, api,
-    application, domain, operation, operations, remote, work,
+    application, domain, operation, operations, remote, work, workflow,
 };
 
 #[test]
@@ -99,6 +99,8 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
         binding.operation_id().as_str(),
         WorkAttemptFinish::OPERATION_ID
     );
+    assert_eq!(WorkAttemptFinish::EFFECT, binding.effect());
+    assert_eq!(WorkAttemptFinish::IDEMPOTENCY, binding.idempotency());
 
     match binding.exposure() {
         operation::RouteExposureV1::Public {
@@ -123,6 +125,29 @@ fn work_attempt_finish_descriptor_matches_the_canonical_binding() {
     assert_eq!(
         binding.result_schema().schema_ref().revision(),
         WorkAttemptFinish::RESULT_SCHEMA_REVISION
+    );
+}
+
+#[test]
+fn workflow_register_definition_descriptor_matches_the_mounted_binding() {
+    let registry = workflow::executable_binding_registry().expect("canonical Workflow registry");
+    let binding = registry
+        .get(&operation::OperationId::new(WorkflowRegisterDefinition::OPERATION_ID).unwrap())
+        .and_then(|availability| availability.binding())
+        .expect("mounted workflow register-definition binding");
+
+    assert_eq!(
+        WorkflowRegisterDefinition::ROUTE,
+        "/application/workflow/register-definition"
+    );
+    assert_eq!(
+        WorkflowRegisterDefinition::BINDING_ID,
+        "binding.http.workflow.register_definition"
+    );
+    assert_eq!(WorkflowRegisterDefinition::EFFECT, binding.effect());
+    assert_eq!(
+        WorkflowRegisterDefinition::IDEMPOTENCY,
+        binding.idempotency()
     );
 }
 
