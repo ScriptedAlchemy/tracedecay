@@ -64,20 +64,18 @@ pub struct GitRepositoryAuthority {
 impl GitRepositoryAuthority {
     /// Discover the repository containing `path`.
     pub fn discover(path: &Path) -> Result<Self, GitRepositoryError> {
-        let repository =
-            gix::discover_opts(path, Default::default(), gix::open::Options::isolated()).map_err(
-                |error| match error {
-                    gix::discover::Error::Discover(
-                        gix::discover::upwards::Error::NoGitRepository { .. },
-                    ) => GitRepositoryError::NotARepository {
-                        path: path.display().to_string(),
-                    },
-                    error => GitRepositoryError::UnreadableRepository {
-                        path: path.display().to_string(),
-                        detail: error.to_string(),
-                    },
+        let repository = gix::discover_opts(path, Default::default(), repository_open_options())
+            .map_err(|error| match error {
+                gix::discover::Error::Discover(
+                    gix::discover::upwards::Error::NoGitRepository { .. },
+                ) => GitRepositoryError::NotARepository {
+                    path: path.display().to_string(),
                 },
-            )?;
+                error => GitRepositoryError::UnreadableRepository {
+                    path: path.display().to_string(),
+                    detail: error.to_string(),
+                },
+            })?;
         let worktree_root = repository
             .workdir()
             .map(|path| canonical(path, "worktree root"))
@@ -493,6 +491,16 @@ impl TrackedStatusBuilder {
             submodule: self.submodule,
         }
     }
+}
+
+/// Preserve the repository's normal configuration and attribute semantics
+/// while rejecting `GIT_*` redirection from the daemon environment.
+fn repository_open_options() -> gix::open::Options {
+    let mut permissions = gix::open::Permissions::secure();
+    permissions.env.git_prefix = gix::sec::Permission::Deny;
+    permissions.env.objects = gix::sec::Permission::Deny;
+    permissions.config.env = false;
+    gix::open::Options::default().permissions(permissions)
 }
 
 fn head_from_gix(repository: &gix::Repository) -> Result<GitHeadStateV1, GitRepositoryError> {
