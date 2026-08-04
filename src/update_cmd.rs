@@ -472,6 +472,20 @@ pub(crate) fn partition_reinstall_results(
 /// resolved, no install runs and a descriptive failure is reported so the
 /// version markers stay put.
 pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> ReinstallOutcome {
+    reinstall_tracked_agents_with_lease(user_config, None).await
+}
+
+async fn reinstall_tracked_agents_under_lease(
+    user_config: &UserConfig,
+    lifecycle_lease: &tracedecay::lifecycle_lease::LifecycleLease,
+) -> ReinstallOutcome {
+    reinstall_tracked_agents_with_lease(user_config, Some(lifecycle_lease)).await
+}
+
+async fn reinstall_tracked_agents_with_lease(
+    user_config: &UserConfig,
+    lifecycle_lease: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+) -> ReinstallOutcome {
     let (Some(home), Some(bin)) = (
         tracedecay::agents::home_dir(),
         tracedecay::agents::which_tracedecay(),
@@ -483,9 +497,25 @@ pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> Reinst
             ],
         };
     };
-    let results =
-        crate::agent_cmd::reinstall_agent_integrations(&user_config.installed_agents, &home, &bin)
-            .await;
+    let results = match lifecycle_lease {
+        Some(lifecycle_lease) => {
+            crate::agent_cmd::reinstall_agent_integrations_under_lease(
+                &user_config.installed_agents,
+                &home,
+                &bin,
+                lifecycle_lease,
+            )
+            .await
+        }
+        None => {
+            crate::agent_cmd::reinstall_agent_integrations(
+                &user_config.installed_agents,
+                &home,
+                &bin,
+            )
+            .await
+        }
+    };
     partition_reinstall_results(results)
 }
 
@@ -569,7 +599,7 @@ async fn run_post_update_mutations(
             config.installed_agents.join(", ")
         );
     }
-    match reinstall_tracked_agents(&config).await {
+    match reinstall_tracked_agents_under_lease(&config, lifecycle_lease).await {
         ReinstallOutcome::AllOk => {
             if config.mark_version_installed(env!("CARGO_PKG_VERSION")) {
                 if let Err(err) = config.save() {

@@ -83,6 +83,12 @@ pub struct LegacyHermesMigrationReport {
     pub failed: Vec<LegacyHermesMigrationIssue>,
 }
 
+struct HermesMigrationRuntime<'a, R, F, H> {
+    registry: &'a R,
+    read_pinned_project_root: &'a F,
+    state_importer: &'a H,
+}
+
 /// Migrates historical stores below the standard user Hermes integration into
 /// the normal `TraceDecay` user profile. No environment or working-directory
 /// override can redirect discovery.
@@ -146,6 +152,37 @@ where
     .await
 }
 
+/// Migrates historical Hermes stores while the caller retains exclusive
+/// lifecycle authority for the destination profile.
+pub async fn migrate_legacy_hermes_stores_to_with_runtime_under_lease<R, F, H>(
+    user_home: &Path,
+    tracedecay_profile_root: &Path,
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    registry: &R,
+    read_pinned_project_root: &F,
+    state_importer: &H,
+) -> LegacyHermesMigrationReport
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
+    let runtime = HermesMigrationRuntime {
+        registry,
+        read_pinned_project_root,
+        state_importer,
+    };
+    migrate_legacy_hermes_stores_with_lease(
+        user_home,
+        tracedecay_profile_root,
+        &[user_home.join(".hermes")],
+        None,
+        lifecycle,
+        &runtime,
+    )
+    .await
+}
+
 #[doc(hidden)]
 pub async fn migrate_legacy_hermes_stores_inner<R, F, H>(
     user_home: &Path,
@@ -161,6 +198,11 @@ where
     F: Fn(&Path) -> Option<String>,
     H: HermesStateImporter,
 {
+    let runtime = HermesMigrationRuntime {
+        registry,
+        read_pinned_project_root,
+        state_importer,
+    };
     let lifecycle = match crate::lifecycle_lease::acquire_exclusive_for_profile(
         tracedecay_profile_root,
         "legacy Hermes store migration",
@@ -170,8 +212,32 @@ where
             return migration_authority_failure(tracedecay_profile_root, error.to_string());
         }
     };
-    let _database_scope = match crate::db::enter_maintenance_database_scope(
+    migrate_legacy_hermes_stores_with_lease(
+        user_home,
+        tracedecay_profile_root,
+        hermes_homes,
+        fail_after_table,
         &lifecycle,
+        &runtime,
+    )
+    .await
+}
+
+async fn migrate_legacy_hermes_stores_with_lease<R, F, H>(
+    user_home: &Path,
+    tracedecay_profile_root: &Path,
+    hermes_homes: &[PathBuf],
+    fail_after_table: Option<&str>,
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    runtime: &HermesMigrationRuntime<'_, R, F, H>,
+) -> LegacyHermesMigrationReport
+where
+    R: RegistryRuntime,
+    F: Fn(&Path) -> Option<String>,
+    H: HermesStateImporter,
+{
+    let _database_scope = match crate::db::enter_maintenance_database_scope(
+        lifecycle,
         tracedecay_profile_root,
         "legacy Hermes store migration",
     ) {
@@ -190,9 +256,9 @@ where
             &candidate,
             tracedecay_profile_root,
             fail_after_table,
-            registry,
-            read_pinned_project_root,
-            state_importer,
+            runtime.registry,
+            runtime.read_pinned_project_root,
+            runtime.state_importer,
         )
         .await
         {
@@ -201,7 +267,7 @@ where
                     tracedecay_profile_root,
                     candidate.legacy_registry_project_id.as_deref(),
                     &candidate.profile_dir,
-                    registry,
+                    runtime.registry,
                 )
                 .await
                 {
@@ -218,7 +284,7 @@ where
                     tracedecay_profile_root,
                     candidate.legacy_registry_project_id.as_deref(),
                     &candidate.profile_dir,
-                    registry,
+                    runtime.registry,
                 )
                 .await
                 {
@@ -245,7 +311,7 @@ where
     for profile_dir in profile_dirs {
         let state_db = profile_dir.join("state.db");
         if !state_db.is_file()
-            || read_pinned_project_root(&profile_dir.join("config.yaml")).is_none()
+            || (runtime.read_pinned_project_root)(&profile_dir.join("config.yaml")).is_none()
         {
             continue;
         }
@@ -254,9 +320,9 @@ where
             hermes_homes,
             &profile_dir,
             tracedecay_profile_root,
-            registry,
-            read_pinned_project_root,
-            state_importer,
+            runtime.registry,
+            runtime.read_pinned_project_root,
+            runtime.state_importer,
         )
         .await
         {
