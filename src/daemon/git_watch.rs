@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant as StdInstant};
 
 use futures_util::FutureExt;
+use futures_util::future::{BoxFuture, Shared};
 use notify::{EventKind, RecursiveMode, Watcher};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -184,6 +185,15 @@ pub(super) enum GitWatcherAdmission {
     IdentityUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "watcher start state must remain explicit"]
+pub(super) enum GitWatcherStart {
+    Started,
+    AlreadyStarted,
+    Disabled,
+    ShuttingDown,
+}
+
 struct WatchIdentity {
     canonical_root: PathBuf,
     common_dir: PathBuf,
@@ -203,7 +213,7 @@ pub(super) struct GitWatcherInner {
     /// Single backstop scheduler task, owned so shutdown can cancel and join it.
     backstop_task: Mutex<Option<JoinHandle<()>>>,
     shutting_down: AtomicBool,
-    shutdown_join_started: AtomicBool,
+    shutdown_completion: Mutex<Option<Shared<BoxFuture<'static, ()>>>>,
 }
 
 impl Default for GitWatcher {
@@ -242,7 +252,7 @@ impl GitWatcher {
                 projects: Mutex::new(HashMap::new()),
                 backstop_task: Mutex::new(None),
                 shutting_down: AtomicBool::new(false),
-                shutdown_join_started: AtomicBool::new(false),
+                shutdown_completion: Mutex::new(None),
             }),
         }
     }
@@ -286,19 +296,27 @@ impl GitWatcher {
     ///
     /// Called once from `run_foreground_unix` after the engine is built. Safe to
     /// call on a disabled watcher (no-op).
-    pub(super) async fn spawn(&self) {
-        if !self.inner.enabled || self.inner.shutting_down.load(Ordering::Acquire) {
-            return;
+    pub(super) async fn spawn(&self) -> GitWatcherStart {
+        if !self.inner.enabled {
+            return GitWatcherStart::Disabled;
         }
         // Startup does not manufacture project owners from registry paths.
         // Active daemon handshakes call `ensure_watching` after publishing the
         // retained project server and graph handle.
 
+        let mut retained = self.inner.backstop_task.lock().await;
+        if self.inner.shutting_down.load(Ordering::Acquire) {
+            return GitWatcherStart::ShuttingDown;
+        }
+        if retained.is_some() {
+            return GitWatcherStart::AlreadyStarted;
+        }
         let watcher = self.clone();
         let handle = tokio::spawn(async move {
             backstop::run(watcher).await;
         });
-        *self.inner.backstop_task.lock().await = Some(handle);
+        *retained = Some(handle);
+        GitWatcherStart::Started
     }
 
     /// Lazily starts watching `project_root` if not already watched and under
@@ -374,26 +392,25 @@ impl GitWatcher {
             return;
         }
         self.cancel();
-        if self
-            .inner
-            .shutdown_join_started
-            .swap(true, Ordering::AcqRel)
-        {
-            return;
-        }
-        if let Some(handle) = self.inner.backstop_task.lock().await.take() {
-            let _ = handle.await;
-        }
-
-        let states: Vec<Arc<WatchState>> = {
-            let mut projects = self.inner.projects.lock().await;
-            projects.drain().map(|(_, state)| state).collect()
-        };
-        for state in states {
-            if let Some(handle) = state.task.lock().await.take() {
-                let _ = handle.await;
+        let completion = {
+            let mut retained = self.inner.shutdown_completion.lock().await;
+            if let Some(completion) = retained.as_ref() {
+                completion.clone()
+            } else {
+                let inner = Arc::clone(&self.inner);
+                let joiner = tokio::spawn(async move {
+                    join_watcher_tasks(inner).await;
+                });
+                let completion = async move {
+                    let _ = joiner.await;
+                }
+                .boxed()
+                .shared();
+                *retained = Some(completion.clone());
+                completion
             }
-        }
+        };
+        completion.await;
     }
 
     /// A doctor-facing snapshot of every registered project's watch health.
@@ -411,6 +428,22 @@ impl GitWatcher {
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
+    }
+}
+
+async fn join_watcher_tasks(inner: Arc<GitWatcherInner>) {
+    if let Some(handle) = inner.backstop_task.lock().await.take() {
+        let _ = handle.await;
+    }
+
+    let states: Vec<Arc<WatchState>> = {
+        let mut projects = inner.projects.lock().await;
+        projects.drain().map(|(_, state)| state).collect()
+    };
+    for state in states {
+        if let Some(handle) = state.task.lock().await.take() {
+            let _ = handle.await;
+        }
     }
 }
 

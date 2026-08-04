@@ -254,8 +254,14 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         maintenance.clone(),
         engine.invocation.code_index_schedulers.clone(),
     );
-    if git_watcher.is_enabled() {
-        git_watcher.spawn().await;
+    if matches!(
+        git_watcher.spawn().await,
+        git_watch::GitWatcherStart::ShuttingDown
+    ) {
+        log_daemon_event(
+            "git_watch_start_rejected",
+            &[("reason", "shutting_down".to_string())],
+        );
     }
     // PR-branch auto-tracking runs independently of the metadata watcher: it is
     // gated per-project on `sync.auto_track_pr_branches` (default off), so this
