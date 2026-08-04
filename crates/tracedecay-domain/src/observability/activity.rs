@@ -48,7 +48,22 @@ impl ActivityObservedV1 {
                     | "test_lifecycle"
                     | "opencode_lsp_updated"
             ),
-            "session_ingest" => matches!(detail, "claude" | "codex" | "cursor" | "opencode"),
+            // These are the exact ids emitted by session ingestion and native
+            // host-history producers; aliases such as `kimi` are not retained.
+            "session_ingest" => matches!(
+                detail,
+                "claude"
+                    | "codex"
+                    | "cursor"
+                    | "hermes"
+                    | "kiro"
+                    | "kimi_code"
+                    | "opencode"
+                    | "cline"
+                    | "roo-code"
+                    | "kilo"
+                    | "vibe"
+            ),
             "code_index" => matches!(detail, "hook_admitted" | "scheduler_reconciled"),
             "tool_call" => matches!(detail, "tracedecay"),
             "task" => matches!(

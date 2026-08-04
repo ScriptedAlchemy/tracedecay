@@ -48,3 +48,34 @@ fn activity_detail_is_a_finite_safe_vocabulary() {
         None
     );
 }
+
+#[test]
+fn session_ingest_producer_keeps_only_canonical_provider_ids() {
+    for provider in [
+        "claude",
+        "codex",
+        "cursor",
+        "hermes",
+        "kiro",
+        "kimi_code",
+        "opencode",
+        "cline",
+        "roo-code",
+        "kilo",
+        "vibe",
+    ] {
+        assert_eq!(
+            ActivityObservedV1::bounded_detail("session_ingest", Some(provider)),
+            Some(provider.to_owned()),
+            "canonical provider {provider} was discarded at the producer boundary"
+        );
+    }
+
+    for untrusted_detail in ["kimi", "unknown-provider", "provider/session-42"] {
+        assert_eq!(
+            ActivityObservedV1::bounded_detail("session_ingest", Some(untrusted_detail)),
+            None,
+            "noncanonical provider {untrusted_detail} must not become retained telemetry"
+        );
+    }
+}
