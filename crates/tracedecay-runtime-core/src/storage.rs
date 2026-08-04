@@ -17,11 +17,7 @@ pub const ENROLLMENT_FILENAME: &str = "enrollment.json";
 pub const STORE_MANIFEST_FILENAME: &str = "store_manifest.json";
 pub const PROFILE_IDENTITY_FILENAME: &str = "profile-identity.json";
 pub const SESSIONS_DB_FILENAME: &str = "sessions.db";
-pub const BRANCH_META_FILENAME: &str = "branch-meta.json";
 pub(crate) const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
-/// Filename prefix for corrupt `branch-meta.json` files renamed out of the
-/// way by the post-update health pass (`branch-meta.json.corrupt-<timestamp>`).
-pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
 #[cfg(any(test, feature = "test-helpers", feature = "test-transport"))]
@@ -121,7 +117,6 @@ pub struct StoreLayout {
     pub data_root: PathBuf,
     pub graph_db_path: PathBuf,
     pub config_path: PathBuf,
-    pub branch_meta_path: PathBuf,
     pub sessions_db_path: PathBuf,
     pub response_handle_root: PathBuf,
     pub lcm_payload_root: PathBuf,
@@ -129,7 +124,6 @@ pub struct StoreLayout {
     pub manifest_path: Option<PathBuf>,
     pub dirty_path: PathBuf,
     pub sync_lock_path: PathBuf,
-    pub branch_add_lock_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -308,25 +302,6 @@ pub struct StoreManifest {
     pub data_root: PathBuf,
     pub graph_db_relpath: PathBuf,
     pub sessions_db_relpath: PathBuf,
-    pub branch_meta_relpath: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum GraphScopeId {
-    Project,
-    Branch(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QueryTarget {
-    pub graph_db_path: PathBuf,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActiveProjectContext {
-    pub layout: StoreLayout,
-    pub scope_id: GraphScopeId,
-    pub query_target: QueryTarget,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1030,20 +1005,6 @@ impl StoreManifest {
             data_root: layout.data_root.clone(),
             graph_db_relpath: relative_to_data_root(&layout.graph_db_path, &layout.data_root),
             sessions_db_relpath: relative_to_data_root(&layout.sessions_db_path, &layout.data_root),
-            branch_meta_relpath: relative_to_data_root(&layout.branch_meta_path, &layout.data_root),
-        }
-    }
-}
-
-impl ActiveProjectContext {
-    pub fn new(layout: StoreLayout, scope_id: GraphScopeId) -> Self {
-        let query_target = QueryTarget {
-            graph_db_path: layout.graph_db_path.clone(),
-        };
-        Self {
-            layout,
-            scope_id,
-            query_target,
         }
     }
 }
@@ -1547,7 +1508,6 @@ impl StoreLayout {
     ) -> Self {
         let graph_db_path = data_root.join(config::db_filename(&data_root));
         let config_path = data_root.join("config.json");
-        let branch_meta_path = data_root.join(BRANCH_META_FILENAME);
         let sessions_db_path = data_root.join(SESSIONS_DB_FILENAME);
         let response_handle_root = data_root.join("response-handles");
         let lcm_payload_root = data_root.join("lcm-payloads");
@@ -1555,7 +1515,6 @@ impl StoreLayout {
         let manifest_path = manifest_filename.map(|filename| data_root.join(filename));
         let dirty_path = data_root.join("dirty");
         let sync_lock_path = data_root.join("sync.lock");
-        let branch_add_lock_path = data_root.join(".branch-add.lock");
         Self {
             identity,
             store_kind,
@@ -1564,7 +1523,6 @@ impl StoreLayout {
             data_root,
             graph_db_path,
             config_path,
-            branch_meta_path,
             sessions_db_path,
             response_handle_root,
             lcm_payload_root,
@@ -1572,7 +1530,6 @@ impl StoreLayout {
             manifest_path,
             dirty_path,
             sync_lock_path,
-            branch_add_lock_path,
         }
     }
 }

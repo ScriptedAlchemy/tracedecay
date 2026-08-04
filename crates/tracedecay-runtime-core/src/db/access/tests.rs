@@ -24,7 +24,7 @@ fn profile_project_databases_share_the_profile_scope() {
     let temp = tempfile::tempdir().unwrap();
     let profile = temp.path().join("profile");
     let first = profile.join("projects/first/graph.db");
-    let second = profile.join("projects/second/branches/main.db");
+    let second = profile.join("projects/second/graph.db");
     std::fs::create_dir_all(first.parent().unwrap()).unwrap();
     std::fs::create_dir_all(second.parent().unwrap()).unwrap();
 

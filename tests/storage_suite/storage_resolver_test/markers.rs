@@ -135,10 +135,6 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
         profile.join("projects/proj_123/config.json")
     );
     assert_eq!(
-        layout.branch_meta_path,
-        profile.join("projects/proj_123/branch-meta.json")
-    );
-    assert_eq!(
         layout.sessions_db_path,
         profile.join("projects/proj_123/sessions.db")
     );
@@ -162,9 +158,5 @@ fn profile_sharded_layout_maps_marker_to_profile_store_paths() {
     assert_eq!(
         layout.sync_lock_path,
         profile.join("projects/proj_123/sync.lock")
-    );
-    assert_eq!(
-        layout.branch_add_lock_path,
-        profile.join("projects/proj_123/.branch-add.lock")
     );
 }

@@ -135,23 +135,6 @@ pub(super) const TABLES: &[Table] = &[
         )]
     ),
     table!(
-        "graph_scopes",
-        [
-            column("graph_scope_id", "TEXT", false, None, 1),
-            column("project_id", "TEXT", true, None, 0),
-            column("store_id", "TEXT", true, None, 0),
-            column("branch_name", "TEXT", true, None, 0),
-            column("db_relpath", "TEXT", true, None, 0),
-            column("parent_scope_id", "TEXT", false, None, 0),
-            column("last_synced_at", "INTEGER", false, None, 0),
-            column("writable", "INTEGER", true, Some("1"), 0),
-        ],
-        [
-            foreign_key("project_id", "code_projects", "project_id", "CASCADE"),
-            foreign_key("store_id", "store_instances", "store_id", "CASCADE"),
-        ]
-    ),
-    table!(
         "store_artifacts",
         [
             column("store_id", "TEXT", true, None, 1),
@@ -1738,7 +1721,6 @@ pub(super) const REGISTRY_TABLE_NAMES: &[&str] = &[
     "code_projects",
     "project_aliases",
     "store_instances",
-    "graph_scopes",
     "store_artifacts",
 ];
 
@@ -1767,13 +1749,6 @@ pub(super) const INDEXES: &[Index] = &[
         unique: false,
         origin: "c",
         columns: &["project_id"],
-    },
-    Index {
-        table: "graph_scopes",
-        name: Some("idx_graph_scopes_project_store"),
-        unique: false,
-        origin: "c",
-        columns: &["project_id", "store_id"],
     },
     Index {
         table: "observations",

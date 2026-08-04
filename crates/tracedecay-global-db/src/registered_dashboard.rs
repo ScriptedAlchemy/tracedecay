@@ -5,8 +5,8 @@ use tracedecay_runtime_core::db::engine::{ReadSnapshot, Row, Value};
 use tracedecay_runtime_core::errors::TraceDecayError;
 
 use super::{
-    CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
-    ProjectStoreContext, RegisteredGlobalDb, StoreArtifactRecord, StoreInstanceRecord,
+    CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
+    RegisteredGlobalDb, StoreArtifactRecord, StoreInstanceRecord,
 };
 
 type Result<T> = std::result::Result<T, TraceDecayError>;
@@ -332,7 +332,6 @@ impl RegisteredGlobalDb {
                 .map_err(|error| dashboard_error("rollback changed orphan relink", error))?;
             return Ok(false);
         }
-        let graph_scopes = load_store_graph_scopes(&transaction, store_id).await?;
         let artifacts = load_store_artifacts(&transaction, store_id).await?;
 
         let deleted = transaction
@@ -373,27 +372,6 @@ impl RegisteredGlobalDb {
             )
             .await
             .map_err(|error| dashboard_error("insert transferred orphan store identity", error))?;
-        for scope in graph_scopes {
-            transaction
-                .execute(
-                    "INSERT INTO graph_scopes (
-                        graph_scope_id, project_id, store_id, branch_name, db_relpath,
-                        parent_scope_id, last_synced_at, writable
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                    tracedecay_runtime_core::db::engine::params![
-                        scope.graph_scope_id,
-                        target_project_id.as_str(),
-                        scope.store_id,
-                        scope.branch_name,
-                        scope.db_relpath,
-                        scope.parent_scope_id,
-                        scope.last_synced_at,
-                        i64::from(scope.writable)
-                    ],
-                )
-                .await
-                .map_err(|error| dashboard_error("restore transferred graph scope", error))?;
-        }
         for artifact in artifacts {
             transaction
                 .execute(
@@ -576,35 +554,6 @@ async fn load_exact_store(
         .map(Some)
 }
 
-async fn load_store_graph_scopes(
-    transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
-    store_id: &str,
-) -> Result<Vec<GraphScopeRecord>> {
-    let mut rows = transaction
-        .query(
-            "SELECT graph_scope_id, project_id, store_id, branch_name, db_relpath,
-                    parent_scope_id, last_synced_at, writable
-             FROM graph_scopes
-             WHERE store_id = ?1
-             ORDER BY graph_scope_id",
-            tracedecay_runtime_core::db::engine::params![store_id],
-        )
-        .await
-        .map_err(|error| dashboard_error("read orphan store graph scopes", error))?;
-    let mut scopes = Vec::new();
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| dashboard_error("read orphan store graph scope", error))?
-    {
-        scopes.push(
-            decode_graph_scope(&row)
-                .ok_or_else(|| dashboard_decode_error("decode orphan store graph scope"))?,
-        );
-    }
-    Ok(scopes)
-}
-
 async fn load_store_artifacts(
     transaction: &super::RegisteredGlobalDbWriteTransaction<'_>,
     store_id: &str,
@@ -690,37 +639,12 @@ async fn contexts_for_projects(
         );
     }
 
-    let store_ids = stores
-        .iter()
-        .map(|store| store.store_id.clone())
-        .collect::<Vec<_>>();
-    let mut graph_scopes_by_store = BTreeMap::<String, Vec<GraphScopeRecord>>::new();
     let mut artifacts_by_store = BTreeMap::<String, Vec<StoreArtifactRecord>>::new();
-    if !store_ids.is_empty() {
-        let mut rows = query_ids(
-            snapshot,
-            "SELECT graph_scope_id, project_id, store_id, branch_name, db_relpath,
-                    parent_scope_id, last_synced_at, writable
-             FROM graph_scopes
-             WHERE store_id IN ({})
-             ORDER BY branch_name, graph_scope_id",
-            &store_ids,
-            "read project graph scopes",
-        )
-        .await?;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| dashboard_error("read project graph scope", error))?
-        {
-            let scope = decode_graph_scope(&row)
-                .ok_or_else(|| dashboard_decode_error("decode project graph scope"))?;
-            graph_scopes_by_store
-                .entry(scope.store_id.clone())
-                .or_default()
-                .push(scope);
-        }
-
+    if !stores.is_empty() {
+        let store_ids = stores
+            .iter()
+            .map(|store| store.store_id.clone())
+            .collect::<Vec<_>>();
         let mut rows = query_ids(
             snapshot,
             "SELECT store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
@@ -751,9 +675,6 @@ async fn contexts_for_projects(
             .entry(store.project_id.clone())
             .or_default()
             .push(ProjectStoreContext {
-                graph_scopes: graph_scopes_by_store
-                    .remove(&store.store_id)
-                    .unwrap_or_default(),
                 artifacts: artifacts_by_store
                     .remove(&store.store_id)
                     .unwrap_or_default(),
@@ -822,19 +743,6 @@ fn decode_store(row: &Row) -> Option<StoreInstanceRecord> {
         created_at: row.get(6).ok()?,
         last_verified_at: row.get(7).ok()?,
         last_write_at: row.get(8).ok()?,
-    })
-}
-
-fn decode_graph_scope(row: &Row) -> Option<GraphScopeRecord> {
-    Some(GraphScopeRecord {
-        graph_scope_id: row.get(0).ok()?,
-        project_id: row.get(1).ok()?,
-        store_id: row.get(2).ok()?,
-        branch_name: row.get(3).ok()?,
-        db_relpath: row.get(4).ok()?,
-        parent_scope_id: row.get(5).ok()?,
-        last_synced_at: row.get(6).ok()?,
-        writable: row.get::<i64>(7).ok()? != 0,
     })
 }
 

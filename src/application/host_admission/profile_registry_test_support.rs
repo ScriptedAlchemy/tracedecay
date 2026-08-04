@@ -243,14 +243,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn upsert_graph_scope(
-        &self,
-        upsert: crate::global_db::GraphScopeUpsert,
-    ) -> Option<crate::global_db::GraphScopeRecord> {
-        self.profile_database.upsert_graph_scope(upsert).await
-    }
-
-    #[doc(hidden)]
     pub async fn upsert_store_artifact(
         &self,
         upsert: crate::global_db::StoreArtifactUpsert,

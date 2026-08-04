@@ -162,30 +162,6 @@ pub struct StoreInstanceRecord {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct GraphScopeUpsert {
-    pub graph_scope_id: String,
-    pub project_id: String,
-    pub store_id: String,
-    pub branch_name: String,
-    pub db_relpath: String,
-    pub parent_scope_id: Option<String>,
-    pub last_synced_at: Option<i64>,
-    pub writable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
-pub struct GraphScopeRecord {
-    pub graph_scope_id: String,
-    pub project_id: String,
-    pub store_id: String,
-    pub branch_name: String,
-    pub db_relpath: String,
-    pub parent_scope_id: Option<String>,
-    pub last_synced_at: Option<i64>,
-    pub writable: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct StoreArtifactUpsert {
     pub store_id: String,
     pub artifact_kind: String,
@@ -209,14 +185,12 @@ pub struct StoreArtifactRecord {
 pub struct ProjectStoreResolution {
     pub project: CodeProjectRecord,
     pub store: StoreInstanceRecord,
-    pub graph_scopes: Vec<GraphScopeRecord>,
     pub artifacts: Vec<StoreArtifactRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProjectStoreContext {
     pub store: StoreInstanceRecord,
-    pub graph_scopes: Vec<GraphScopeRecord>,
     pub artifacts: Vec<StoreArtifactRecord>,
 }
 

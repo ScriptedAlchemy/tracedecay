@@ -7,11 +7,11 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::{
-    GraphScopeUpsert, ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
+    ProjectObservationStoreError, StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay::storage::{
-    BRANCH_META_FILENAME, SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
-    StoreKind, StoreManifest, write_store_manifest_to_path,
+    SESSIONS_DB_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, StoreManifest,
+    write_store_manifest_to_path,
 };
 
 static GLOBAL_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::const_new(());
@@ -73,7 +73,6 @@ fn write_observation_store_manifest(
             data_root: paths.0.clone(),
             graph_db_relpath: PathBuf::from("tracedecay.db"),
             sessions_db_relpath: PathBuf::from(SESSIONS_DB_FILENAME),
-            branch_meta_relpath: PathBuf::from(BRANCH_META_FILENAME),
         },
     )
     .unwrap();
@@ -125,18 +124,6 @@ async fn upsert_registry_fixture(db: &HostAdmissionTestRuntimeV1, project_root: 
         })
         .await
         .unwrap();
-    db.upsert_graph_scope(GraphScopeUpsert {
-        graph_scope_id: "scope_registry_main".to_string(),
-        project_id: project.project_id,
-        store_id: store.store_id.clone(),
-        branch_name: "main".to_string(),
-        db_relpath: "projects/proj_registry/tracedecay.db".to_string(),
-        parent_scope_id: None,
-        last_synced_at: Some(102),
-        writable: true,
-    })
-    .await
-    .unwrap();
     db.upsert_store_artifact(StoreArtifactUpsert {
         store_id: store.store_id,
         artifact_kind: "store_manifest".to_string(),
@@ -298,8 +285,6 @@ async fn registered_profile_runtime_creates_and_round_trips_registry_records() {
     );
     assert_eq!(context.stores.len(), 1);
     assert_eq!(context.stores[0].store.store_id, "store_registry");
-    assert_eq!(context.stores[0].graph_scopes.len(), 1);
-    assert_eq!(context.stores[0].graph_scopes[0].branch_name, "main");
     assert_eq!(context.stores[0].artifacts.len(), 1);
     assert_eq!(
         context.stores[0].artifacts[0].artifact_kind,

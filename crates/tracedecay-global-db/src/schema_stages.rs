@@ -52,18 +52,6 @@ const REGISTRY_SCHEMA: &str = "
         last_write_at INTEGER,
         FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS graph_scopes (
-        graph_scope_id TEXT PRIMARY KEY,
-        project_id TEXT NOT NULL,
-        store_id TEXT NOT NULL,
-        branch_name TEXT NOT NULL,
-        db_relpath TEXT NOT NULL,
-        parent_scope_id TEXT,
-        last_synced_at INTEGER,
-        writable INTEGER NOT NULL DEFAULT 1,
-        FOREIGN KEY(project_id) REFERENCES code_projects(project_id) ON DELETE CASCADE,
-        FOREIGN KEY(store_id) REFERENCES store_instances(store_id) ON DELETE CASCADE
-    );
     CREATE TABLE IF NOT EXISTS store_artifacts (
         store_id TEXT NOT NULL,
         artifact_kind TEXT NOT NULL,
@@ -78,8 +66,6 @@ const REGISTRY_SCHEMA: &str = "
         ON project_aliases(project_id);
     CREATE INDEX IF NOT EXISTS idx_store_instances_project_id
         ON store_instances(project_id);
-    CREATE INDEX IF NOT EXISTS idx_graph_scopes_project_store
-        ON graph_scopes(project_id, store_id);
 ";
 
 const TRANSCRIPT_SCHEMA: &str = "

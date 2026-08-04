@@ -260,27 +260,6 @@ const STORE_PROJECT_IMMUTABILITY: &[Trigger] = &[Trigger {
         BEGIN SELECT RAISE(ABORT, 'store project identity is immutable'); END",
 }];
 
-const GRAPH_SCOPE_IDENTITY: &[Trigger] = &[
-    Trigger {
-        name: "graph_scopes_store_project_insert_v1",
-        table: "graph_scopes",
-        create_sql: "CREATE TRIGGER graph_scopes_store_project_insert_v1
-            BEFORE INSERT ON graph_scopes WHEN NOT EXISTS (
-                SELECT 1 FROM store_instances
-                WHERE store_id = NEW.store_id AND project_id = NEW.project_id
-            ) BEGIN SELECT RAISE(ABORT, 'graph scope store/project mismatch'); END",
-    },
-    Trigger {
-        name: "graph_scopes_store_project_update_v1",
-        table: "graph_scopes",
-        create_sql: "CREATE TRIGGER graph_scopes_store_project_update_v1
-            BEFORE UPDATE OF store_id, project_id ON graph_scopes WHEN NOT EXISTS (
-                SELECT 1 FROM store_instances
-                WHERE store_id = NEW.store_id AND project_id = NEW.project_id
-            ) BEGIN SELECT RAISE(ABORT, 'graph scope store/project mismatch'); END",
-    },
-];
-
 const QUEUE_IDENTITY: &[Trigger] = &[
     Trigger {
         name: "projection_queue_identity_insert_v1",
@@ -1367,16 +1346,6 @@ pub(in crate::schema_contract) const INVARIANTS: &[Invariant] = &[
         violation: "store project identity is not immutable",
     },
     Invariant {
-        triggers: GRAPH_SCOPE_IDENTITY,
-        audit_query: Some(
-            "SELECT 1 FROM graph_scopes AS scope
-             LEFT JOIN store_instances AS store
-               ON store.store_id = scope.store_id AND store.project_id = scope.project_id
-             WHERE store.store_id IS NULL LIMIT 1",
-        ),
-        violation: "graph_scopes contains a store/project identity mismatch",
-    },
-    Invariant {
         triggers: QUEUE_IDENTITY,
         audit_query: Some(
             "SELECT 1 FROM projection_queue AS queue
@@ -1845,10 +1814,8 @@ mod tests {
         );
     }
 
-    /// The identity triggers reject rows whose cross-table keys disagree, so a
-    /// graph scope cannot claim a store owned by another project and the
-    /// projection queue cannot point at a sequence its observation does not
-    /// have.
+    /// The identity triggers reject projection queue rows that diverge from
+    /// their source observation sequence.
     #[tokio::test]
     async fn cross_table_identity_constraints_reject_mismatched_rows() {
         let harness = RegisteredGlobalDbHarness::open("cross-table-identity").await;
@@ -1861,20 +1828,6 @@ mod tests {
             .execute_batch(SEED_PROJECTS)
             .await
             .expect("seed registry identity rows");
-
-        let graph_error = transaction
-            .execute(
-                "INSERT INTO graph_scopes
-                 (graph_scope_id, project_id, store_id, branch_name, db_relpath)
-                 VALUES ('scope_bad', 'project_two', 'store_one', 'main', 'graph.db')",
-                (),
-            )
-            .await
-            .expect_err("graph scope must not claim another project's store");
-        assert!(
-            graph_error.to_string().contains("store/project mismatch"),
-            "{graph_error}"
-        );
 
         transaction
             .execute_batch(

@@ -9,10 +9,9 @@ use tracedecay_runtime_core::db::engine::{
 };
 
 use super::{
-    CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
-    ProjectRegistryContext, ProjectStoreResolution, RegisteredGlobalDb, StoreArtifactRecord,
-    StoreArtifactUpsert, StoreInstanceRecord, StoreInstanceUpsert, global_db_operation_error,
-    global_db_operation_message,
+    CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreResolution,
+    RegisteredGlobalDb, StoreArtifactRecord, StoreArtifactUpsert, StoreInstanceRecord,
+    StoreInstanceUpsert, global_db_operation_error, global_db_operation_message,
 };
 
 // ---------------------------------------------------------------------------
@@ -878,46 +877,6 @@ impl RegisteredGlobalDb {
             .find(|store| store.store_id == upsert.store_id)
     }
 
-    pub async fn upsert_graph_scope(&self, upsert: GraphScopeUpsert) -> Option<GraphScopeRecord> {
-        let transaction = self.begin_write_transaction().await.ok()?;
-        transaction
-            .execute(
-                "INSERT INTO graph_scopes
-                 (graph_scope_id, project_id, store_id, branch_name, db_relpath,
-                  parent_scope_id, last_synced_at, writable)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                 ON CONFLICT(graph_scope_id) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    store_id = excluded.store_id,
-                    branch_name = excluded.branch_name,
-                    db_relpath = excluded.db_relpath,
-                    parent_scope_id = excluded.parent_scope_id,
-                    last_synced_at = excluded.last_synced_at,
-                    writable = excluded.writable",
-                params![
-                    upsert.graph_scope_id.as_str(),
-                    upsert.project_id.as_str(),
-                    upsert.store_id.as_str(),
-                    upsert.branch_name.as_str(),
-                    upsert.db_relpath.as_str(),
-                    upsert.parent_scope_id.as_deref(),
-                    upsert.last_synced_at,
-                    i64::from(upsert.writable)
-                ],
-            )
-            .await
-            .ok()?;
-        transaction.commit().await.ok()?;
-        self.project_registry_context_by_id(&upsert.project_id)
-            .await
-            .ok()
-            .flatten()?
-            .stores
-            .into_iter()
-            .flat_map(|context| context.graph_scopes)
-            .find(|scope| scope.graph_scope_id == upsert.graph_scope_id)
-    }
-
     pub async fn upsert_store_artifact(
         &self,
         upsert: StoreArtifactUpsert,
@@ -1026,7 +985,6 @@ impl RegisteredGlobalDb {
         Some(ProjectStoreResolution {
             project: context.project,
             store: store.store,
-            graph_scopes: store.graph_scopes,
             artifacts: store.artifacts,
         })
     }
@@ -1252,7 +1210,6 @@ impl RegisteredGlobalDb {
         Ok(Some(ProjectStoreResolution {
             project: context.project,
             store: store.store,
-            graph_scopes: store.graph_scopes,
             artifacts: store.artifacts,
         }))
     }

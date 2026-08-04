@@ -60,7 +60,6 @@
 #![allow(rustdoc::private_intra_doc_links)]
 
 pub mod branch;
-pub mod branch_meta;
 pub mod cancellation;
 pub mod config;
 pub mod db;
