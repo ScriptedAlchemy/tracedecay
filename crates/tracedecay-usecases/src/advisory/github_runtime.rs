@@ -42,7 +42,7 @@ pub use decoder::{
     MAX_GITHUB_REVIEW_BODY_BYTES_V1,
 };
 pub use discovery::{
-    GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
+    GitHubDiscoveryControlV1, GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
     discover_exact_commit_pull_request_v1,
 };
 pub use dto::{

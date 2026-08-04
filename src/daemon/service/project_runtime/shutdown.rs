@@ -14,6 +14,21 @@ impl ProjectRuntimeRegistryV1 {
     /// are joined, and process-wide semantic handles are unregistered.
     pub(crate) async fn shut_down_all(&self) {
         self.closed.store(true, Ordering::Release);
+        let advisory_setups = {
+            let runtimes = self.lock_runtimes();
+            runtimes
+                .values()
+                .filter_map(|runtime| {
+                    runtime
+                        .advisory_hook_orchestrator
+                        .as_ref()
+                        .map(RegisteredAdvisoryHookOrchestrationRuntimeV1::runtime)
+                })
+                .collect::<Vec<_>>()
+        };
+        for setup in advisory_setups {
+            setup.cancel_and_join().await;
+        }
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();

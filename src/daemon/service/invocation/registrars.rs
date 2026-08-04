@@ -1021,7 +1021,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
         }
     }
 
-    pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
+    pub(crate) async fn build<GR, GA, CS, CE, PE, PC>(
         &self,
         project_root: PathBuf,
         input: Pr13AdvisoryRuntimeOpenV1,
@@ -1054,38 +1054,16 @@ impl DaemonAdvisoryRuntimeRegistrar {
         if !feedback_registered {
             return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
         }
-        if self
-            .service
-            .project_runtimes
-            .holds::<Arc<dyn Any + Send + Sync>>(&project_root)
-            .await
-        {
-            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
-        }
         let registration = Arc::new(register_pr13_advisory_daemon_startup(
             input,
             providers,
-            lsp_session_factory.clone(),
+            lsp_session_factory,
             hook_delivery_port,
         )?);
-        let registered_root = project_root.clone();
-        let published: Arc<dyn Any + Send + Sync> = registration.clone();
-        self.service
-            .project_runtimes
-            .register(project_root, published)
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
-        self.service
-            .install_lsp_owner(
-                registered_root,
-                DaemonLspInvocationOwner::new(lsp_session_factory),
-            )
-            .await
-            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)?;
         Ok(registration)
     }
 
-    pub(crate) async fn register_production(
+    pub(crate) async fn build_production(
         &self,
         project_root: PathBuf,
         input: Pr13AdvisoryRuntimeOpenV1,
@@ -1097,7 +1075,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
     > {
         let authorities = open_pr13_advisory_production_authorities(production)?;
         let (providers, hook_delivery_port) = authorities.into_registrar_parts();
-        self.register(
+        self.build(
             project_root,
             input,
             providers,
@@ -1105,5 +1083,31 @@ impl DaemonAdvisoryRuntimeRegistrar {
             hook_delivery_port,
         )
         .await
+    }
+
+    pub(crate) async fn publish(
+        &self,
+        project_root: &Path,
+        registration: Arc<dyn Any + Send + Sync>,
+        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
+        feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
+        cancellation: &crate::application::context::CancellationToken,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .publish_advisory_atomically(
+                project_root,
+                registration,
+                advisory_cycle,
+                feedback_input,
+                cancellation,
+            )
+            .await
+            .map_err(|error| match error {
+                FeedbackCyclePublicationError::Registry(error) => error.into(),
+                FeedbackCyclePublicationError::RouterUnavailable => {
+                    DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime
+                }
+            })
     }
 }

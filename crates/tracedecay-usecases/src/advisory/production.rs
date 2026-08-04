@@ -133,7 +133,8 @@ pub fn open_pr13_advisory_production_authorities(
             open_production_ci_provider_authorities_v1(config, ci_retained, ci_code_anchors)
                 .map_err(|_| Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?
         }
-        None => unavailable_production_ci_provider_authorities_v1(),
+        None => unavailable_production_ci_provider_authorities_v1()
+            .map_err(|_| Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable)?,
     };
     let (ci_source, ci_exact_evidence) = ci.into_registrar_parts();
     let hook_delivery_port =

@@ -781,6 +781,57 @@ impl ProjectRuntimeRegistryV1 {
         }
     }
 
+    /// Publishes the complete advisory capability bundle under one registry
+    /// lock. The existing switchable feedback route is updated only after all
+    /// target slots have been proved vacant, so failure exposes neither a
+    /// partial cycle nor an unreachable advisory owner.
+    pub(crate) async fn publish_advisory_atomically(
+        &self,
+        project_root: &Path,
+        advisory: Arc<dyn Any + Send + Sync>,
+        advisory_cycle: DaemonAdvisoryCycleInvocationOwner,
+        feedback_input: Arc<dyn FeedbackCycleRuntimePort>,
+        cancellation: &crate::application::context::CancellationToken,
+    ) -> Result<(), FeedbackCyclePublicationError> {
+        loop {
+            let mut reservation_changed = self.reservation_changed.subscribe();
+            {
+                let mut runtimes = self.lock_runtimes();
+                if self.closed.load(Ordering::Acquire) {
+                    return Err(ProjectRuntimeRegistryError::Closed.into());
+                }
+                let Some(runtime) = runtimes.get_mut(project_root) else {
+                    return Err(FeedbackCyclePublicationError::RouterUnavailable);
+                };
+                let reserved = runtime.reservations.iter().any(|type_id| {
+                    *type_id == TypeId::of::<Arc<dyn Any + Send + Sync>>()
+                        || *type_id == TypeId::of::<DaemonAdvisoryCycleInvocationOwner>()
+                        || *type_id == TypeId::of::<Arc<SwitchableFeedbackCycleRuntimeV1>>()
+                });
+                if !reserved {
+                    if cancellation.is_cancelled() {
+                        return Err(FeedbackCyclePublicationError::RouterUnavailable);
+                    }
+                    if runtime.advisory.is_some() || runtime.advisory_cycle.is_some() {
+                        return Err(ProjectRuntimeRegistryError::AlreadyRegistered.into());
+                    }
+                    runtime
+                        .feedback_cycle_input
+                        .as_ref()
+                        .ok_or(FeedbackCyclePublicationError::RouterUnavailable)?
+                        .replace(feedback_input)
+                        .map_err(|_| FeedbackCyclePublicationError::RouterUnavailable)?;
+                    runtime.advisory = Some(advisory);
+                    runtime.advisory_cycle = Some(advisory_cycle);
+                    return Ok(());
+                }
+            }
+            if reservation_changed.changed().await.is_err() {
+                return Err(ProjectRuntimeRegistryError::Closed.into());
+            }
+        }
+    }
+
     /// Withdraw a component, returning it if it was there.
     pub(crate) async fn withdraw<C>(&self, project_root: &Path) -> Option<C>
     where

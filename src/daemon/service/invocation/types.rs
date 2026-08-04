@@ -69,37 +69,77 @@ pub(crate) trait AdvisoryHookOrchestrationPortV1: Send + Sync {
 }
 
 type AdvisoryHookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type AdvisoryHookOrchestrationWorkV1 =
-    dyn Fn(AdvisoryHookOrchestrationRequestV1) -> AdvisoryHookOrchestrationFutureV1 + Send + Sync;
-type AdvisoryHookOrchestrationKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type AdvisoryHookOrchestrationWorkV1 = dyn Fn(
+        AdvisoryHookOrchestrationRequestV1,
+        crate::application::context::CancellationToken,
+    ) -> AdvisoryHookOrchestrationFutureV1
+    + Send
+    + Sync;
+type AdvisoryHookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type AdvisoryHookOrchestrationAddressV1 = String;
 type AdvisoryHookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
-type AdvisoryHookOrchestrationInFlightV1 =
-    StdMutex<BTreeMap<AdvisoryHookOrchestrationKeyV1, Vec<AdvisoryHookOrchestrationCompletionV1>>>;
+
+struct AdvisoryHookOrchestrationInFlightEntryV1 {
+    event: AdvisoryHookOrchestrationEventKeyV1,
+    generation: u64,
+    cancellation: crate::application::context::CancellationToken,
+    completions: Vec<AdvisoryHookOrchestrationCompletionV1>,
+}
+
+#[derive(Default)]
+struct AdvisoryHookOrchestrationInFlightV1 {
+    next_generation: u64,
+    addresses:
+        BTreeMap<AdvisoryHookOrchestrationAddressV1, AdvisoryHookOrchestrationInFlightEntryV1>,
+}
+
 pub(in crate::daemon::service) const MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS: usize = 32;
 
 pub(crate) struct BoundedAdvisoryHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<AdvisoryHookOrchestrationWorkV1>,
-    in_flight: Arc<AdvisoryHookOrchestrationInFlightV1>,
+    in_flight: Arc<StdMutex<AdvisoryHookOrchestrationInFlightV1>>,
     cancellation: crate::application::context::CancellationToken,
 }
 
 impl BoundedAdvisoryHookOrchestratorV1 {
     pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
     where
-        F: Fn(AdvisoryHookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        F: Fn(
+                AdvisoryHookOrchestrationRequestV1,
+                crate::application::context::CancellationToken,
+            ) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let work: Arc<AdvisoryHookOrchestrationWorkV1> =
-            Arc::new(move |request| Box::pin(work(request)));
+            Arc::new(move |request, cancellation| Box::pin(work(request, cancellation)));
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
-                in_flight: Arc::new(StdMutex::new(BTreeMap::new())),
+                in_flight: Arc::new(StdMutex::new(AdvisoryHookOrchestrationInFlightV1::default())),
                 cancellation: crate::application::context::CancellationToken::new(),
             })
         })
+    }
+
+    fn stable_address(
+        request: &AdvisoryHookOrchestrationRequestV1,
+    ) -> Option<AdvisoryHookOrchestrationAddressV1> {
+        let envelope = request.hook.envelope();
+        canonical_sha256(&(
+            "tracedecay.advisory-hook-address.v1",
+            envelope.project_id,
+            envelope.repository_id,
+            envelope.worktree_id,
+            envelope.protected_session_id,
+            request.lifecycle.as_ref(),
+        ))
+        .ok()
+        .map(|digest| digest.as_str().to_owned())
     }
 }
 
@@ -112,39 +152,99 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
             return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
         };
         let envelope = request.hook.envelope();
-        let key = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let event = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let Some(address) = Self::stable_address(&request) else {
+            return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+        };
         let completion = request.completion.take();
-        let permit = {
+        let (permit, generation, work_cancellation) = {
             let Ok(mut in_flight) = self.in_flight.lock() else {
                 return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
             };
-            if let Some(completions) = in_flight.get_mut(&key) {
+            if let Some(incumbent) = in_flight
+                .addresses
+                .values_mut()
+                .find(|incumbent| incumbent.event == event)
+            {
                 if let Some(completion) = completion {
-                    if completions.len() >= MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS {
+                    if incumbent.completions.len() >= MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS {
                         return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
                     }
-                    completions.push(completion);
+                    incumbent.completions.push(completion);
                 }
                 return AdvisoryHookOrchestrationAdmissionV1::Enqueued;
             }
-            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+            let permit = if let Some(incumbent) = in_flight.addresses.get(&address) {
+                incumbent.cancellation.cancel();
+                None
+            } else {
+                let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                    return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+                };
+                Some(permit)
             };
-            in_flight.insert(key, completion.into_iter().collect());
-            permit
+            in_flight.next_generation = in_flight.next_generation.wrapping_add(1).max(1);
+            let generation = in_flight.next_generation;
+            let work_cancellation = crate::application::context::CancellationToken::new();
+            in_flight.addresses.insert(
+                address.clone(),
+                AdvisoryHookOrchestrationInFlightEntryV1 {
+                    event,
+                    generation,
+                    cancellation: work_cancellation.clone(),
+                    completions: completion.into_iter().collect(),
+                },
+            );
+            (permit, generation, work_cancellation)
         };
         let work = Arc::clone(&self.work);
         let in_flight = Arc::clone(&self.in_flight);
         let cancellation = self.cancellation.clone();
+        let permits = Arc::clone(&self.permits);
         handle.spawn(async move {
+            let permit = match permit {
+                Some(permit) => Some(permit),
+                None => tokio::select! {
+                    () = cancellation.cancelled() => None,
+                    () = work_cancellation.cancelled() => None,
+                    permit = permits.acquire_owned() => permit.ok(),
+                },
+            };
+            let Some(permit) = permit else {
+                let mut in_flight = in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if in_flight
+                    .addresses
+                    .get(&address)
+                    .is_some_and(|entry| entry.generation == generation)
+                {
+                    in_flight.addresses.remove(&address);
+                }
+                return;
+            };
             let completed = tokio::select! {
                 () = cancellation.cancelled() => false,
-                () = (work)(request) => true,
+                () = work_cancellation.cancelled() => false,
+                () = (work)(request, work_cancellation.clone()) => true,
             };
-            let completions = in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&key);
+            let completions = {
+                let mut in_flight = in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if in_flight
+                    .addresses
+                    .get(&address)
+                    .is_some_and(|entry| entry.generation == generation)
+                {
+                    in_flight
+                        .addresses
+                        .remove(&address)
+                        .map(|entry| entry.completions)
+                } else {
+                    None
+                }
+            };
             match completions {
                 Some(completions) if completed => {
                     for completion in completions {
@@ -166,6 +266,11 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
 impl Drop for BoundedAdvisoryHookOrchestratorV1 {
     fn drop(&mut self) {
         self.cancellation.cancel();
+        if let Ok(in_flight) = self.in_flight.lock() {
+            for entry in in_flight.addresses.values() {
+                entry.cancellation.cancel();
+            }
+        }
     }
 }
 
@@ -195,12 +300,17 @@ pub(crate) enum AdvisoryRuntimeReadinessV1 {
 }
 
 enum DeferredAdvisoryHookOrchestratorStateV1 {
-    Warming,
+    Warming {
+        started_at: UtcMicros,
+        claimed: bool,
+    },
     Ready {
+        started_at: UtcMicros,
         runtime: Arc<dyn AdvisoryHookOrchestrationPortV1>,
         finished_at: UtcMicros,
     },
     Unavailable {
+        started_at: UtcMicros,
         reason: AdvisoryRuntimeUnavailableReasonV1,
         finished_at: UtcMicros,
     },
@@ -212,39 +322,54 @@ enum DeferredAdvisoryHookOrchestratorStateV1 {
 /// admission distinguishes a live warming owner from a terminally unavailable
 /// one. Setup has one claim and project-runtime retirement cancels that claim.
 pub(crate) struct DeferredAdvisoryHookOrchestratorV1 {
-    started_at: UtcMicros,
     state: StdMutex<DeferredAdvisoryHookOrchestratorStateV1>,
-    setup_claimed: AtomicBool,
+    setup_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     cancellation: crate::application::context::CancellationToken,
 }
 
 impl DeferredAdvisoryHookOrchestratorV1 {
     pub(crate) fn new(started_at: UtcMicros) -> Arc<Self> {
         Arc::new(Self {
-            started_at,
-            state: StdMutex::new(DeferredAdvisoryHookOrchestratorStateV1::Warming),
-            setup_claimed: AtomicBool::new(false),
+            state: StdMutex::new(DeferredAdvisoryHookOrchestratorStateV1::Warming {
+                started_at,
+                claimed: false,
+            }),
+            setup_task: Mutex::new(None),
             cancellation: crate::application::context::CancellationToken::new(),
         })
     }
 
     pub(crate) fn claim_setup(&self) -> bool {
-        if self.cancellation.is_cancelled()
-            || !matches!(
-                self.state.lock().as_deref(),
-                Ok(DeferredAdvisoryHookOrchestratorStateV1::Warming)
-            )
-        {
+        if self.cancellation.is_cancelled() {
             return false;
         }
-        self.setup_claimed
-            .compare_exchange(
-                false,
-                true,
-                std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Acquire,
-            )
-            .is_ok()
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        match &mut *state {
+            DeferredAdvisoryHookOrchestratorStateV1::Warming { claimed, .. } if !*claimed => {
+                *claimed = true;
+                true
+            }
+            DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+                reason:
+                    AdvisoryRuntimeUnavailableReasonV1::DeadlineExceeded
+                    | AdvisoryRuntimeUnavailableReasonV1::RegistrationFailed,
+                ..
+            } => {
+                *state = DeferredAdvisoryHookOrchestratorStateV1::Warming {
+                    started_at: now_micros(),
+                    claimed: true,
+                };
+                true
+            }
+            DeferredAdvisoryHookOrchestratorStateV1::Warming { .. }
+            | DeferredAdvisoryHookOrchestratorStateV1::Ready { .. }
+            | DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+                reason: AdvisoryRuntimeUnavailableReasonV1::Cancelled,
+                ..
+            } => false,
+        }
     }
 
     pub(crate) fn cancellation(&self) -> crate::application::context::CancellationToken {
@@ -257,22 +382,25 @@ impl DeferredAdvisoryHookOrchestratorV1 {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*state {
-            DeferredAdvisoryHookOrchestratorStateV1::Warming => {
+            DeferredAdvisoryHookOrchestratorStateV1::Warming { started_at, .. } => {
                 AdvisoryRuntimeReadinessV1::Warming {
-                    started_at: self.started_at,
+                    started_at: *started_at,
                 }
             }
-            DeferredAdvisoryHookOrchestratorStateV1::Ready { finished_at, .. } => {
-                AdvisoryRuntimeReadinessV1::Ready {
-                    started_at: self.started_at,
-                    finished_at: *finished_at,
-                }
-            }
+            DeferredAdvisoryHookOrchestratorStateV1::Ready {
+                started_at,
+                finished_at,
+                ..
+            } => AdvisoryRuntimeReadinessV1::Ready {
+                started_at: *started_at,
+                finished_at: *finished_at,
+            },
             DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+                started_at,
                 reason,
                 finished_at,
             } => AdvisoryRuntimeReadinessV1::Unavailable {
-                started_at: self.started_at,
+                started_at: *started_at,
                 finished_at: *finished_at,
                 reason: *reason,
             },
@@ -292,10 +420,15 @@ impl DeferredAdvisoryHookOrchestratorV1 {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, DeferredAdvisoryHookOrchestratorStateV1::Warming) {
+        let DeferredAdvisoryHookOrchestratorStateV1::Warming {
+            started_at,
+            claimed: true,
+        } = *state
+        else {
             return false;
-        }
+        };
         *state = DeferredAdvisoryHookOrchestratorStateV1::Ready {
+            started_at,
             runtime,
             finished_at,
         };
@@ -311,33 +444,80 @@ impl DeferredAdvisoryHookOrchestratorV1 {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, DeferredAdvisoryHookOrchestratorStateV1::Warming) {
+        let DeferredAdvisoryHookOrchestratorStateV1::Warming {
+            started_at,
+            claimed: true,
+        } = *state
+        else {
             return false;
-        }
+        };
         *state = DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+            started_at,
             reason,
             finished_at,
         };
         true
     }
 
-    pub(crate) fn cancel(&self) {
+    pub(crate) async fn retain_setup_task(
+        &self,
+        task: tokio::task::JoinHandle<()>,
+    ) -> Result<(), tokio::task::JoinHandle<()>> {
+        let task = task;
+        loop {
+            let incumbent = {
+                let mut setup_task = self.setup_task.lock().await;
+                if self.cancellation.is_cancelled() {
+                    return Err(task);
+                }
+                match setup_task.take() {
+                    Some(incumbent) => Some(incumbent),
+                    None => {
+                        *setup_task = Some(task);
+                        return Ok(());
+                    }
+                }
+            };
+            if let Some(incumbent) = incumbent {
+                let _ = incumbent.await;
+            }
+        }
+    }
+
+    pub(crate) async fn setup_task_finished(&self) {
+        self.setup_task.lock().await.take();
+    }
+
+    pub(crate) async fn cancel_and_join(&self) {
         self.cancellation.cancel();
         let finished_at = now_micros();
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(
-            *state,
-            DeferredAdvisoryHookOrchestratorStateV1::Warming
-                | DeferredAdvisoryHookOrchestratorStateV1::Ready { .. }
-        ) {
-            *state = DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
-                reason: AdvisoryRuntimeUnavailableReasonV1::Cancelled,
-                finished_at,
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let started_at = match &*state {
+                DeferredAdvisoryHookOrchestratorStateV1::Warming { started_at, .. }
+                | DeferredAdvisoryHookOrchestratorStateV1::Ready { started_at, .. } => {
+                    Some(*started_at)
+                }
+                DeferredAdvisoryHookOrchestratorStateV1::Unavailable { .. } => None,
             };
+            if let Some(started_at) = started_at {
+                *state = DeferredAdvisoryHookOrchestratorStateV1::Unavailable {
+                    started_at,
+                    reason: AdvisoryRuntimeUnavailableReasonV1::Cancelled,
+                    finished_at,
+                };
+            }
         }
+        if let Some(task) = self.setup_task.lock().await.take() {
+            let _ = task.await;
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
     }
 }
 
@@ -364,7 +544,7 @@ impl AdvisoryHookOrchestrationPortV1 for DeferredAdvisoryHookOrchestratorV1 {
                 DeferredAdvisoryHookOrchestratorStateV1::Ready { runtime, .. } => {
                     Arc::clone(runtime)
                 }
-                DeferredAdvisoryHookOrchestratorStateV1::Warming
+                DeferredAdvisoryHookOrchestratorStateV1::Warming { .. }
                 | DeferredAdvisoryHookOrchestratorStateV1::Unavailable { .. } => {
                     return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
                 }

@@ -1,7 +1,6 @@
 //! Retained lifecycle for advisory and Context Scout post-open setup.
 
 use std::future::Future;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,41 +13,45 @@ use super::service::invocation::{
 use crate::errors::{Result, TraceDecayError};
 
 const POST_OPEN_ADVISORY_SETUP_BUDGET: Duration = Duration::from_secs(15);
+const POST_OPEN_ADVISORY_CANCELLATION_GRACE: Duration = Duration::from_millis(250);
 
 /// Starts at most one bounded setup for a retained deferred gateway.
 ///
 /// The gateway itself is already published, so callers see `warming` while
 /// this future runs. Project-runtime retirement cancels the shared token and
 /// drops the setup future before it can publish a stale delegate.
-pub(super) fn schedule_bounded_post_open_advisory_setup<F>(
-    project_root: PathBuf,
+pub(super) async fn schedule_bounded_post_open_advisory_setup<F, Fut>(
     deferred: Arc<DeferredAdvisoryHookOrchestratorV1>,
     setup: F,
 ) -> bool
 where
-    F: Future<Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>> + Send + 'static,
+    F: FnOnce(crate::application::context::CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>> + Send + 'static,
 {
     schedule_bounded_post_open_advisory_setup_with_budget(
-        project_root,
         deferred,
         setup,
         POST_OPEN_ADVISORY_SETUP_BUDGET,
     )
+    .await
 }
 
-fn schedule_bounded_post_open_advisory_setup_with_budget<F>(
-    project_root: PathBuf,
+async fn schedule_bounded_post_open_advisory_setup_with_budget<F, Fut>(
     deferred: Arc<DeferredAdvisoryHookOrchestratorV1>,
     setup: F,
     budget: Duration,
 ) -> bool
 where
-    F: Future<Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>> + Send + 'static,
+    F: FnOnce(crate::application::context::CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>> + Send + 'static,
 {
     if !deferred.claim_setup() {
         return false;
     }
-    tokio::spawn(async move {
+    let (start, started) = tokio::sync::oneshot::channel();
+    let retained = Arc::clone(&deferred);
+    let task = tokio::spawn(async move {
+        let _ = started.await;
         let cancellation = deferred.cancellation();
         let setup_started_at = match deferred.readiness() {
             AdvisoryRuntimeReadinessV1::Warming { started_at }
@@ -62,35 +65,41 @@ where
             DeadlineExceeded,
             Failed(TraceDecayError),
         }
+        let work_cancellation = crate::application::context::CancellationToken::new();
+        let mut setup_task = tokio::spawn(setup(work_cancellation.clone()));
         let outcome = tokio::select! {
             biased;
-            () = cancellation.cancelled() => SetupOutcome::Cancelled,
+            result = &mut setup_task => match result {
+                Ok(Ok(runtime)) => SetupOutcome::Ready(runtime),
+                Ok(Err(error)) => SetupOutcome::Failed(error),
+                Err(error) => SetupOutcome::Failed(TraceDecayError::Config {
+                    message: format!("advisory runtime setup task failed: {error}"),
+                }),
+            },
+            () = cancellation.cancelled() => {
+                work_cancellation.cancel();
+                join_cancelled_setup(&mut setup_task).await;
+                SetupOutcome::Cancelled
+            },
             () = tokio::time::sleep(budget) => {
+                work_cancellation.cancel();
+                join_cancelled_setup(&mut setup_task).await;
                 SetupOutcome::DeadlineExceeded
             }
-            result = &mut setup => match result {
-                Ok(runtime) => SetupOutcome::Ready(runtime),
-                Err(error) => SetupOutcome::Failed(error),
-            },
         };
         let finished_at = now_micros();
         match outcome {
             SetupOutcome::Ready(runtime) => {
                 if deferred.mark_ready(runtime, finished_at) {
                     tracing::info!(
-                        event = "project_open_owner_phase",
-                        project = %project_root.display(),
-                        phase = "advisory_owner_registered",
+                        event = "advisory_runtime_setup",
                         state = "ready",
-                        deferred = true,
                         started_at_micros = setup_started_at.0,
                         finished_at_micros = finished_at.0,
                     );
                 } else {
                     tracing::info!(
-                        event = "project_open_owner_phase",
-                        project = %project_root.display(),
-                        phase = "advisory_owner_cancelled",
+                        event = "advisory_runtime_setup",
                         state = "unavailable",
                         reason = "cancelled",
                         started_at_micros = setup_started_at.0,
@@ -102,9 +111,7 @@ where
                 deferred
                     .mark_unavailable(AdvisoryRuntimeUnavailableReasonV1::Cancelled, finished_at);
                 tracing::info!(
-                    event = "project_open_owner_phase",
-                    project = %project_root.display(),
-                    phase = "advisory_owner_cancelled",
+                    event = "advisory_runtime_setup",
                     state = "unavailable",
                     reason = "cancelled",
                     started_at_micros = setup_started_at.0,
@@ -117,9 +124,7 @@ where
                     finished_at,
                 );
                 tracing::warn!(
-                    event = "project_open_owner_phase",
-                    project = %project_root.display(),
-                    phase = "advisory_owner_deferred_failed",
+                    event = "advisory_runtime_setup",
                     state = "unavailable",
                     reason = "deadline_exceeded",
                     started_at_micros = setup_started_at.0,
@@ -132,9 +137,7 @@ where
                     finished_at,
                 );
                 tracing::warn!(
-                    event = "project_open_owner_phase",
-                    project = %project_root.display(),
-                    phase = "advisory_owner_deferred_failed",
+                    event = "advisory_runtime_setup",
                     state = "unavailable",
                     reason = "registration_failed",
                     started_at_micros = setup_started_at.0,
@@ -143,8 +146,28 @@ where
                 );
             }
         }
+        deferred.setup_task_finished().await;
     });
+    if let Err(task) = retained.retain_setup_task(task).await {
+        task.abort();
+        let _ = task.await;
+        retained.mark_unavailable(AdvisoryRuntimeUnavailableReasonV1::Cancelled, now_micros());
+        return false;
+    }
+    let _ = start.send(());
     true
+}
+
+async fn join_cancelled_setup(
+    task: &mut tokio::task::JoinHandle<Result<Arc<dyn AdvisoryHookOrchestrationPortV1>>>,
+) {
+    if tokio::time::timeout(POST_OPEN_ADVISORY_CANCELLATION_GRACE, &mut *task)
+        .await
+        .is_err()
+    {
+        task.abort();
+        let _ = task.await;
+    }
 }
 
 #[cfg(test)]
@@ -156,12 +179,14 @@ mod tests {
     #[tokio::test]
     async fn post_open_advisory_setup_has_a_truthful_terminal_deadline() {
         let deferred = DeferredAdvisoryHookOrchestratorV1::new(now_micros());
-        assert!(schedule_bounded_post_open_advisory_setup_with_budget(
-            PathBuf::from("/project"),
-            Arc::clone(&deferred),
-            std::future::pending(),
-            Duration::from_millis(1),
-        ));
+        assert!(
+            schedule_bounded_post_open_advisory_setup_with_budget(
+                Arc::clone(&deferred),
+                |_| std::future::pending(),
+                Duration::from_millis(1),
+            )
+            .await
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             while matches!(
                 deferred.readiness(),
@@ -204,21 +229,17 @@ mod tests {
 
         let deferred = DeferredAdvisoryHookOrchestratorV1::new(now_micros());
         let setup_dropped = Arc::new(AtomicBool::new(false));
-        assert!(schedule_bounded_post_open_advisory_setup_with_budget(
-            PathBuf::from("/project"),
-            Arc::clone(&deferred),
-            PendingSetup(Arc::clone(&setup_dropped)),
-            Duration::from_secs(10),
-        ));
+        assert!(
+            schedule_bounded_post_open_advisory_setup_with_budget(
+                Arc::clone(&deferred),
+                |_| PendingSetup(Arc::clone(&setup_dropped)),
+                Duration::from_secs(10),
+            )
+            .await
+        );
         tokio::task::yield_now().await;
-        deferred.cancel();
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !setup_dropped.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("cancelled setup dropped");
+        deferred.cancel_and_join().await;
+        assert!(setup_dropped.load(Ordering::Acquire));
         assert!(matches!(
             deferred.readiness(),
             AdvisoryRuntimeReadinessV1::Unavailable {
@@ -226,5 +247,54 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn failed_setup_can_be_retried_without_republishing_the_gateway() {
+        struct Ready;
+        impl AdvisoryHookOrchestrationPortV1 for Ready {
+            fn admit(
+                &self,
+                _request: super::super::service::invocation::AdvisoryHookOrchestrationRequestV1,
+            ) -> super::super::service::invocation::AdvisoryHookOrchestrationAdmissionV1
+            {
+                super::super::service::invocation::AdvisoryHookOrchestrationAdmissionV1::Enqueued
+            }
+        }
+
+        let deferred = DeferredAdvisoryHookOrchestratorV1::new(now_micros());
+        assert!(
+            schedule_bounded_post_open_advisory_setup_with_budget(
+                Arc::clone(&deferred),
+                |_| async {
+                    Err(TraceDecayError::Config {
+                        message: "injected setup failure".to_owned(),
+                    })
+                },
+                Duration::from_secs(1),
+            )
+            .await
+        );
+        tokio::task::yield_now().await;
+        while matches!(
+            deferred.readiness(),
+            AdvisoryRuntimeReadinessV1::Warming { .. }
+        ) {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            schedule_bounded_post_open_advisory_setup_with_budget(
+                Arc::clone(&deferred),
+                |_| async { Ok(Arc::new(Ready) as Arc<dyn AdvisoryHookOrchestrationPortV1>) },
+                Duration::from_secs(1),
+            )
+            .await
+        );
+        while !matches!(
+            deferred.readiness(),
+            AdvisoryRuntimeReadinessV1::Ready { .. }
+        ) {
+            tokio::task::yield_now().await;
+        }
     }
 }

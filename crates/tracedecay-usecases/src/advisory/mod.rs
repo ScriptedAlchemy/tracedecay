@@ -88,7 +88,7 @@ pub use host_delivery::{
 };
 pub use host_delivery::{
     acknowledge_pr13_advisory_hook_notice, peek_pr13_advisory_hook_notice,
-    register_pr13_advisory_hook_notice_queue,
+    register_pr13_advisory_hook_notice_queue, unregister_pr13_advisory_hook_notice_queue,
 };
 pub use production::{
     Pr13AdvisoryProductionAuthoritiesV1, Pr13AdvisoryProductionHookDeliveryPortV1,
