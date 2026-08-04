@@ -249,6 +249,7 @@ pub(in crate::daemon::service) use types::{
 #[derive(Clone)]
 pub(crate) struct DaemonInvocationService {
     code_index_schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    lsp_admission_open: Arc<Mutex<bool>>,
     lsp_sessions: Arc<Mutex<BTreeMap<LspSessionId, RuntimeLspSession>>>,
     lsp_lease_tasks: Arc<LspLeaseTaskRegistry>,
     authorized_lsp_workspaces: Arc<Mutex<BTreeMap<ManifestDigest, AuthorizedDaemonLspWorkspace>>>,
@@ -274,6 +275,7 @@ impl DaemonInvocationService {
     ) -> Self {
         Self {
             code_index_schedulers,
+            lsp_admission_open: Arc::new(Mutex::new(true)),
             lsp_sessions: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_lease_tasks: Arc::new(LspLeaseTaskRegistry::default()),
             authorized_lsp_workspaces: Arc::new(Mutex::new(BTreeMap::new())),

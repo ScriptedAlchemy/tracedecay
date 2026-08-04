@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
@@ -1604,6 +1605,76 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         git_stdout(&fixture.project, &["write-tree"]),
         cancellation_tree,
         "CLI/MCP cancellation must leave native Git state unchanged"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
+    let fixture = lsp_runtime_fixture().await;
+    let root_uri = url::Url::from_directory_path(&fixture.project)
+        .expect("project root URI")
+        .to_string();
+    let frames = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": {}
+        }),
+    ];
+    let mut command = common::tracedecay_command_with_home(fixture.home());
+    command
+        .current_dir(&fixture.project)
+        .args([
+            "lsp",
+            "bridge",
+            "--stdio",
+            "--project",
+            fixture.project.to_str().expect("UTF-8 project path"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut bridge =
+        common::TestChildProcess::new(command.spawn().expect("spawn stdio LSP bridge"));
+    {
+        let stdin = bridge.stdin_mut().expect("bridge stdin");
+        for frame in frames {
+            let payload = frame.to_string();
+            write!(stdin, "Content-Length: {}\r\n\r\n{payload}", payload.len())
+                .expect("write LSP frame");
+        }
+        stdin.flush().expect("flush LSP frames");
+    }
+    let output = bridge
+        .wait_with_output(std::time::Duration::from_secs(20))
+        .expect("stdio LSP bridge exit");
+
+    assert!(
+        output.status.success(),
+        "graceful LSP exit must not fail explicit bridge detach: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

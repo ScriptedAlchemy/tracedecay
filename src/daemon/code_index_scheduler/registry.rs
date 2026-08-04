@@ -1879,6 +1879,7 @@ impl CodeIndexSchedulerRegistryV1 {
     }
 
     pub async fn shutdown(&self) {
+        self.cancel();
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
         self.test_attribution_authorities
             .write()
@@ -1890,6 +1891,17 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         for (_, worktree) in mounted {
             let _ = worktree.task.await;
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.mount_admission.close();
+        self.background_reconcile_admission.close();
+        if let Ok(mounted) = self.mounted.try_lock() {
+            for worktree in mounted.values() {
+                worktree.shutting_down.store(true, Ordering::Release);
+                worktree.wake.notify_one();
+            }
         }
     }
 }
