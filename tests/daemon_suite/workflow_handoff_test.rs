@@ -1,4 +1,4 @@
-//! PR17 workflow/handoff runtime: a direct daemon restart journey.
+//! Workflow/handoff runtime: a direct daemon restart journey.
 //!
 //! Definitions, activations, single-use handoff tokens, and fan-out execution
 //! fencing all share the registered Work SQLite channel

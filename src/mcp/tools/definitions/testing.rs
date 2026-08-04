@@ -92,18 +92,18 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
     def_rw(
         "tracedecay_run_affected_tests",
         "Run Affected Tests",
-        "Run `cargo test` for tests that cover the symbols in `changed_paths` \
-         (or, if omitted, the files changed in the working tree). Closes the \
-         loop opened by `tracedecay_test_map` / `tracedecay_test_risk` — emits \
-         pass/fail per test alongside the source nodes each test covers. \
-         Output is the libtest summary parsed into JSON.",
+        "Run `cargo test` for tests that cover the symbols in the explicit \
+         `changed_paths` manifest. Closes the loop opened by \
+         `tracedecay_test_map` / `tracedecay_test_risk` — emits pass/fail per \
+         test alongside the source nodes each test covers. Output is the \
+         libtest summary parsed into JSON.",
         json!({
             "type": "object",
             "properties": {
                 "changed_paths": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Explicit file paths to compute affected tests from. Defaults to `git diff --name-only` against the working tree."
+                    "description": "Explicit manifest of file paths used to compute affected tests."
                 },
                 "profile": {
                     "type": "string",
@@ -118,7 +118,8 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
                     "type": "number",
                     "description": "Cap on tests dispatched in a single invocation (default: 100)."
                 }
-            }
+            },
+            "required": ["changed_paths"]
         }),
     )
 }
@@ -157,4 +158,18 @@ pub(super) fn def_diagnostics() -> ToolDefinition {
             }
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::def_run_affected_tests;
+
+    #[test]
+    fn affected_test_execution_requires_an_explicit_file_manifest() {
+        let definition = def_run_affected_tests();
+        assert_eq!(
+            definition.input_schema["required"],
+            serde_json::json!(["changed_paths"])
+        );
+    }
 }
