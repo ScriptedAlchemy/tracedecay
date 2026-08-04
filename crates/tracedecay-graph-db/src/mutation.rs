@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use grafeo_common::types::Value;
 use grafeo_engine::{GrafeoDB, Session};
 
+use crate::error::rollback_failure;
 use crate::schema::{
     ENTITY_KEY_PROPERTY, ENTITY_LABEL, FORMAT_LABEL, PROJECTION_KEY_PROPERTY, PROJECTION_LABEL,
     PUBLICATION_KEY_PROPERTY, PUBLICATION_LABEL, RELATION_KEY_PROPERTY, RELATION_LABEL,
@@ -59,12 +60,14 @@ pub(crate) fn apply(
         publication_record.as_ref(),
     );
     if let Err(error) = result {
-        rollback_or_poison(&mut session, error, poisoned)?;
-        unreachable!("rollback_or_poison always returns an error")
+        return Err(rollback_or_poison(&mut session, error, poisoned));
     }
     if batch.cancellation.is_cancelled() {
-        rollback_or_poison(&mut session, GraphDbError::Cancelled, poisoned)?;
-        unreachable!("rollback_or_poison always returns an error")
+        return Err(rollback_or_poison(
+            &mut session,
+            GraphDbError::Cancelled,
+            poisoned,
+        ));
     }
     session.commit().map_err(map_commit_error)?;
     state.sequence = sequence;
@@ -235,6 +238,17 @@ fn replace_entity(
         &prior_properties,
         batch,
     )?;
+    // Grafeo 0.5.42's GQL SET path tracks the node write but does not persist
+    // a vector parameter on an existing node. Replay vector scalars inside the
+    // same tracked transaction so commit/rollback remains authoritative. HNSW
+    // maintenance still happens only after commit in `GraphDb::apply_locked`.
+    for (name, value) in &properties {
+        if matches!(value, Value::Vector(_)) {
+            session
+                .set_node_property(previous.node, name, value.clone())
+                .map_err(|error| GraphDbError::unavailable(error.to_string()))?;
+        }
+    }
     tracked_replace_labels(
         session,
         ENTITY_LABEL,
@@ -618,16 +632,14 @@ fn rollback_or_poison(
     session: &mut Session,
     error: GraphDbError,
     poisoned: &AtomicBool,
-) -> Result<(), GraphDbError> {
-    if let Err(rollback_error) = session.rollback() {
-        poisoned.store(true, Ordering::Release);
-        return Err(GraphDbError::DurabilityUncertain {
-            message: format!(
-                "pre-commit failure `{error}` followed by rollback failure: {rollback_error}"
-            ),
-        });
+) -> GraphDbError {
+    match session.rollback() {
+        Ok(()) => error,
+        Err(rollback_error) => {
+            poisoned.store(true, Ordering::Release);
+            rollback_failure("pre-commit", error, rollback_error)
+        }
     }
-    Err(error)
 }
 
 fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {

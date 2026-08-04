@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use grafeo_common::types::Value;
 
-use super::GraphDb;
+use super::{GraphDb, require_committed_vector_scalar};
 use crate::{
     GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
     GraphFormatVersion, GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty,
@@ -190,4 +190,28 @@ fn grafeo_query_mutations_track_conflicting_marker_writes() {
     );
     first.rollback().unwrap();
     second.rollback().unwrap();
+}
+
+#[test]
+fn vector_index_refresh_requires_the_identical_committed_scalar() {
+    let database = grafeo_engine::GrafeoDB::new_in_memory();
+    let expected = Value::Vector(vec![1.0_f32, 2.0].into());
+    let node = database
+        .session()
+        .create_node_with_props(&["Vector"], [("embedding", expected.clone())])
+        .unwrap();
+
+    assert_eq!(
+        require_committed_vector_scalar(&database, node, "embedding", &expected),
+        Ok(())
+    );
+    assert!(matches!(
+        require_committed_vector_scalar(
+            &database,
+            node,
+            "embedding",
+            &Value::Vector(vec![2.0_f32, 1.0].into()),
+        ),
+        Err(GraphDbError::DurabilityUncertain { .. })
+    ));
 }

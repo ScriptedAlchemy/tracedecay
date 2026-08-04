@@ -19,7 +19,10 @@ pub use projection::{
     GraphRelation, GraphRelationId, GraphRelationKind, GraphVector, GraphWatermark,
     GraphWriteBatch, NeverCancelled, ProjectionReplacement, SourceGeneration,
 };
-pub use projection_read::GraphProjectionLabelPage;
+pub use projection_read::{
+    GraphProjectionLabelPage, GraphProjectionPage, GraphProjectionReadRequest,
+    GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
+};
 pub use publication::GraphPublication;
 pub use runtime::{GraphDb, GraphSnapshot};
 pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
