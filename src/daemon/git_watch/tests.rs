@@ -439,7 +439,11 @@ async fn ensure_watching_or_skip(watcher: &GitWatcher, repo: &Path) -> Option<Ar
         Debounce,
         Degraded,
     }
-    watcher.ensure_watching(repo).await;
+    assert_eq!(
+        watcher.ensure_watching(repo).await,
+        GitWatcherAdmission::Ready,
+        "a valid repository must be admitted before watcher readiness"
+    );
     let state = ready_registered_state(watcher, repo).await;
 
     let outcome = tokio::time::timeout(TEST_READY_TIMEOUT, async {
@@ -487,16 +491,28 @@ async fn ensure_watching_registers_dedups_and_caps() {
     let watcher = GitWatcher::new(config);
     assert!(watcher.is_enabled());
 
-    watcher.ensure_watching(repo_a.path()).await;
+    assert_eq!(
+        watcher.ensure_watching(repo_a.path()).await,
+        GitWatcherAdmission::Ready
+    );
     assert_eq!(watcher.health_report().await.len(), 1);
 
-    watcher.ensure_watching(repo_a.path()).await;
+    assert_eq!(
+        watcher.ensure_watching(repo_a.path()).await,
+        GitWatcherAdmission::Ready
+    );
     assert_eq!(watcher.health_report().await.len(), 1);
 
-    watcher.ensure_watching(repo_b.path()).await;
+    assert_eq!(
+        watcher.ensure_watching(repo_b.path()).await,
+        GitWatcherAdmission::Ready
+    );
     assert_eq!(watcher.health_report().await.len(), 2);
 
-    watcher.ensure_watching(repo_c.path()).await;
+    assert_eq!(
+        watcher.ensure_watching(repo_c.path()).await,
+        GitWatcherAdmission::Capacity
+    );
     assert_eq!(watcher.health_report().await.len(), 2);
 }
 
@@ -508,9 +524,18 @@ async fn linked_worktrees_share_one_repository_watcher() {
     let mut config = fast_watch_config();
     config.watch_max_projects = 1;
     let watcher = GitWatcher::new(config);
-    watcher.ensure_watching(&primary).await;
-    watcher.ensure_watching(&linked).await;
-    watcher.ensure_watching(unrelated.path()).await;
+    assert_eq!(
+        watcher.ensure_watching(&primary).await,
+        GitWatcherAdmission::Ready
+    );
+    assert_eq!(
+        watcher.ensure_watching(&linked).await,
+        GitWatcherAdmission::Ready
+    );
+    assert_eq!(
+        watcher.ensure_watching(unrelated.path()).await,
+        GitWatcherAdmission::Capacity
+    );
 
     let projects = watcher.inner.projects.lock().await;
     assert_eq!(
@@ -604,7 +629,10 @@ async fn linked_worktree_operation_holds_real_debounce_until_marker_clears() {
     let Some(state) = ensure_watching_or_skip(&watcher, &primary).await else {
         return;
     };
-    watcher.ensure_watching(&linked).await;
+    assert_eq!(
+        watcher.ensure_watching(&linked).await,
+        GitWatcherAdmission::Ready
+    );
     tokio::time::timeout(TEST_READY_TIMEOUT, state.entered_debounce.notified())
         .await
         .expect("linked-worktree registration must rebuild the repository watcher");
@@ -705,8 +733,33 @@ async fn disabled_watcher_never_registers() {
     config.auto_watch = false;
     let watcher = GitWatcher::new(config);
     assert!(!watcher.is_enabled());
-    watcher.ensure_watching(repo.path()).await;
+    assert_eq!(
+        watcher.ensure_watching(repo.path()).await,
+        GitWatcherAdmission::Disabled
+    );
     assert!(watcher.health_report().await.is_empty());
+}
+
+#[tokio::test]
+async fn missing_or_dangling_project_identity_is_rejected() {
+    let tmp = tempfile::tempdir().expect("identity fixture");
+    let missing = tmp.path().join("missing");
+    let dangling = tmp.path().join("dangling");
+    std::os::unix::fs::symlink(&missing, &dangling).expect("dangling project symlink");
+    let watcher = GitWatcher::new(fast_watch_config());
+
+    for root in [&missing, &dangling] {
+        let outcome = watcher.ensure_watching(root).await;
+        assert_eq!(
+            outcome,
+            GitWatcherAdmission::IdentityUnavailable,
+            "an unresolved project root must not be admitted as a watcher identity"
+        );
+    }
+    assert!(
+        watcher.inner.projects.lock().await.is_empty(),
+        "rejected identities must not create a repository owner"
+    );
 }
 
 #[tokio::test]

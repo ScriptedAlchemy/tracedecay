@@ -49,7 +49,7 @@ use super::store_maintenance;
 use super::{log_daemon_event, maintenance::MaintenanceCoordinator};
 
 mod state;
-use state::WatchState;
+use state::{WatchState, WorktreeRegistration};
 
 /// Degraded watchers fall back to polling git metadata every 5 minutes.
 const DEGRADED_POLL_INTERVAL: Duration = Duration::from_mins(5);
@@ -162,6 +162,21 @@ pub struct GitWatcher {
     inner: Arc<GitWatcherInner>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "watcher admission rejection must remain a truthful fallback state"]
+pub(super) enum GitWatcherAdmission {
+    Ready,
+    Disabled,
+    Capacity,
+    IdentityUnavailable,
+}
+
+struct WatchIdentity {
+    canonical_root: PathBuf,
+    common_dir: PathBuf,
+    git_dir: PathBuf,
+}
+
 pub(super) struct GitWatcherInner {
     pub(super) config: SyncConfig,
     maintenance: MaintenanceCoordinator,
@@ -268,29 +283,34 @@ impl GitWatcher {
     /// Lazily starts watching `project_root` if not already watched and under
     /// the repository cap. Linked worktrees register distinct scheduler roots
     /// on one common-directory watcher.
-    pub async fn ensure_watching(&self, project_root: &Path) {
+    pub async fn ensure_watching(&self, project_root: &Path) -> GitWatcherAdmission {
         if !self.inner.enabled || self.inner.shutting_down.load(Ordering::Acquire) {
-            return;
+            return GitWatcherAdmission::Disabled;
         }
-        let canonical_root = project_root
-            .canonicalize()
-            .unwrap_or_else(|_| project_root.to_path_buf());
-        let Some(common_dir) = crate::worktree::git_common_dir(&canonical_root) else {
-            return;
+        let Some(identity) = watch_identity(project_root) else {
+            return GitWatcherAdmission::IdentityUnavailable;
         };
-        let Some(git_dir) = worktree_git_dir(&canonical_root) else {
-            return;
-        };
+        let WatchIdentity {
+            canonical_root,
+            common_dir,
+            git_dir,
+        } = identity;
 
         let mut projects = self.inner.projects.lock().await;
         if let Some(state) = projects.get(&common_dir) {
-            state.register_worktree(canonical_root, git_dir, MAX_WORKTREES_PER_REPOSITORY);
-            return;
+            return match state.register_worktree(
+                canonical_root,
+                git_dir,
+                MAX_WORKTREES_PER_REPOSITORY,
+            ) {
+                WorktreeRegistration::Ready => GitWatcherAdmission::Ready,
+                WorktreeRegistration::Capacity => GitWatcherAdmission::Capacity,
+            };
         }
         if projects.len() >= self.inner.config.watch_max_projects {
             // Capacity is repository-scoped so linked worktrees never consume
             // additional OS-watcher slots.
-            return;
+            return GitWatcherAdmission::Capacity;
         }
 
         let state = Arc::new(WatchState::new(
@@ -310,6 +330,7 @@ impl GitWatcher {
             "git_watch_started",
             &[("git_common_dir", common_dir.display().to_string())],
         );
+        GitWatcherAdmission::Ready
     }
 
     /// Stops every watcher-owned task and joins it before database shutdown.
@@ -352,15 +373,29 @@ impl GitWatcher {
     }
 }
 
-fn worktree_git_dir(project_root: &Path) -> Option<PathBuf> {
-    let repository = gix::discover(project_root).ok()?;
-    let git_dir = repository.git_dir().to_path_buf();
-    let resolved = if git_dir.is_absolute() {
-        git_dir
+fn canonical_git_metadata_path(project_root: &Path, path: &Path) -> Option<PathBuf> {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        project_root.join(git_dir)
+        project_root.join(path)
     };
-    Some(resolved.canonicalize().unwrap_or(resolved))
+    resolved.canonicalize().ok()
+}
+
+fn watch_identity(project_root: &Path) -> Option<WatchIdentity> {
+    let canonical_root = project_root.canonicalize().ok()?;
+    let repository = gix::discover(&canonical_root).ok()?;
+    let common_dir = canonical_git_metadata_path(&canonical_root, repository.common_dir())?;
+    let git_dir = canonical_git_metadata_path(&canonical_root, repository.git_dir())?;
+    Some(WatchIdentity {
+        canonical_root,
+        common_dir,
+        git_dir,
+    })
+}
+
+fn worktree_git_dir(project_root: &Path) -> Option<PathBuf> {
+    watch_identity(project_root).map(|identity| identity.git_dir)
 }
 
 /// Supervises one repository's watch task: on panic, restart with capped
