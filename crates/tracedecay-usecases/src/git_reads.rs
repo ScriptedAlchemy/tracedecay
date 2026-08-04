@@ -17,7 +17,7 @@ use tracedecay_domain::{
     ScopeSetRevision, ScopeUnavailableReasonV1,
 };
 
-use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest};
+use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest, GitIntelligenceError};
 // SEAM: the native `git` spawn adapter is still root-owned
 // (`src/git_intelligence.rs`). See `SEAMS.md`.
 use crate::git_intelligence::NativeGitIntelligence;
@@ -97,6 +97,7 @@ pub enum GitReadUnavailableReasonV1 {
     ScopeMismatch,
     Cancelled,
     TimedOut,
+    OutputLimitExceeded,
     ReadFailed,
 }
 
@@ -244,6 +245,7 @@ fn git_unavailable_reason(reason: GitReadUnavailableReasonV1) -> ScopeUnavailabl
         }
         GitReadUnavailableReasonV1::Cancelled
         | GitReadUnavailableReasonV1::TimedOut
+        | GitReadUnavailableReasonV1::OutputLimitExceeded
         | GitReadUnavailableReasonV1::ReadFailed => ScopeUnavailableReasonV1::StoreUnavailable,
     }
 }
@@ -278,6 +280,11 @@ impl GitReadAuthorityV1 {
             self.project_root.clone(),
             self.scope.repository_id.clone(),
             self.scope.worktree_id.clone(),
+        )
+        .with_execution_bounds(
+            bounds.deadline,
+            bounds.cancel.clone(),
+            usize::try_from(bounds.max_bytes).unwrap_or(usize::MAX),
         );
         let engine = GitQueryEngine::new(&adapter);
         let result = match request {
@@ -332,6 +339,20 @@ impl GitReadAuthorityV1 {
             },
             Err(GitQueryError::DeadlineExceeded) => GitReadOutcomeV1::Unavailable {
                 reason: GitReadUnavailableReasonV1::TimedOut,
+            },
+            Err(GitQueryError::Adapter(GitIntelligenceError::Cancelled)) => {
+                GitReadOutcomeV1::Unavailable {
+                    reason: GitReadUnavailableReasonV1::Cancelled,
+                }
+            }
+            Err(GitQueryError::Adapter(GitIntelligenceError::DeadlineExceeded)) => {
+                GitReadOutcomeV1::Unavailable {
+                    reason: GitReadUnavailableReasonV1::TimedOut,
+                }
+            }
+            Err(GitQueryError::Adapter(GitIntelligenceError::OutputLimitExceeded { .. }))
+            | Err(GitQueryError::ByteBoundExceeded { .. }) => GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::OutputLimitExceeded,
             },
             Err(_) => GitReadOutcomeV1::Unavailable {
                 reason: GitReadUnavailableReasonV1::ReadFailed,
@@ -433,8 +454,6 @@ pub fn execute_historical_git_read(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
@@ -446,6 +465,7 @@ mod tests {
         ActorId, GitCoverageV1, ProjectId, RepositoryId, ScopeOutcome, ScopeSetId,
         ScopeSetRevision, UtcMicros, WorktreeId,
     };
+    use tracedecay_runtime_core::cancellation::CancellationToken;
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
     use super::*;
@@ -546,8 +566,10 @@ mod tests {
         let root = TempDir::new().expect("tempdir");
         let scope = scope("mounted");
         let authority = GitReadAuthorityV1::new(root.path(), scope.clone());
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
         let cancelled = GitQueryBounds {
-            cancel: Some(Arc::new(AtomicBool::new(true))),
+            cancel: Some(cancellation),
             ..GitQueryBounds::default()
         };
         let timed_out = GitQueryBounds {
@@ -569,6 +591,30 @@ mod tests {
             authority.read(&scope, &GitReadRequestV1::Status, &timed_out),
             GitReadOutcomeV1::Unavailable {
                 reason: GitReadUnavailableReasonV1::TimedOut,
+            }
+        );
+    }
+
+    #[test]
+    fn subprocess_output_bound_is_a_distinct_typed_unavailable_outcome() {
+        let root = TempDir::new().expect("tempdir");
+        let initialized = std::process::Command::new(tracedecay_runtime_core::git::git_program())
+            .args(["init", "--quiet"])
+            .current_dir(root.path())
+            .status()
+            .expect("initialize git fixture");
+        assert!(initialized.success());
+        let scope = scope("output-bound");
+        let authority = GitReadAuthorityV1::new(root.path(), scope.clone());
+        let bounds = GitQueryBounds {
+            max_bytes: 1,
+            ..GitQueryBounds::default()
+        };
+
+        assert_eq!(
+            authority.read(&scope, &GitReadRequestV1::Status, &bounds),
+            GitReadOutcomeV1::Unavailable {
+                reason: GitReadUnavailableReasonV1::OutputLimitExceeded,
             }
         );
     }

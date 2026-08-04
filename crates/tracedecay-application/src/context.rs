@@ -1,7 +1,10 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -237,6 +240,18 @@ const ACTIVE_CANCELLATION_SIGNAL: i64 = i64::MIN;
 pub struct CancellationSignal {
     token_id: CancellationTokenId,
     requested_at: Arc<AtomicI64>,
+    listeners: Arc<Mutex<CancellationListeners>>,
+}
+
+#[derive(Debug, Default)]
+struct CancellationListeners {
+    next_id: u64,
+    wakers: BTreeMap<u64, Waker>,
+}
+
+struct CancellationWait {
+    signal: CancellationSignal,
+    listener_id: Option<u64>,
 }
 
 impl CancellationSignal {
@@ -244,6 +259,7 @@ impl CancellationSignal {
         Ok(Self {
             token_id: CancellationTokenId::new(token_id)?,
             requested_at: Arc::new(AtomicI64::new(ACTIVE_CANCELLATION_SIGNAL)),
+            listeners: Arc::new(Mutex::new(CancellationListeners::default())),
         })
     }
 
@@ -259,6 +275,16 @@ impl CancellationSignal {
             .is_err()
         {
             return false;
+        }
+        let wakers = {
+            let mut listeners = self
+                .listeners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut listeners.wakers)
+        };
+        for waker in wakers.into_values() {
+            waker.wake();
         }
         true
     }
@@ -284,6 +310,63 @@ impl CancellationSignal {
     pub fn cancelled_at(&self) -> Option<UtcMicros> {
         let requested_at = self.requested_at.load(Ordering::Acquire);
         (requested_at != ACTIVE_CANCELLATION_SIGNAL).then_some(UtcMicros(requested_at))
+    }
+
+    /// Resolves when this exact process-local signal is cancelled.
+    pub async fn cancelled(&self) {
+        CancellationWait {
+            signal: self.clone(),
+            listener_id: None,
+        }
+        .await;
+    }
+}
+
+impl Future for CancellationWait {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.signal.is_cancelled() {
+            return Poll::Ready(());
+        }
+        let signal = self.signal.clone();
+        let mut listeners = signal
+            .listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if signal.is_cancelled() {
+            return Poll::Ready(());
+        }
+        match self.listener_id {
+            Some(listener_id) => {
+                listeners
+                    .wakers
+                    .insert(listener_id, context.waker().clone());
+            }
+            None => {
+                let listener_id = listeners.next_id;
+                listeners.next_id = listeners.next_id.wrapping_add(1);
+                listeners
+                    .wakers
+                    .insert(listener_id, context.waker().clone());
+                self.listener_id = Some(listener_id);
+            }
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for CancellationWait {
+    fn drop(&mut self) {
+        let Some(listener_id) = self.listener_id else {
+            return;
+        };
+        self.signal
+            .listeners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .wakers
+            .remove(&listener_id);
     }
 }
 
@@ -394,8 +477,22 @@ impl RequestContext {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
     use super::{CancellationSignal, CancellationState};
     use tracedecay_domain::UtcMicros;
+
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[test]
     fn cancellation_signal_clones_share_one_runtime_token() {
@@ -410,5 +507,19 @@ mod tests {
                 requested_at: UtcMicros(41)
             }
         ));
+    }
+
+    #[test]
+    fn cancellation_wait_is_notified_without_polling() {
+        let signal = CancellationSignal::active("cancel.transport.wait").unwrap();
+        let mut wait = pin!(signal.cancelled());
+        let counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut context = Context::from_waker(&waker);
+
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        assert!(signal.cancel(UtcMicros(42)));
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Ready(())));
     }
 }

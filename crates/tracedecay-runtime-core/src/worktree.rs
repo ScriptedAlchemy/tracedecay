@@ -33,8 +33,7 @@ pub struct WorktreeIndexMismatch {
 }
 
 /// Absolute, symlink-resolved toplevel of the git working tree that `dir`
-/// belongs to, or `None` when `dir` isn't inside a git repo (or `git` is
-/// missing on PATH).
+/// belongs to, or `None` when `dir` isn't inside a readable repository.
 ///
 /// `git rev-parse --show-toplevel` returns the per-worktree root: the main
 /// checkout and each linked worktree report their own distinct directory,
@@ -43,14 +42,8 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
     // gix discovery walks up the same way `git rev-parse` does but without
     // a subprocess spawn. A discovered bare repo (no workdir) matches
     // `--show-toplevel` failing.
-    if let Ok(repo) = gix::discover(dir) {
-        return realpath(repo.workdir()?);
-    }
-    if !git_may_resolve_repo(dir) {
-        return None;
-    }
-    let trimmed = crate::git::git_capture(dir, &["rev-parse", "--show-toplevel"])?;
-    realpath(Path::new(&trimmed))
+    let repo = gix::discover(dir).ok()?;
+    realpath(repo.workdir()?)
 }
 
 /// Absolute, symlink-resolved path to the repository's git common directory.
@@ -58,20 +51,8 @@ pub fn git_worktree_root(dir: &Path) -> Option<PathBuf> {
 /// For a linked worktree this is the main checkout's `.git` directory, which is
 /// the stable local identity all linked worktrees share.
 pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
-    if let Ok(repo) = gix::discover(dir) {
-        let common_dir = repo.common_dir().to_path_buf();
-        let resolved = if common_dir.is_absolute() {
-            common_dir
-        } else {
-            dir.join(common_dir)
-        };
-        return Some(resolved.canonicalize().unwrap_or(resolved));
-    }
-    if !git_may_resolve_repo(dir) {
-        return None;
-    }
-    let raw = crate::git::git_capture(dir, &["rev-parse", "--git-common-dir"])?;
-    let common_dir = PathBuf::from(raw);
+    let repo = gix::discover(dir).ok()?;
+    let common_dir = repo.common_dir().to_path_buf();
     let resolved = if common_dir.is_absolute() {
         common_dir
     } else {
@@ -122,22 +103,15 @@ pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
     if !is_detached_linked_worktree(dir) {
         return None;
     }
-    let resolve = |raw: String| {
-        let path = PathBuf::from(raw);
-        let path = if path.is_absolute() {
-            path
-        } else {
-            dir.join(path)
-        };
-        path.canonicalize().unwrap_or(path)
-    };
-    // Use Git here deliberately: gix can collapse a linked worktree's git
-    // directory onto its common directory, which loses the per-worktree key.
-    let git_dir = resolve(crate::git::git_capture(dir, &["rev-parse", "--git-dir"])?);
-    let common_dir = resolve(crate::git::git_capture(
-        dir,
-        &["rev-parse", "--git-common-dir"],
-    )?);
+    let repo = gix::open(dir).ok()?;
+    let git_dir = repo
+        .git_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.git_dir().to_path_buf());
+    let common_dir = repo
+        .common_dir()
+        .canonicalize()
+        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
     let identity = git_dir.strip_prefix(&common_dir).unwrap_or(&git_dir);
     let mut hasher = Sha256::new();
     hasher.update(crate::os_str_bytes::native_os_str_bytes(
@@ -335,6 +309,49 @@ mod tests {
             std::fs::canonicalize(&worktree).unwrap()
         );
         assert_eq!(mismatch.index_root, std::fs::canonicalize(&main).unwrap());
+        assert!(
+            detached_worktree_graph_scope(&worktree)
+                .is_some_and(|scope| scope.starts_with("detached-worktree/"))
+        );
+    }
+
+    #[test]
+    fn gix_resolves_the_linked_worktree_specific_branch() {
+        let tmp = tempdir().unwrap();
+        let main = tmp.path().join("main");
+        fs::create_dir_all(&main).unwrap();
+        run_git(&main, &["init", "--quiet"]);
+        fs::write(main.join("README.md"), "hi").unwrap();
+        run_git(&main, &["add", "."]);
+        run_git(
+            &main,
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--quiet",
+                "-m",
+                "init",
+            ],
+        );
+        let worktree = tmp.path().join("feature");
+        run_git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+
+        assert_eq!(
+            crate::branch::current_branch(&worktree).as_deref(),
+            Some("feature")
+        );
     }
 
     #[test]

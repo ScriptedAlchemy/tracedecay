@@ -18,7 +18,7 @@
 //!   of silently mismatching.
 //! - **Cancellation and bounding**: every query takes [`GitQueryBounds`] —
 //!   max entries, max bytes, an optional deadline, and an optional
-//!   cooperative cancellation flag. Entry bounds truncate truthfully (never
+//!   cooperative cancellation token. Entry bounds truncate truthfully (never
 //!   silently), byte bounds fail truthfully, and no query performs an
 //!   unbounded history walk.
 //!
@@ -26,8 +26,6 @@
 //! It spawns no subprocess of its own, holds no repository handle, and cannot
 //! mutate the index, refs, objects, config, or the worktree.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -39,6 +37,7 @@ use tracedecay_domain::git::{
     HunkRefV1,
 };
 use tracedecay_domain::research::{ManifestDigest, RepositoryId, canonical_sha256};
+use tracedecay_runtime_core::cancellation::CancellationToken;
 
 use crate::git_intelligence::{
     GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest, GitHistoryRequest, GitIntelligenceError,
@@ -69,17 +68,17 @@ pub const GIT_QUERY_DEFAULT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 ///   degraded payload.
 /// - `deadline` is checked before and after every adapter call; expiry fails
 ///   with [`GitQueryError::DeadlineExceeded`].
-/// - `cancel` is a cooperative flag polled at the same checkpoints; a set
-///   flag fails with [`GitQueryError::Cancelled`].
+/// - `cancel` is a cooperative token checked at the same checkpoints; a
+///   cancelled token fails with [`GitQueryError::Cancelled`].
 ///
-/// Adapter calls are one-shot reads: cancellation and the deadline bracket
-/// each call, they do not interrupt a native read in flight.
+/// Native adapter calls carry the same token into bounded subprocess reads, so
+/// cancellation also interrupts an exact Git read in flight.
 #[derive(Clone, Debug)]
 pub struct GitQueryBounds {
     pub max_entries: u32,
     pub max_bytes: u64,
     pub deadline: Option<Instant>,
-    pub cancel: Option<Arc<AtomicBool>>,
+    pub cancel: Option<CancellationToken>,
 }
 
 impl Default for GitQueryBounds {
@@ -99,7 +98,7 @@ impl GitQueryBounds {
         if self
             .cancel
             .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            .is_some_and(CancellationToken::is_cancelled)
         {
             return Err(GitQueryError::Cancelled);
         }
@@ -1114,7 +1113,8 @@ mod tests {
         };
         let adapter = fixture.adapter();
         let engine = GitQueryEngine::new(&adapter);
-        let flag = Arc::new(AtomicBool::new(true));
+        let flag = CancellationToken::new();
+        flag.cancel();
         let bounds = GitQueryBounds {
             cancel: Some(flag),
             ..GitQueryBounds::default()
