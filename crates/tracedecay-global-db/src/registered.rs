@@ -373,9 +373,7 @@ impl RegisteredGlobalDb {
     > {
         let storage = self.workflow_storage_handle()?;
         tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority::from_registered(storage)
-            .map_err(|error| {
-                registered_error("attach registered workflow storage", format!("{error:?}"))
-            })
+            .map_err(workflow_storage_error)
     }
 
     pub fn workflow_application_services(
@@ -918,6 +916,25 @@ fn configuration_schema_error(
     }
 }
 
+fn workflow_storage_error(
+    error: tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError,
+) -> TraceDecayError {
+    match error {
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::ResetRequired => {
+            TraceDecayError::reset_required(
+                "workflow",
+                "persisted workflow schema does not match the final workflow authority",
+            )
+        }
+        tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthorityBuildError::Unavailable => {
+            registered_error(
+                "attach registered workflow storage",
+                "workflow storage is unavailable",
+            )
+        }
+    }
+}
+
 fn sqlite_identity_error_message(
     error: tracedecay_runtime_core::db::SqliteFileIdentityError,
 ) -> &'static str {
@@ -1179,6 +1196,120 @@ mod tests {
             crate::configuration::ensure_configuration_schema(&snapshot)
                 .await
                 .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_workflow_store_requires_reset_without_mutation() {
+        crate::register_test_schema_installer();
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("project/sessions.db");
+        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+        let authority =
+            DatabaseAuthority::acquire_test(&database_path, "partial workflow runtime").unwrap();
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: tracedecay_domain::ProjectId::new(
+                    "project.partial-workflow".to_owned(),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let writer = database
+                .writer_connection("seed partial workflow shape")
+                .await
+                .unwrap();
+            crate::ensure_registered_schema(writer.engine_connection())
+                .await
+                .unwrap();
+            writer
+                .engine_connection()
+                .execute_batch(
+                    "CREATE TABLE workflow_schema (
+                         singleton INTEGER PRIMARY KEY,
+                         schema_version INTEGER NOT NULL,
+                         definition_digest TEXT NOT NULL
+                     );
+                     INSERT INTO workflow_schema VALUES (1, 0, 'partial');
+                     CREATE TABLE workflow_reset_canary (value TEXT NOT NULL);
+                     INSERT INTO workflow_reset_canary VALUES ('preserve-me');",
+                )
+                .await
+                .unwrap();
+        }
+        let runtime = database.retained_runtime().clone();
+        let expected_binding = runtime.binding().clone();
+        let expected_locator = runtime.locator().verified().clone();
+        let authority = runtime
+            .database_authority("attach partial workflow runtime")
+            .unwrap();
+        let registered = RegisteredGlobalDb::migrate_and_attach(
+            runtime,
+            expected_binding,
+            expected_locator,
+            authority,
+        )
+        .await
+        .unwrap();
+
+        let error = match registered.workflow_application_services() {
+            Ok(_) => panic!("partial workflow schema must not attach"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            TraceDecayError::ResetRequired {
+                ref authority,
+                ..
+            } if authority == "workflow"
+        ));
+
+        let snapshot = registered.read_snapshot().await.unwrap();
+        let mut canary = snapshot
+            .query("SELECT value FROM workflow_reset_canary", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            canary
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "preserve-me"
+        );
+        let mut workflow_tables = snapshot
+            .query(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN (
+                       'workflow_definitions',
+                       'workflow_effect_journal',
+                       'workflow_handoffs',
+                       'workflow_schema',
+                       'workflow_reset_canary'
+                   )",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            workflow_tables
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<i64>(0)
+                .unwrap(),
+            2,
+            "typed refusal must not create, drop, or repair workflow tables"
         );
     }
 

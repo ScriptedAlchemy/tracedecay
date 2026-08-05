@@ -264,6 +264,24 @@ where
     })
 }
 
+#[cfg(test)]
+mod reset_problem_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_workflow_reset_remains_a_typed_cli_problem() {
+        let problem = daemon_application_problem(DaemonInvocationProblem::ResetRequired);
+        let ApplicationProblem::Unavailable { diagnostic, .. } = problem else {
+            panic!("workflow reset must remain a typed unavailable problem");
+        };
+        assert_eq!(diagnostic.code, "workflow_authority_reset_required");
+        assert_eq!(
+            diagnostic.message,
+            "The owning Workflow authority requires an explicit reset"
+        );
+    }
+}
+
 fn config_error(error: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
         message: error.to_string(),
