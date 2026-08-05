@@ -36,7 +36,6 @@ use crate::runtime::shared::{
     append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
     content_storage_text_and_tools, paths_equal, title_from_messages,
 };
-use crate::runtime::snapshot_observation::host_admission_error;
 use crate::runtime::source::{
     MAX_JSONL_RECORD_BYTES, ParsedTranscript, RawJsonlFrame, RawJsonlFrameReader, SessionDraft,
     TranscriptDiscoveryBounds, TranscriptIngestError, TranscriptIngestResult, TranscriptSource,
@@ -52,6 +51,9 @@ const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
         "cursor_event_location_provenance",
     );
 const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
+
+mod projection;
+pub(super) use projection::drain_cursor_observation_projections;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct CursorTranscriptIngestStats {
@@ -535,7 +537,7 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
     )
     .await?;
     stats.bytes_consumed = budget.consumed();
-    stats.source_deferred = budget.deferred();
+    stats.source_deferred |= budget.deferred();
     Ok(stats)
 }
 
@@ -675,7 +677,7 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     )
     .await?;
     stats.bytes_consumed = budget.consumed();
-    stats.source_deferred = budget.deferred();
+    stats.source_deferred |= budget.deferred();
     Ok(stats)
 }
 
@@ -822,30 +824,8 @@ async fn admit_cursor_sweep_observations_with_admission(
     }
     let mut stats = drain_cursor_observation_projections(admission, &scope, cancellation).await?;
     stats.bytes_consumed = budget.consumed();
-    stats.source_deferred = budget.deferred();
+    stats.source_deferred |= budget.deferred();
     Ok(stats)
-}
-
-pub(super) async fn drain_cursor_observation_projections(
-    admission: &dyn HostAdmission,
-    scope: &ObservationScopeV1,
-    cancellation: &ObservationCancellation,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    let outcome = admission
-        .drain_projection_queue(
-            "cursor",
-            scope,
-            cancellation,
-            MAX_CURSOR_PROJECTIONS_PER_PASS,
-        )
-        .await
-        .map_err(|outcome| host_admission_error("cursor", outcome))?;
-    Ok(CursorTranscriptIngestStats {
-        sessions_upserted: u64::try_from(outcome.session_ids.len()).unwrap_or(u64::MAX),
-        messages_upserted: outcome.projected_outputs,
-        bytes_consumed: 0,
-        source_deferred: false,
-    })
 }
 
 fn cursor_ingest_or_default(

@@ -8,7 +8,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::observation::{ObservationCoverageReason, ObservationCursorAdvance};
 
-use crate::admission::HostAdmission;
+use crate::admission::{HostAdmission, is_admission_cancellation};
 use crate::observation::{
     CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
 };
@@ -212,7 +212,7 @@ impl ActiveAdmission<'_> {
             .advance_non_durable_source_cursor(advance, self.cancellation.clone())
             .await
             .map_err(|outcome| {
-                if self.cancellation.is_cancelled() {
+                if is_admission_cancellation(&outcome, &self.cancellation) {
                     TranscriptIngestError::Cancelled {
                         provider: self.provider,
                     }
@@ -306,6 +306,14 @@ impl ActiveAdmission<'_> {
             // advance coverage with a durable typed reason so the stream
             // converges instead of re-reporting the same records every sweep.
             Err(outcome) if !outcome.retryable => {
+                if self.cancellation.is_cancelled() {
+                    return Err(TranscriptIngestError::NonDurableRecord {
+                        provider: self.provider,
+                        offset: frame.checkpoint.offset,
+                        end_offset: frame.checkpoint.end_offset,
+                        reason: outcome.reason_code.unwrap_or("host_admission_incomplete"),
+                    });
+                }
                 tracing::warn!(
                     provider = self.provider,
                     offset = frame.checkpoint.offset,
@@ -321,7 +329,7 @@ impl ActiveAdmission<'_> {
                 .await
             }
             Err(outcome) => {
-                if self.cancellation.is_cancelled() {
+                if is_admission_cancellation(&outcome, &self.cancellation) {
                     Err(TranscriptIngestError::Cancelled {
                         provider: self.provider,
                     })
@@ -362,16 +370,17 @@ pub(super) async fn admit_jsonl_observations<State>(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }
-    let mut expected_cursor = admission
-        .get_source_cursor(&source, &scope)
-        .await
-        .map_err(|_| {
-            if cancellation.is_cancelled() {
-                TranscriptIngestError::Cancelled { provider }
-            } else {
-                TranscriptIngestError::InvalidFrameState { provider }
-            }
-        })?;
+    let mut expected_cursor =
+        admission
+            .get_source_cursor(&source, &scope)
+            .await
+            .map_err(|outcome| {
+                if is_admission_cancellation(&outcome, &cancellation) {
+                    TranscriptIngestError::Cancelled { provider }
+                } else {
+                    TranscriptIngestError::InvalidFrameState { provider }
+                }
+            })?;
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider });
     }

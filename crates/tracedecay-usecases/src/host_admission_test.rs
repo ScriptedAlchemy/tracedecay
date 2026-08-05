@@ -70,6 +70,16 @@ fn pending_external_source_projection_is_a_typed_durable_success() {
 }
 
 #[test]
+fn projection_backlog_survives_the_sessions_adapter() {
+    let outcome = canonical_projection_drain_outcome(HostProjectionDrainOutcome {
+        deferred: true,
+        ..HostProjectionDrainOutcome::default()
+    });
+
+    assert!(outcome.deferred);
+}
+
+#[test]
 fn quarantine_outcomes_serialize_as_static_payload_free_dispositions() {
     for outcome in [
         HostAdmissionOutcome::quarantine_full(),

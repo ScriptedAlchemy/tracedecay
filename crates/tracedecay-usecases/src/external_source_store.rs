@@ -50,6 +50,12 @@ pub(crate) enum RuntimeSourceCaptureOutcomeV1 {
     ProjectionPending(SourceCommitReceiptV1),
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RuntimeProjectionReplayOutcomeV1 {
+    pub(crate) projected: usize,
+    pub(crate) deferred: bool,
+}
+
 pub(crate) enum RuntimeSourceCaptureAuthorityV1<'a> {
     Poll,
     CanonicalRefetch(&'a SourceCanonicalRefetchAuthorityV1),
@@ -441,9 +447,14 @@ impl RuntimeExternalSourceStore {
         &self,
         max: usize,
         cancellation: &crate::observation::ObservationCancellation,
-    ) -> Result<usize, RuntimeExternalSourceErrorV1> {
-        self.drain_projection_replay(None, host_external_source_projector()?, max, cancellation)
-            .await
+    ) -> Result<RuntimeProjectionReplayOutcomeV1, RuntimeExternalSourceErrorV1> {
+        self.drain_projection_replay_outcome(
+            None,
+            host_external_source_projector()?,
+            max,
+            cancellation,
+        )
+        .await
     }
 
     pub(crate) async fn drain_projection_replay(
@@ -453,12 +464,27 @@ impl RuntimeExternalSourceStore {
         max: usize,
         cancellation: &crate::observation::ObservationCancellation,
     ) -> Result<usize, RuntimeExternalSourceErrorV1> {
+        Ok(self
+            .drain_projection_replay_outcome(binding, projector, max, cancellation)
+            .await?
+            .projected)
+    }
+
+    async fn drain_projection_replay_outcome(
+        &self,
+        binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
+        projector: ComponentVersion,
+        max: usize,
+        cancellation: &crate::observation::ObservationCancellation,
+    ) -> Result<RuntimeProjectionReplayOutcomeV1, RuntimeExternalSourceErrorV1> {
         projector
             .validate()
             .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
         let mut projected = 0;
+        let mut exhausted = false;
         while projected < max && !cancellation.is_cancelled() {
             let Some(pending) = self.read_pending_projection(binding.clone()).await? else {
+                exhausted = true;
                 break;
             };
             let projection =
@@ -466,7 +492,13 @@ impl RuntimeExternalSourceStore {
             self.submit_projection(projection).await?;
             projected = projected.saturating_add(1);
         }
-        Ok(projected)
+        let deferred = !exhausted
+            && !cancellation.is_cancelled()
+            && self.read_pending_projection(binding).await?.is_some();
+        Ok(RuntimeProjectionReplayOutcomeV1 {
+            projected,
+            deferred,
+        })
     }
 
     async fn read_receipt(

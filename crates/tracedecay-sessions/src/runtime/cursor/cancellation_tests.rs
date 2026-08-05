@@ -1,7 +1,10 @@
 use super::*;
+use crate::admission::HostAdmissionOutcome;
 use crate::admission::test_support::MemoryHostAdmission;
 
-fn cursor_sweep_test_fixture() -> (
+fn cursor_sweep_test_fixture_with_messages(
+    message_count: usize,
+) -> (
     tempfile::TempDir,
     tempfile::TempDir,
     CursorSweepSource,
@@ -19,16 +22,27 @@ fn cursor_sweep_test_fixture() -> (
         .join("agent-transcripts")
         .join("session-cancelled");
     std::fs::create_dir_all(&transcript_dir).unwrap();
-    std::fs::write(
-        transcript_dir.join("session-cancelled.jsonl"),
-        concat!(
-            r#"{"role":"user","message":{"content":[{"type":"text","text":"must not ingest"}]}}"#,
-            "\n"
-        ),
-    )
-    .unwrap();
+    let transcript = (0..message_count)
+        .map(|index| {
+            format!(
+                r#"{{"role":"user","message":{{"content":[{{"type":"text","text":"message {index}"}}]}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(transcript_dir.join("session-cancelled.jsonl"), transcript).unwrap();
     let source = CursorSweepSource::with_home(home.path());
     (project, home, source, project_id)
+}
+
+fn cursor_sweep_test_fixture() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    CursorSweepSource,
+    ProjectId,
+) {
+    cursor_sweep_test_fixture_with_messages(1)
 }
 
 #[tokio::test]
@@ -123,4 +137,97 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
     assert_eq!(replay.messages_upserted, 1);
+}
+
+#[tokio::test]
+async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
+    let (project, _home, source, project_id) =
+        cursor_sweep_test_fixture_with_messages(MAX_CURSOR_PROJECTIONS_PER_PASS + 1);
+    let admission = MemoryHostAdmission::default();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+
+    let first = admit_cursor_sweep_observations_with_admission(
+        &source,
+        project.path(),
+        &admission,
+        None,
+        scope.clone(),
+        &ObservationCancellation::default(),
+    )
+    .await
+    .expect("first bounded projection pass");
+
+    assert_eq!(
+        first.messages_upserted,
+        MAX_CURSOR_PROJECTIONS_PER_PASS as u64
+    );
+    assert!(first.source_deferred);
+    assert_eq!(admission.pending_projection_count(), 1);
+
+    let second = admit_cursor_sweep_observations_with_admission(
+        &source,
+        project.path(),
+        &admission,
+        None,
+        scope,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .expect("second bounded projection pass");
+
+    assert_eq!(second.messages_upserted, 1);
+    assert!(!second.source_deferred);
+    assert_eq!(admission.pending_projection_count(), 0);
+}
+
+#[tokio::test]
+async fn typed_projection_cancellation_is_control_termination() {
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+    admission.fail_next_projection_drain_after_cancelling(
+        HostAdmissionOutcome::retained_backpressured("admission_cancelled"),
+        cancellation.clone(),
+    );
+
+    let error = drain_cursor_observation_projections(
+        &admission,
+        &ObservationScopeV1::Profile,
+        &cancellation,
+    )
+    .await
+    .expect_err("typed projection cancellation must stop control flow");
+
+    assert!(matches!(
+        error,
+        TranscriptIngestError::Cancelled { provider: "cursor" }
+    ));
+}
+
+#[tokio::test]
+async fn projection_error_racing_cancellation_remains_visible() {
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+    admission.fail_next_projection_drain_after_cancelling(
+        HostAdmissionOutcome::registered_authority_unavailable(),
+        cancellation.clone(),
+    );
+
+    let error = drain_cursor_observation_projections(
+        &admission,
+        &ObservationScopeV1::Profile,
+        &cancellation,
+    )
+    .await
+    .expect_err("projection authority error must remain visible");
+
+    assert!(matches!(
+        error,
+        TranscriptIngestError::NonDurableRecord {
+            provider: "cursor",
+            reason: "registered_authority_unavailable",
+            ..
+        }
+    ));
 }
