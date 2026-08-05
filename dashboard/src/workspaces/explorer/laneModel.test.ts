@@ -3,6 +3,7 @@ import {
   DashboardEnvelopeV1Schema,
   ExplorerQueryRunV1Schema,
   ExplorerSourceProgressV1Schema,
+  type DashboardEnvelopeV1,
   type ExplorerQueryRunV1,
   type ExplorerSourceProgressV1,
 } from '../../contracts/generated.ts';
@@ -100,6 +101,13 @@ function answered(payload: ExplorerQueryRunV1): EnvelopeResult<ExplorerQueryRunV
       payload,
     }),
   };
+}
+
+function browseAnswered<T>(payload: T): EnvelopeResult<T> {
+  const result = answered(run());
+  if (result.outcome !== 'envelope') throw new Error('test envelope must be accepted');
+  const envelope = result.envelope;
+  return { outcome: 'envelope', envelope: { ...envelope, payload } as DashboardEnvelopeV1<T> };
 }
 
 describe('laneFromSourceProgress', () => {
@@ -426,7 +434,7 @@ describe('browseLane', () => {
   it('reports an overview that answered without claiming a matching total', () => {
     const read = browseLane(
       'code',
-      { outcome: 'ok', data: [{ id: 'n1', name: 'browse_row' }] },
+      browseAnswered([{ id: 'n1', name: 'browse_row' }]),
       false,
       (rows: readonly Record<string, unknown>[]) => rows,
       [],
@@ -436,10 +444,10 @@ describe('browseLane', () => {
     expect(laneHits(read)).toHaveLength(1);
   });
 
-  it('preserves each legacy transport reading as its own state', () => {
+  it('preserves each canonical transport reading as its own state', () => {
     const rowsOf = (rows: readonly Record<string, unknown>[]) => rows;
     const states = (['offline', 'unauthorized', 'denied', 'unsupported_schema'] as const).map(
-      (outcome) => browseLane('code', { outcome }, false, rowsOf, []).state,
+      (state) => browseLane('code', { outcome: 'transport', state }, false, rowsOf, []).state,
     );
 
     expect(states).toEqual(['offline', 'unauthorized', 'denied', 'unsupported_schema']);

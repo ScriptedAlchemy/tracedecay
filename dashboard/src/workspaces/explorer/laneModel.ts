@@ -27,7 +27,6 @@ import type {
   DashboardDomainStateV1,
 } from '../../contracts/generated.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
-import type { LegacyResult } from '../../data/query/legacy.ts';
 import { codeHits, knowledgeHits, sessionHits, type Hit, type LaneId } from './model.ts';
 
 /** Which coordinator source answers for each lane. */
@@ -307,7 +306,7 @@ export function searchLane(
 }
 
 /**
- * The lane's condition while browsing, read off one legacy overview response.
+ * The lane's condition while browsing, read off one canonical overview response.
  *
  * These endpoints predate the envelope and report no matching total, so
  * `reportedTotal` is `null` rather than the row count: the overview says what
@@ -315,45 +314,25 @@ export function searchLane(
  */
 export function browseLane<T>(
   lane: LaneId,
-  result: LegacyResult<T> | undefined,
+  result: EnvelopeResult<T> | undefined,
   isPending: boolean,
   rowsOf: (data: T) => readonly Record<string, unknown>[],
   terms: readonly string[],
 ): ExplorerLaneReadModel {
   if (isPending) return { state: 'pending', lane, phase: null };
   if (result === undefined) return { state: 'unanswered', lane };
-  switch (result.outcome) {
-    case 'ok': {
-      const rows = rowsOf(result.data);
-      const hits = hitsForLane(lane, rows, terms);
-      return {
-        state: 'ready',
-        lane,
-        hits,
-        reportedTotal: null,
-        unreadableRows: rows.length - hits.length,
-      };
-    }
-    case 'offline':
-      return { state: 'offline', lane };
-    case 'unauthorized':
-      return { state: 'unauthorized', lane };
-    case 'denied':
-      return { state: 'denied', lane };
-    case 'unsupported_schema':
-      return { state: 'unsupported_schema', lane };
-    case 'error':
-      return { state: 'error', lane, errorCode: null, detail: result.detail };
-    // The transport carried the source's own report of not being able to
-    // serve, which is the state this lane already has for the same condition
-    // arriving inside a 200 envelope.
-    case 'unavailable':
-      return { state: 'unavailable', lane, errorCode: result.status, detail: result.reason };
-    default: {
-      const exhaustive: never = result;
-      return exhaustive;
-    }
+  if (result.outcome === 'transport') {
+    return laneFromTransport(lane, result.state, result.detail ?? null);
   }
+  const rows = rowsOf(result.envelope.payload);
+  const hits = hitsForLane(lane, rows, terms);
+  return {
+    state: 'ready',
+    lane,
+    hits,
+    reportedTotal: null,
+    unreadableRows: rows.length - hits.length,
+  };
 }
 
 /** Rows the lane actually delivered. Empty for every state but `ready`, where

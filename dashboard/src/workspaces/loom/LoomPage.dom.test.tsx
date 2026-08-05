@@ -275,6 +275,25 @@ const TEMPORAL = {
   },
 };
 
+const TEMPORAL_RETRIEVAL_UNAVAILABLE = {
+  ...TEMPORAL,
+  coverage: {
+    completeness: 'unknown',
+    eligible: null,
+    examined: null,
+    matched: null,
+    excluded: null,
+    omitted: null,
+    unknown: null,
+    denominator: null,
+    unit: 'records',
+    omission_reasons: ['lcm_temporal_retrieval_not_mounted'],
+  },
+  freshness: { state: 'unknown', observed_at_micros: null, watermark: null },
+  domain_state: 'unknown',
+  payload: null,
+};
+
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -290,8 +309,8 @@ function serve(routes: Record<string, { status: number; body: unknown }>) {
 
 const HAPPY = {
   '/api/loom/temporal': { status: 200, body: TEMPORAL },
-  '/api/plugins/hermes-lcm/session/': { status: 200, body: CHAIN },
-  '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
+  '/api/plugins/hermes-lcm/session/': { status: 200, body: TEMPORAL_RETRIEVAL_UNAVAILABLE },
+  '/api/plugins/hermes-lcm/timeline': { status: 200, body: TEMPORAL_RETRIEVAL_UNAVAILABLE },
 };
 
 function renderLoom(routes: Record<string, { status: number; body: unknown }> = HAPPY) {
@@ -420,20 +439,12 @@ describe('LoomPage', () => {
     expect(screen.getAllByText('unrecorded').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('pulls the chain on selection and marks it ordinal-ordered, not timed', async () => {
+  it('reports canonical temporal retrieval as unavailable on selection', async () => {
     renderLoom();
     const row = await screen.findByText('Deliver Git primitive runtime');
     await userEvent.click(row);
-    await screen.findByText('ordinal order');
-    expect(
-      screen.getByText(/The store served no timestamp on any turn/),
-    ).toBeTruthy();
-    // The measured tools leg of the chain renders from real tool names — in
-    // the histogram and again against the turn that invoked it. Two each, so
-    // the count is asserted rather than merely "at least one": a name that
-    // reached the histogram but never the turn would otherwise pass.
-    expect(screen.getAllByText('Read')).toHaveLength(2);
-    expect(screen.getAllByText('Bash')).toHaveLength(2);
+    expect(await screen.findByText(/lcm_temporal_retrieval_not_mounted/)).toBeTruthy();
+    expect(screen.queryByText('ordinal order')).toBeNull();
   });
 
   it('continues the chain through durable causal rows', async () => {
