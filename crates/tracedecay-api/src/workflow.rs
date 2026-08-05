@@ -263,7 +263,10 @@ mod tests {
     use tracedecay_application::{CancellationSignal, Deadline, RequestId};
     use tracedecay_domain::UtcMicros;
 
-    use super::{HttpApplicationControls, WorkflowOperation, workflow_application_router};
+    use super::{
+        HttpApplicationControls, WorkflowHttpRequest, WorkflowOperation,
+        workflow_application_router,
+    };
 
     #[test]
     fn descriptor_derives_route_and_catalog_identity() {
@@ -284,7 +287,7 @@ mod tests {
     async fn router_dispatches_every_advertised_definition_and_runtime_operation() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let owner_seen = Arc::clone(&seen);
-        let app = workflow_application_router(move |request| {
+        let app = workflow_application_router(move |request: WorkflowHttpRequest| {
             let owner_seen = Arc::clone(&owner_seen);
             async move {
                 owner_seen
