@@ -1197,9 +1197,10 @@ mod tests {
             "preserve-me"
         );
         assert!(
-            crate::configuration::ensure_configuration_schema(&snapshot)
+            crate::configuration::configuration_reset_confirmation(&snapshot)
                 .await
-                .is_ok()
+                .unwrap()
+                .is_none()
         );
     }
 
