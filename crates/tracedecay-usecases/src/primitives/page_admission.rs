@@ -96,6 +96,7 @@ pub struct SymbolGraphPageAdmissionAdapterV1<C> {
 pub struct ProjectSymbolGraphCursorSnapshotAuthority {
     key: SignedCursorKeyRefV1,
     configuration_digest: ManifestDigest,
+    graph_snapshot_digest: ManifestDigest,
     watermark: u64,
 }
 
@@ -103,11 +104,13 @@ impl ProjectSymbolGraphCursorSnapshotAuthority {
     pub(super) fn new(
         key: SignedCursorKeyRefV1,
         configuration_digest: ManifestDigest,
+        graph_snapshot_digest: ManifestDigest,
         watermark: u64,
     ) -> Self {
         Self {
             key,
             configuration_digest,
+            graph_snapshot_digest,
             watermark,
         }
     }
@@ -140,6 +143,7 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
             context.grant().disclosure,
             lane,
             body_digest.as_str(),
+            self.graph_snapshot_digest.as_str(),
         ))
         .map_err(|_| {
             symbol_graph_snapshot_failure(
@@ -180,7 +184,18 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                 ranking: 1,
                 configuration_digest: BindingDigest::new(
                     "configuration_digest",
-                    self.configuration_digest.as_str(),
+                    canonical_sha256(&(
+                        "tracedecay.symbol-graph.cursor-configuration.v1",
+                        self.configuration_digest.as_str(),
+                        self.graph_snapshot_digest.as_str(),
+                    ))
+                    .map_err(|_| {
+                        symbol_graph_snapshot_failure(
+                            "application.symbol-graph.configuration",
+                            "could not bind the symbol-graph snapshot configuration",
+                        )
+                    })?
+                    .as_str(),
                 )
                 .map_err(|_| {
                     symbol_graph_snapshot_failure(

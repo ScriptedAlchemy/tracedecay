@@ -155,6 +155,7 @@ async fn symbol_page_admission_uses_the_existing_authenticated_cursor_verifier()
             Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
                 key.clone(),
                 digest('c'),
+                digest('b'),
                 11,
             )),
             authenticator(&key),
@@ -276,6 +277,7 @@ async fn binding_operation_mismatch_is_rejected_before_cursor_admission() {
             Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
                 key.clone(),
                 digest('c'),
+                digest('b'),
                 11,
             )),
             authenticator(&key),

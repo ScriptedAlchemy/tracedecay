@@ -1,8 +1,8 @@
 //! Canonical query identities shared by page admission and cursor ownership.
 //!
-//! Page size and continuation state are intentionally absent: retries and
-//! later pages must bind to the same query while every result-shaping field
-//! remains part of the authenticated cursor snapshot.
+//! Continuation state is intentionally absent so a later page binds to the
+//! same query. Page size remains authenticated because it changes the result
+//! boundary represented by a cursor.
 
 use tracedecay_application::retrieval::{
     ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationsRequest,
@@ -14,7 +14,12 @@ use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use super::runtime::DiagnosticsPrimitiveRequest;
 
 fn symbol_meta(meta: &RetrievalRequestMeta) -> impl serde::Serialize + '_ {
-    (&meta.temporal, &meta.projection, &meta.order)
+    (
+        meta.page.page_size,
+        &meta.temporal,
+        &meta.projection,
+        &meta.order,
+    )
 }
 
 pub fn symbol_search_page_body_digest(
@@ -88,6 +93,7 @@ pub fn diagnostics_page_body_digest(
         "tracedecay.primitive-page-body.v1",
         "diagnostics_read",
         &request.scope,
+        request.maximum_diagnostics,
     ))
     .map_err(Into::into)
 }
@@ -169,16 +175,26 @@ mod tests {
     }
 
     #[test]
-    fn symbol_digest_is_stable_across_page_and_retry_state() {
+    fn symbol_digest_excludes_continuation_but_binds_page_size() {
         let first = signature(PageRequest::first(10).expect("page"), "Result");
-        let resumed = signature(
-            PageRequest::new(200, Some(OpaqueCursor::new("opaque.next").expect("cursor")))
+        let same_size_resume = signature(
+            PageRequest::new(10, Some(OpaqueCursor::new("opaque.next").expect("cursor")))
                 .expect("page"),
             "Result",
         );
         assert_eq!(
             signature_search_page_body_digest(&first).expect("digest"),
-            signature_search_page_body_digest(&resumed).expect("digest")
+            signature_search_page_body_digest(&same_size_resume).expect("digest")
+        );
+
+        let resized_resume = signature(
+            PageRequest::new(200, Some(OpaqueCursor::new("opaque.next").expect("cursor")))
+                .expect("page"),
+            "Result",
+        );
+        assert_ne!(
+            signature_search_page_body_digest(&first).expect("digest"),
+            signature_search_page_body_digest(&resized_resume).expect("digest")
         );
 
         let other_query = signature(PageRequest::first(10).expect("page"), "Option");
@@ -189,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_digest_excludes_continuation_but_binds_scope() {
+    fn diagnostic_digest_excludes_continuation_but_binds_scope_and_page_size() {
         let first = DiagnosticsPrimitiveRequest {
             scope: DiagnosticsPrimitiveScope::Workspace,
             maximum_diagnostics: 10,
@@ -197,12 +213,22 @@ mod tests {
         };
         let retry = DiagnosticsPrimitiveRequest {
             scope: DiagnosticsPrimitiveScope::Workspace,
-            maximum_diagnostics: 500,
+            maximum_diagnostics: 10,
             cursor: Some("opaque.next".to_owned()),
         };
         assert_eq!(
             diagnostics_page_body_digest(&first).expect("digest"),
             diagnostics_page_body_digest(&retry).expect("digest")
+        );
+
+        let resized = DiagnosticsPrimitiveRequest {
+            scope: DiagnosticsPrimitiveScope::Workspace,
+            maximum_diagnostics: 500,
+            cursor: Some("opaque.next".to_owned()),
+        };
+        assert_ne!(
+            diagnostics_page_body_digest(&first).expect("digest"),
+            diagnostics_page_body_digest(&resized).expect("digest")
         );
 
         let other_scope = DiagnosticsPrimitiveRequest {

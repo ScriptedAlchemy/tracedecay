@@ -2021,22 +2021,35 @@ pub async fn open_pr12_production_primitive_runtime(
                 field: "PR12 primitive session cursor authenticator",
             })?,
     );
-    // The watermark is part of every symbol-graph cursor's snapshot identity.
-    // Substituting a plausible count for a failed read would make two
-    // different graph states share one identity, so an unreadable store
-    // refuses to open the runtime rather than mint ambiguous cursors.
-    let watermark = graph
-        .get_stats()
+    // Bind every cursor to the daemon-owned sealed code-index identity. Counts
+    // are not snapshot identities: a graph mutation can replace nodes without
+    // changing cardinality.
+    let graph_identity = code_index
+        .current_identity(project_root.clone(), None)
         .await
         .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive symbol-graph cursor watermark",
+            field: "PR12 primitive symbol-graph sealed identity",
         })?
-        .node_count
-        .max(1);
+        .admit_for_scope(&scope)
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "PR12 primitive symbol-graph sealed scope",
+        })?;
+    let graph_snapshot_digest = canonical_sha256(&(
+        "tracedecay.symbol-graph.snapshot.v1",
+        graph_identity.head_commit_id.as_str(),
+        graph_identity.code_generation_id.as_str(),
+        graph_identity.snapshot_digest.as_str(),
+        graph_identity.invalidation_digest.as_str(),
+        graph_identity.snapshot_content_digest.as_str(),
+    ))
+    .map_err(|_| ApplicationContractError::Inconsistent {
+        field: "PR12 primitive symbol-graph snapshot digest",
+    })?;
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
         key.clone(),
         configuration_digest.clone(),
-        watermark,
+        graph_snapshot_digest,
+        graph_identity.generation.max(1),
     ));
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
         AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
@@ -2627,11 +2640,12 @@ mod affected_tests_tests {
         );
         let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
             Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
-                key,
+                key.clone(),
                 digest('c'),
+                digest('b'),
                 11,
             )),
-            authenticator,
+            Arc::clone(&authenticator),
         );
 
         let issuing = symbol_graph_context(
@@ -2675,6 +2689,21 @@ mod affected_tests_tests {
                 .resume_offset(&resuming, "search", &digest('e'), &cursor, observed_at)
                 .is_err(),
             "a cursor must not resume for another query body"
+        );
+        let changed_snapshot = AuthenticatedSymbolGraphCursorAdapter::new(
+            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
+                key,
+                digest('c'),
+                digest('f'),
+                11,
+            )),
+            authenticator,
+        );
+        assert!(
+            changed_snapshot
+                .resume_offset(&resuming, "search", &body_digest, &cursor, observed_at)
+                .is_err(),
+            "a cursor must not resume after a same-cardinality graph mutation"
         );
     }
 
