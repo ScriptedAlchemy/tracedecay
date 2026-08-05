@@ -21,14 +21,6 @@ impl<S> WorkProviderRegistry<S> {
             providers: vec![provider],
         }
     }
-
-    #[cfg(all(test, unix))]
-    pub(crate) fn is_ready(&self) -> bool
-    where
-        S: tracedecay_application::WorkStoragePort + Clone,
-    {
-        self.providers.iter().any(NativeWorkProviderV1::is_ready)
-    }
 }
 
 pub(crate) enum RegisteredWorkRun {

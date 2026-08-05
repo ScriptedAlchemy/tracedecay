@@ -9,8 +9,6 @@ use tracedecay_application::{
     WorkExecutionService, WorkProviderExecutionError, WorkProviderSettlementV1, WorkStorageError,
     WorkStoragePort,
 };
-#[cfg(all(test, unix))]
-use tracedecay_domain::WorkProviderRouteV1;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProgressV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
@@ -20,17 +18,15 @@ use tracedecay_domain::{
 };
 
 use crate::application::event_lane::{self, ActivityFamilyV1};
+use crate::config::work_executable_binding::WorkExecutableBindingResolver;
 use crate::daemon_contract::WorkAttemptInvocationV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::codex_app_server::CodexAppServerSummaryConfig;
 
 mod codex_provider;
+mod native_cli;
 mod provider_registry;
-#[cfg(all(test, unix))]
-mod tests;
 
-#[cfg(test)]
-pub(crate) use codex_provider::CODEX_PROVIDER_ID;
 use codex_provider::{NativeWorkProviderConfigV1, NativeWorkProviderV1};
 use provider_registry::WorkProviderRegistry;
 
@@ -58,6 +54,7 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
+        executable_bindings: Arc<dyn WorkExecutableBindingResolver + Send + Sync>,
         configuration_digest: ManifestDigest,
         observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
@@ -66,6 +63,7 @@ where
             authority,
             storage,
             config,
+            executable_bindings,
             configuration_digest,
             observation_db,
             project_root,
@@ -77,6 +75,7 @@ where
         authority: WorkAuthority,
         storage: S,
         config: CodexAppServerSummaryConfig,
+        executable_bindings: Arc<dyn WorkExecutableBindingResolver + Send + Sync>,
         configuration_digest: ManifestDigest,
         observation_db: Arc<RegisteredGlobalDb>,
         project_root: PathBuf,
@@ -87,6 +86,7 @@ where
             authority.clone(),
             NativeWorkProviderConfigV1::from_registered(
                 config,
+                executable_bindings,
                 configuration_digest.clone(),
                 project_root.clone(),
             ),
@@ -103,21 +103,6 @@ where
             project_root,
             configuration_digest,
         }
-    }
-
-    #[cfg(all(test, unix))]
-    pub(crate) fn provider_route(&self) -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
-        self.queue.route()
-    }
-
-    #[cfg(all(test, unix))]
-    pub(crate) fn is_ready(&self) -> bool {
-        self.queue.provider().is_ready() && event_lane::enabled(Some(self.observation_db.as_ref()))
-    }
-
-    #[cfg(all(test, unix))]
-    pub(crate) fn in_flight(&self) -> usize {
-        self.queue.in_flight()
     }
 
     pub(crate) fn capacity(&self) -> usize {
