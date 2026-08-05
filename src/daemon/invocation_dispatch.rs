@@ -95,39 +95,67 @@ pub(super) async fn execute_portable_daemon_invocation(
             request,
             ..
         } => Some(request.roots.clone()),
-        service::invocation::DaemonInvocationPayload::MultiRootExecute { request, .. } => {
+        service::invocation::DaemonInvocationPayload::MultiRootExecute {
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+        } => {
+            let Some(active_project_root) = project_path.as_deref() else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
             let scope_set = match store_administration
                 .registered_profile_database()
                 .await
                 .ok()
                 .and_then(|database| database.authorized_scope_set_storage().ok())
-                .and_then(|storage| storage.read(&request.scope_set_id).ok().flatten())
-                .filter(|scope_set| {
-                    scope_set.revision() == request.scope_set_revision
-                        && scope_set.digest() == &request.scope_set_digest
-                }) {
-                Some(scope_set) => scope_set,
-                None => {
-                    return DaemonInvocationResponse::problem(
-                        request_id,
-                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
-                    );
-                }
+            {
+                Some(storage) => invocation
+                    .service
+                    .persisted_scope_set(
+                        active_project_root,
+                        Some(&storage),
+                        &request.scope_set_id,
+                        tracedecay_application::MultiRootApplicationOperation::Execute,
+                        *observed_at,
+                        deadline,
+                        cancellation,
+                    )
+                    .await
+                    .filter(|scope_set| {
+                        scope_set.revision() == request.scope_set_revision
+                            && scope_set.digest() == &request.scope_set_digest
+                    }),
+                None => None,
             };
-            Some(
-                scope_set
-                    .roots()
-                    .iter()
-                    .filter_map(|root| {
-                        let locator = root.locator()?;
-                        tracedecay_application::RegisteredRootSelectorV1::new(
-                            locator.project_id.clone(),
-                            &locator.canonical_root,
-                        )
-                        .ok()
-                    })
-                    .collect(),
-            )
+            let Some(scope_set) = scope_set else {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            };
+            let selectors = match scope_set
+                .roots()
+                .iter()
+                .map(|root| {
+                    let locator = root
+                        .locator()
+                        .ok_or(DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+                    tracedecay_application::RegisteredRootSelectorV1::new(
+                        locator.project_id.clone(),
+                        &locator.canonical_root,
+                    )
+                    .map_err(|_| DaemonInvocationProblem::InvalidRequest)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+            {
+                Ok(selectors) => selectors,
+                Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+            };
+            Some(selectors)
         }
         _ => None,
     };

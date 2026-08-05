@@ -434,8 +434,8 @@ async fn run_authenticated_multi_root_journey() {
                     &read_cancellation,
                 )
                 .await
-                .is_some(),
-            "federated admission must persist the scope set in every participating store"
+                .is_none(),
+            "federated LSP admission must retain its frozen scope only in daemon session state"
         );
     }
 
@@ -546,6 +546,45 @@ async fn run_authenticated_multi_root_journey() {
         panic!("multi-root read must return evidence");
     };
     assert_eq!(packet.payload.clone().flatten().as_ref(), Some(&stored));
+
+    // The portable route must authorize the active daemon scope before it
+    // resolves or mounts any selected root, then reach the same executor.
+    let observed_at = now();
+    let (deadline, cancellation) = controls("portable-execute", observed_at);
+    let portable_execute = execute_portable_daemon_invocation(
+        engine.lifecycle.clone(),
+        engine.store_administration.clone(),
+        Arc::clone(&engine.project_open_gates),
+        &first_handshake,
+        &engine.invocation,
+        engine.http_application_registry.clone(),
+        DaemonInvocationRequest::multi_root_execute(
+            "request.multi-root.portable-execute",
+            MultiRootExecuteRequestV1::new(
+                scope_set_id.clone(),
+                stored.revision(),
+                stored.digest().clone(),
+                MultiRootOperationV1::Work {
+                    request: json!({
+                        "operation": "snapshot",
+                        "request": { "page_size": 1 }
+                    }),
+                },
+                0,
+                None,
+            )
+            .expect("portable execute request"),
+            observed_at,
+            deadline,
+            cancellation,
+        ),
+        Some(Arc::clone(&engine.project_open_attempts)),
+    )
+    .await;
+    assert!(matches!(
+        portable_execute.outcome,
+        DaemonInvocationOutcome::MultiRootQueryPage { .. }
+    ));
 
     // A stale revision or digest is refused by the executor, not by a gate.
     let observed_at = now();
