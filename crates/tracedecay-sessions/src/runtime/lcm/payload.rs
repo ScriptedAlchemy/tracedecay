@@ -245,6 +245,9 @@ pub async fn expand_payload(
         Err(err) => return Err(err),
     };
     let payload = validate_expand_payload_owner(conn, provider, session_id, payload).await?;
+    if payload.kind == "quarantined_assistant_output" {
+        return Err(LcmError::PayloadLocked);
+    }
 
     let dir = existing_payload_dir(storage_root)?;
     let path = dir.join(payload_ref);

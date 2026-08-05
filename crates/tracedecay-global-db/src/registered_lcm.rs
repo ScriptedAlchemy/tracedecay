@@ -401,6 +401,7 @@ impl RegisteredGlobalDb {
             );
         }
         draft.metadata_json = Some(JsonValue::Object(metadata).to_string());
+        let draft = tracedecay_sessions::runtime::lcm::dag::sanitize_summary_draft(draft)?;
         drop(snapshot);
 
         let transaction = self

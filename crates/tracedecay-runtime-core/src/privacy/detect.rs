@@ -604,8 +604,38 @@ pub fn bind_sanitized_lcm_payload_text(
     raw: &str,
     candidate: &str,
 ) -> Result<LcmPayloadSanitizationV1, DetectionError> {
-    let (sanitized_text, findings) = detect_lcm_payload(candidate)?;
+    let (_, mut findings) = detect_lcm_payload(raw)?;
+    let (sanitized_text, candidate_findings) = detect_lcm_payload(candidate)?;
+    findings.extend(candidate_findings);
+    findings.sort();
+    findings.dedup();
     bind_lcm_payload(raw, sanitized_text, findings)
+}
+
+pub fn quarantine_lcm_payload_text(raw: &str) -> Result<SanitizationReceiptV1, DetectionError> {
+    if raw.len() > MAX_LCM_PAYLOAD_BYTES_V1 {
+        return Err(DetectionError::ScanLimitExceeded);
+    }
+    let sanitizer_version = ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1)
+        .map_err(|_| DetectionError::Receipt)?;
+    let disposition = SanitizerDispositionV1::Quarantined;
+    let sensitivity = SensitivityV1::Secret;
+    let raw_digest = Sha256::digest(raw.as_bytes());
+    let receipt_id = SanitizationReceiptId::new(format!(
+        "privacy.lcm-payload.v1.{}",
+        length_prefixed_sha256_hex(&[
+            LCM_PAYLOAD_RECEIPT_DOMAIN_V1,
+            sanitizer_version.as_str().as_bytes(),
+            disposition.as_str().as_bytes(),
+            sensitivity.as_str().as_bytes(),
+            raw_digest.as_slice(),
+        ])
+    ))
+    .map_err(|_| DetectionError::Receipt)?;
+    let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
+        .map_err(|_| DetectionError::Receipt)?;
+    SanitizationReceiptV1::new(receipt_ref, disposition, sensitivity, None)
+        .map_err(|_| DetectionError::Receipt)
 }
 
 fn bind_lcm_payload(

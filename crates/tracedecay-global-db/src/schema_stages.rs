@@ -320,7 +320,17 @@ pub async fn ensure_registered_schema_for_admission(
 
         tracedecay_sessions::runtime::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
             .await
-            .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
+            .map_err(|error| match error {
+                tracedecay_sessions::runtime::lcm::LcmError::ProfileResetRequired {
+                    found_version,
+                    required_version,
+                } => tracedecay_runtime_core::errors::TraceDecayError::ProfileResetRequired {
+                    component: "LCM",
+                    found_version,
+                    required_version,
+                },
+                error => global_db_operation_error("initialize LCM schema", error),
+            })?;
         tracedecay_sessions::runtime::git_correlation::ensure_git_correlation_schema_in_transaction(
             &transaction,
         )

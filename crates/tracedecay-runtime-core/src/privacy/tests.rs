@@ -171,6 +171,24 @@ fn lcm_payload_sanitization_is_idempotent() {
 }
 
 #[test]
+fn lcm_receipt_binding_preserves_findings_from_the_raw_payload() {
+    let raw = "api_key=sk-lcm-binding-raw-secret-1234567890abcdef";
+    let sanitized = super::sanitize_lcm_payload_text(raw).expect("sanitize raw payload");
+    let bound = super::bind_sanitized_lcm_payload_text(raw, sanitized.sanitized_text())
+        .expect("bind protected candidate");
+
+    assert_eq!(
+        bound.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    assert_eq!(bound.receipt().sensitivity(), SensitivityV1::Secret);
+    assert!(
+        !bound.findings().is_empty(),
+        "receipt binding discarded raw-input findings"
+    );
+}
+
+#[test]
 fn parsed_record_token_preserves_verified_source_evidence() {
     let record = serde_json::to_vec(&json!({
         "type": "assistant",

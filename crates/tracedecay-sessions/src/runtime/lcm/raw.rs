@@ -9,9 +9,9 @@ use crate::compatibility::projected_content_hash;
 use crate::runtime::SessionMessageRecord;
 use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 use tracedecay_runtime_core::privacy::{
-    LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, LcmSensitiveRedactionPolicyV1,
-    PrivacyDetectorV1, bind_sanitized_lcm_payload_text, redact_lcm_sensitive_payload,
-    sanitize_lcm_payload_text, sanitize_provider_metadata_json, verify_sanitized_json_payload,
+    LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, PrivacyDetectorV1,
+    bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text, sanitize_lcm_payload_text,
+    sanitize_provider_metadata_json, verify_sanitized_json_payload,
 };
 
 use super::{
@@ -51,18 +51,16 @@ pub fn raw_message_metadata_from_row(row: &Row) -> Result<LcmRawMessageMetadata,
 }
 
 fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
-    let Some(metadata) = message.metadata_json.as_deref() else {
-        return Ok(());
-    };
-    let Ok(metadata) = serde_json::from_str::<JsonValue>(metadata) else {
-        return Ok(());
-    };
-    let Some(receipt) = metadata
+    let metadata = message
+        .metadata_json
+        .as_deref()
+        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
+    let metadata = serde_json::from_str::<JsonValue>(metadata)
+        .map_err(|_| LcmError::Db("invalid LCM sanitization metadata".to_owned()))?;
+    let receipt = metadata
         .get("ingest_protection")
         .and_then(|protection| protection.get("sanitization_receipt"))
-    else {
-        return Ok(());
-    };
+        .ok_or_else(|| LcmError::Db("missing LCM sanitization receipt".to_owned()))?;
     let receipt: SanitizationReceiptV1 = serde_json::from_value(receipt.clone())
         .map_err(|_| LcmError::Db("invalid LCM sanitization receipt".to_owned()))?;
     let expected_revision = ComponentVersion::new(LCM_PAYLOAD_SANITIZER_VERSION_V1)
@@ -74,15 +72,23 @@ fn verify_raw_message_receipt(message: &LcmRawMessage) -> Result<(), LcmError> {
             &expected_revision,
         )
         .map_err(|error| LcmError::Db(format!("invalid LCM sanitization receipt: {error}")))?;
-    } else if receipt.receipt().sanitizer_version() != &expected_revision
-        || !matches!(
+    } else {
+        let quarantined = metadata
+            .get("ingest_protection")
+            .and_then(|protection| protection.get("kind"))
+            .and_then(JsonValue::as_str)
+            == Some("quarantined_assistant_output");
+        let disposition_is_valid = matches!(
             receipt.disposition(),
             SanitizerDispositionV1::Accepted | SanitizerDispositionV1::Redacted
-        )
-    {
-        return Err(LcmError::Db(
-            "invalid LCM sanitization receipt for external payload".to_owned(),
-        ));
+        ) || (quarantined
+            && receipt.disposition() == SanitizerDispositionV1::Quarantined
+            && receipt.payload().is_none());
+        if receipt.receipt().sanitizer_version() != &expected_revision || !disposition_is_valid {
+            return Err(LcmError::Db(
+                "invalid LCM sanitization receipt for external payload".to_owned(),
+            ));
+        }
     }
     Ok(())
 }
@@ -159,20 +165,17 @@ struct PreparedMessage {
     metadata_json: Option<String>,
     external_kind: Option<String>,
     sanitization: LcmPayloadSanitizationV1,
+    quarantine_receipt: Option<SanitizationReceiptV1>,
     nested_external_payloads: usize,
     quarantine_reason: Option<String>,
     quarantine_kind: Option<String>,
 }
 
-struct IngestConfig {
-    sensitive_patterns_enabled: bool,
-    sensitive_patterns: Vec<String>,
-}
-
-impl IngestConfig {
-    fn redaction_policy(&self) -> Option<LcmSensitiveRedactionPolicyV1> {
-        self.sensitive_patterns_enabled
-            .then(|| LcmSensitiveRedactionPolicyV1::enabled(&self.sensitive_patterns))
+impl PreparedMessage {
+    fn receipt(&self) -> &SanitizationReceiptV1 {
+        self.quarantine_receipt
+            .as_ref()
+            .unwrap_or_else(|| self.sanitization.receipt())
     }
 }
 
@@ -291,7 +294,7 @@ fn externalized_payload_metadata(
         "char_count": payload_ref.char_count,
         "sha256": payload_ref.content_hash,
     });
-    add_sanitization_metadata(&mut metadata, prepared)?;
+    add_sanitization_metadata(&mut metadata, prepared, None)?;
     Ok(metadata.to_string())
 }
 
@@ -305,13 +308,7 @@ pub async fn upsert_raw_message_with_payload_tracked(
         storage_root,
         rollback,
     };
-    let prepared = prepare_message(
-        conn,
-        message,
-        &mut externalizer,
-        &IngestProtectionDefaults::from_profile(),
-    )
-    .await?;
+    let prepared = prepare_message(conn, message, &mut externalizer).await?;
     if !security::should_externalize(&message.role, message.kind.as_deref(), &prepared.text) {
         let projection_text = derived_text_for_index(&prepared.text);
         upsert_inline_raw_message(
@@ -404,21 +401,12 @@ pub async fn protect_replay_field_value_tracked(
         storage_root,
         rollback,
     };
-    let config = ingest_config(
-        message.metadata_json.as_deref(),
-        &IngestProtectionDefaults::from_profile(),
-    );
-    let mut protected = value.clone();
-
-    if let Some(policy) = config.redaction_policy() {
-        let encoded = serde_json::to_string(&protected)
-            .map_err(|error| LcmError::Db(format!("replay privacy encoding failed: {error}")))?;
-        let redacted = redact_lcm_sensitive_payload(&encoded, &policy).map_err(|error| {
-            LcmError::Db(format!("replay privacy sanitization failed: {error}"))
-        })?;
-        protected = serde_json::from_str(redacted.text())
-            .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))?;
-    }
+    let encoded = serde_json::to_string(value)
+        .map_err(|error| LcmError::Db(format!("replay privacy encoding failed: {error}")))?;
+    let initial = sanitize_lcm_payload_text(&encoded)
+        .map_err(|error| LcmError::Db(format!("replay privacy sanitization failed: {error}")))?;
+    let mut protected = serde_json::from_str(initial.sanitized_text())
+        .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))?;
 
     let mut payloads = Vec::new();
     protect_json_media_payloads(
@@ -433,8 +421,8 @@ pub async fn protect_replay_field_value_tracked(
     }
     let serialized = serde_json::to_string(&protected)
         .map_err(|error| LcmError::Db(format!("replay privacy encoding failed: {error}")))?;
-    let sanitized = sanitize_lcm_payload_text(&serialized)
-        .map_err(|error| LcmError::Db(format!("replay privacy sanitization failed: {error}")))?;
+    let sanitized = bind_sanitized_lcm_payload_text(&encoded, &serialized)
+        .map_err(|error| LcmError::Db(format!("replay privacy receipt failed: {error}")))?;
     serde_json::from_str(sanitized.sanitized_text())
         .map_err(|error| LcmError::Db(format!("replay privacy decoding failed: {error}")))
 }
@@ -443,14 +431,18 @@ async fn prepare_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
-    defaults: &IngestProtectionDefaults,
 ) -> Result<PreparedMessage, LcmError> {
-    let config = ingest_config(message.metadata_json.as_deref(), defaults);
-    let mut text = redact_sensitive_text(&message.text, &config)?.text;
+    let initial = sanitize_lcm_payload_text(&message.text)
+        .map_err(|error| LcmError::Db(format!("LCM privacy sanitization failed: {error}")))?;
+    let mut text = initial.sanitized_text().to_owned();
+    let quarantine_reason =
+        security::quarantine_reason(&message.role, message.kind.as_deref(), &text)
+            .map(str::to_owned);
     let mut nested_external_payloads = 0usize;
 
     let mut handled_as_structured = false;
-    if let Ok(mut value) = serde_json::from_str::<JsonValue>(&text)
+    if quarantine_reason.is_none()
+        && let Ok(mut value) = serde_json::from_str::<JsonValue>(&text)
         && matches!(value, JsonValue::Object(_) | JsonValue::Array(_))
     {
         handled_as_structured = true;
@@ -482,7 +474,8 @@ async fn prepare_message(
     // still wins when there is no inline scaffold worth keeping or when a
     // whole-message reason (quarantine, binary-ish, oversized tool output)
     // applies.
-    if !handled_as_structured
+    if quarantine_reason.is_none()
+        && !handled_as_structured
         && !security::prefers_whole_message_externalization(
             &message.role,
             message.kind.as_deref(),
@@ -505,9 +498,11 @@ async fn prepare_message(
     let sanitization = bind_sanitized_lcm_payload_text(&message.text, &text)
         .map_err(|error| LcmError::Db(format!("LCM privacy receipt failed: {error}")))?;
     text = sanitization.sanitized_text().to_owned();
-    let quarantine_reason =
-        security::quarantine_reason(&message.role, message.kind.as_deref(), &text)
-            .map(str::to_owned);
+    let quarantine_receipt = quarantine_reason
+        .as_ref()
+        .map(|_| quarantine_lcm_payload_text(&message.text))
+        .transpose()
+        .map_err(|error| LcmError::Db(format!("LCM quarantine receipt failed: {error}")))?;
     let quarantine_kind = quarantine_reason
         .as_ref()
         .map(|_| "quarantined_assistant_output".to_owned());
@@ -516,6 +511,7 @@ async fn prepare_message(
         metadata_json: None,
         external_kind: quarantine_kind.clone(),
         sanitization,
+        quarantine_receipt,
         nested_external_payloads,
         quarantine_reason,
         quarantine_kind,
@@ -660,15 +656,22 @@ fn externalize_spans(
     for &(start, end) in spans {
         protected.push_str(&text[cursor..start]);
         let span = &text[start..end];
+        let sanitization = sanitize_lcm_payload_text(span)
+            .map_err(|error| LcmError::Db(format!("LCM payload sanitization failed: {error}")))?;
         let metadata_json = Some(
             json!({
                 "ingest_payload": true,
                 "field_path": field_path,
-                "lossless": true,
+                "sanitization_receipt": sanitization.receipt(),
             })
             .to_string(),
         );
-        let payload_ref = externalizer.write(message, "ingest_payload", span, metadata_json)?;
+        let payload_ref = externalizer.write(
+            message,
+            "ingest_payload",
+            sanitization.sanitized_text(),
+            metadata_json,
+        )?;
         protected.push_str(&ingest_payload_placeholder(&payload_ref, field_path));
         payloads.push(payload_ref);
         cursor = end;
@@ -710,93 +713,6 @@ fn safe_placeholder_metadata(value: &str) -> String {
     }
 }
 
-struct RedactionOutcome {
-    text: String,
-}
-
-const BUILT_IN_SENSITIVE_PATTERNS: [&str; 4] = [
-    "api_key",
-    "bearer_token",
-    "password_assignment",
-    "private_key",
-];
-
-#[derive(Clone, Debug, Default)]
-struct IngestProtectionDefaults {
-    sensitive_patterns_enabled: bool,
-    sensitive_patterns: Option<Vec<String>>,
-}
-
-impl IngestProtectionDefaults {
-    fn from_profile() -> Self {
-        Self::from_policy(&crate::host_ports::lcm_redaction::resolve())
-    }
-
-    fn from_policy(policy: &crate::host_ports::LcmRedactionPolicy) -> Self {
-        let patterns: Vec<String> = policy
-            .patterns
-            .iter()
-            .map(|pattern| pattern.to_ascii_lowercase())
-            .collect();
-        Self {
-            sensitive_patterns_enabled: policy.enabled,
-            sensitive_patterns: (!patterns.is_empty()).then_some(patterns),
-        }
-    }
-}
-
-fn ingest_config(metadata_json: Option<&str>, defaults: &IngestProtectionDefaults) -> IngestConfig {
-    let mut config = IngestConfig {
-        sensitive_patterns_enabled: defaults.sensitive_patterns_enabled,
-        sensitive_patterns: defaults.sensitive_patterns.clone().unwrap_or_else(|| {
-            BUILT_IN_SENSITIVE_PATTERNS
-                .iter()
-                .map(|pattern| (*pattern).to_string())
-                .collect()
-        }),
-    };
-    let Some(metadata_json) = metadata_json else {
-        return config;
-    };
-    let Ok(value) = serde_json::from_str::<JsonValue>(metadata_json) else {
-        return config;
-    };
-    let ingest = value
-        .get("lcm_ingest")
-        .or_else(|| value.get("ingest_protection"))
-        .unwrap_or(&value);
-    if let Some(enabled) = ingest
-        .get("sensitive_patterns_enabled")
-        .and_then(JsonValue::as_bool)
-    {
-        config.sensitive_patterns_enabled = enabled;
-    }
-    if let Some(patterns) = ingest
-        .get("sensitive_patterns")
-        .and_then(JsonValue::as_array)
-    {
-        config.sensitive_patterns = patterns
-            .iter()
-            .filter_map(JsonValue::as_str)
-            .map(str::to_ascii_lowercase)
-            .collect();
-    }
-    config
-}
-
-fn redact_sensitive_text(text: &str, config: &IngestConfig) -> Result<RedactionOutcome, LcmError> {
-    let Some(policy) = config.redaction_policy() else {
-        return Ok(RedactionOutcome {
-            text: text.to_string(),
-        });
-    };
-    let result = redact_lcm_sensitive_payload(text, &policy)
-        .map_err(|error| LcmError::Db(format!("LCM privacy sanitization failed: {error}")))?;
-    Ok(RedactionOutcome {
-        text: result.text().to_string(),
-    })
-}
-
 const MAX_PROVIDER_METADATA_BYTES: u64 = 1_048_576;
 
 fn protected_metadata_json(
@@ -811,26 +727,44 @@ fn protected_metadata_json(
             "LCM metadata sanitization failed: metadata must be a JSON object".to_owned(),
         ));
     }
-    add_sanitization_metadata(&mut metadata, prepared)?;
+    let sanitized_metadata = serde_json::to_string(&metadata)
+        .map_err(|error| LcmError::Db(format!("LCM metadata encoding failed: {error}")))?;
+    let metadata_sanitization =
+        bind_sanitized_lcm_payload_text(original.unwrap_or("{}"), &sanitized_metadata)
+            .map_err(|error| LcmError::Db(format!("LCM metadata receipt failed: {error}")))?;
+    add_sanitization_metadata(
+        &mut metadata,
+        prepared,
+        Some(metadata_sanitization.receipt()),
+    )?;
     Ok(Some(metadata.to_string()))
 }
 
 fn payload_metadata_json(prepared: &PreparedMessage) -> Result<Option<String>, LcmError> {
     let mut metadata = JsonValue::Object(Map::new());
-    add_sanitization_metadata(&mut metadata, prepared)?;
+    add_sanitization_metadata(&mut metadata, prepared, None)?;
     Ok(Some(metadata.to_string()))
 }
 
 fn add_sanitization_metadata(
     metadata: &mut JsonValue,
     prepared: &PreparedMessage,
+    metadata_receipt: Option<&SanitizationReceiptV1>,
 ) -> Result<(), LcmError> {
     let mut ingest = Map::new();
     ingest.insert(
         "sanitization_receipt".to_owned(),
-        serde_json::to_value(prepared.sanitization.receipt())
+        serde_json::to_value(prepared.receipt())
             .map_err(|error| LcmError::Db(format!("LCM receipt encoding failed: {error}")))?,
     );
+    if let Some(receipt) = metadata_receipt {
+        ingest.insert(
+            "metadata_sanitization_receipt".to_owned(),
+            serde_json::to_value(receipt).map_err(|error| {
+                LcmError::Db(format!("LCM metadata receipt encoding failed: {error}"))
+            })?,
+        );
+    }
     if prepared.nested_external_payloads > 0 {
         ingest.insert(
             "nested_external_payloads".to_string(),

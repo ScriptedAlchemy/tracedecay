@@ -1,10 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
+use serde_json::{Map, Value as JsonValue, json};
 use tracedecay_domain::HydrationStateV1;
 
 use crate::compatibility::projected_content_hash;
 use tracedecay_runtime_core::db::engine::{QueryExecutor, Value, params};
+use tracedecay_runtime_core::privacy::{
+    bind_sanitized_lcm_payload_text, sanitize_lcm_payload_text, sanitize_provider_metadata_json,
+};
 
 use super::types::{LcmImmutableSummaryPublication, LcmSummaryPublicationReceipt};
 use super::{
@@ -45,6 +49,7 @@ pub async fn insert_summary_node(
     publisher: &impl LcmSummaryPublicationPort,
     draft: LcmSummaryNodeDraft,
 ) -> Result<LcmSummaryNode, LcmError> {
+    let draft = sanitize_summary_draft(draft)?;
     let summary_hash = projected_content_hash(&draft.summary_text);
     let node_id = summary_node_id(
         &draft.provider,
@@ -62,6 +67,67 @@ pub async fn insert_summary_node(
         })
         .await
         .map(|receipt| receipt.summary)
+}
+
+pub fn sanitize_summary_draft(
+    mut draft: LcmSummaryNodeDraft,
+) -> Result<LcmSummaryNodeDraft, LcmError> {
+    const MAX_SUMMARY_METADATA_BYTES: u64 = 1_048_576;
+
+    let summary = sanitize_lcm_payload_text(&draft.summary_text)
+        .map_err(|error| LcmError::Db(format!("summary privacy sanitization failed: {error}")))?;
+    draft.summary_text = summary.sanitized_text().to_owned();
+
+    let hint = draft
+        .expand_hint
+        .as_deref()
+        .map(sanitize_lcm_payload_text)
+        .transpose()
+        .map_err(|error| LcmError::Db(format!("summary hint sanitization failed: {error}")))?;
+    draft.expand_hint = hint
+        .as_ref()
+        .map(|sanitization| sanitization.sanitized_text().to_owned());
+
+    let raw_metadata = draft.metadata_json.as_deref().unwrap_or("{}");
+    let mut metadata = sanitize_provider_metadata_json(raw_metadata, MAX_SUMMARY_METADATA_BYTES)
+        .ok_or_else(|| LcmError::Db("summary metadata sanitization failed".to_owned()))?;
+    if !metadata.is_object() {
+        return Err(LcmError::Db(
+            "summary metadata sanitization failed: metadata must be a JSON object".to_owned(),
+        ));
+    }
+    let sanitized_metadata = serde_json::to_string(&metadata)
+        .map_err(|error| LcmError::Db(format!("summary metadata encoding failed: {error}")))?;
+    let metadata_receipt = bind_sanitized_lcm_payload_text(raw_metadata, &sanitized_metadata)
+        .map_err(|error| LcmError::Db(format!("summary metadata receipt failed: {error}")))?;
+    let mut receipts = Map::new();
+    receipts.insert(
+        "summary_text".to_owned(),
+        serde_json::to_value(summary.receipt())
+            .map_err(|error| LcmError::Db(format!("summary receipt encoding failed: {error}")))?,
+    );
+    if let Some(hint) = hint {
+        receipts.insert(
+            "expand_hint".to_owned(),
+            serde_json::to_value(hint.receipt()).map_err(|error| {
+                LcmError::Db(format!("summary hint receipt encoding failed: {error}"))
+            })?,
+        );
+    }
+    receipts.insert(
+        "metadata".to_owned(),
+        serde_json::to_value(metadata_receipt.receipt()).map_err(|error| {
+            LcmError::Db(format!("summary metadata receipt encoding failed: {error}"))
+        })?,
+    );
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "tracedecay_privacy".to_owned(),
+            json!({"sanitization_receipts": receipts}),
+        );
+    }
+    draft.metadata_json = Some(metadata.to_string());
+    Ok(draft)
 }
 
 pub async fn expand_summary_node(
@@ -516,5 +582,40 @@ fn source_ref_from_db(source_kind: &str, source_id: &str) -> Result<LcmSourceRef
         _ => Err(LcmError::Db(format!(
             "invalid summary source_kind: {source_kind}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::*;
+
+    #[test]
+    fn summary_text_hint_and_metadata_are_sanitized_before_publication() {
+        let secret = "sk-summary-canary-1234567890abcdef";
+        let draft = LcmSummaryNodeDraft {
+            provider: "codex".to_owned(),
+            conversation_id: "conversation-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            depth: 0,
+            summary_text: format!("api_key={secret}"),
+            source_refs: vec![LcmSourceRef::RawMessage { store_id: 1 }],
+            source_token_count: 1,
+            summary_token_count: 1,
+            source_time_start: None,
+            source_time_end: None,
+            expand_hint: Some(format!("Bearer {secret}")),
+            metadata_json: Some(json!({"authorization": secret}).to_string()),
+        };
+
+        let sanitized = sanitize_summary_draft(draft).expect("sanitize summary draft");
+        let durable = serde_json::to_string(&sanitized).expect("serialize sanitized draft");
+        assert!(!durable.contains(secret));
+        let metadata: JsonValue =
+            serde_json::from_str(sanitized.metadata_json.as_deref().expect("metadata"))
+                .expect("decode sanitized metadata");
+        assert_eq!(
+            metadata["tracedecay_privacy"]["sanitization_receipts"]["summary_text"]["disposition"],
+            "redacted"
+        );
     }
 }

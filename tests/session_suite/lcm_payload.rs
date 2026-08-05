@@ -878,6 +878,10 @@ async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
         "quarantined_assistant_output"
     );
     assert_eq!(metadata["ingest_protection"]["reason"], "high_repetition");
+    assert_eq!(
+        metadata["ingest_protection"]["sanitization_receipt"]["disposition"],
+        "quarantined"
+    );
     assert!(!raw.content.contains("LOOP_SEGMENT"));
     let (snippet_text, index_text) = raw_snippet_and_index(&db, "cursor", "assistant-loop").await;
     assert!(
@@ -889,11 +893,11 @@ async fn repetitive_assistant_output_is_quarantined_without_indexing_body() {
     assert!(!index_text.contains("LOOP_SEGMENT"));
     assert_eq!(lcm_fts_count(&db, "LOOP_SEGMENT").await, 0);
 
-    let expanded = store
+    let error = store
         .lcm_expand_payload("cursor", "session-1", payload_ref, 0, body.chars().count())
         .await
-        .expect("quarantined payload should expand");
-    assert_eq!(expanded.content, body);
+        .expect_err("quarantined payload must remain locked");
+    assert_eq!(error, LcmError::PayloadLocked);
 }
 
 #[tokio::test]
