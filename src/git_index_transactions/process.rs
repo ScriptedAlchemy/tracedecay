@@ -1,7 +1,7 @@
 use std::env;
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 
 use tracedecay_application::DirectorySyncPolicy;
 use tracedecay_domain::{GitFileModeV1, GitOidV1, GitOperationStateV1};
