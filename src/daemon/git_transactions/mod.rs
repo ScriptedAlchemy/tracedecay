@@ -86,7 +86,7 @@ where
 
     #[cfg(test)]
     pub(crate) fn mutation_queue_for_test(&self) -> &std::sync::Arc<RepositoryMutationQueue> {
-        &self.port.queue
+        self.port.mutation_queue_for_test()
     }
 }
 
