@@ -726,12 +726,7 @@ where
         started_at: identity.started_at(),
         ended_at: terminal.ended_at(),
         effective_deadline: identity.deadline().clone(),
-        cancellation: (termination == EffectTermination::TimedOut).then_some(
-            CancellationObservation {
-                stage: CancellationStage::EffectInFlight,
-                observed_at: terminal.ended_at(),
-            },
-        ),
+        cancellation: workflow_effect_terminal_observation(termination, terminal.ended_at()),
         budget: OperationBudgetUsage::default(),
         termination: termination.into(),
     };
@@ -766,11 +761,42 @@ where
     )?))
 }
 
+fn workflow_effect_terminal_observation(
+    termination: EffectTermination,
+    observed_at: UtcMicros,
+) -> Option<CancellationObservation> {
+    (termination == EffectTermination::TimedOut).then_some(CancellationObservation {
+        stage: CancellationStage::BeforeEffect,
+        observed_at,
+    })
+}
+
 impl DaemonInvocationService {
     pub(super) async fn work_runtime(
         &self,
         project_root: Option<&Path>,
     ) -> Option<RegisteredWorkRuntime> {
         self.project_runtimes.get(project_root?).await
+    }
+}
+
+#[cfg(test)]
+mod workflow_effect_receipt_tests {
+    use super::*;
+
+    #[test]
+    fn deadline_before_mutation_is_not_labeled_in_flight() {
+        let observed_at = UtcMicros(42);
+        assert_eq!(
+            workflow_effect_terminal_observation(EffectTermination::TimedOut, observed_at),
+            Some(CancellationObservation {
+                stage: CancellationStage::BeforeEffect,
+                observed_at,
+            })
+        );
+        assert_eq!(
+            workflow_effect_terminal_observation(EffectTermination::Completed, observed_at),
+            None
+        );
     }
 }

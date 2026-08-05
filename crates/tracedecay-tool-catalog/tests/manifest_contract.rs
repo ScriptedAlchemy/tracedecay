@@ -125,6 +125,19 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
     assert_eq!(serialized["inverse"]["reason"], "no_shipped_inverse");
     assert_eq!(serialized["receipt"], "durable_effect");
 
+    let mut falsely_cancelled = input.clone();
+    falsely_cancelled.cancellation = CancellationContract::NotCancellable;
+    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(falsely_cancelled.clone()).is_err());
+    falsely_cancelled.terminal_states = TerminalStateContract::new(vec![
+        TerminalState::Completed,
+        TerminalState::TimedOut,
+        TerminalState::Failed,
+        TerminalState::EffectUnknown,
+        TerminalState::Partial,
+    ])
+    .unwrap();
+    assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(falsely_cancelled).is_ok());
+
     let mut invalid = input.clone();
     invalid.receipt = ReceiptContract::Operation;
     assert!(tracedecay_tool_catalog::CapabilityManifestV1::new(invalid).is_err());

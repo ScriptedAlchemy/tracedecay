@@ -776,7 +776,6 @@ impl CapabilityManifestV1 {
 
         let base_terminals = [
             TerminalState::Completed,
-            TerminalState::Cancelled,
             TerminalState::TimedOut,
             TerminalState::Failed,
             TerminalState::Partial,
@@ -785,7 +784,15 @@ impl CapabilityManifestV1 {
             .iter()
             .any(|state| !self.terminal_states.contains(*state))
         {
-            return Err(self.invalid("terminal states must preserve completed, cancelled, timed out, failed, and partial"));
+            return Err(self.invalid(
+                "terminal states must preserve completed, timed out, failed, and partial",
+            ));
+        }
+        let cancellable = matches!(&self.cancellation, CancellationContract::Cooperative { .. });
+        if self.terminal_states.contains(TerminalState::Cancelled) != cancellable {
+            return Err(
+                self.invalid("the cancelled terminal must exactly match the cancellation contract")
+            );
         }
 
         if self.effect.is_effect() {
@@ -798,7 +805,7 @@ impl CapabilityManifestV1 {
                 )
                 || self.deadline.behavior() != DeadlineBehavior::ReturnEffectReceipt
                 || !self.terminal_states.contains(TerminalState::EffectUnknown)
-                || (!matches!(self.cancellation, CancellationContract::NotCancellable)
+                || (!matches!(&self.cancellation, CancellationContract::NotCancellable)
                     && (!self.cancellation.observes(CancellationPoint::BeforeEffect)
                         || !self
                             .cancellation
