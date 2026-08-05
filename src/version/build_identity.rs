@@ -26,9 +26,12 @@ pub fn resolve(root: &std::path::Path) -> BuildIdentity {
     let Some(sha) = git_stdout(root, &["rev-parse", "--short=12", "HEAD"]) else {
         return BuildIdentity::default();
     };
+    let Some(status) = git_output(root, &["status", "--porcelain"]) else {
+        return BuildIdentity::default();
+    };
     BuildIdentity {
         sha: Some(sha),
-        dirty: git_stdout(root, &["status", "--porcelain"]).is_some(),
+        dirty: !status.stdout.is_empty(),
     }
 }
 
