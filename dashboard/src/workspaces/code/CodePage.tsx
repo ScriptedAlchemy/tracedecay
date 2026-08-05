@@ -85,7 +85,10 @@ export function CodePage() {
     },
   );
   const [selected, setSelected] = useState<TraceFocus | null>(null);
-  const focusId = selected?.id ?? structure.focusId;
+  // The URL identity is authoritative. Every local selection writes it in the
+  // same gesture, so a back/forward navigation or a pasted deep link can never
+  // be silently retargeted by an older in-memory row.
+  const focusId = structure.focusId;
   const subgraph = useLegacy(
     ['graph', 'subgraph', focusId ?? ''],
     `${BASE}/subgraph${focusId ? `?node_id=${encodeURIComponent(focusId)}` : ''}`,
