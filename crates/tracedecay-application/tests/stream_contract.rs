@@ -71,32 +71,25 @@ fn stream_rejects_multiple_terminal_receipts() {
 
 #[test]
 fn stream_rejects_an_invalid_gap_event() {
-    let operation = common::operation();
-    let context = common::context(&operation);
-    let receipt = OperationReceipt::completed(
-        UtcMicros(2),
-        UtcMicros(3),
-        context.deadline().clone(),
-        Default::default(),
-    )
-    .unwrap();
-    let events = vec![
-        StreamEvent {
-            sequence: 0,
-            kind: StreamEventKind::<()>::Gap(StreamGap {
-                first_missing_sequence: 4,
-                last_missing_sequence: 3,
-                frontier: StreamFrontier {
-                    next_sequence: 5,
-                    retained_from_sequence: 0,
-                    resume_token: None,
-                },
-            }),
-        },
-        StreamEvent::terminal(1, StreamTermination::completed(receipt)).unwrap(),
-    ];
+    let events = [StreamEvent {
+        sequence: 4,
+        kind: StreamEventKind::<()>::Gap(StreamGap {
+            first_missing_sequence: 4,
+            last_missing_sequence: 3,
+            frontier: StreamFrontier {
+                next_sequence: 5,
+                retained_from_sequence: 0,
+                resume_token: None,
+            },
+        }),
+    }];
 
-    assert!(validate_stream(&events).is_err());
+    assert_eq!(
+        validate_stream(&events),
+        Err(StreamValidationError::InvalidGap(
+            "stream gap has an invalid range".to_owned()
+        ))
+    );
 }
 
 #[test]
@@ -118,13 +111,15 @@ fn stream_gap_advances_sequence_to_the_end_of_the_missing_range() {
                 first_missing_sequence: 3,
                 last_missing_sequence: 5,
                 frontier: StreamFrontier {
-                    next_sequence: 6,
+                    next_sequence: 9,
                     retained_from_sequence: 6,
                     resume_token: None,
                 },
             }),
         },
-        StreamEvent::terminal(6, StreamTermination::completed(receipt)).unwrap(),
+        StreamEvent::item(6, ()).unwrap(),
+        StreamEvent::item(7, ()).unwrap(),
+        StreamEvent::terminal(8, StreamTermination::completed(receipt)).unwrap(),
     ];
 
     assert_eq!(validate_stream(&events), Ok(()));
@@ -177,6 +172,16 @@ fn stream_gap_sequence_overflow_is_typed() {
             },
         }),
     }];
+
+    assert_eq!(
+        validate_stream(&events),
+        Err(StreamValidationError::SequenceOverflow)
+    );
+}
+
+#[test]
+fn stream_item_sequence_overflow_is_typed() {
+    let events = [StreamEvent::item(u64::MAX, ()).unwrap()];
 
     assert_eq!(
         validate_stream(&events),

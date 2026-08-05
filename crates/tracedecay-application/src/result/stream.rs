@@ -198,7 +198,12 @@ pub fn validate_stream<T>(events: &[StreamEvent<T>]) -> Result<(), StreamValidat
                 .map_err(|error| StreamValidationError::InvalidGap(error.to_string()))?;
             expected = Some(next_sequence);
         } else {
-            expected = event.sequence.checked_add(1);
+            expected = Some(
+                event
+                    .sequence
+                    .checked_add(1)
+                    .ok_or(StreamValidationError::SequenceOverflow)?,
+            );
         }
         if let StreamEventKind::Terminal(termination) = &event.kind {
             termination

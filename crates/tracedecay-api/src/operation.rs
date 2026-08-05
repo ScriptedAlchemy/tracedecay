@@ -7,17 +7,19 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use axum::extract::rejection::QueryRejection;
-use axum::extract::{Extension, Path, Query, State};
+use axum::body::Bytes;
+use axum::extract::rejection::{BytesRejection, QueryRejection};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::Stream;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use tracedecay_application::{
-    ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, RequestContext, RequestId,
-    ResumeToken, RetryDirective, StreamEvent, StreamFrontier,
+    ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
+    OperationCancelOutcome, OperationEventSubscription, RequestContext, RequestId, ResumeToken,
+    RetryDirective, SafeDiagnostic, StreamEvent,
 };
 
 use crate::http::{adapter_problem, application_problem_response, invalid_request_response};
@@ -28,6 +30,7 @@ pub const DEFAULT_OPERATION_EVENT_PAGE_SIZE: u16 = 256;
 /// Largest retained-event page an HTTP client may request.
 pub const MAX_OPERATION_EVENT_PAGE_SIZE: u16 = 256;
 const MAX_OPERATION_EVENT_SEQUENCE: u64 = i64::MAX as u64;
+const MAX_OPERATION_CANCEL_BODY_BYTES: usize = 1_024;
 
 /// Exact authenticated input forwarded when an operation stream is opened.
 #[derive(Clone, Debug)]
@@ -48,20 +51,11 @@ pub struct OperationCancelRequest {
     pub operation_id: RequestId,
 }
 
-/// Idempotent result of an explicit cancellation request.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationCancellationStatus {
-    Requested,
-    AlreadyRequested,
-    AlreadyTerminal,
-}
-
-impl OperationCancellationStatus {
-    const fn http_status(self) -> axum::http::StatusCode {
-        match self {
-            Self::Requested => axum::http::StatusCode::ACCEPTED,
-            Self::AlreadyRequested | Self::AlreadyTerminal => axum::http::StatusCode::OK,
+const fn operation_cancel_http_status(outcome: OperationCancelOutcome) -> axum::http::StatusCode {
+    match outcome {
+        OperationCancelOutcome::Requested => axum::http::StatusCode::ACCEPTED,
+        OperationCancelOutcome::AlreadyRequested | OperationCancelOutcome::AlreadyTerminal => {
+            axum::http::StatusCode::OK
         }
     }
 }
@@ -69,40 +63,21 @@ impl OperationCancellationStatus {
 /// Dynamically dispatched canonical event stream owned outside this adapter.
 pub type OperationEventStream = Pin<Box<dyn Stream<Item = StreamEvent<Value>> + Send + 'static>>;
 
-/// Initial replay frontier and the live canonical event stream.
-pub struct OperationEventSubscription {
-    pub frontier: StreamFrontier,
-    pub events: OperationEventStream,
-}
-
-impl OperationEventSubscription {
-    /// Erase the concrete owner stream without buffering or changing events.
-    pub fn new<S>(frontier: StreamFrontier, events: S) -> Self
-    where
-        S: Stream<Item = StreamEvent<Value>> + Send + 'static,
-    {
-        Self {
-            frontier,
-            events: Box::pin(events),
-        }
-    }
-}
-
 /// Owner future for an authenticated operation-event subscription.
 pub type OperationEventFuture = Pin<
     Box<
-        dyn Future<Output = Result<OperationEventSubscription, ApplicationProblemEnvelope>>
-            + Send
+        dyn Future<
+                Output = Result<
+                    OperationEventSubscription<OperationEventStream>,
+                    ApplicationProblemEnvelope,
+                >,
+            > + Send
             + 'static,
     >,
 >;
 /// Owner future for an explicit typed cancellation result.
 pub type OperationCancelFuture = Pin<
-    Box<
-        dyn Future<Output = CanonicalInvocationResult<OperationCancellationStatus>>
-            + Send
-            + 'static,
-    >,
+    Box<dyn Future<Output = CanonicalInvocationResult<OperationCancelOutcome>> + Send + 'static>,
 >;
 
 /// Application/runtime authority adapted by the operation HTTP routes.
@@ -141,6 +116,7 @@ where
             "/operations/{operation_id}/cancel",
             post(cancel_operation::<O>),
         )
+        .layer(DefaultBodyLimit::max(MAX_OPERATION_CANCEL_BODY_BYTES))
         .with_state(owner)
 }
 
@@ -192,7 +168,13 @@ where
         .await
     {
         Ok(subscription) => {
-            sse_response(request_id, subscription.frontier, subscription.events).into_response()
+            let (correlation_id, frontier, events) = subscription.into_parts();
+            sse_response(correlation_id, frontier, events).into_response()
+        }
+        Err(problem)
+            if problem.problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized =>
+        {
+            concealed_operation_response(request_id)
         }
         Err(problem) => application_problem_response(problem),
     }
@@ -203,6 +185,7 @@ async fn cancel_operation<O>(
     Path(operation_id): Path<String>,
     Extension(context): Extension<RequestContext>,
     Extension(controls): Extension<HttpApplicationControls>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response
 where
     O: OperationEventOwner,
@@ -212,6 +195,13 @@ where
         Ok(operation_id) => operation_id,
         Err(_) => return concealed_operation_response(request_id),
     };
+    if !matches!(body, Ok(ref body) if body.is_empty()) {
+        return invalid_request_response(
+            request_id,
+            "operation_cancel.invalid_body",
+            "The operation cancellation request body must be empty",
+        );
+    }
     let result = owner
         .cancel_operation(OperationCancelRequest {
             context,
@@ -219,6 +209,13 @@ where
             operation_id,
         })
         .await;
+    if matches!(
+        &result.result,
+        Err(problem)
+            if problem.problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized
+    ) {
+        return concealed_operation_response(request_id);
+    }
     let status = match &result.result {
         Ok(application) => match &application.outcome {
             ApplicationOutcome::Evidence(packet) => packet.payload.as_ref(),
@@ -226,12 +223,13 @@ where
             ApplicationOutcome::Effect(effect) => effect.payload.as_ref(),
         }
         .copied()
-        .map(OperationCancellationStatus::http_status),
+        .map(operation_cancel_http_status),
         Err(_) => None,
     };
     match status {
         Some(status) => (status, Json(result.into_http_json())).into_response(),
-        None => result.into_http_response(),
+        None if result.result.is_err() => result.into_http_response(),
+        None => invalid_cancellation_outcome_response(request_id),
     }
 }
 
@@ -239,6 +237,16 @@ fn concealed_operation_response(request_id: RequestId) -> Response {
     application_problem_response(adapter_problem(
         request_id,
         ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+    ))
+}
+
+fn invalid_cancellation_outcome_response(request_id: RequestId) -> Response {
+    application_problem_response(adapter_problem(
+        request_id,
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "operation_cancel.invalid_outcome".to_owned(),
+            message: "The operation cancellation authority returned no typed outcome".to_owned(),
+        }),
     ))
 }
 
@@ -253,7 +261,7 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
-    use futures_util::Stream;
+    use futures_util::{Stream, StreamExt};
     use serde_json::json;
     use tower::ServiceExt;
     use tracedecay_application::{
@@ -271,7 +279,7 @@ mod tests {
     use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, SortContractId, UseCaseId};
 
     use super::{
-        OperationCancelFuture, OperationCancelRequest, OperationCancellationStatus,
+        OperationCancelFuture, OperationCancelOutcome, OperationCancelRequest,
         OperationEventFuture, OperationEventOwner, OperationEventRequest,
         OperationEventSubscription, operation_event_router,
     };
@@ -286,6 +294,10 @@ mod tests {
     }
 
     fn context() -> RequestContext {
+        context_for("request.operation-http")
+    }
+
+    fn context_for(request_id: &str) -> RequestContext {
         let scope = ResolvedScope::new(
             id::<ProjectId>("project.operation-http"),
             id::<RepositoryId>("repository.operation-http"),
@@ -310,7 +322,7 @@ mod tests {
             id::<ActorId>("actor.requester"),
             scope,
             grant,
-            RequestId::new("request.operation-http").expect("request id"),
+            RequestId::new(request_id).expect("request id"),
             Deadline::new(UtcMicros(9_000)).expect("deadline"),
             CancellationContext::active("cancel.operation-http").expect("cancellation"),
         )
@@ -347,8 +359,8 @@ mod tests {
 
     fn cancellation_result(
         request: &RequestContext,
-        status: OperationCancellationStatus,
-    ) -> CanonicalInvocationResult<OperationCancellationStatus> {
+        status: Option<OperationCancelOutcome>,
+    ) -> CanonicalInvocationResult<OperationCancelOutcome> {
         let digest = ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("digest");
         let authority = AuthorityReceipt {
             grant_id: request.grant().grant_id.clone(),
@@ -366,7 +378,7 @@ mod tests {
             revalidated_at: UtcMicros(2),
         };
         let retrieval = RetrievalEvidence {
-            payload: Some(status),
+            payload: Some(status.unwrap_or(OperationCancelOutcome::Requested)),
             temporal: TemporalState::current(UtcMicros(2)),
             evidence_authorities: Vec::new(),
             coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Symbol], 1, 1, 1)
@@ -392,7 +404,7 @@ mod tests {
             Default::default(),
         )
         .expect("receipt");
-        let application = ApplicationEnvelope::evidence(
+        let mut application = ApplicationEnvelope::evidence(
             ResultContractRef::new(
                 SchemaId::new("schema.operation-http.cancel").expect("schema"),
                 1,
@@ -402,19 +414,42 @@ mod tests {
             request.scope().clone(),
             EvidencePacket::from_retrieval(retrieval, authority, execution).expect("packet"),
         );
+        if status.is_none()
+            && let tracedecay_application::ApplicationOutcome::Evidence(packet) =
+                &mut application.outcome
+        {
+            packet.payload = None;
+        }
         CanonicalInvocationResult::new(
             BindingId::new("binding.operation-http.cancel").expect("binding"),
             Ok(application),
         )
     }
 
+    fn cancellation_problem_result(
+        problem: ApplicationProblemEnvelope,
+    ) -> CanonicalInvocationResult<OperationCancelOutcome> {
+        CanonicalInvocationResult::new(
+            BindingId::new("binding.operation-http.cancel").expect("binding"),
+            Err(problem),
+        )
+    }
+
     #[derive(Clone)]
     struct RecordingOwner {
         event_requests: Arc<Mutex<Vec<OperationEventRequest>>>,
-        event_reply:
-            Arc<Mutex<Option<Result<OperationEventSubscription, ApplicationProblemEnvelope>>>>,
+        event_reply: Arc<
+            Mutex<
+                Option<
+                    Result<
+                        OperationEventSubscription<super::OperationEventStream>,
+                        ApplicationProblemEnvelope,
+                    >,
+                >,
+            >,
+        >,
         cancel_requests: Arc<Mutex<Vec<OperationCancelRequest>>>,
-        cancel_reply: Arc<Mutex<Option<CanonicalInvocationResult<OperationCancellationStatus>>>>,
+        cancel_reply: Arc<Mutex<Option<CanonicalInvocationResult<OperationCancelOutcome>>>>,
     }
 
     impl Default for RecordingOwner {
@@ -435,7 +470,9 @@ mod tests {
         ) -> Self {
             Self {
                 event_reply: Arc::new(Mutex::new(Some(Ok(OperationEventSubscription::new(
-                    frontier, events,
+                    RequestId::new("request.operation.correlation").expect("correlation"),
+                    frontier,
+                    Box::pin(events),
                 ))))),
                 ..Self::default()
             }
@@ -448,9 +485,7 @@ mod tests {
             }
         }
 
-        fn with_cancel_result(
-            result: CanonicalInvocationResult<OperationCancellationStatus>,
-        ) -> Self {
+        fn with_cancel_result(result: CanonicalInvocationResult<OperationCancelOutcome>) -> Self {
             Self {
                 cancel_reply: Arc::new(Mutex::new(Some(result))),
                 ..Self::default()
@@ -471,8 +506,9 @@ mod tests {
                 .take()
                 .unwrap_or_else(|| {
                     Ok(OperationEventSubscription::new(
+                        RequestId::new("request.operation.correlation").expect("correlation"),
                         frontier(42),
-                        futures_util::stream::empty(),
+                        Box::pin(futures_util::stream::empty()),
                     ))
                 });
             Box::pin(async move { reply })
@@ -526,22 +562,46 @@ mod tests {
             "request.operation-http"
         );
         assert_eq!(request.controls.deadline.expires_at, UtcMicros(8_000));
-        assert_eq!(
-            serde_json::to_value(&request.context).expect("context"),
-            serde_json::to_value(context()).expect("expected context")
-        );
-        assert_eq!(
-            serde_json::to_value(json!({
-                "next_sequence": request.next_sequence,
-                "max_events": request.max_events,
-            }))
-            .expect("query"),
-            json!({"next_sequence": 41, "max_events": 37})
-        );
+    }
+
+    #[tokio::test]
+    async fn reconnect_preserves_subscription_correlation_across_request_ids() {
+        let app = operation_event_router(RecordingOwner::default());
+
+        for (uri, request_id) in [
+            ("/operations/request.origin/events", "request.http.initial"),
+            (
+                "/operations/request.origin/events?next_sequence=4",
+                "request.http.reconnect",
+            ),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(uri)
+                        .extension(context_for(request_id))
+                        .extension(controls())
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            let mut body = response.into_body().into_data_stream();
+            let open = body
+                .next()
+                .await
+                .expect("open frame")
+                .expect("encoded open frame");
+            let open = String::from_utf8(open.to_vec()).expect("UTF-8 open frame");
+
+            assert!(open.contains("\"correlation_id\":\"request.operation.correlation\""));
+            assert!(!open.contains(request_id));
+        }
     }
 
     #[tokio::test]
     async fn resume_gap_is_framed_as_a_canonical_sse_event() {
+        let request = context();
         let gap = StreamEvent {
             sequence: 7,
             kind: StreamEventKind::Gap(StreamGap {
@@ -554,15 +614,28 @@ mod tests {
                 },
             }),
         };
+        let terminal = StreamEvent::terminal(
+            10,
+            StreamTermination::completed(
+                OperationReceipt::completed(
+                    UtcMicros(1),
+                    UtcMicros(2),
+                    request.deadline().clone(),
+                    Default::default(),
+                )
+                .expect("receipt"),
+            ),
+        )
+        .expect("terminal event");
         let app = operation_event_router(RecordingOwner::with_events(
-            futures_util::stream::iter([gap]),
+            futures_util::stream::iter([gap, terminal]),
             frontier(10),
         ));
 
         let response = app
             .oneshot(
                 Request::get("/operations/request.origin/events")
-                    .extension(context())
+                    .extension(request)
                     .extension(controls())
                     .body(Body::empty())
                     .expect("request"),
@@ -578,6 +651,7 @@ mod tests {
         .expect("UTF-8 SSE");
 
         assert!(body.contains("event: resume_gap"));
+        assert!(body.contains("\"correlation_id\":\"request.operation.correlation\""));
         assert!(body.contains("id: 7"));
         assert!(body.contains("\"first_missing_sequence\":7"));
         assert!(body.contains("\"last_missing_sequence\":9"));
@@ -628,27 +702,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_end_without_terminal_is_not_a_successful_response_body() {
+        let item = StreamEvent::item(0, json!({"value": 1})).expect("item");
+        let app = operation_event_router(RecordingOwner::with_events(
+            futures_util::stream::iter([item]),
+            frontier(0),
+        ));
+
+        let response = app
+            .oneshot(
+                Request::get("/operations/request.origin/events")
+                    .extension(context())
+                    .extension(controls())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert!(to_bytes(response.into_body(), 32 * 1024).await.is_err());
+    }
+
+    #[tokio::test]
     async fn explicit_cancellation_returns_a_typed_canonical_envelope() {
         for (outcome, expected_status, expected_wire) in [
             (
-                OperationCancellationStatus::Requested,
+                OperationCancelOutcome::Requested,
                 StatusCode::ACCEPTED,
                 "requested",
             ),
             (
-                OperationCancellationStatus::AlreadyRequested,
+                OperationCancelOutcome::AlreadyRequested,
                 StatusCode::OK,
                 "already_requested",
             ),
             (
-                OperationCancellationStatus::AlreadyTerminal,
+                OperationCancelOutcome::AlreadyTerminal,
                 StatusCode::OK,
                 "already_terminal",
             ),
         ] {
             let request_context = context();
-            let owner =
-                RecordingOwner::with_cancel_result(cancellation_result(&request_context, outcome));
+            let owner = RecordingOwner::with_cancel_result(cancellation_result(
+                &request_context,
+                Some(outcome),
+            ));
             let cancel_requests = Arc::clone(&owner.cancel_requests);
             let app = operation_event_router(owner);
 
@@ -716,25 +814,61 @@ mod tests {
 
         assert_eq!(unauthorized.status(), StatusCode::NOT_FOUND);
         assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
-        let unauthorized_body: serde_json::Value = serde_json::from_slice(
-            &to_bytes(unauthorized.into_body(), 32 * 1024)
-                .await
-                .expect("unauthorized body"),
+        let unauthorized_body = to_bytes(unauthorized.into_body(), 32 * 1024)
+            .await
+            .expect("unauthorized body");
+        let malformed_body = to_bytes(malformed.into_body(), 32 * 1024)
+            .await
+            .expect("malformed body");
+        assert_eq!(unauthorized_body, malformed_body);
+        let body: serde_json::Value =
+            serde_json::from_slice(&unauthorized_body).expect("concealed JSON");
+        assert_eq!(
+            body["value"]["problem"]["kind"],
+            "not_found_or_not_authorized"
+        );
+        assert!(body["value"].get("binding_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_and_unauthorized_cancel_ids_are_concealed_identically() {
+        let request_context = context();
+        let denied = problem(
+            request_context.request_id(),
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        );
+        let unauthorized = operation_event_router(RecordingOwner::with_cancel_result(
+            cancellation_problem_result(denied),
+        ))
+        .oneshot(
+            Request::post("/operations/request.unknown/cancel")
+                .extension(request_context.clone())
+                .extension(controls())
+                .body(Body::empty())
+                .expect("request"),
         )
-        .expect("unauthorized JSON");
-        let malformed_body: serde_json::Value = serde_json::from_slice(
-            &to_bytes(malformed.into_body(), 32 * 1024)
-                .await
-                .expect("malformed body"),
-        )
-        .expect("malformed JSON");
-        for body in [unauthorized_body, malformed_body] {
-            assert_eq!(
-                body["value"]["problem"]["kind"],
-                "not_found_or_not_authorized"
-            );
-            assert!(body["value"].get("binding_id").is_none());
-        }
+        .await
+        .expect("unauthorized response");
+        let malformed = operation_event_router(RecordingOwner::default())
+            .oneshot(
+                Request::post("/operations/%20bad/cancel")
+                    .extension(request_context)
+                    .extension(controls())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("malformed response");
+
+        assert_eq!(unauthorized.status(), StatusCode::NOT_FOUND);
+        assert_eq!(malformed.status(), StatusCode::NOT_FOUND);
+        let unauthorized_body = to_bytes(unauthorized.into_body(), 32 * 1024)
+            .await
+            .expect("unauthorized body");
+        let malformed_body = to_bytes(malformed.into_body(), 32 * 1024)
+            .await
+            .expect("malformed body");
+        assert_eq!(unauthorized_body, malformed_body);
     }
 
     struct DropAwarePendingStream {
@@ -811,5 +945,55 @@ mod tests {
                 "{query}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancel_rejects_every_nonempty_body_before_owner_dispatch() {
+        for body in [b"{}".to_vec(), vec![b'x'; 4_096]] {
+            let owner = RecordingOwner::default();
+            let cancel_requests = Arc::clone(&owner.cancel_requests);
+            let response = operation_event_router(owner)
+                .oneshot(
+                    Request::post("/operations/request.origin/cancel")
+                        .extension(context())
+                        .extension(controls())
+                        .body(Body::from(body))
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(cancel_requests.lock().expect("cancel requests").is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_success_without_a_typed_payload_is_not_http_success() {
+        let request_context = context();
+        let owner = RecordingOwner::with_cancel_result(cancellation_result(&request_context, None));
+        let response = operation_event_router(owner)
+            .oneshot(
+                Request::post("/operations/request.origin/cancel")
+                    .extension(request_context)
+                    .extension(controls())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 32 * 1024)
+                .await
+                .expect("problem body"),
+        )
+        .expect("canonical problem");
+        assert_eq!(body["kind"], "problem");
+        assert_eq!(
+            body["value"]["problem"]["code"],
+            "operation_cancel.invalid_outcome"
+        );
     }
 }
