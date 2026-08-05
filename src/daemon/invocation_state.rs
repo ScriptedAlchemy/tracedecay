@@ -758,21 +758,18 @@ impl DaemonInvocationState {
         )>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
-        if let Some((scope, pinned)) = &pinned_generation {
-            let current = self
-                .code_index_schedulers
-                .latest_complete_ready_for_scope(scope)
-                .await;
-            if current
-                .as_ref()
-                .and_then(|current| published_root_generation(scope, current).ok())
-                != published_root_generation(scope, pinned).ok()
-            {
-                return DaemonInvocationResponse::problem(
-                    request.request_id,
-                    service::invocation::DaemonInvocationProblem::Unavailable,
-                );
-            }
+        if !matches!(
+            &request.payload,
+            service::invocation::DaemonInvocationPayload::CallableCode { .. }
+        ) && let Some((scope, pinned)) = &pinned_generation
+            && multi_root::ensure_pinned_generation(self, scope, pinned)
+                .await
+                .is_err()
+        {
+            return DaemonInvocationResponse::problem(
+                request.request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
         }
         if let Some(response) = invalid_multi_root_invocation_response(&request) {
             return response;
@@ -985,11 +982,12 @@ impl DaemonInvocationState {
             None
         };
         self.service
-            .invoke(
+            .invoke_with_query_generation(
                 &self.lsp_session_registry,
                 request_project_path,
                 lsp_workspace,
                 git_service,
+                pinned_generation,
                 request,
             )
             .await

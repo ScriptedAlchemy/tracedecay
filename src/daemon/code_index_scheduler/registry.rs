@@ -157,6 +157,14 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
             >,
         >,
     >,
+    /// Request-local immutable generation owner for callable-code reads.
+    ///
+    /// Registry clones ordinarily leave this empty. Multi-root execution binds
+    /// one clone so query dispatch cannot re-resolve through a newer publication.
+    pub(super) query_generation_pin: Option<(
+        tracedecay_application::ResolvedScope,
+        LatestCompleteCodeIndexV1,
+    )>,
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -177,6 +185,7 @@ impl CodeIndexSchedulerRegistryV1 {
             cadence_telemetry: Arc::new(Mutex::new(CodeIndexCadenceTelemetryV1::default())),
             activations: Arc::new(Mutex::new(BTreeMap::new())),
             test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
+            query_generation_pin: None,
         }
     }
 

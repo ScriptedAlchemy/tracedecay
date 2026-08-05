@@ -4916,9 +4916,8 @@ async fn unpinned_query_serves_freshness_resolved_latest_generation() {
     registry.shutdown().await;
 }
 
-/// An explicit caller-pinned generation is served generation-bound and
-/// read-only: the freshness ladder is bypassed, so an out-of-band commit after
-/// indexing never mutates the served generation and never triggers a reconcile.
+/// A request-local generation owner remains immutable after a newer generation
+/// is published, including when the surface request asks for unpinned latest.
 #[tokio::test]
 async fn pinned_query_bypasses_freshness_resolution() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
@@ -4948,12 +4947,6 @@ async fn pinned_query_bypasses_freshness_resolution() {
         .clone()
         .expect("worktree identity");
 
-    // The same out-of-band commit as the unpinned case: it would be caught by
-    // the tier-1 metadata check *if* the freshness ladder ran.
-    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
-    git(fixture.path(), &["commit", "-qam", "external"]);
-
-    // The caller pins the exact generation indexed at mount.
     let operation =
         callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
     let context = application_context(&operation, repository, worktree);
@@ -4964,10 +4957,24 @@ async fn pinned_query_bypasses_freshness_resolution() {
         latest.generation.manifest().privacy_domain.clone(),
     )
     .await;
-    let scope = CodeQueryScope::new(initial.clone(), None).expect("scope");
+    let bound = registry
+        .bind_callable_query_generation(context.scope().clone(), latest)
+        .expect("bind immutable query owners");
+
+    fixture.edit("src/lib.rs", "pub fn beta() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "publish newer content"]);
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let current = wait_for_generation_change(&registry, fixture.path(), &initial).await;
+
+    let scope =
+        CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
     let request =
         ExactOccurrenceRequest::new("alpha", None, scope, query_meta()).expect("exact request");
-    let outcome = registry
+    let outcome = bound
         .exact_occurrence(
             RetrievalPortContext {
                 request: &context,
@@ -4977,21 +4984,16 @@ async fn pinned_query_bypasses_freshness_resolution() {
         )
         .await;
 
-    let served = match outcome {
-        RetrievalPortOutcome::Completed(evidence) => {
-            evidence.payload.expect("exact page").generation
-        }
+    let page = match outcome {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("exact page"),
         other => panic!("expected a completed pinned query, got {other:?}"),
     };
-    assert_eq!(
-        served, initial,
-        "a pinned query serves exactly the requested generation, bypassing freshness"
+    assert_eq!(page.generation, initial);
+    assert!(
+        !page.items.is_empty(),
+        "the frozen generation still contains alpha"
     );
-    assert_eq!(
-        registry.latest_generation_id(fixture.path()).await,
-        Some(initial),
-        "the pinned read never triggers a reconcile of the out-of-band commit"
-    );
+    assert_ne!(page.generation, current);
 
     registry.shutdown().await;
 }

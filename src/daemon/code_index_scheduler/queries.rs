@@ -83,7 +83,7 @@ pub(in crate::daemon) fn callable_query_normalization_revision() -> QueryNormali
         .unwrap_or_else(|_| panic!("static normalization revision"))
 }
 
-fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
+pub(super) fn is_unpinned_latest(generation: &CodeGenerationId) -> bool {
     generation.as_str() == UNPINNED_LATEST_GENERATION_SENTINEL
 }
 
@@ -327,7 +327,7 @@ fn retrieval_budget(page_size: u32) -> RetrievalBudget {
     }
 }
 
-fn prepared_routing_bindings(
+pub(super) fn prepared_routing_bindings(
     context: &RetrievalPortContext<'_>,
     temporal_mode: TemporalModeV1,
     operation: &'static str,
@@ -359,9 +359,9 @@ pub(in crate::daemon) fn maximum_retrieval_budget() -> RetrievalBudget {
     retrieval_budget(tracedecay_application::MAX_APPLICATION_PAGE_SIZE)
 }
 
-type CallableCodeCursorError = PreparedQueryErrorV1;
+pub(super) type CallableCodeCursorError = PreparedQueryErrorV1;
 
-fn current_utc_micros() -> Result<UtcMicros, CallableCodeCursorError> {
+pub(super) fn current_utc_micros() -> Result<UtcMicros, CallableCodeCursorError> {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| CallableCodeCursorError::Unavailable)?;
@@ -374,7 +374,7 @@ fn query_finished_at() -> UtcMicros {
     current_utc_micros().unwrap_or(UtcMicros(0))
 }
 
-fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Duration> {
+pub(super) fn remaining_generation_resolution_wait(request: &RequestContext) -> Option<Duration> {
     let now = current_utc_micros().ok()?;
     if request.admission_at(now) != RequestAdmission::Admitted {
         return None;
@@ -399,7 +399,7 @@ fn reject_unresolved_cursor<T>(
     }
 }
 
-fn base_request(
+pub(super) fn base_request(
     context: &RetrievalPortContext<'_>,
     latest: &LatestCompleteCodeIndexV1,
     temporal_mode: TemporalModeV1,
@@ -911,9 +911,9 @@ fn symbol_record_by_id(
     symbol_record(latest, symbol, &chunk.anchor.file_occurrence_id)
 }
 
-struct PreparedCallableQueryV1 {
-    latest: LatestCompleteCodeIndexV1,
-    query: PreparedQueryV1,
+pub(super) struct PreparedCallableQueryV1 {
+    pub(super) latest: LatestCompleteCodeIndexV1,
+    pub(super) query: PreparedQueryV1,
 }
 
 macro_rules! prepare_callable_query_or_return {
@@ -963,47 +963,6 @@ macro_rules! resolve_start_symbol {
         }
         start
     }};
-}
-
-impl CodeIndexSchedulerRegistryV1 {
-    async fn prepare_callable_query(
-        &self,
-        context: &RetrievalPortContext<'_>,
-        generation: &CodeGenerationId,
-        page: &tracedecay_application::PageRequest,
-        temporal: TemporalModeV1,
-        operation: &'static str,
-        query_binding_digest: ManifestDigest,
-    ) -> Result<PreparedCallableQueryV1, CallableCodeCursorError> {
-        let authority = self
-            .query_authority_for_scope(context.request.scope())
-            .await
-            .ok_or(CallableCodeCursorError::Unavailable)?;
-        let routing = prepared_routing_bindings(
-            context,
-            temporal,
-            operation,
-            query_binding_digest,
-            page.page_size,
-        )?;
-        let latest = self
-            .resolve_serving_generation(
-                context.request,
-                generation,
-                page,
-                authority.as_ref(),
-                &routing,
-            )
-            .await?;
-        let base = base_request(context, &latest, temporal, authority.profile())
-            .map_err(|_| CallableCodeCursorError::Unavailable)?;
-        let query = PreparedQueryV1::prepare(
-            authority,
-            base,
-            page.cursor.as_ref().map(OpaqueCursor::as_str),
-        )?;
-        Ok(PreparedCallableQueryV1 { latest, query })
-    }
 }
 
 #[allow(clippy::too_many_arguments)]

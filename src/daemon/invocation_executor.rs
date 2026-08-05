@@ -178,6 +178,23 @@ pub(super) fn multi_root_family_allows(
     }
 }
 
+pub(super) fn multi_root_query_uses_generation_owner(
+    operation: ApplicationSurfaceOperation,
+) -> bool {
+    matches!(
+        operation,
+        ApplicationSurfaceOperation::CodeExactOccurrence
+            | ApplicationSurfaceOperation::CodePhraseSearch
+            | ApplicationSurfaceOperation::CodeCallees
+            | ApplicationSurfaceOperation::CodeFacets
+            | ApplicationSurfaceOperation::CodeTimeline
+            | ApplicationSurfaceOperation::CodeDeclaration
+            | ApplicationSurfaceOperation::CodeDefinition
+            | ApplicationSurfaceOperation::CodeTypeDefinition
+            | ApplicationSurfaceOperation::CodeReferences
+    )
+}
+
 pub(super) fn multi_root_operation_is_readable(operation: ApplicationSurfaceOperation) -> bool {
     matches!(
         operation,
@@ -268,7 +285,8 @@ pub(super) struct InProcessDaemonInvocationExecutor {
     store_administration: StoreAdministration,
     project_path: PathBuf,
     scope: tracedecay_application::ResolvedScope,
-    generation: code_index_scheduler::LatestCompleteCodeIndexV1,
+    generation: Option<code_index_scheduler::LatestCompleteCodeIndexV1>,
+    generation_owned_query: bool,
 }
 
 impl InProcessDaemonInvocationExecutor {
@@ -277,20 +295,38 @@ impl InProcessDaemonInvocationExecutor {
         store_administration: StoreAdministration,
         project_path: PathBuf,
         scope: tracedecay_application::ResolvedScope,
-        generation: code_index_scheduler::LatestCompleteCodeIndexV1,
     ) -> Self {
         Self {
             invocation,
             store_administration,
             project_path,
             scope,
-            generation,
+            generation: None,
+            generation_owned_query: false,
+        }
+    }
+
+    pub(super) fn new_pinned(
+        invocation: DaemonInvocationState,
+        store_administration: StoreAdministration,
+        project_path: PathBuf,
+        scope: tracedecay_application::ResolvedScope,
+        generation: code_index_scheduler::LatestCompleteCodeIndexV1,
+        generation_owned_query: bool,
+    ) -> Self {
+        Self {
+            invocation,
+            store_administration,
+            project_path,
+            scope,
+            generation: Some(generation),
+            generation_owned_query,
         }
     }
 
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
         let request_id = request.request_id.clone();
-        if !self.generation_is_current().await {
+        if !self.generation_owned_query && !self.generation_is_current().await {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
@@ -301,11 +337,13 @@ impl InProcessDaemonInvocationExecutor {
             .invoke_for_project(
                 &self.store_administration,
                 Some(&self.project_path),
-                Some((self.scope.clone(), self.generation.clone())),
+                self.generation
+                    .as_ref()
+                    .map(|generation| (self.scope.clone(), generation.clone())),
                 request,
             )
             .await;
-        if !self.generation_is_current().await {
+        if !self.generation_owned_query && !self.generation_is_current().await {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
@@ -315,6 +353,9 @@ impl InProcessDaemonInvocationExecutor {
     }
 
     async fn generation_is_current(&self) -> bool {
+        let Some(generation) = &self.generation else {
+            return true;
+        };
         let Some(current) = self
             .invocation
             .code_index_schedulers
@@ -324,7 +365,7 @@ impl InProcessDaemonInvocationExecutor {
             return false;
         };
         published_root_generation(&self.scope, &current).ok()
-            == published_root_generation(&self.scope, &self.generation).ok()
+            == published_root_generation(&self.scope, generation).ok()
     }
 }
 

@@ -121,6 +121,10 @@ pub(super) async fn execute_callable_code(
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
+    query_generation: Option<(
+        ResolvedScope,
+        crate::daemon::code_index_scheduler::LatestCompleteCodeIndexV1,
+    )>,
 ) -> DaemonInvocationResponse {
     let Some(project_root) = project_root else {
         return concealed_application_problem(wire_request_id);
@@ -201,8 +205,18 @@ pub(super) async fn execute_callable_code(
         Ok(context) => context,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
+    let query_runtime = match query_generation {
+        Some((scope, generation)) if scope == registered.scope => service
+            .code_index_schedulers
+            .bind_callable_query_generation(scope, generation),
+        Some(_) => None,
+        None => Some(service.code_index_schedulers.clone()),
+    };
+    let Some(query_runtime) = query_runtime else {
+        return concealed_application_problem(wire_request_id);
+    };
     let query = CallableCodeQueryService::new(
-        service.code_index_schedulers.clone(),
+        query_runtime,
         registered.authorization.authorize(access),
         operations,
     );

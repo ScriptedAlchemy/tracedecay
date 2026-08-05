@@ -28,6 +28,29 @@ impl DaemonInvocationService {
         git_service: Option<DaemonGitInvocationOwner>,
         request: DaemonInvocationRequest,
     ) -> DaemonInvocationResponse {
+        self.invoke_with_query_generation(
+            lsp_registry,
+            project_root,
+            lsp_workspace,
+            git_service,
+            None,
+            request,
+        )
+        .await
+    }
+
+    pub(crate) async fn invoke_with_query_generation(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        project_root: Option<&Path>,
+        lsp_workspace: Option<AuthorizedLspWorkspace>,
+        git_service: Option<DaemonGitInvocationOwner>,
+        query_generation: Option<(
+            ResolvedScope,
+            crate::daemon::code_index_scheduler::LatestCompleteCodeIndexV1,
+        )>,
+        request: DaemonInvocationRequest,
+    ) -> DaemonInvocationResponse {
         let request_id = request.request_id.clone();
         let operation = request.operation();
         let delivery_route = request.delivery_route;
@@ -421,6 +444,7 @@ impl DaemonInvocationService {
                     observed_at,
                     deadline,
                     cancellation,
+                    query_generation,
                 ))
                 .await
             }

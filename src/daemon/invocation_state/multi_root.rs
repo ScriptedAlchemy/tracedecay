@@ -110,9 +110,9 @@ pub(super) async fn execute_one_multi_root_operation(
     ),
     service::invocation::DaemonInvocationProblem,
 > {
-    ensure_pinned_generation(state, scope, pinned_generation).await?;
     match operation {
         tracedecay_application::MultiRootOperationV1::Work { request } => {
+            ensure_pinned_generation(state, scope, pinned_generation).await?;
             let mut request = serde_json::from_value::<
                 service::invocation::WorkApplicationInvocationV1,
             >(request.clone())
@@ -181,6 +181,10 @@ pub(super) async fn execute_one_multi_root_operation(
             if !multi_root_family_allows(operation, wire.operation) {
                 return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
             }
+            let generation_owned_query = multi_root_query_uses_generation_owner(wire.operation);
+            if !generation_owned_query {
+                ensure_pinned_generation(state, scope, pinned_generation).await?;
+            }
             let page_cursor = match root_cursor {
                 Some(tracedecay_application::MultiRootRootContinuationV1::Page(cursor)) => {
                     Some(cursor.clone())
@@ -192,12 +196,13 @@ pub(super) async fn execute_one_multi_root_operation(
                 None => None,
             };
             let (payload, cursor) = crate::application_surface::invoke_multi_root_surface_request(
-                Arc::new(InProcessDaemonInvocationExecutor::new(
+                Arc::new(InProcessDaemonInvocationExecutor::new_pinned(
                     state.clone(),
                     store_administration.clone(),
                     root.to_path_buf(),
                     scope.clone(),
                     pinned_generation.clone(),
+                    generation_owned_query,
                 )),
                 wire.operation,
                 tracedecay_application::RequestId::new(format!(
@@ -213,7 +218,9 @@ pub(super) async fn execute_one_multi_root_operation(
             )
             .await
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-            ensure_pinned_generation(state, scope, pinned_generation).await?;
+            if !generation_owned_query {
+                ensure_pinned_generation(state, scope, pinned_generation).await?;
+            }
             Ok((
                 payload,
                 cursor.map(tracedecay_application::MultiRootRootContinuationV1::Page),
@@ -222,7 +229,7 @@ pub(super) async fn execute_one_multi_root_operation(
     }
 }
 
-async fn ensure_pinned_generation(
+pub(super) async fn ensure_pinned_generation(
     state: &DaemonInvocationState,
     scope: &tracedecay_application::ResolvedScope,
     pinned: &code_index_scheduler::LatestCompleteCodeIndexV1,

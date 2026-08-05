@@ -2263,6 +2263,7 @@ mod tests;
 
 mod activation;
 mod cadence;
+mod callable_query_preparation;
 mod classification;
 pub(crate) mod identity;
 pub(in crate::daemon) mod queries;
