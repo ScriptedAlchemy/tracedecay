@@ -12,6 +12,7 @@ import {
 } from '../../contracts/generated.ts';
 import { projectRegistryInvalidationKey } from '../../data/query/projectRegistry.ts';
 import { scopeWritable, useScope } from '../../data/scope/store.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import { DoctorInspector } from '../../workspaces/observatory/DoctorInspector.tsx';
 import { NavRail } from './NavRail.tsx';
 import { ScopeBar } from './ScopeBar.tsx';
@@ -236,7 +237,9 @@ describe('shared shell truthfulness', () => {
     stubRoutes({
       '/api/projects/proj-ghost': {
         status: 404,
-        body: failurePayload('not_found', 'no project registered with id proj-ghost'),
+        body: fixtureEnvelope(
+          failurePayload('not_found', 'no project registered with id proj-ghost'),
+        ),
       },
     });
 
@@ -281,7 +284,9 @@ describe('shared shell truthfulness', () => {
       expect(found).not.toBeNull();
       return found as HTMLElement;
     });
-    expect(annotated.getAttribute('data-scope-label-annotation')).toContain('unconfirmed');
+    expect(annotated.getAttribute('data-scope-label-annotation')).toContain(
+      'unsupported registry schema',
+    );
     expect(useScope.getState().scope).toMatchObject({ activation: 'unresolved' });
     expect(scopeWritable(useScope.getState().scope).state).toBe('unknown');
   });
@@ -294,7 +299,9 @@ describe('shared shell truthfulness', () => {
     stubRoutes({
       '/api/projects/proj-real': {
         status: 503,
-        body: failurePayload('registry_unavailable', 'registry database could not be opened'),
+        body: fixtureEnvelope(
+          failurePayload('registry_unavailable', 'registry database could not be opened'),
+        ),
       },
     });
 
@@ -526,7 +533,7 @@ function stubRegistry(payload: ProjectContextPayloadV1) {
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       requestedUrls.push(String(input));
-      return jsonResponse(200, payload);
+      return jsonResponse(200, fixtureEnvelope(payload));
     }),
   );
 }
@@ -541,11 +548,14 @@ function stubRoutes(routes: Record<string, unknown | { status: number; body: unk
       const url = String(input);
       requestedUrls.push(url);
       const match = routes[url.split('?')[0] ?? url];
-      if (match === undefined) return jsonResponse(404, failurePayload('not_found'));
+      if (match === undefined) {
+        return jsonResponse(404, fixtureEnvelope(failurePayload('not_found')));
+      }
       const framed = match as { status?: number; body?: unknown };
-      return typeof framed.status === 'number'
-        ? jsonResponse(framed.status, framed.body)
-        : jsonResponse(200, match);
+      if (typeof framed.status === 'number') {
+        return jsonResponse(framed.status, framed.body);
+      }
+        return jsonResponse(200, fixtureEnvelope(match));
     }),
   );
 }

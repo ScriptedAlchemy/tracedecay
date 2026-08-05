@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrainPage } from './BrainPage.tsx';
 import { useScope } from '../../data/scope/store.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 import {
   ProjectsPayloadV1Schema,
 } from '../../contracts/generated.ts';
@@ -33,8 +34,8 @@ function registryBody(status: string, error: string | null = null) {
  * `projects.rs::list` answers both registry failures with 503, never with a
  * 200 carrying a failing status — so serving these at 200, as this suite used
  * to, exercised a response the daemon cannot produce. It passed only because
- * `fetchLegacy` discarded non-2xx bodies, which is the defect that made these
- * very branches unreachable in production.
+ * the former generic client discarded non-2xx bodies, which made these very
+ * branches unreachable in production.
  *
  * An unrecognised status is different, and stays at 200: `status` is a bare
  * string in Rust, so a future successful state is a word this build has not
@@ -44,12 +45,16 @@ function transportStatusFor(status: string): number {
   return status === 'missing_registry' || status === 'registry_unavailable' ? 503 : 200;
 }
 
+function registryEnvelope(status: string, error: string | null = null) {
+  return fixtureEnvelope(registryBody(status, error), status === 'ok' ? 'ready' : 'partial');
+}
+
 function renderBrain(status: string, error: string | null = null) {
   vi.stubGlobal(
     'fetch',
     vi.fn(
       async () =>
-        new Response(JSON.stringify(registryBody(status, error)), {
+        new Response(JSON.stringify(registryEnvelope(status, error)), {
           status: transportStatusFor(status),
         }),
     ),

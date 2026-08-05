@@ -1,14 +1,15 @@
 import { useMemo, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
-import { CenteredState, LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { CenteredState, ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { FigureRail, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useScrollTabStop } from '../../ui/useScrollTabStop.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useProjectEntry } from '../../data/query/projectRegistry.ts';
-import { useScope } from '../../data/scope/store.ts';
+import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
+import { scopedQueryKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { relativeTime } from './BrainPage.tsx';
 import {
   AnalyticsOverviewPayloadV1Schema,
@@ -19,6 +20,26 @@ import {
   type ProjectContextPayloadV1,
   type ProjectStoreContext,
 } from '../../contracts/generated.ts';
+import type { WireSchema } from '../../data/query/wireSchema.ts';
+
+function useBrainEnvelope<T>(
+  key: readonly unknown[],
+  url: string,
+  schema: WireSchema<T>,
+) {
+  const scope = useScope((s) => s.scope);
+  const target = scopedUrl(scope, url);
+  return useQuery<EnvelopeResult<T>>({
+    queryKey: scopedQueryKey(scope, key, url),
+    queryFn: ({ signal }) => fetchEnvelope(target, schema, { signal }),
+    refetchInterval: false,
+    staleTime: 60_000,
+  });
+}
+
+function envelopePayload<T>(result: EnvelopeResult<T> | undefined): T | null {
+  return result?.outcome === 'envelope' ? result.envelope.payload : null;
+}
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -35,9 +56,9 @@ import {
  *   the project has been checked out at.
  *
  *   The project-scoped gateway, `/api/projects/{id}/…`, supplies the code graph,
- *   memory bank and session analytics when those reads resolve. The legacy
- *   client preserves transport/schema outcomes but not the server's error body,
- *   so this surface never guesses that a generic failure means "not mounted".
+ *   memory bank and session analytics when those reads resolve. Their envelope
+ *   client preserves typed transport and schema outcomes, so this surface never
+ *   guesses that a generic failure means "not mounted".
  */
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
   const selectAllProjects = useScope((s) => s.selectAllProjects);
@@ -57,31 +78,29 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // called, it is fetched once, and a registry change invalidates both.
   const context = useProjectEntry(projectId);
 
-  // Scoped reads. `useLegacy` rewrites each of these through the project
-  // gateway for the current scope, so the paths below are written unscoped.
-  const subgraph = useLegacy(
+  const subgraph = useBrainEnvelope(
     ['brain', 'subgraph'],
     '/api/plugins/graph/subgraph',
     GraphSubgraphPayloadV1Schema,
   );
-  const overview = useLegacy(
+  const overview = useBrainEnvelope(
     ['brain', 'graph-overview'],
     '/api/plugins/graph/overview',
     GraphOverviewPayloadV1Schema,
   );
-  const memory = useLegacy(
+  const memory = useBrainEnvelope(
     ['brain', 'memory-status'],
     '/api/plugins/holographic/status',
     MemoryStatusPayloadV1Schema,
   );
-  const analytics = useLegacy(
+  const analytics = useBrainEnvelope(
     ['brain', 'analytics'],
     '/api/plugins/analytics/overview',
     AnalyticsOverviewPayloadV1Schema,
   );
 
   const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
-  const graph = subgraph.data?.outcome === 'ok' ? subgraph.data.data : null;
+  const graph = envelopePayload(subgraph.data);
   const nodes = useMemo(
     () =>
       (graph?.nodes ?? []).map((node) => ({
@@ -109,19 +128,12 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   // distinguish zero data from a query failure" — it can, by status code, and
   // the rule cost a project with an indexed graph and no edges its node count
   // as well.
-  const totals = overview.data?.outcome === 'ok' ? overview.data.data.totals : null;
+  const totals = envelopePayload(overview.data)?.totals ?? null;
 
-  // `exists` is the memory bank reporting whether it is there, and `error`
-  // carries why when it is not. Reading `memory` regardless would render its
-  // zeros as a measured empty bank for a project that has no bank at all.
-  const memoryRead = memory.data?.outcome === 'ok' ? memory.data.data : null;
+  const memoryRead = envelopePayload(memory.data);
   const bank = memoryRead?.exists === true ? memoryRead.memory : null;
 
-  // Two `available` flags, both required by the generated contract, and both
-  // load-bearing: `event_count` is 0 when the store did not answer, so reading
-  // the number without the flags turns an absent analytics store into a
-  // project where nothing has happened.
-  const analyticsRead = analytics.data?.outcome === 'ok' ? analytics.data.data : null;
+  const analyticsRead = envelopePayload(analytics.data);
   const usage =
     analyticsRead?.available === true && analyticsRead.usage.available ? analyticsRead.usage : null;
 
@@ -184,13 +196,17 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
               </ul>
             ) : null}
           </div>
-          <LegacyBoundary
+          <ReadSection
             title={`${label} graph`}
-            pending={subgraph.isPending}
-            result={subgraph.data}
+            chrome="centered"
+            state={envelopeReadState(subgraph.isPending, subgraph.data, {
+              loading: `reading ${label} code graph`,
+              transport: 'the read failed',
+            })}
           >
-            {(slice) =>
-              nodes.length > 0 ? (
+            {(envelope) => {
+              const slice = envelope.payload;
+              return nodes.length > 0 ? (
                 <GraphCanvas
                   nodes={nodes}
                   edges={edges}
@@ -223,9 +239,9 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                 />
               ) : (
                 <EmptySlice slice={slice} label={label} />
-              )
-            }
-          </LegacyBoundary>
+              );
+            }}
+          </ReadSection>
         </div>
         <aside
           ref={holdingsRef}
@@ -238,14 +254,13 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
           tabIndex={holdingsTabStop}
           className="flex w-full shrink-0 flex-col gap-3 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
         >
-          <LegacyBoundary
+          <ReadSection
             title="Project"
-            pending={context.isPending}
-            result={context.data}
-            statusInBody
+            chrome="centered"
+            state={projectContextReadState(context.isPending, context.data)}
           >
             {(data) => <ProjectHoldings data={data} />}
-          </LegacyBoundary>
+          </ReadSection>
           {usage && usage.by_category.length > 0 ? (
             <ActivityByCategory categories={usage.by_category} total={usage.event_count} />
           ) : null}
@@ -253,6 +268,22 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
       </div>
     </div>
   );
+}
+
+function projectContextReadState(
+  pending: boolean,
+  result: ReturnType<typeof useProjectEntry>['data'],
+): import('../../ui/ReadSection.tsx').ReadState<ProjectContextPayloadV1> {
+  if (pending) return { kind: 'blocked', state: 'loading', detail: 'reading project registry' };
+  if (!result) return { kind: 'blocked', state: 'unknown', detail: 'no response recorded' };
+  if (result.outcome === 'transport') {
+    return {
+      kind: 'blocked',
+      state: result.state,
+      detail: result.detail ?? 'the project registry could not be read',
+    };
+  }
+  return { kind: 'ready', value: result.envelope.payload };
 }
 
 /**
