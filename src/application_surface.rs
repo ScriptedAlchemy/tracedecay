@@ -104,9 +104,11 @@ use crate::daemon_contract::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
+mod configuration_wire;
 mod handoff;
 mod workflow;
 
+use configuration_wire::validate_configuration_outcome;
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
@@ -3439,12 +3441,23 @@ pub async fn execute_application_surface(
             ))
         }
         crate::daemon_contract::DaemonInvocationOutcome::Configuration { scope, outcome } => {
-            Ok(ApplicationEnvelope {
-                contract: result_contract.clone(),
-                request_id: request_id.clone(),
-                scope,
-                outcome,
-            })
+            if validate_configuration_outcome(operation, &outcome) {
+                Ok(ApplicationEnvelope {
+                    contract: result_contract.clone(),
+                    request_id: request_id.clone(),
+                    scope,
+                    outcome,
+                })
+            } else {
+                Err(ApplicationProblemEnvelope::new(
+                    result_contract.clone(),
+                    request_id.clone(),
+                    ApplicationProblem::unavailable(SafeDiagnostic::new(
+                        "application.surface.invalid_configuration_response",
+                        "The daemon returned a configuration result that did not match its wire contract",
+                    )?),
+                ))
+            }
         }
         crate::daemon_contract::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
             Ok(ApplicationEnvelope {
