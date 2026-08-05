@@ -24,9 +24,6 @@ pub mod shared;
 pub mod snapshot_observation;
 pub mod source;
 pub mod store_port;
-// Exposes three `#[doc(hidden)]` process-safety test helpers that the root
-// integration tests reach through the `crate::sessions` shim.
-pub mod transcript_backfill;
 pub mod vibe;
 pub mod workflow_index;
 pub mod workflow_ingest;

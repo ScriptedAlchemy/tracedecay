@@ -30,8 +30,10 @@ use std::{
     sync::Arc,
 };
 
+use crate::global_db::registry_maintenance::{
+    StaleRootScope, code_project_root_exists, stale_project_contexts,
+};
 use crate::global_db::{CodeProjectRecord, RegisteredGlobalDb};
-use crate::migrate::registry::{StaleRootScope, code_project_root_exists, stale_project_contexts};
 use crate::storage::{BRANCH_META_FILENAME, BRANCH_META_QUARANTINE_PREFIX};
 
 mod report;

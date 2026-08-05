@@ -2,7 +2,7 @@ use super::{
     AutomationAction, AutomationConfigAction, AutomationConfigScope, AutomationRunAction,
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
-    MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
+    PackageHookAction, ProfileStorageAction, ScoopPackageHookAction, SessionsAction,
     SessionsRefreshAction, WorkflowCliOperationArg,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
@@ -1676,21 +1676,21 @@ fn project_selector_flags_parse_for_cli_read_surfaces() {
 }
 
 #[test]
-fn migrate_storage_report_parses() {
+fn storage_report_parses() {
     let cli = Cli::try_parse_from([
         "tracedecay",
-        "migrate",
+        "storage",
         "storage-report",
         "--profile-root",
         "/tmp/profile",
         "--json",
     ])
-    .expect("migrate storage-report should parse");
+    .expect("storage storage-report should parse");
 
     assert!(matches!(
         cli.command,
-        Some(Commands::Migrate {
-            action: MigrateAction::StorageReport {
+        Some(Commands::Storage {
+            action: ProfileStorageAction::StorageReport {
                 profile_root,
                 project_id,
                 project_root,
@@ -1704,10 +1704,10 @@ fn migrate_storage_report_parses() {
 }
 
 #[test]
-fn migrate_storage_report_parses_targeted_project() {
+fn storage_report_parses_targeted_project() {
     let cli = Cli::try_parse_from([
         "tracedecay",
-        "migrate",
+        "storage",
         "storage-report",
         "--profile-root",
         "/tmp/profile",
@@ -1716,12 +1716,12 @@ fn migrate_storage_report_parses_targeted_project() {
         "--project-root",
         "/repos/a",
     ])
-    .expect("targeted migrate storage-report should parse");
+    .expect("targeted storage report should parse");
 
     assert!(matches!(
         cli.command,
-        Some(Commands::Migrate {
-            action: MigrateAction::StorageReport {
+        Some(Commands::Storage {
+            action: ProfileStorageAction::StorageReport {
                 profile_root,
                 project_id,
                 project_root,
@@ -1734,10 +1734,10 @@ fn migrate_storage_report_parses_targeted_project() {
 }
 
 #[test]
-fn migrate_cleanup_sources_is_not_a_supported_subcommand() {
+fn storage_cleanup_sources_is_not_a_supported_subcommand() {
     let err = match Cli::try_parse_from([
         "tracedecay",
-        "migrate",
+        "storage",
         "cleanup-sources",
         "--manifest",
         "/tmp/migration-manifest.json",

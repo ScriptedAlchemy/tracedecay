@@ -58,6 +58,22 @@ pub(crate) fn load_or_create(profile_root: &Path) -> Result<LocalProfileIdentity
     load_or_create_pinned(profile_root, None)
 }
 
+pub(crate) fn load_existing(profile_root: &Path) -> Result<LocalProfileIdentityAuthorityV1> {
+    let profile_root = canonical_identity_path(profile_root)?;
+    validate_private_profile_root(&profile_root)?;
+    let path = profile_root.join(PROFILE_IDENTITY_FILENAME);
+    let record = read_existing_record(&path)?.ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "ResetRequired: {PROFILE_IDENTITY_RECORD_NAME} '{}' is missing from an existing profile",
+            path.display()
+        ),
+    })?;
+    Ok(LocalProfileIdentityAuthorityV1 {
+        profile_root,
+        record,
+    })
+}
+
 pub(super) fn load_or_create_pinned(
     profile_root: &Path,
     expected: Option<(&BrainId, &UserProfileId)>,

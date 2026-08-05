@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::global_db::RegisteredGlobalDb;
-use crate::migrate::registry::{RootLivenessV1, probe_root};
+use crate::global_db::registry_maintenance::{RootLivenessV1, probe_root};
 
 /// One profile-sharded store observed on disk, paired with the registry
 /// identity that points at it. This is the pure input to classification so the

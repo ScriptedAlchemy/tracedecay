@@ -15,7 +15,6 @@ members = [
     "crates/tracedecay-hooks",
     "crates/tracedecay-jsonrpc",
     "crates/tracedecay-lsp",
-    "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
@@ -188,7 +187,6 @@ lang-lean = ["tracedecay-code-index/lang-lean"]
 test-transport = [
     "tracedecay-rusqlite-runtime/test-transport",
     "tracedecay-runtime-core/test-transport",
-    "tracedecay-migrate/test-transport",
     "tracedecay-agent-hosts/test-transport",
     "tracedecay-dashboard-api/test-transport",
     "tracedecay-usecases/test-transport",
@@ -283,7 +281,6 @@ tracedecay-hooks = { path = "crates/tracedecay-hooks", version = "0.1.0" }
 tracedecay-jsonrpc = { path = "crates/tracedecay-jsonrpc", version = "0.1.0" }
 tracedecay-lsp = { path = "crates/tracedecay-lsp", version = "0.1.0" }
 tracedecay-global-db = { path = "crates/tracedecay-global-db", version = "0.1.0" }
-tracedecay-migrate = { path = "crates/tracedecay-migrate", version = "0.1.0" }
 tracedecay-policy = { path = "crates/tracedecay-policy", version = "0.1.0" }
 tracedecay-query = { path = "crates/tracedecay-query", version = "0.1.0" }
 tracedecay-runtime-core = { path = "crates/tracedecay-runtime-core", version = "0.1.0" }

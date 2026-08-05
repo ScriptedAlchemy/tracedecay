@@ -179,8 +179,7 @@ fn paths_same(left: &Path, right: &Path) -> bool {
 ///   patterns, but a project's `config.exclude` can still be overridden).
 /// - `tracedecay::scan::TraceDecay::is_skipped_dir_hint` (an informational
 ///   hint only; the authoritative gate there is still `is_excluded_dir`).
-/// - `tracedecay_migrate::inventory::should_prune_dir` (authoritative
-///   directory prune during migration inventory scans).
+/// - profile inventory and storage-diagnostics scanners.
 /// - `mcp::tools::handlers::redundancy::is_generated_path` (candidate
 ///   filtering for the duplicate-code scanner).
 ///

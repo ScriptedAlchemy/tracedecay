@@ -27,7 +27,7 @@ fn doctor_graph_schema_state(actual: i64) -> DoctorGraphSchemaState {
     match actual {
         18 => DoctorGraphSchemaState::ReleasedV0067,
         24 => DoctorGraphSchemaState::PreviousV2Candidate,
-        actual if actual == i64::from(crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION) => {
+        actual if actual == i64::from(crate::db::migrations::SCHEMA_VERSION) => {
             DoctorGraphSchemaState::Current
         }
         _ => DoctorGraphSchemaState::Unsupported,
@@ -347,7 +347,7 @@ async fn doctor_runtime_value_inner(
         }
     };
     let schema_state = doctor_graph_schema_state(schema_version);
-    let expected_schema_version = crate::migrate::final_v2::FINAL_PROJECT_SCHEMA_VERSION;
+    let expected_schema_version = crate::db::migrations::SCHEMA_VERSION;
     let mut value = json!({
         "tracedecay_version": crate::version::build_version(),
         "process": {

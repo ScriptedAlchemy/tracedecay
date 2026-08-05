@@ -2,8 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
-use tracedecay::migrate::profile_backup::{
-    create_complete_profile_backup, rehearse_complete_profile_backup,
+use tracedecay::global_db::profile_archive::{
+    export_final_profile, rehearse_final_profile_restore,
     set_rehearsal_publication_fault_for_test,
 };
 use tracedecay::storage::{
@@ -11,17 +11,28 @@ use tracedecay::storage::{
     read_store_manifest, write_store_manifest_to_path,
 };
 
-struct ReleasedProfileFixture {
+struct FinalProfileFixture {
     profile: PathBuf,
     project: PathBuf,
     project_id: &'static str,
     source_store: PathBuf,
 }
 
-fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
-    let profile = temp.path().join("released-profile");
-    let project = temp.path().join("released-project");
-    let project_id = "project.release";
+fn seed_final_database(path: &Path) {
+    let connection = rusqlite::Connection::open(path).unwrap();
+    connection
+        .pragma_update(
+            None,
+            "user_version",
+            tracedecay::db::migrations::SCHEMA_VERSION,
+        )
+        .unwrap();
+}
+
+fn seed_final_profile(temp: &TempDir) -> FinalProfileFixture {
+    let profile = temp.path().join("final-profile");
+    let project = temp.path().join("final-project");
+    let project_id = "project.final";
     let source_store = profile.join("projects").join(project_id);
     fs::create_dir_all(&source_store).unwrap();
     fs::create_dir(&project).unwrap();
@@ -45,23 +56,27 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
         "config.toml",
         "profile-identity.json",
     ] {
-        fs::write(profile.join(name), format!("released fixture: {name}")).unwrap();
+        let path = profile.join(name);
+        if name.ends_with(".db") {
+            seed_final_database(&path);
+        } else {
+            fs::write(path, format!("final fixture: {name}")).unwrap();
+        }
     }
-    fs::create_dir(profile.join("migration-inventory")).unwrap();
-    fs::write(
-        profile.join("migration-inventory/released.json"),
-        b"released migration inventory",
-    )
-    .unwrap();
     for (name, contents) in [
-        ("tracedecay.db", b"released memory identity".as_slice()),
-        ("sessions.db", b"released LCM identity".as_slice()),
+        ("tracedecay.db", b"final memory identity".as_slice()),
+        ("sessions.db", b"final LCM identity".as_slice()),
         (
             "branch-meta.json",
             br#"{"default_branch":"main","branches":{}}"#,
         ),
     ] {
-        fs::write(source_store.join(name), contents).unwrap();
+        let path = source_store.join(name);
+        if name.ends_with(".db") {
+            seed_final_database(&path);
+        } else {
+            fs::write(path, contents).unwrap();
+        }
     }
     write_store_manifest_to_path(
         &source_store.join(STORE_MANIFEST_FILENAME),
@@ -78,7 +93,7 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
         },
     )
     .unwrap();
-    ReleasedProfileFixture {
+    FinalProfileFixture {
         profile,
         project,
         project_id,
@@ -86,16 +101,16 @@ fn seed_released_profile(temp: &TempDir) -> ReleasedProfileFixture {
     }
 }
 
-fn create_backup(temp: &TempDir, fixture: &ReleasedProfileFixture) -> PathBuf {
+fn create_archive(temp: &TempDir, fixture: &FinalProfileFixture) -> PathBuf {
     let lease = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
         &fixture.profile,
-        "released-copy rehearsal test",
+        "final-profile rehearsal test",
     )
     .unwrap();
-    create_complete_profile_backup(
+    export_final_profile(
         &fixture.profile,
-        &temp.path().join("backups"),
-        "backup.release",
+        &temp.path().join("archives"),
+        "archive.final",
         100,
         &lease,
     )
@@ -107,17 +122,17 @@ fn read_bytes(root: &Path, relative: &str) -> Vec<u8> {
 }
 
 #[test]
-fn released_copy_rehearsal_rebinds_store_and_preserves_identity() {
+fn final_profile_rehearsal_rebinds_store_and_preserves_identity() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let expected_profile_identity = read_bytes(&fixture.profile, "profile-identity.json");
     let expected_memory = read_bytes(&fixture.profile, "user-memory.db");
     let expected_lcm = read_bytes(&fixture.profile, "user-sessions.db");
     let expected_config = read_bytes(&fixture.profile, "config.toml");
 
-    rehearse_complete_profile_backup(&backup, &restore).unwrap();
+    rehearse_final_profile_restore(&archive, &restore).unwrap();
 
     let restored_store = restore.join("projects").join(fixture.project_id);
     let restored_manifest =
@@ -147,36 +162,36 @@ fn released_copy_rehearsal_rebinds_store_and_preserves_identity() {
 }
 
 #[test]
-fn released_copy_rehearsal_recovers_owned_interrupted_staging() {
+fn final_profile_rehearsal_recovers_owned_interrupted_staging() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
     set_rehearsal_publication_fault_for_test("before_rename");
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     assert!(error.contains("injected rehearsal publication fault"));
     assert!(staging.join(".tracedecay-profile-rehearsal.json").is_file());
 
-    rehearse_complete_profile_backup(&backup, &restore).unwrap();
+    rehearse_final_profile_restore(&archive, &restore).unwrap();
 
     assert!(restore.join("profile-identity.json").is_file());
     assert!(!staging.exists());
 }
 
 #[test]
-fn released_copy_rehearsal_rejects_missing_store_manifest() {
+fn final_profile_rehearsal_rejects_missing_store_manifest() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let manifest_entry = format!(
         "projects/{}/{}",
         fixture.project_id, STORE_MANIFEST_FILENAME
     );
-    fs::remove_file(backup.join(&manifest_entry)).unwrap();
-    let manifest_path = backup.join("backup-manifest.json");
+    fs::remove_file(archive.join(&manifest_entry)).unwrap();
+    let manifest_path = archive.join("archive-manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
     let entries = manifest
@@ -192,7 +207,7 @@ fn released_copy_rehearsal_rejects_missing_store_manifest() {
     )
     .unwrap();
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     assert!(
         error.contains("missing required store_manifest.json"),
         "unexpected error: {error}"
@@ -201,19 +216,19 @@ fn released_copy_rehearsal_rejects_missing_store_manifest() {
 }
 
 #[test]
-fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
+fn final_profile_rehearsal_resumes_after_rename_before_marker_removal() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     assert!(error.contains("injected rehearsal publication fault"));
     assert!(restore.join(".tracedecay-profile-rehearsal.json").is_file());
 
     set_rehearsal_publication_fault_for_test("");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap();
+    rehearse_final_profile_restore(&archive, &restore).unwrap();
     assert!(restore.join("profile-identity.json").is_file());
     assert!(!restore.join(".tracedecay-profile-rehearsal.json").exists());
 }
@@ -221,12 +236,12 @@ fn released_copy_rehearsal_resumes_after_rename_before_marker_removal() {
 #[test]
 fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     let expected_marker = fs::read(&marker).unwrap();
     fs::write(
         restore.join("user-memory.db"),
@@ -234,7 +249,7 @@ fn marked_publication_recovery_rejects_tampered_durable_bytes() {
     )
     .unwrap();
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
 
     assert!(
         error.contains("checksum mismatch"),
@@ -250,16 +265,16 @@ fn marked_publication_recovery_rejects_tampered_durable_bytes() {
 #[test]
 fn marked_publication_recovery_rejects_partially_durable_restore() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     let expected_marker = fs::read(&marker).unwrap();
     fs::remove_file(restore.join("user-sessions.db")).unwrap();
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
 
     assert!(
         error.contains("user-sessions.db"),
@@ -272,12 +287,12 @@ fn marked_publication_recovery_rejects_partially_durable_restore() {
 #[test]
 fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     let temp = TempDir::new().unwrap();
-    let fixture = seed_released_profile(&temp);
-    let backup = create_backup(&temp, &fixture);
+    let fixture = seed_final_profile(&temp);
+    let archive = create_archive(&temp, &fixture);
     let restore = temp.path().join("rehearsed-profile");
     let marker = restore.join(".tracedecay-profile-rehearsal.json");
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
-    rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    rehearse_final_profile_restore(&archive, &restore).unwrap_err();
     let expected_marker = fs::read(&marker).unwrap();
     let manifest_path = restore
         .join("projects")
@@ -287,10 +302,10 @@ fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
     manifest.data_root = temp.path().join("tampered-store-root");
     write_store_manifest_to_path(&manifest_path, &manifest).unwrap();
 
-    let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&archive, &restore).unwrap_err();
 
     assert!(
-        error.contains("rebound backup manifest"),
+        error.contains("rebound archive manifest"),
         "unexpected error: {error}"
     );
     assert_eq!(fs::read(&marker).unwrap(), expected_marker);
@@ -301,28 +316,28 @@ fn marked_publication_recovery_rejects_tampered_rebound_manifest() {
 }
 
 #[test]
-fn released_copy_rehearsal_rejects_same_id_from_another_backup_root() {
+fn final_profile_rehearsal_rejects_same_id_from_another_archive_root() {
     let original_temp = TempDir::new().unwrap();
-    let original_fixture = seed_released_profile(&original_temp);
-    let original_backup = create_backup(&original_temp, &original_fixture);
+    let original_fixture = seed_final_profile(&original_temp);
+    let original_archive = create_archive(&original_temp, &original_fixture);
     let restore = original_temp.path().join("rehearsed-profile");
     let marker_path = restore.join(".tracedecay-profile-rehearsal.json");
     let expected_identity = read_bytes(&original_fixture.profile, "profile-identity.json");
     set_rehearsal_publication_fault_for_test("after_rename_before_parent_sync");
 
-    rehearse_complete_profile_backup(&original_backup, &restore).unwrap_err();
+    rehearse_final_profile_restore(&original_archive, &restore).unwrap_err();
     let expected_marker = fs::read(&marker_path).unwrap();
 
     let foreign_temp = TempDir::new().unwrap();
-    let foreign_fixture = seed_released_profile(&foreign_temp);
+    let foreign_fixture = seed_final_profile(&foreign_temp);
     fs::write(
         foreign_fixture.profile.join("profile-identity.json"),
         b"foreign profile identity",
     )
     .unwrap();
-    let foreign_backup = create_backup(&foreign_temp, &foreign_fixture);
+    let foreign_archive = create_archive(&foreign_temp, &foreign_fixture);
 
-    let error = rehearse_complete_profile_backup(&foreign_backup, &restore).unwrap_err();
+    let error = rehearse_final_profile_restore(&foreign_archive, &restore).unwrap_err();
 
     assert!(
         error.contains("belongs to another restore attempt"),

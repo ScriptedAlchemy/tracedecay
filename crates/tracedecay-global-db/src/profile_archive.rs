@@ -52,7 +52,7 @@ fn inject_rehearsal_publication_fault(phase: RehearsalPublicationFault) -> Resul
     }
 }
 
-const BACKUP_MANIFEST_SCHEMA_VERSION: u32 = 1;
+const ARCHIVE_MANIFEST_SCHEMA_VERSION: u32 = 1;
 const REHEARSAL_MARKER_SCHEMA_VERSION: u32 = 2;
 const REHEARSAL_MARKER_FILENAME: &str = ".tracedecay-profile-rehearsal.json";
 const REQUIRED_PROFILE_PATHS: &[&str] = &[
@@ -68,13 +68,12 @@ const REQUIRED_PROFILE_PATHS: &[&str] = &[
     "projects",
     "enrollment.json",
     "config.toml",
-    "migration-inventory",
     "profile-identity.json",
 ];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct ProfileBackupEntry {
+pub struct ProfileArchiveEntry {
     pub logical_path: String,
     pub present: bool,
     pub byte_len: Option<u64>,
@@ -83,80 +82,81 @@ pub struct ProfileBackupEntry {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct CompleteProfileBackupManifest {
+pub struct FinalProfileArchiveManifest {
     pub schema_version: u32,
-    pub backup_id: String,
+    pub archive_id: String,
     pub created_at: i64,
     pub source_profile_identity_sha256: Option<String>,
-    pub entries: Vec<ProfileBackupEntry>,
+    pub entries: Vec<ProfileArchiveEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ProfileBackupRehearsalMarker {
+struct ProfileRestoreRehearsalMarker {
     schema_version: u32,
-    backup_id: String,
-    backup_root: PathBuf,
+    archive_id: String,
+    archive_root: PathBuf,
     manifest_sha256: String,
     source_profile_identity_sha256: Option<String>,
     restore_root: PathBuf,
 }
 
-struct VerifiedCompleteProfileBackup {
+struct VerifiedFinalProfileArchive {
     root: PathBuf,
-    manifest: CompleteProfileBackupManifest,
+    manifest: FinalProfileArchiveManifest,
     manifest_sha256: String,
 }
 
-pub fn create_complete_profile_backup(
+pub fn export_final_profile(
     profile_root: &Path,
-    backup_parent: &Path,
-    backup_id: &str,
+    archive_parent: &Path,
+    archive_id: &str,
     created_at: i64,
     lifecycle: &tracedecay_runtime_core::lifecycle_lease::LifecycleLease,
 ) -> Result<PathBuf, String> {
-    if backup_id.is_empty() || created_at <= 0 {
-        return Err("backup identity and timestamp must be non-empty".to_owned());
+    if archive_id.is_empty() || created_at <= 0 {
+        return Err("archive identity and timestamp must be non-empty".to_owned());
     }
     let source = fs::canonicalize(profile_root)
         .map_err(|error| format!("canonicalize profile '{}': {error}", profile_root.display()))?;
     if !lifecycle.is_exclusive() || !lifecycle.guards_profile(&source) {
         return Err(
-            "complete profile backup requires the exact exclusive profile lease".to_owned(),
+            "complete profile archive requires the exact exclusive profile lease".to_owned(),
         );
     }
-    fs::create_dir_all(backup_parent).map_err(|error| {
+    validate_exact_final_databases(&source)?;
+    fs::create_dir_all(archive_parent).map_err(|error| {
         format!(
-            "create backup parent '{}': {error}",
-            backup_parent.display()
+            "create archive parent '{}': {error}",
+            archive_parent.display()
         )
     })?;
-    let parent = fs::canonicalize(backup_parent).map_err(|error| {
+    let parent = fs::canonicalize(archive_parent).map_err(|error| {
         format!(
-            "canonicalize backup parent '{}': {error}",
-            backup_parent.display()
+            "canonicalize archive parent '{}': {error}",
+            archive_parent.display()
         )
     })?;
     if parent.starts_with(&source) {
-        return Err("backup destination must be outside the source profile".to_owned());
+        return Err("archive destination must be outside the source profile".to_owned());
     }
 
-    let final_root = parent.join(backup_id);
-    let staging = parent.join(format!(".{backup_id}.tmp"));
+    let final_root = parent.join(archive_id);
+    let staging = parent.join(format!(".{archive_id}.tmp"));
     if final_root.exists() || staging.exists() {
-        return Err("backup destination already exists".to_owned());
+        return Err("archive destination already exists".to_owned());
     }
     fs::create_dir(&staging)
-        .map_err(|error| format!("create backup staging '{}': {error}", staging.display()))?;
+        .map_err(|error| format!("create archive staging '{}': {error}", staging.display()))?;
 
-    let result = create_backup_contents(&source, &staging, backup_id, created_at);
+    let result = create_archive_contents(&source, &staging, archive_id, created_at);
     if let Err(error) = result {
         let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
     fs::rename(&staging, &final_root).map_err(|error| {
         format!(
-            "publish backup '{}' to '{}': {error}",
+            "publish archive '{}' to '{}': {error}",
             staging.display(),
             final_root.display()
         )
@@ -165,22 +165,77 @@ pub fn create_complete_profile_backup(
     Ok(final_root)
 }
 
-pub fn rehearse_complete_profile_backup(
-    backup_root: &Path,
+fn validate_exact_final_databases(profile_root: &Path) -> Result<(), String> {
+    let mut pending = vec![profile_root.to_path_buf()];
+    let mut found = false;
+    while let Some(path) = pending.pop() {
+        let mut entries = fs::read_dir(&path)
+            .map_err(|error| format!("read final profile directory '{}': {error}", path.display()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("read final profile entry: {error}"))?;
+        entries.sort_by_key(fs::DirEntry::file_name);
+        for entry in entries {
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                format!("inspect final profile entry '{}': {error}", path.display())
+            })?;
+            if metadata.file_type().is_symlink() {
+                return Err(format!(
+                    "final profile archive source contains a symlink: '{}'",
+                    path.display()
+                ));
+            }
+            if metadata.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if metadata.is_file() && path.extension().is_some_and(|extension| extension == "db") {
+                found = true;
+                validate_exact_final_database(&path)?;
+            }
+        }
+    }
+    if !found {
+        return Err("final profile contains no TraceDecay databases".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_exact_final_database(path: &Path) -> Result<(), String> {
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("open final database '{}': {error}", path.display()))?;
+    let version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
+        .map_err(|error| format!("read final database schema '{}': {error}", path.display()))?;
+    if version != tracedecay_runtime_core::db::migrations::SCHEMA_VERSION {
+        return Err(format!(
+            "ResetRequired: database '{}' has schema v{version}; expected exact final schema v{}",
+            path.display(),
+            tracedecay_runtime_core::db::migrations::SCHEMA_VERSION
+        ));
+    }
+    Ok(())
+}
+
+pub fn rehearse_final_profile_restore(
+    archive_root: &Path,
     restore_root: &Path,
-) -> Result<CompleteProfileBackupManifest, String> {
-    let backup = load_verified_backup(backup_root)?;
+) -> Result<FinalProfileArchiveManifest, String> {
+    let archive = load_verified_profile_archive(archive_root)?;
     let restore_root = absolute_destination(restore_root)?;
-    let marker = ProfileBackupRehearsalMarker {
+    let marker = ProfileRestoreRehearsalMarker {
         schema_version: REHEARSAL_MARKER_SCHEMA_VERSION,
-        backup_id: backup.manifest.backup_id.clone(),
-        backup_root: backup.root.clone(),
-        manifest_sha256: backup.manifest_sha256.clone(),
-        source_profile_identity_sha256: backup.manifest.source_profile_identity_sha256.clone(),
+        archive_id: archive.manifest.archive_id.clone(),
+        archive_root: archive.root.clone(),
+        manifest_sha256: archive.manifest_sha256.clone(),
+        source_profile_identity_sha256: archive.manifest.source_profile_identity_sha256.clone(),
         restore_root: restore_root.clone(),
     };
-    if recover_interrupted_publication(&restore_root, &marker, &backup)? {
-        return Ok(backup.manifest);
+    if recover_interrupted_publication(&restore_root, &marker, &archive)? {
+        return Ok(archive.manifest);
     }
     let staging = rehearsal_staging_path(&restore_root)?;
     recover_interrupted_staging(&staging, &marker)?;
@@ -201,17 +256,22 @@ pub fn rehearse_complete_profile_backup(
             .map_err(|error| format!("encode profile rehearsal marker: {error}"))?,
     )?;
     let result = (|| {
-        for entry in backup.manifest.entries.iter().filter(|entry| entry.present) {
-            let source = checked_join(&backup.root, &entry.logical_path)?;
+        for entry in archive
+            .manifest
+            .entries
+            .iter()
+            .filter(|entry| entry.present)
+        {
+            let source = checked_join(&archive.root, &entry.logical_path)?;
             let destination = checked_join(&staging, &entry.logical_path)?;
             copy_verified_file(&source, &destination, entry)?;
         }
-        let restored = verify_restored_copy(&staging, &backup.manifest)?;
-        if restored != backup.manifest {
-            return Err("restored profile inventory differs from backup manifest".to_owned());
+        let restored = verify_restored_copy(&staging, &archive.manifest)?;
+        if restored != archive.manifest {
+            return Err("restored profile inventory differs from archive manifest".to_owned());
         }
         rebind_restored_store_manifests(&staging, &restore_root)?;
-        verify_restored_rehearsal(&staging, &restore_root, &backup)?;
+        verify_restored_rehearsal(&staging, &restore_root, &archive)?;
         // Keep the ownership marker through rename and parent sync so a crash
         // never leaves an unowned staging directory or an unmarked published
         // root that recovery cannot finish.
@@ -237,7 +297,7 @@ pub fn rehearse_complete_profile_backup(
         }
         return Err(error);
     }
-    Ok(backup.manifest)
+    Ok(archive.manifest)
 }
 
 fn absolute_destination(path: &Path) -> Result<PathBuf, String> {
@@ -267,8 +327,8 @@ fn rehearsal_staging_path(restore_root: &Path) -> Result<PathBuf, String> {
 
 fn recover_interrupted_publication(
     restore_root: &Path,
-    expected_marker: &ProfileBackupRehearsalMarker,
-    backup: &VerifiedCompleteProfileBackup,
+    expected_marker: &ProfileRestoreRehearsalMarker,
+    archive: &VerifiedFinalProfileArchive,
 ) -> Result<bool, String> {
     let metadata = match fs::symlink_metadata(restore_root) {
         Ok(metadata) => metadata,
@@ -308,14 +368,14 @@ fn recover_interrupted_publication(
             restore_root.display()
         ));
     }
-    verify_restored_rehearsal(restore_root, restore_root, backup)?;
+    verify_restored_rehearsal(restore_root, restore_root, archive)?;
     finish_published_rehearsal(restore_root, expected_marker)?;
     Ok(true)
 }
 
 fn recover_interrupted_staging(
     staging: &Path,
-    expected_marker: &ProfileBackupRehearsalMarker,
+    expected_marker: &ProfileRestoreRehearsalMarker,
 ) -> Result<(), String> {
     let metadata = match fs::symlink_metadata(staging) {
         Ok(metadata) => metadata,
@@ -368,7 +428,7 @@ fn recover_interrupted_staging(
 
 fn finish_published_rehearsal(
     restore_root: &Path,
-    expected_marker: &ProfileBackupRehearsalMarker,
+    expected_marker: &ProfileRestoreRehearsalMarker,
 ) -> Result<(), String> {
     let marker_path = restore_root.join(REHEARSAL_MARKER_FILENAME);
     let marker = read_rehearsal_marker(&marker_path)?;
@@ -395,7 +455,7 @@ fn finish_published_rehearsal(
     sync_directory(parent)
 }
 
-fn read_rehearsal_marker(marker_path: &Path) -> Result<ProfileBackupRehearsalMarker, String> {
+fn read_rehearsal_marker(marker_path: &Path) -> Result<ProfileRestoreRehearsalMarker, String> {
     serde_json::from_slice(&fs::read(marker_path).map_err(|error| {
         format!(
             "read profile rehearsal marker '{}': {error}",
@@ -540,9 +600,14 @@ fn rebound_store_manifest(
 fn verify_restored_rehearsal(
     restored_profile_root: &Path,
     published_profile_root: &Path,
-    backup: &VerifiedCompleteProfileBackup,
+    archive: &VerifiedFinalProfileArchive,
 ) -> Result<(), String> {
-    for entry in backup.manifest.entries.iter().filter(|entry| entry.present) {
+    for entry in archive
+        .manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.present)
+    {
         if restored_store_manifest_project_id(&entry.logical_path).is_none() {
             verify_file(
                 &checked_join(restored_profile_root, &entry.logical_path)?,
@@ -550,11 +615,16 @@ fn verify_restored_rehearsal(
             )?;
         }
     }
-    for entry in backup.manifest.entries.iter().filter(|entry| entry.present) {
+    for entry in archive
+        .manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.present)
+    {
         let Some(project_id) = restored_store_manifest_project_id(&entry.logical_path) else {
             continue;
         };
-        let source_path = checked_join(&backup.root, &entry.logical_path)?;
+        let source_path = checked_join(&archive.root, &entry.logical_path)?;
         let source_manifest = tracedecay_runtime_core::storage::read_store_manifest(&source_path)
             .map_err(|error| error.to_string())?;
         let expected = rebound_store_manifest(
@@ -568,11 +638,12 @@ fn verify_restored_rehearsal(
             .map_err(|error| error.to_string())?;
         if restored != expected {
             return Err(format!(
-                "restored store manifest '{}' does not match its rebound backup manifest",
+                "restored store manifest '{}' does not match its rebound archive manifest",
                 restored_path.display()
             ));
         }
     }
+    validate_exact_final_databases(restored_profile_root)?;
     Ok(())
 }
 
@@ -609,53 +680,57 @@ fn validate_restored_store_relative_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub fn load_and_verify_backup(backup_root: &Path) -> Result<CompleteProfileBackupManifest, String> {
-    Ok(load_verified_backup(backup_root)?.manifest)
+pub fn load_and_verify_profile_archive(
+    archive_root: &Path,
+) -> Result<FinalProfileArchiveManifest, String> {
+    Ok(load_verified_profile_archive(archive_root)?.manifest)
 }
 
-fn load_verified_backup(backup_root: &Path) -> Result<VerifiedCompleteProfileBackup, String> {
-    let root = fs::canonicalize(backup_root)
-        .map_err(|error| format!("canonicalize backup '{}': {error}", backup_root.display()))?;
+fn load_verified_profile_archive(
+    archive_root: &Path,
+) -> Result<VerifiedFinalProfileArchive, String> {
+    let root = fs::canonicalize(archive_root)
+        .map_err(|error| format!("canonicalize archive '{}': {error}", archive_root.display()))?;
     let metadata = fs::symlink_metadata(&root)
-        .map_err(|error| format!("inspect backup root '{}': {error}", root.display()))?;
+        .map_err(|error| format!("inspect archive root '{}': {error}", root.display()))?;
     if !metadata.is_dir() {
         return Err(format!(
-            "complete-profile backup root '{}' is not a directory",
+            "complete-profile archive root '{}' is not a directory",
             root.display()
         ));
     }
-    let manifest_path = root.join("backup-manifest.json");
+    let manifest_path = root.join("archive-manifest.json");
     let bytes = fs::read(&manifest_path).map_err(|error| {
         format!(
-            "read backup manifest '{}': {error}",
+            "read archive manifest '{}': {error}",
             manifest_path.display()
         )
     })?;
-    let manifest: CompleteProfileBackupManifest = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("decode backup manifest: {error}"))?;
+    let manifest: FinalProfileArchiveManifest = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("decode archive manifest: {error}"))?;
     validate_manifest(&manifest)?;
     for entry in manifest.entries.iter().filter(|entry| entry.present) {
         let path = checked_join(&root, &entry.logical_path)?;
         verify_file(&path, entry)?;
     }
-    Ok(VerifiedCompleteProfileBackup {
+    Ok(VerifiedFinalProfileArchive {
         root,
         manifest,
         manifest_sha256: hex::encode(Sha256::digest(&bytes)),
     })
 }
 
-fn create_backup_contents(
+fn create_archive_contents(
     source: &Path,
     staging: &Path,
-    backup_id: &str,
+    archive_id: &str,
     created_at: i64,
 ) -> Result<(), String> {
     let mut entries = Vec::new();
     for logical in REQUIRED_PROFILE_PATHS {
         let path = source.join(logical);
         if !path.exists() {
-            entries.push(ProfileBackupEntry {
+            entries.push(ProfileArchiveEntry {
                 logical_path: (*logical).to_owned(),
                 present: false,
                 byte_len: None,
@@ -666,7 +741,7 @@ fn create_backup_contents(
         let before = entries.len();
         collect_files(source, &path, &mut entries)?;
         if entries.len() == before {
-            entries.push(ProfileBackupEntry {
+            entries.push(ProfileArchiveEntry {
                 logical_path: (*logical).to_owned(),
                 present: false,
                 byte_len: None,
@@ -683,9 +758,9 @@ fn create_backup_contents(
     }
 
     let profile_identity = source.join("profile-identity.json");
-    let manifest = CompleteProfileBackupManifest {
-        schema_version: BACKUP_MANIFEST_SCHEMA_VERSION,
-        backup_id: backup_id.to_owned(),
+    let manifest = FinalProfileArchiveManifest {
+        schema_version: ARCHIVE_MANIFEST_SCHEMA_VERSION,
+        archive_id: archive_id.to_owned(),
         created_at,
         source_profile_identity_sha256: profile_identity
             .is_file()
@@ -694,9 +769,9 @@ fn create_backup_contents(
         entries,
     };
     validate_manifest(&manifest)?;
-    let manifest_path = staging.join("backup-manifest.json");
+    let manifest_path = staging.join("archive-manifest.json");
     let bytes = serde_json::to_vec_pretty(&manifest)
-        .map_err(|error| format!("encode backup manifest: {error}"))?;
+        .map_err(|error| format!("encode archive manifest: {error}"))?;
     write_new_synced(&manifest_path, &bytes)?;
     sync_directory(staging)
 }
@@ -704,18 +779,18 @@ fn create_backup_contents(
 fn collect_files(
     root: &Path,
     path: &Path,
-    entries: &mut Vec<ProfileBackupEntry>,
+    entries: &mut Vec<ProfileArchiveEntry>,
 ) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect backup source '{}': {error}", path.display()))?;
+        .map_err(|error| format!("inspect archive source '{}': {error}", path.display()))?;
     if metadata.file_type().is_symlink() {
-        return Err(format!("backup source is a symlink: '{}'", path.display()));
+        return Err(format!("archive source is a symlink: '{}'", path.display()));
     }
     if metadata.is_dir() {
         let mut children = fs::read_dir(path)
-            .map_err(|error| format!("read backup directory '{}': {error}", path.display()))?
+            .map_err(|error| format!("read archive directory '{}': {error}", path.display()))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("read backup directory '{}': {error}", path.display()))?;
+            .map_err(|error| format!("read archive directory '{}': {error}", path.display()))?;
         children.sort_by_key(std::fs::DirEntry::file_name);
         for child in children {
             collect_files(root, &child.path(), entries)?;
@@ -724,16 +799,16 @@ fn collect_files(
     }
     if !metadata.is_file() {
         return Err(format!(
-            "backup source is not a regular file: '{}'",
+            "archive source is not a regular file: '{}'",
             path.display()
         ));
     }
     let logical = path
         .strip_prefix(root)
-        .map_err(|_| "backup source escaped profile root".to_owned())?
+        .map_err(|_| "archive source escaped profile root".to_owned())?
         .to_string_lossy()
         .replace('\\', "/");
-    entries.push(ProfileBackupEntry {
+    entries.push(ProfileArchiveEntry {
         logical_path: logical,
         present: true,
         byte_len: Some(metadata.len()),
@@ -744,8 +819,8 @@ fn collect_files(
 
 fn verify_restored_copy(
     restore_root: &Path,
-    expected: &CompleteProfileBackupManifest,
-) -> Result<CompleteProfileBackupManifest, String> {
+    expected: &FinalProfileArchiveManifest,
+) -> Result<FinalProfileArchiveManifest, String> {
     for entry in expected.entries.iter().filter(|entry| entry.present) {
         verify_file(&checked_join(restore_root, &entry.logical_path)?, entry)?;
     }
@@ -755,19 +830,19 @@ fn verify_restored_copy(
 fn copy_verified_file(
     source: &Path,
     destination: &Path,
-    expected: &ProfileBackupEntry,
+    expected: &ProfileArchiveEntry,
 ) -> Result<(), String> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!(
-                "create backup destination directory '{}': {error}",
+                "create archive destination directory '{}': {error}",
                 parent.display()
             )
         })?;
     }
     fs::copy(source, destination).map_err(|error| {
         format!(
-            "copy backup file '{}' to '{}': {error}",
+            "copy archive file '{}' to '{}': {error}",
             source.display(),
             destination.display()
         )
@@ -776,30 +851,30 @@ fn copy_verified_file(
     verify_file(destination, expected)
 }
 
-fn verify_file(path: &Path, expected: &ProfileBackupEntry) -> Result<(), String> {
+fn verify_file(path: &Path, expected: &ProfileArchiveEntry) -> Result<(), String> {
     let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("inspect backup file '{}': {error}", path.display()))?;
+        .map_err(|error| format!("inspect archive file '{}': {error}", path.display()))?;
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(format!(
-            "backup artifact is not a regular file: '{}'",
+            "archive artifact is not a regular file: '{}'",
             path.display()
         ));
     }
     if Some(metadata.len()) != expected.byte_len || Some(sha256_file(path)?) != expected.sha256 {
         return Err(format!(
-            "backup artifact checksum mismatch: '{}'",
+            "archive artifact checksum mismatch: '{}'",
             path.display()
         ));
     }
     Ok(())
 }
 
-fn validate_manifest(manifest: &CompleteProfileBackupManifest) -> Result<(), String> {
-    if manifest.schema_version != BACKUP_MANIFEST_SCHEMA_VERSION
-        || manifest.backup_id.is_empty()
+fn validate_manifest(manifest: &FinalProfileArchiveManifest) -> Result<(), String> {
+    if manifest.schema_version != ARCHIVE_MANIFEST_SCHEMA_VERSION
+        || manifest.archive_id.is_empty()
         || manifest.created_at <= 0
     {
-        return Err("invalid complete-profile backup manifest identity".to_owned());
+        return Err("invalid complete-profile archive manifest identity".to_owned());
     }
     let mut previous = None;
     for entry in &manifest.entries {
@@ -813,7 +888,7 @@ fn validate_manifest(manifest: &CompleteProfileBackupManifest) -> Result<(), Str
                 .is_some_and(|digest| digest.len() != 64)
             || previous.is_some_and(|value: &str| value >= entry.logical_path.as_str())
         {
-            return Err("invalid complete-profile backup manifest entry".to_owned());
+            return Err("invalid complete-profile archive manifest entry".to_owned());
         }
         previous = Some(entry.logical_path.as_str());
     }
@@ -825,7 +900,7 @@ fn validate_manifest(manifest: &CompleteProfileBackupManifest) -> Result<(), Str
                     .strip_prefix(required)
                     .is_some_and(|suffix| suffix.starts_with('/'))
         }) {
-            return Err(format!("backup manifest omits required path '{required}'"));
+            return Err(format!("archive manifest omits required path '{required}'"));
         }
     }
     let profile_identity_sha256 = manifest
@@ -835,7 +910,7 @@ fn validate_manifest(manifest: &CompleteProfileBackupManifest) -> Result<(), Str
         .and_then(|entry| entry.sha256.clone());
     if manifest.source_profile_identity_sha256 != profile_identity_sha256 {
         return Err(
-            "backup manifest source profile identity digest does not match content".to_owned(),
+            "archive manifest source profile identity digest does not match content".to_owned(),
         );
     }
     Ok(())
@@ -848,7 +923,7 @@ fn checked_join(root: &Path, logical: &str) -> Result<PathBuf, String> {
             .components()
             .any(|part| matches!(part, std::path::Component::ParentDir))
     {
-        return Err("backup manifest path is not relative".to_owned());
+        return Err("archive manifest path is not relative".to_owned());
     }
     Ok(root.join(path))
 }
@@ -912,323 +987,4 @@ fn restrict_private_directory(_path: &Path) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn released_profile(root: &Path) {
-        for name in [
-            "global.db",
-            "global.db-wal",
-            "global.db-shm",
-            "user-sessions.db",
-            "user-sessions.db-wal",
-            "user-sessions.db-shm",
-            "user-memory.db",
-            "user-memory.db-wal",
-            "user-memory.db-shm",
-            "enrollment.json",
-            "config.toml",
-            "profile-identity.json",
-        ] {
-            let path = root.join(name);
-            fs::write(&path, format!("released fixture: {name}")).unwrap();
-        }
-        fs::create_dir(root.join("projects")).unwrap();
-        fs::write(
-            root.join("projects/project.release.db"),
-            b"project schema 18",
-        )
-        .unwrap();
-        fs::create_dir(root.join("migration-inventory")).unwrap();
-        fs::write(
-            root.join("migration-inventory/migration.release.json"),
-            b"migration inventory",
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn complete_backup_rehearses_from_restored_isolated_copy() {
-        let temp = tempfile::tempdir().unwrap();
-        let profile = temp.path().join("profile");
-        let backups = temp.path().join("backups");
-        let restore = temp.path().join("restored");
-        fs::create_dir(&profile).unwrap();
-        released_profile(&profile);
-        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "backup test",
-        )
-        .unwrap();
-
-        let backup =
-            create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
-                .unwrap();
-        let manifest = rehearse_complete_profile_backup(&backup, &restore).unwrap();
-
-        assert!(
-            manifest
-                .entries
-                .iter()
-                .any(|entry| { entry.logical_path == "user-sessions.db-wal" && entry.present })
-        );
-        assert!(
-            manifest.entries.iter().any(|entry| {
-                entry.logical_path == "projects/project.release.db" && entry.present
-            })
-        );
-        assert_eq!(
-            fs::read(restore.join("user-memory.db")).unwrap(),
-            fs::read(profile.join("user-memory.db")).unwrap()
-        );
-    }
-
-    #[test]
-    fn rehearsal_rebinds_relocated_store_without_changing_durable_identity() {
-        let temp = tempfile::tempdir().unwrap();
-        let profile = temp.path().join("released-profile");
-        let backups = temp.path().join("backups");
-        let restore = temp.path().join("rehearsed-profile");
-        let project = temp.path().join("released-project");
-        let project_id = "project.release";
-        fs::create_dir(&profile).unwrap();
-        fs::create_dir(&project).unwrap();
-        released_profile(&profile);
-        fs::remove_file(profile.join("projects/project.release.db")).unwrap();
-        let source_store = profile.join("projects").join(project_id);
-        fs::create_dir(&source_store).unwrap();
-        for (name, contents) in [
-            ("tracedecay.db", b"released memory identity".as_slice()),
-            ("sessions.db", b"released LCM identity".as_slice()),
-            (
-                "branch-meta.json",
-                br#"{"default_branch":"main","branches":{}}"#,
-            ),
-        ] {
-            fs::write(source_store.join(name), contents).unwrap();
-        }
-        let source_manifest = tracedecay_runtime_core::storage::StoreManifest {
-            schema_version: tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION,
-            project_id: Some(project_id.to_owned()),
-            store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
-            storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-            project_root: project.clone(),
-            data_root: source_store.clone(),
-            graph_db_relpath: "tracedecay.db".into(),
-            sessions_db_relpath: "sessions.db".into(),
-            branch_meta_relpath: "branch-meta.json".into(),
-        };
-        tracedecay_runtime_core::storage::write_store_manifest_to_path(
-            &source_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-            &source_manifest,
-        )
-        .unwrap();
-        let expected_profile_identity = fs::read(profile.join("profile-identity.json")).unwrap();
-        let expected_memory = fs::read(profile.join("user-memory.db")).unwrap();
-        let expected_lcm = fs::read(profile.join("user-sessions.db")).unwrap();
-        let expected_config = fs::read(profile.join("config.toml")).unwrap();
-        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "backup test",
-        )
-        .unwrap();
-
-        let backup =
-            create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
-                .unwrap();
-        rehearse_complete_profile_backup(&backup, &restore).unwrap();
-
-        let restored_store = restore.join("projects").join(project_id);
-        let restored_manifest = tracedecay_runtime_core::storage::read_store_manifest(
-            &restored_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-        )
-        .unwrap();
-        assert_eq!(restored_manifest.project_id.as_deref(), Some(project_id));
-        assert_eq!(restored_manifest.project_root, project);
-        assert_eq!(
-            restored_manifest.data_root,
-            restored_store.canonicalize().unwrap()
-        );
-        assert_eq!(
-            tracedecay_runtime_core::storage::read_store_manifest(
-                &source_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME)
-            )
-            .unwrap(),
-            source_manifest,
-            "rehearsal must never mutate the source fixture profile"
-        );
-        assert_eq!(
-            fs::read(restore.join("profile-identity.json")).unwrap(),
-            expected_profile_identity
-        );
-        assert_eq!(
-            fs::read(restore.join("user-memory.db")).unwrap(),
-            expected_memory
-        );
-        assert_eq!(
-            fs::read(restore.join("user-sessions.db")).unwrap(),
-            expected_lcm
-        );
-        assert_eq!(
-            fs::read(restore.join("config.toml")).unwrap(),
-            expected_config
-        );
-    }
-
-    #[test]
-    fn rehearsal_rejects_corrupted_backup_material() {
-        let temp = tempfile::tempdir().unwrap();
-        let profile = temp.path().join("profile");
-        let backups = temp.path().join("backups");
-        fs::create_dir(&profile).unwrap();
-        released_profile(&profile);
-        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "backup test",
-        )
-        .unwrap();
-        let backup =
-            create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
-                .unwrap();
-        fs::write(backup.join("global.db"), b"corrupt").unwrap();
-
-        let error =
-            rehearse_complete_profile_backup(&backup, &temp.path().join("restored")).unwrap_err();
-        assert!(error.contains("checksum mismatch"));
-    }
-
-    #[test]
-    fn backup_refuses_destination_inside_live_profile() {
-        let temp = tempfile::tempdir().unwrap();
-        let profile = temp.path().join("profile");
-        fs::create_dir(&profile).unwrap();
-        released_profile(&profile);
-        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "backup test",
-        )
-        .unwrap();
-
-        let error = create_complete_profile_backup(
-            &profile,
-            &profile.join("backups"),
-            "backup.release",
-            100,
-            &lease,
-        )
-        .unwrap_err();
-        assert!(error.contains("outside the source profile"));
-    }
-
-    fn sharded_released_backup(temp: &tempfile::TempDir) -> (PathBuf, PathBuf) {
-        let profile = temp.path().join("released-profile");
-        let backups = temp.path().join("backups");
-        let project = temp.path().join("released-project");
-        let project_id = "project.release";
-        fs::create_dir(&profile).unwrap();
-        fs::create_dir(&project).unwrap();
-        released_profile(&profile);
-        fs::remove_file(profile.join("projects/project.release.db")).unwrap();
-        let source_store = profile.join("projects").join(project_id);
-        fs::create_dir(&source_store).unwrap();
-        for (name, contents) in [
-            ("tracedecay.db", b"released memory identity".as_slice()),
-            ("sessions.db", b"released LCM identity".as_slice()),
-            (
-                "branch-meta.json",
-                br#"{"default_branch":"main","branches":{}}"#,
-            ),
-        ] {
-            fs::write(source_store.join(name), contents).unwrap();
-        }
-        tracedecay_runtime_core::storage::write_store_manifest_to_path(
-            &source_store.join(tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME),
-            &tracedecay_runtime_core::storage::StoreManifest {
-                schema_version: tracedecay_runtime_core::storage::STORE_MANIFEST_SCHEMA_VERSION,
-                project_id: Some(project_id.to_owned()),
-                store_kind: tracedecay_runtime_core::storage::StoreKind::CodeProject,
-                storage_mode: tracedecay_runtime_core::storage::StorageMode::ProfileSharded,
-                project_root: project,
-                data_root: source_store.clone(),
-                graph_db_relpath: "tracedecay.db".into(),
-                sessions_db_relpath: "sessions.db".into(),
-                branch_meta_relpath: "branch-meta.json".into(),
-            },
-        )
-        .unwrap();
-        let lease = tracedecay_runtime_core::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "backup test",
-        )
-        .unwrap();
-        let backup =
-            create_complete_profile_backup(&profile, &backups, "backup.release", 100, &lease)
-                .unwrap();
-        (backup, temp.path().join("rehearsed-profile"))
-    }
-
-    #[test]
-    fn rehearsal_publication_faults_resume_or_rollback_at_each_boundary() {
-        for (fault, expect_staging, expect_published_marker) in [
-            ("before_rename", true, false),
-            ("after_rename_before_parent_sync", false, true),
-            ("after_parent_sync_before_marker_removal", false, true),
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let (backup, restore) = sharded_released_backup(&temp);
-            let staging = temp.path().join(".rehearsed-profile.tracedecay-rehearsal");
-            set_rehearsal_publication_fault_for_test(fault);
-
-            let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-            assert!(
-                error.contains("injected rehearsal publication fault"),
-                "{fault}: unexpected error {error}"
-            );
-            assert_eq!(
-                staging.is_dir(),
-                expect_staging,
-                "{fault}: staging presence"
-            );
-            assert_eq!(
-                restore.join(REHEARSAL_MARKER_FILENAME).is_file(),
-                expect_published_marker,
-                "{fault}: published marker presence"
-            );
-
-            set_rehearsal_publication_fault_for_test("");
-            rehearse_complete_profile_backup(&backup, &restore).unwrap();
-            assert!(restore.join("profile-identity.json").is_file());
-            assert!(!staging.exists());
-            assert!(!restore.join(REHEARSAL_MARKER_FILENAME).exists());
-        }
-    }
-
-    #[test]
-    fn rehearsal_rejects_project_store_missing_store_manifest() {
-        let temp = tempfile::tempdir().unwrap();
-        let (backup, restore) = sharded_released_backup(&temp);
-        let manifest_entry = format!(
-            "projects/project.release/{}",
-            tracedecay_runtime_core::storage::STORE_MANIFEST_FILENAME
-        );
-        fs::remove_file(backup.join(&manifest_entry)).unwrap();
-        let manifest_path = backup.join("backup-manifest.json");
-        let mut manifest: CompleteProfileBackupManifest =
-            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-        manifest
-            .entries
-            .retain(|entry| entry.logical_path != manifest_entry);
-        fs::write(
-            &manifest_path,
-            serde_json::to_vec_pretty(&manifest).unwrap(),
-        )
-        .unwrap();
-
-        let error = rehearse_complete_profile_backup(&backup, &restore).unwrap_err();
-        assert!(
-            error.contains("missing required store_manifest.json"),
-            "unexpected error: {error}"
-        );
-        assert!(!restore.exists());
-    }
-}
+mod tests;

@@ -118,7 +118,7 @@ pub struct Cli {
     /// Verify and print the exact signed lifecycle plan without mutating.
     /// Valid only alongside the agent-lifecycle commands; dispatch enforces the
     /// `--component` pairing so this global flag never demands `--component`
-    /// from unrelated subcommands (e.g. `branch gc`, `migrate storage-report`).
+    /// from unrelated subcommands (e.g. `branch gc`, `storage storage-report`).
     #[arg(long, global = true, conflicts_with = "yes")]
     pub dry_run: bool,
     /// Confirm a first-party component mutation, or a `wipe`. Scope is enforced
@@ -655,11 +655,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: AutomationAction,
     },
-    /// Inspect stores before profile-storage migration
-    #[command(long_about = MIGRATE_LONG_ABOUT, after_help = MIGRATE_AFTER_HELP)]
-    Migrate {
+    /// Inspect and preserve exact-final profile storage
+    #[command(long_about = STORAGE_LONG_ABOUT, after_help = STORAGE_AFTER_HELP)]
+    Storage {
         #[command(subcommand)]
-        action: MigrateAction,
+        action: ProfileStorageAction,
     },
     /// Wipe local tracedecay DBs (current folder, parents, and children)
     #[command(long_about = WIPE_LONG_ABOUT, after_help = WIPE_AFTER_HELP)]
@@ -1007,7 +1007,7 @@ pub enum MemoryAction {
 }
 
 #[derive(Subcommand)]
-pub enum MigrateAction {
+pub enum ProfileStorageAction {
     /// Read-only per-store size, free-page ratio, and retention-backlog report
     /// (plan 38 §7). Never mutates anything; use `branch gc` and the daemon's
     /// automatic sweeps to reclaim what this reports.
@@ -1026,22 +1026,22 @@ pub enum MigrateAction {
         #[arg(long)]
         json: bool,
     },
-    /// Create a complete checksummed profile backup under a quiesced exclusive lease.
-    #[command(name = "backup-profile")]
-    BackupProfile {
-        /// Backup parent outside the TraceDecay profile.
+    /// Export a complete checksummed final profile under a quiesced exclusive lease.
+    #[command(name = "export-profile")]
+    ExportProfile {
+        /// Archive parent outside the TraceDecay profile.
         #[arg(long)]
         to: String,
-        /// Stable backup directory name.
-        #[arg(long = "backup-id")]
-        backup_id: String,
+        /// Stable archive directory name.
+        #[arg(long = "archive-id")]
+        archive_id: String,
     },
-    /// Restore and verify a complete backup in an isolated destination.
-    #[command(name = "rehearse-profile-backup")]
-    RehearseProfileBackup {
-        /// Complete backup directory containing `backup-manifest.json`.
+    /// Restore and verify an exact-final archive in an isolated destination.
+    #[command(name = "rehearse-profile-restore")]
+    RehearseProfileRestore {
+        /// Complete profile archive directory containing `archive-manifest.json`.
         #[arg(long)]
-        backup: String,
+        archive: String,
         /// New isolated restore directory.
         #[arg(long)]
         restore: String,

@@ -579,16 +579,16 @@ Examples:
 Related: tracedecay install --agent codex --automation (enable at install),
 tracedecay dashboard (review UI), tracedecay memory curate.";
 
-pub(crate) const MIGRATE_LONG_ABOUT: &str = "\
-Profile-storage maintenance: read-only per-store size and retention reporting, \
-complete profile backup, and backup restore rehearsal. TraceDecay V2 stores are \
-created at their final shape, so there is no cross-version migration workflow.";
+pub(crate) const STORAGE_LONG_ABOUT: &str = "\
+Exact-final profile storage: read-only per-store size and retention reporting, \
+complete profile export, and isolated restore rehearsal. Non-final stores must \
+be reset or recreated and are never imported.";
 
-pub(crate) const MIGRATE_AFTER_HELP: &str = "\
+pub(crate) const STORAGE_AFTER_HELP: &str = "\
 Examples:
-  tracedecay migrate storage-report              Per-store size / free-page ratio (read-only)
-  tracedecay migrate backup-profile --to <dir> --backup-id <id>
-  tracedecay migrate rehearse-profile-backup --backup <dir> --restore <dir>
+  tracedecay storage storage-report              Per-store size / free-page ratio (read-only)
+  tracedecay storage export-profile --to <dir> --archive-id <id>
+  tracedecay storage rehearse-profile-restore --archive <dir> --restore <dir>
 
 Related: tracedecay projects (registry view), tracedecay wipe.";
 

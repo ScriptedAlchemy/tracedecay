@@ -36,7 +36,7 @@
 //! pages to the filesystem and never touches live rows, so this pass has no
 //! dry-run mode to gate -- there is no state it can destroy. It deliberately
 //! does not consult
-//! [`crate::migrate::durability`]: branch databases are project graph stores
+//! Branch databases are project graph stores
 //! (durable `memory_*` tables and all), and compaction is safe on them
 //! precisely because it preserves every row.
 

@@ -124,7 +124,7 @@ pub(crate) async fn handle_wipe(all: bool, assume_yes: bool) -> tracedecay::erro
     let _database_scope =
         tracedecay::db::enter_maintenance_database_scope(&lifecycle_lease, &profile_root, "wipe")?;
     let registry =
-        tracedecay::migrate::registry::MigrationRegistryRuntime::try_open_existing(&profile_root)
+        tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::try_open_existing(&profile_root)
             .await?;
 
     // `--all` must enumerate the registry only after exclusive maintenance
@@ -304,12 +304,12 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
             0
         };
         let project_key =
-            tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path);
+            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path);
         let token_row = token_rows.iter().find(|row| {
             row.get("project")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|value| {
-                    tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
+                    tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(
                         Path::new(value),
                     ) == project_key
                 })
@@ -435,18 +435,20 @@ fn append_orphan_manifest_rows(
     let registered: std::collections::HashSet<String> = project_paths
         .iter()
         .map(|path| {
-            tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path)
+            tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(path)
         })
         .collect();
-    let report = tracedecay::migrate::registry::scan_profile_store_manifests(
+    let report = tracedecay::global_db::registry_maintenance::inspect_profile_store_orphans(
         profile_root,
         tracedecay::tracedecay::current_timestamp(),
     );
     for plan in report.plans {
-        if plan.status != tracedecay::migrate::registry::RegistryReconstructionStatus::Eligible {
+        if plan.status
+            != tracedecay::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible
+        {
             continue;
         }
-        let key = tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
+        let key = tracedecay::profile_registry_maintenance::ProfileRegistryMaintenanceRuntime::canonical_project_key(
             &plan.project.project_root,
         );
         if registered.contains(&key) {

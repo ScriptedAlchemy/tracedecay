@@ -289,13 +289,17 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         "{warnings:?}"
     );
 
-    let scan = crate::migrate::registry::scan_profile_store_manifests(&profile_root, 1_800_000_000);
-    let eligible = crate::migrate::registry::RegistryReconstructionReport {
+    let scan = crate::global_db::registry_maintenance::inspect_profile_store_orphans(
+        &profile_root,
+        1_800_000_000,
+    );
+    let eligible = crate::global_db::registry_maintenance::RegistryOrphanRelinkReport {
         plans: scan
             .plans
             .into_iter()
             .filter(|plan| {
-                plan.status == crate::migrate::registry::RegistryReconstructionStatus::Eligible
+                plan.status
+                    == crate::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible
                     && plan.project.project_id == "proj_eligible"
             })
             .collect(),
@@ -315,9 +319,9 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
     batch_right.artifacts.clear();
     batch_left.graph_scopes.clear();
     batch_left.artifacts.clear();
-    let batch_diff = crate::migrate::registry::diff_registry_reconstruction_report(
+    let batch_diff = crate::global_db::registry_maintenance::diff_registry_orphan_relink_report(
         db,
-        &crate::migrate::registry::RegistryReconstructionReport {
+        &crate::global_db::registry_maintenance::RegistryOrphanRelinkReport {
             plans: vec![batch_left, batch_right],
             issues: Vec::new(),
         },
@@ -332,9 +336,10 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         "{:?}",
         batch_diff.issues
     );
-    let applied = crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
-        .await
-        .unwrap();
+    let applied =
+        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(db, &eligible)
+            .await
+            .unwrap();
     assert_eq!(applied.projects, 1);
     assert_eq!(
         orphan_store_manifest_report(db, &profile_root).await.0,
@@ -342,10 +347,10 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         "a complete reconstruction registry is healthy without a legacy projects.path row"
     );
     assert_eq!(
-        crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
+        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(db, &eligible)
             .await
             .unwrap(),
-        crate::migrate::registry::RegistryReconstructionApplyReport::default()
+        crate::global_db::registry_maintenance::RegistryOrphanRelinkApplyReport::default()
     );
 
     db.writer_connection()
@@ -357,7 +362,7 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         .await
         .unwrap();
     assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
-    crate::migrate::registry::apply_registry_reconstruction_report(db, &eligible)
+    crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(db, &eligible)
         .await
         .unwrap();
 

@@ -1,21 +1,26 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::cli::MigrateAction;
+use crate::cli::ProfileStorageAction;
 
-pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::errors::Result<()> {
+pub(crate) async fn handle_profile_storage_action(
+    action: ProfileStorageAction,
+) -> tracedecay::errors::Result<()> {
     match action {
-        MigrateAction::StorageReport {
+        ProfileStorageAction::StorageReport {
             profile_root,
             project_id,
             project_root,
             json,
-        } => handle_migrate_storage_report(profile_root, project_id, project_root, json).await,
-        MigrateAction::BackupProfile { to, backup_id } => {
-            handle_migrate_backup_profile(to, backup_id)
+        } => {
+            handle_profile_storage_storage_report(profile_root, project_id, project_root, json)
+                .await
         }
-        MigrateAction::RehearseProfileBackup { backup, restore } => {
-            handle_migrate_rehearse_profile_backup(backup, restore)
+        ProfileStorageAction::ExportProfile { to, archive_id } => {
+            handle_profile_storage_export_profile(to, archive_id)
+        }
+        ProfileStorageAction::RehearseProfileRestore { archive, restore } => {
+            handle_profile_storage_rehearse_profile_restore(archive, restore)
         }
     }
 }
@@ -91,7 +96,7 @@ fn merge_storage_report_page(
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
 /// (plan 38 §7). The active profile routes through the daemon's retained
 /// authority; explicit offline profiles retain the bounded read-only path.
-async fn handle_migrate_storage_report(
+async fn handle_profile_storage_storage_report(
     profile_root: Option<String>,
     project_id: Option<String>,
     project_root: Option<String>,
@@ -258,9 +263,9 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn handle_migrate_backup_profile(
+fn handle_profile_storage_export_profile(
     destination: String,
-    backup_id: String,
+    archive_id: String,
 ) -> tracedecay::errors::Result<()> {
     let profile_root = tracedecay::storage::default_profile_root()?;
     let created_at = SystemTime::now()
@@ -271,15 +276,15 @@ fn handle_migrate_backup_profile(
         .as_secs()
         .try_into()
         .map_err(|_| tracedecay::errors::TraceDecayError::Config {
-            message: "system clock exceeds supported backup timestamp range".to_owned(),
+            message: "system clock exceeds supported archive timestamp range".to_owned(),
         })?;
-    let backup = tracedecay::daemon::with_quiesced_installed_service(
-        "complete profile backup",
+    let archive = tracedecay::daemon::with_quiesced_installed_service(
+        "complete profile archive",
         |lifecycle| {
-            tracedecay::migrate::profile_backup::create_complete_profile_backup(
+            tracedecay::global_db::profile_archive::export_final_profile(
                 &profile_root,
                 Path::new(&destination),
-                &backup_id,
+                &archive_id,
                 created_at,
                 lifecycle,
             )
@@ -287,23 +292,23 @@ fn handle_migrate_backup_profile(
         },
     )?;
     println!(
-        "complete profile backup created and verified: {}",
-        backup.display()
+        "complete profile archive created and verified: {}",
+        archive.display()
     );
     Ok(())
 }
 
-fn handle_migrate_rehearse_profile_backup(
-    backup: String,
+fn handle_profile_storage_rehearse_profile_restore(
+    archive: String,
     restore: String,
 ) -> tracedecay::errors::Result<()> {
-    let manifest = tracedecay::migrate::profile_backup::rehearse_complete_profile_backup(
-        Path::new(&backup),
+    let manifest = tracedecay::global_db::profile_archive::rehearse_final_profile_restore(
+        Path::new(&archive),
         Path::new(&restore),
     )
     .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
     println!(
-        "complete profile backup rehearsed: {} entries restored to {}",
+        "complete profile archive rehearsed: {} entries restored to {}",
         manifest.entries.len(),
         restore
     );

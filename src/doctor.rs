@@ -1650,27 +1650,29 @@ pub(crate) async fn orphan_store_manifest_report(
     global_db: &crate::global_db::RegisteredGlobalDb,
     profile_root: &Path,
 ) -> (usize, Vec<String>) {
-    let report = crate::migrate::registry::scan_profile_store_manifests(
+    let report = crate::global_db::registry_maintenance::inspect_profile_store_orphans(
         profile_root,
         crate::tracedecay::current_timestamp(),
     );
     let mut warnings = report.issues.clone();
     for plan in &report.plans {
         match plan.status {
-            crate::migrate::registry::RegistryReconstructionStatus::Blocked => {
+            crate::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Blocked => {
                 warnings.push(format!(
                     "blocked store manifest '{}': {}",
                     plan.manifest_path.display(),
                     plan.status_reason.as_deref().unwrap_or("not eligible")
                 ));
             }
-            crate::migrate::registry::RegistryReconstructionStatus::Eligible
-            | crate::migrate::registry::RegistryReconstructionStatus::Stale
-            | crate::migrate::registry::RegistryReconstructionStatus::Retired => {}
+            crate::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Eligible
+            | crate::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Stale
+            | crate::global_db::registry_maintenance::RegistryOrphanRelinkStatus::Retired => {}
         }
     }
-    let diff =
-        crate::migrate::registry::diff_registry_reconstruction_report(global_db, &report).await;
+    let diff = crate::global_db::registry_maintenance::diff_registry_orphan_relink_report(
+        global_db, &report,
+    )
+    .await;
     warnings.extend(diff.issues);
     (diff.missing_plans, warnings)
 }

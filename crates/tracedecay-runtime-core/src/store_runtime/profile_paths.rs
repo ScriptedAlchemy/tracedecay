@@ -1,10 +1,8 @@
 //! Profile-root filenames the store-runtime resolver has to know.
 //!
 //! `memory::user::USER_MEMORY_DB_FILENAME` already lives in this kernel, but
-//! the matching session filename is owned by `tracedecay-sessions`, which the
-//! kernel cannot depend on: `tracedecay-global-db` already depends on
-//! `tracedecay-migrate`, which depends on this crate, so any edge back up is a
-//! Cargo cycle. The canonical value is therefore restated here.
+//! the matching session filename is owned by `tracedecay-sessions`, above this
+//! kernel. The canonical value is therefore restated here.
 //!
 //! The root crate — which sees both sides — pins the two definitions together
 //! in `src/daemon/store_runtime.rs`, so a divergence fails the root test suite

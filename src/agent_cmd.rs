@@ -2843,63 +2843,6 @@ fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
     }
 }
 
-/// Moves provable historical Hermes-local session data before any install can
-/// remove its legacy project pin. Unresolved sources remain untouched and are
-/// reported without blocking the projectless user-profile integration. Read,
-/// integrity, or copy failures still block the cutover.
-pub(crate) async fn migrate_legacy_hermes_data(home: &Path) -> tracedecay::errors::Result<()> {
-    let report = tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await;
-    finish_legacy_hermes_migration(report)
-}
-
-/// Upgrade reinstalls share the same preservation policy while reusing any
-/// lifecycle authority already held by post-update maintenance.
-async fn migrate_legacy_hermes_data_for_reinstall(
-    home: &Path,
-    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
-) -> tracedecay::errors::Result<()> {
-    let report = if let Some(lifecycle) = lifecycle {
-        tracedecay::migrate::hermes::migrate_legacy_hermes_stores_under_lease(home, lifecycle).await
-    } else {
-        tracedecay::migrate::hermes::migrate_legacy_hermes_stores(home).await
-    };
-    finish_legacy_hermes_migration(report)
-}
-
-fn finish_legacy_hermes_migration(
-    report: tracedecay::migrate::hermes::LegacyHermesMigrationReport,
-) -> tracedecay::errors::Result<()> {
-    for migration in report.migrated {
-        eprintln!(
-            "  \x1b[32m✔\x1b[0m Migrated legacy Hermes session store {} -> {} ({} rows)",
-            migration.source_db.display(),
-            migration.target_project.display(),
-            migration.rows_copied
-        );
-    }
-    for issue in report.unresolved {
-        eprintln!(
-            "  \x1b[33mwarning:\x1b[0m preserving unresolved legacy Hermes session store {}: {}",
-            issue.source_db.display(),
-            issue.reason
-        );
-    }
-    if report.failed.is_empty() {
-        return Ok(());
-    }
-    let issues = report
-        .failed
-        .into_iter()
-        .map(|issue| format!("{}: {}", issue.source_db.display(), issue.reason))
-        .collect::<Vec<_>>()
-        .join("; ");
-    Err(tracedecay::errors::TraceDecayError::Config {
-        message: format!(
-            "legacy Hermes session data migration failed; source data and project pins were preserved: {issues}"
-        ),
-    })
-}
-
 fn print_legacy_install_guidance(agent_id: &str) {
     if agent_id != "hermes" {
         return;
@@ -3007,10 +2950,6 @@ pub(crate) async fn handle_install_command(
         return Ok(());
     }
 
-    if agent.as_deref() == Some("hermes") {
-        migrate_legacy_hermes_data(&home).await?;
-    }
-
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
     tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
 
@@ -3065,10 +3004,6 @@ pub(crate) async fn handle_install_command(
     } else {
         let (to_install, to_uninstall) =
             tracedecay::agents::pick_integrations_interactive(&home, &user_cfg.installed_agents)?;
-
-        if to_install.iter().any(|id| id == "hermes") {
-            migrate_legacy_hermes_data(&home).await?;
-        }
 
         for id in &to_uninstall {
             let ag = tracedecay::agents::get_integration(id)?;
@@ -3463,9 +3398,7 @@ fn registration_state_label(
 /// loop forever — `migrate_installed_agents` only ever adds ids, never prunes,
 /// so a stale id would never resolve and the markers would never advance. Only
 /// genuine `install()` failures are reported as `Err` so they still gate
-/// markers. Unresolved legacy Hermes project evidence is preserved and warned
-/// during automated reinstall; actual source-integrity or copy failures still
-/// gate Hermes so corrupted or partially copied data cannot be hidden.
+/// markers.
 pub(crate) async fn reinstall_agent_integrations(
     agent_ids: &[String],
     home: &Path,
@@ -3489,30 +3422,11 @@ async fn reinstall_agent_integrations_with_lease(
     agent_ids: &[String],
     home: &Path,
     tracedecay_bin: &str,
-    lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
+    _lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
-    let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
-        migrate_legacy_hermes_data_for_reinstall(home, lifecycle)
-            .await
-            .err()
-            .map(|error| error.to_string())
-    } else {
-        None
-    };
     for id in agent_ids {
-        if id == "hermes"
-            && let Some(message) = hermes_migration_error.as_ref()
-        {
-            results.push((
-                id.clone(),
-                Err(tracedecay::errors::TraceDecayError::Config {
-                    message: message.clone(),
-                }),
-            ));
-            continue;
-        }
         let ag = match tracedecay::agents::get_integration(id) {
             Ok(ag) => ag,
             Err(_) => {
@@ -3579,12 +3493,6 @@ pub(crate) async fn handle_uninstall_command(
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
     tracedecay::agents::migrate_installed_agents(&home, &mut user_cfg);
 
-    if agent.as_deref() == Some("hermes")
-        || (agent.is_none() && user_cfg.installed_agents.iter().any(|id| id == "hermes"))
-    {
-        migrate_legacy_hermes_data(&home).await?;
-    }
-
     if let Some(id) = agent {
         if !apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)? {
             let ag = tracedecay::agents::get_integration(&id)?;
@@ -3641,18 +3549,16 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use tracedecay::agents::host_bundle_v2::{
-        CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
-        HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
-    };
-    use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
-
     use super::{
         AgentReinstallOutcome, CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
         apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_set_request,
-        finish_legacy_hermes_migration, reinstall_agent_integrations,
+        reinstall_agent_integrations,
+    };
+    use tracedecay::agents::host_bundle_v2::{
+        CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
+        HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
     };
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
@@ -4151,35 +4057,6 @@ mod tests {
         assert!(error.to_string().contains("daemon unavailable"));
         assert!(!resolved.load(Ordering::SeqCst));
         assert!(std::fs::read_dir(project.path()).unwrap().next().is_none());
-    }
-
-    #[test]
-    fn unresolved_legacy_store_is_preserved_without_gating_cutover() {
-        let report = LegacyHermesMigrationReport {
-            unresolved: vec![LegacyHermesMigrationIssue {
-                source_db: PathBuf::from("legacy-sessions.db"),
-                reason: "project evidence is unresolved".to_string(),
-            }],
-            ..LegacyHermesMigrationReport::default()
-        };
-
-        assert!(finish_legacy_hermes_migration(report).is_ok());
-    }
-
-    #[test]
-    fn legacy_store_failures_gate_cutover() {
-        let report = LegacyHermesMigrationReport {
-            failed: vec![LegacyHermesMigrationIssue {
-                source_db: PathBuf::from("legacy-sessions.db"),
-                reason: "integrity check failed".to_string(),
-            }],
-            ..LegacyHermesMigrationReport::default()
-        };
-
-        let error = finish_legacy_hermes_migration(report)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("integrity check failed"));
     }
 
     #[test]

@@ -20,6 +20,7 @@ mod support;
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 mod observation_store;
+pub mod profile_archive;
 mod project_registry;
 mod registered;
 mod registered_accounting;
@@ -27,6 +28,7 @@ mod registered_analytics;
 mod registered_dashboard;
 mod registered_lcm;
 mod registered_sessions;
+pub mod registry_maintenance;
 pub mod schema_contract;
 pub mod schema_stages;
 pub use schema_stages::ensure_registered_schema;
@@ -38,8 +40,8 @@ pub use schema_stages::ensure_registered_schema;
 /// The kernel opens a profile- or session-scoped shard through that port when a
 /// fixture calls `Database::publish_test_runtime`, but the real schema
 /// ([`ensure_registered_schema`]) lives here in `tracedecay-global-db`, above
-/// the kernel. Production wires the same installer through
-/// `tracedecay-migrate`/the daemon; this helper lets the root crate's
+/// the kernel. Production wires the same installer through the daemon; this
+/// helper lets the root crate's
 /// integration suites (and this crate's own tests) register the identical real
 /// schema without reaching into daemon internals. Idempotent — the port keeps
 /// the first registration. Gated behind `test-helpers`, so no production build

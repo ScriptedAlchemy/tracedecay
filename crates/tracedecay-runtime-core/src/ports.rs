@@ -56,8 +56,8 @@ pub mod branch_admin_recovery {
 /// `store_runtime::registry` initialises a freshly created profile- or
 /// session-scoped shard by running the registered global-database schema
 /// against the attachment it just opened. That schema lives in
-/// `tracedecay-global-db`, which already depends on `tracedecay-migrate`, which
-/// depends on this crate — so the kernel cannot name it without a Cargo cycle.
+/// `tracedecay-global-db`, above this kernel, so the kernel reaches it through
+/// this registered composition port.
 ///
 /// Unlike [`branch_admin_recovery`], this port **fails closed**: an
 /// uninitialised profile or session store is not safe to publish, so an
