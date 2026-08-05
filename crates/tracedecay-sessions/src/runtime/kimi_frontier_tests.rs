@@ -104,3 +104,32 @@ async fn directory_generation_reset_recovers_a_recreated_entry() {
             .contains("recreated-entry")
     }));
 }
+
+#[tokio::test]
+async fn cancelled_discovery_does_not_advance_the_durable_frontier() {
+    let (_temp, project, _sessions, source) = populated_source(MAX_SESSION_FILES + 1);
+    let admission = MemoryHostAdmission::default();
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+
+    let outcome = capture_kimi_observations(
+        &admission,
+        &source,
+        &project,
+        ObservationScopeV1::Profile,
+        None,
+        &cancellation,
+    )
+    .await
+    .unwrap();
+
+    assert!(outcome.deferred);
+    assert!(admission.observations().is_empty());
+    assert!(
+        admission
+            .get_parse_offset(&ObservationScopeV1::Profile, KIMI_DISCOVERY_FRONTIER_KEY,)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}

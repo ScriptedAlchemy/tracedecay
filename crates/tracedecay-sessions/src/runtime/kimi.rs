@@ -564,7 +564,7 @@ pub async fn capture_kimi_observations(
         processed = processed.saturating_add(1);
         processed_offset = next_offset;
     }
-    if processed > 0 || discovery.reached_end {
+    if (processed > 0 || discovery.reached_end) && !scan_budget.evidence().cancelled {
         let next_offset = if discovery.reached_end
             && unscheduled_files == 0
             && !discovery_truncated
