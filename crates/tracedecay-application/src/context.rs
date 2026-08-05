@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -225,7 +225,16 @@ impl CancellationContext {
     }
 }
 
-const ACTIVE_CANCELLATION_SIGNAL: i64 = i64::MIN;
+const CANCELLATION_ACTIVE: u8 = 0;
+const CANCELLATION_REQUESTING: u8 = 1;
+const CANCELLATION_CANCELLED: u8 = 2;
+const CANCELLATION_COMMIT_STARTED: u8 = 3;
+
+#[derive(Debug)]
+struct CancellationSignalState {
+    phase: AtomicU8,
+    requested_at: AtomicI64,
+}
 
 /// One live transport cancellation identity shared by adapter clones.
 ///
@@ -236,23 +245,27 @@ const ACTIVE_CANCELLATION_SIGNAL: i64 = i64::MIN;
 #[derive(Clone, Debug)]
 pub struct CancellationSignal {
     token_id: CancellationTokenId,
-    requested_at: Arc<AtomicI64>,
+    state: Arc<CancellationSignalState>,
 }
 
 impl CancellationSignal {
     pub fn active(token_id: impl Into<String>) -> Result<Self, ApplicationContractError> {
         Ok(Self {
             token_id: CancellationTokenId::new(token_id)?,
-            requested_at: Arc::new(AtomicI64::new(ACTIVE_CANCELLATION_SIGNAL)),
+            state: Arc::new(CancellationSignalState {
+                phase: AtomicU8::new(CANCELLATION_ACTIVE),
+                requested_at: AtomicI64::new(0),
+            }),
         })
     }
 
     pub fn cancel(&self, requested_at: UtcMicros) -> bool {
         if self
-            .requested_at
+            .state
+            .phase
             .compare_exchange(
-                ACTIVE_CANCELLATION_SIGNAL,
-                requested_at.0,
+                CANCELLATION_ACTIVE,
+                CANCELLATION_REQUESTING,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -260,30 +273,62 @@ impl CancellationSignal {
         {
             return false;
         }
+        self.state
+            .requested_at
+            .store(requested_at.0, Ordering::Release);
+        self.state
+            .phase
+            .store(CANCELLATION_CANCELLED, Ordering::Release);
         true
     }
 
+    pub fn try_begin_commit(&self) -> bool {
+        self.state
+            .phase
+            .compare_exchange(
+                CANCELLATION_ACTIVE,
+                CANCELLATION_COMMIT_STARTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn commit_started(&self) -> bool {
+        self.phase() == CANCELLATION_COMMIT_STARTED
+    }
+
     pub fn context(&self) -> CancellationContext {
-        let requested_at = self.requested_at.load(Ordering::Acquire);
+        let phase = self.phase();
         CancellationContext {
             token_id: self.token_id.clone(),
-            state: if requested_at == ACTIVE_CANCELLATION_SIGNAL {
-                CancellationState::Active
-            } else {
+            state: if phase == CANCELLATION_CANCELLED {
                 CancellationState::Cancelled {
-                    requested_at: UtcMicros(requested_at),
+                    requested_at: UtcMicros(self.state.requested_at.load(Ordering::Acquire)),
                 }
+            } else {
+                CancellationState::Active
             },
         }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.requested_at.load(Ordering::Acquire) != ACTIVE_CANCELLATION_SIGNAL
+        self.phase() == CANCELLATION_CANCELLED
     }
 
     pub fn cancelled_at(&self) -> Option<UtcMicros> {
-        let requested_at = self.requested_at.load(Ordering::Acquire);
-        (requested_at != ACTIVE_CANCELLATION_SIGNAL).then_some(UtcMicros(requested_at))
+        (self.phase() == CANCELLATION_CANCELLED)
+            .then(|| UtcMicros(self.state.requested_at.load(Ordering::Acquire)))
+    }
+
+    fn phase(&self) -> u8 {
+        loop {
+            let phase = self.state.phase.load(Ordering::Acquire);
+            if phase != CANCELLATION_REQUESTING {
+                return phase;
+            }
+            std::hint::spin_loop();
+        }
     }
 }
 
@@ -410,5 +455,27 @@ mod tests {
                 requested_at: UtcMicros(41)
             }
         ));
+    }
+
+    #[test]
+    fn cancellation_wins_commit_arbitration() {
+        let signal = CancellationSignal::active("cancel.before-commit.fixture").unwrap();
+
+        assert!(signal.cancel(UtcMicros(41)));
+        assert!(!signal.try_begin_commit());
+        assert!(!signal.commit_started());
+        assert_eq!(signal.cancelled_at(), Some(UtcMicros(41)));
+    }
+
+    #[test]
+    fn commit_claim_wins_cancellation_arbitration() {
+        let signal = CancellationSignal::active("commit.before-cancel.fixture").unwrap();
+
+        assert!(signal.try_begin_commit());
+        assert!(signal.commit_started());
+        assert!(!signal.cancel(UtcMicros(41)));
+        assert!(!signal.is_cancelled());
+        assert_eq!(signal.cancelled_at(), None);
+        assert!(matches!(signal.context().state, CancellationState::Active));
     }
 }
