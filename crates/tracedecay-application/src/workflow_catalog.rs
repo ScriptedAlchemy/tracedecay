@@ -233,12 +233,13 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         terminal_states: TerminalStateContract::new({
             let mut states = vec![
                 TerminalState::Completed,
-                TerminalState::Cancelled,
                 TerminalState::TimedOut,
                 TerminalState::Failed,
                 TerminalState::Partial,
             ];
-            if !read_only {
+            if read_only {
+                states.push(TerminalState::Cancelled);
+            } else {
                 states.push(TerminalState::EffectUnknown);
             }
             states
@@ -305,6 +306,11 @@ mod tests {
                 manifest
                     .terminal_states()
                     .contains(TerminalState::EffectUnknown)
+            );
+            assert!(
+                !manifest
+                    .terminal_states()
+                    .contains(TerminalState::Cancelled)
             );
             assert!(matches!(
                 manifest.cancellation(),
