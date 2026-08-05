@@ -18,7 +18,7 @@ use crate::exact_sql::{
 };
 
 pub const AUTHORIZED_SCOPE_SET_SCHEMA_V1: &str = "
-CREATE TABLE IF NOT EXISTS authorized_scope_sets_v1 (
+CREATE TABLE IF NOT EXISTS authorized_scope_sets (
     scope_set_id TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL CHECK (revision > 0),
     digest TEXT NOT NULL,
@@ -104,7 +104,7 @@ impl AuthorizedScopeSetExecutor {
         match command.expected_revision {
             None => {
                 transaction.execute(
-                    "INSERT INTO authorized_scope_sets_v1
+                    "INSERT INTO authorized_scope_sets
                          (scope_set_id, revision, digest, canonical_payload)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![
@@ -117,7 +117,7 @@ impl AuthorizedScopeSetExecutor {
             }
             Some(expected) => {
                 let changed = transaction.execute(
-                    "UPDATE authorized_scope_sets_v1
+                    "UPDATE authorized_scope_sets
                      SET revision = ?2, digest = ?3, canonical_payload = ?4
                      WHERE scope_set_id = ?1 AND revision = ?5",
                     params![
@@ -190,7 +190,7 @@ impl AuthorizedScopeSetSqliteStorage {
         }
         let payload = serde_json::to_vec(next)?;
         transaction.execute(ExactSqlStatement::new(
-            "INSERT INTO authorized_scope_sets_v1 (
+            "INSERT INTO authorized_scope_sets (
                  scope_set_id, revision, digest, canonical_payload
              ) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(scope_set_id) DO UPDATE SET
@@ -222,7 +222,7 @@ fn registered_read_statement(
 ) -> Result<ExactSqlStatement, AuthorizedScopeSetStoreError> {
     Ok(ExactSqlStatement::new(
         "SELECT revision, digest, canonical_payload
-         FROM authorized_scope_sets_v1
+         FROM authorized_scope_sets
          WHERE scope_set_id = ?1"
             .to_owned(),
         vec![ExactSqlValue::Text(scope_set_id.as_str().to_owned())],
@@ -266,7 +266,7 @@ fn read_record(
     let row = connection
         .query_row(
             "SELECT revision, digest, canonical_payload
-             FROM authorized_scope_sets_v1
+             FROM authorized_scope_sets
              WHERE scope_set_id = ?1",
             [scope_set_id.as_str()],
             |row| {
@@ -297,7 +297,7 @@ fn read_revision(
 ) -> Result<Option<ScopeSetRevision>, AuthorizedScopeSetStoreError> {
     connection
         .query_row(
-            "SELECT revision FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
+            "SELECT revision FROM authorized_scope_sets WHERE scope_set_id = ?1",
             [scope_set_id.as_str()],
             |row| row.get::<_, i64>(0),
         )

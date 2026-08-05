@@ -282,7 +282,7 @@ fn scope_set_cas_rejects_cross_actor_update_without_changing_stored_bytes() {
     AuthorizedScopeSetExecutor::compare_and_swap(&mut connection, None, &first).unwrap();
     let before: Vec<u8> = connection
         .query_row(
-            "SELECT canonical_payload FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
+            "SELECT canonical_payload FROM authorized_scope_sets WHERE scope_set_id = ?1",
             [first.scope_set_id().as_str()],
             |row| row.get(0),
         )
@@ -298,7 +298,7 @@ fn scope_set_cas_rejects_cross_actor_update_without_changing_stored_bytes() {
     );
     let after: Vec<u8> = connection
         .query_row(
-            "SELECT canonical_payload FROM authorized_scope_sets_v1 WHERE scope_set_id = ?1",
+            "SELECT canonical_payload FROM authorized_scope_sets WHERE scope_set_id = ?1",
             [first.scope_set_id().as_str()],
             |row| row.get(0),
         )
@@ -325,7 +325,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO authorized_scope_sets_v1
+                "INSERT INTO authorized_scope_sets
                      (scope_set_id, revision, digest, canonical_payload)
                  VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![
@@ -351,7 +351,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
             .is_err()
     );
     let count: i64 = overflow_connection
-        .query_row("SELECT COUNT(*) FROM authorized_scope_sets_v1", [], |row| {
+        .query_row("SELECT COUNT(*) FROM authorized_scope_sets", [], |row| {
             row.get(0)
         })
         .unwrap();
@@ -361,7 +361,7 @@ fn public_scope_set_store_rejects_invalid_revision_and_payload_edges() {
     AuthorizedScopeSetExecutor::install_schema(&corrupt_connection).unwrap();
     corrupt_connection
         .execute(
-            "INSERT INTO authorized_scope_sets_v1
+            "INSERT INTO authorized_scope_sets
                  (scope_set_id, revision, digest, canonical_payload)
              VALUES (?1, 1, ?2, ?3)",
             rusqlite::params![
@@ -413,7 +413,7 @@ fn registered_scope_set_store_preserves_actor_and_checked_revisions() {
     assert!(store.storage.compare_and_swap(None, &oversized).is_err());
     store.inspect(|connection| {
         let count: i64 = connection
-            .query_row("SELECT COUNT(*) FROM authorized_scope_sets_v1", [], |row| {
+            .query_row("SELECT COUNT(*) FROM authorized_scope_sets", [], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -438,7 +438,7 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
                 .unwrap();
             connection
                 .execute(
-                    "INSERT INTO authorized_scope_sets_v1
+                    "INSERT INTO authorized_scope_sets
                          (scope_set_id, revision, digest, canonical_payload)
                      VALUES (?1, ?2, ?3, ?4)",
                     rusqlite::params![id, revision, digest, payload],
@@ -451,7 +451,7 @@ fn registered_scope_set_store_rejects_zero_negative_and_corrupt_rows() {
     let corrupt = RegisteredScopeSetStore::start("corrupt-payload", move |connection| {
         connection
             .execute(
-                "INSERT INTO authorized_scope_sets_v1
+                "INSERT INTO authorized_scope_sets
                      (scope_set_id, revision, digest, canonical_payload)
                  VALUES (?1, 1, ?2, ?3)",
                 rusqlite::params![id, digest, b"{".as_slice()],
