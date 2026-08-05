@@ -1609,6 +1609,45 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workflow_json_preserves_a_typed_application_problem_envelope() {
+    let environment = TempDir::new().expect("workflow CLI environment");
+    let request_path = environment.path().join("invalid-handoff.json");
+    std::fs::write(&request_path, r#"{"unexpected":true}"#)
+        .expect("write invalid typed Workflow request");
+    let output = common::tracedecay_command_with_home(environment.path())
+        .args([
+            "workflow",
+            "handoff-redeem",
+            "--request-file",
+            request_path.to_str().expect("UTF-8 request path"),
+            "--project",
+            environment.path().to_str().expect("UTF-8 project path"),
+            "--json",
+        ])
+        .output()
+        .expect("invoke Workflow CLI");
+
+    assert!(
+        output.status.success(),
+        "typed application problems are successful CLI transport responses: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("Workflow JSON stdout");
+    assert_eq!(stdout.lines().count(), 1);
+    let problem: Value = serde_json::from_str(stdout.trim_end()).expect("typed Workflow problem");
+    assert_eq!(
+        problem["contract"]["schema_id"],
+        "schema.workflow.handoff_redeem.result"
+    );
+    assert_eq!(problem["contract"]["schema_revision"], 1);
+    assert_eq!(problem["problem"]["kind"], "invalid_request");
+    assert_eq!(
+        problem["problem"]["code"], "invalid_workflow_request",
+        "Workflow --json must not flatten typed problems into Config stderr"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
     let fixture = lsp_runtime_fixture().await;
     let root_uri = url::Url::from_directory_path(&fixture.project)
