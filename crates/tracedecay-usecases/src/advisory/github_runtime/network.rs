@@ -734,6 +734,8 @@ pub struct GitHubHttpReadConfigV1 {
     pub socket_timeout: Duration,
 }
 
+const DEFAULT_GITHUB_SOCKET_TIMEOUT_V1: Duration = Duration::from_secs(20);
+
 impl Default for GitHubHttpReadConfigV1 {
     fn default() -> Self {
         Self {
@@ -741,7 +743,7 @@ impl Default for GitHubHttpReadConfigV1 {
             graphql_uri: "https://api.github.com/graphql".to_owned(),
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
-            socket_timeout: MAX_GITHUB_READ_DURATION_V1,
+            socket_timeout: DEFAULT_GITHUB_SOCKET_TIMEOUT_V1,
         }
     }
 }
@@ -1966,9 +1968,11 @@ mod tests {
     fn default_http_read_configuration_is_mountable_within_the_global_bound() {
         let config = GitHubHttpReadConfigV1::default();
         assert!(config.validate());
-        assert!(config.request_timeout <= MAX_GITHUB_READ_DURATION_V1);
-        assert!(config.connect_timeout <= MAX_GITHUB_READ_DURATION_V1);
-        assert!(config.socket_timeout <= MAX_GITHUB_READ_DURATION_V1);
+        assert_eq!(config.request_timeout, Duration::from_secs(30));
+        assert_eq!(config.connect_timeout, Duration::from_secs(10));
+        assert_eq!(config.socket_timeout, DEFAULT_GITHUB_SOCKET_TIMEOUT_V1);
+        assert!(config.connect_timeout <= config.socket_timeout);
+        assert!(config.socket_timeout <= config.request_timeout);
     }
 
     #[derive(Clone, Copy)]
