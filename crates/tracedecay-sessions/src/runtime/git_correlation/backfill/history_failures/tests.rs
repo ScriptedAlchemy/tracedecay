@@ -2,7 +2,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use tracedecay_runtime_core::db::engine::{
-    Executor, QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior,
+    QueryExecutor, ReadSnapshot, TestConnection, Transaction, TransactionBehavior,
 };
 
 use super::*;
