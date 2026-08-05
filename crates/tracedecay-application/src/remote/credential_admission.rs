@@ -15,8 +15,10 @@ use tracedecay_domain::{
 use super::auth::{
     OpaqueRemoteCredential, RemoteEnrollmentAdmissionEvidenceV1, RemoteEnrollmentCommitReceiptV1,
 };
-use super::protocol::{EnrollmentRequestV1, RemoteProtocolRequestV1};
+use super::protocol::{EnrollmentRequestV1, RemoteProtocolBodyV1, RemoteProtocolRequestV1};
+use super::query::RemoteQueryRequestV1;
 use super::recovery::{BackupRequestV1, PromotionConfirmationV1, StagedRestoreConfirmationV1};
+use super::replay::RemoteReplayRequestV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteCredentialClassV1 {
@@ -343,6 +345,115 @@ impl RemoteAuthenticatedSessionV1 {
     }
 }
 
+/// Application-owned binding between a route's typed body and the credential
+/// session admitted before any body bytes were read.
+///
+/// The HTTP adapter selects the concrete request type from the matched route.
+/// Caller-controlled JSON cannot select either the credential use or whether
+/// current credential state must be re-read before execution.
+pub trait RemoteSessionBoundProtocolBodyV1: RemoteProtocolBodyV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1;
+    const REAUTHORIZE_BEFORE_EXECUTION: bool = false;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1>
+    where
+        Self: Sized;
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for EnrollmentRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::InitialEnrollment;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        session.bind_initial_enrollment(request)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for RemoteReplayRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Replay;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        bind_protocol_body(session, request, Self::CREDENTIAL_USE)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for RemoteQueryRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Query;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        bind_protocol_body(session, request, Self::CREDENTIAL_USE)?;
+        session.bind_scope(&request.body.scope)?;
+        if request.expected_authority.as_ref() != Some(&request.body.expected_authority) {
+            return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
+        }
+        Ok(())
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for BackupRequestV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::CreateBackup;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        session.bind_backup(request)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for StagedRestoreConfirmationV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::PublishRestore;
+    const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        session.bind_restore_publication(request)
+    }
+}
+
+impl RemoteSessionBoundProtocolBodyV1 for PromotionConfirmationV1 {
+    const CREDENTIAL_USE: RemoteCredentialUseV1 = RemoteCredentialUseV1::Promote;
+    const REAUTHORIZE_BEFORE_EXECUTION: bool = true;
+
+    fn bind_authenticated_session(
+        session: &RemoteAuthenticatedSessionV1,
+        request: &RemoteProtocolRequestV1<Self>,
+    ) -> Result<(), RemoteCredentialAdmissionErrorV1> {
+        session.bind_promotion(request)
+    }
+}
+
+fn bind_protocol_body<Request>(
+    session: &RemoteAuthenticatedSessionV1,
+    request: &RemoteProtocolRequestV1<Request>,
+    use_case: RemoteCredentialUseV1,
+) -> Result<(), RemoteCredentialAdmissionErrorV1>
+where
+    Request: RemoteProtocolBodyV1,
+{
+    if session.use_case() != use_case {
+        return Err(RemoteCredentialAdmissionErrorV1::BindingMismatch);
+    }
+    session.bind_protocol(request)?;
+    request
+        .body
+        .validate_remote_protocol_body(request.sent_at)
+        .map_err(|_| RemoteCredentialAdmissionErrorV1::BindingMismatch)
+}
+
 pub trait RemoteCredentialAdmissionPortV1: Send + Sync {
     fn admit_before_body(
         &self,
@@ -471,33 +582,28 @@ fn map_lookup_error(error: RemoteCredentialLookupErrorV1) -> RemoteCredentialAdm
     }
 }
 
-/// Required capability mapping for the six canonical remote protocol routes.
-pub fn remote_route_credential_use_v1(path: &str) -> Option<RemoteCredentialUseV1> {
-    match path {
-        "/enrollment" => Some(RemoteCredentialUseV1::InitialEnrollment),
-        "/replay" => Some(RemoteCredentialUseV1::Replay),
-        "/query" => Some(RemoteCredentialUseV1::Query),
-        "/backup" => Some(RemoteCredentialUseV1::CreateBackup),
-        "/restore" => Some(RemoteCredentialUseV1::PublishRestore),
-        "/failover" => Some(RemoteCredentialUseV1::Promote),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Mutex;
 
     use tracedecay_domain::{
-        ActorId, BrainId, BrainNodeId, ComponentVersion, EnrollmentCredentialRecordV1,
-        EnrollmentGrantV1, EntityId, ManifestDigest, RefId, RemoteCredentialFingerprintV1,
-        RepositoryId, RepositoryStateSnapshotId, WorktreeId, canonical_sha256,
+        ActorId, AuthorityEpoch, BrainId, BrainNodeId, CanonicalObservationIdV1, ComponentVersion,
+        EnrollmentCredentialRecordV1, EnrollmentGrantV1, EntityId, ManifestDigest,
+        ProjectionGenerationId, RefId, RemoteCredentialFingerprintV1, RemotePlacementRevisionV1,
+        RemoteWriterFenceV1, RepositoryId, RepositoryStateSnapshotId, ShardId, WorktreeId,
+        canonical_sha256,
     };
 
     use crate::{
         AuthorityReceipt, CapabilityGrantId, Deadline, DisclosureClass, OperationBudgetUsage,
         PolicyDecisionRef, ResolvedScope,
+        remote::{
+            composition::ExpectedRemoteShardV1,
+            query::{
+                REMOTE_QUERY_SCHEMA_REVISION_V1, RemoteQueryOperationV1, RemoteQueryRequestV1,
+            },
+        },
     };
 
     use super::*;
@@ -552,6 +658,7 @@ mod tests {
             revoked_at: None,
             capabilities: BTreeSet::from([
                 RemoteCapabilityV1::Replay,
+                RemoteCapabilityV1::Query,
                 RemoteCapabilityV1::PublishRestore,
             ]),
             scope: scope(),
@@ -626,19 +733,6 @@ mod tests {
     }
 
     #[test]
-    fn route_mapping_is_endpoint_owned_and_complete() {
-        assert_eq!(
-            remote_route_credential_use_v1("/replay"),
-            Some(RemoteCredentialUseV1::Replay)
-        );
-        assert_eq!(
-            remote_route_credential_use_v1("/restore"),
-            Some(RemoteCredentialUseV1::PublishRestore)
-        );
-        assert_eq!(remote_route_credential_use_v1("/unknown"), None);
-    }
-
-    #[test]
     fn admission_precedes_body_and_typed_metadata_binding_is_exact() {
         let secret = [7_u8; 32];
         let record = fake_record(&secret);
@@ -662,12 +756,106 @@ mod tests {
             },
         )
         .unwrap();
-        session.bind_protocol(&request).unwrap();
+        <RemoteReplayRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+            &session, &request,
+        )
+        .unwrap();
 
-        let mut wrong_revision = request;
+        let mut wrong_revision = request.clone();
         wrong_revision.enrollment_revision = 5;
         assert_eq!(
-            session.bind_protocol(&wrong_revision),
+            <RemoteReplayRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+                &session,
+                &wrong_revision,
+            ),
+            Err(RemoteCredentialAdmissionErrorV1::BindingMismatch)
+        );
+
+        let wrong_route_session = service
+            .admit_before_body(
+                &presented,
+                RemoteCredentialUseV1::PublishRestore,
+                UtcMicros(20),
+            )
+            .unwrap();
+        assert_eq!(
+            <RemoteReplayRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+                &wrong_route_session,
+                &request,
+            ),
+            Err(RemoteCredentialAdmissionErrorV1::BindingMismatch)
+        );
+    }
+
+    #[test]
+    fn query_binding_requires_the_admitted_scope_and_authority_identity() {
+        let secret = [8_u8; 32];
+        let record = fake_record(&secret);
+        let fingerprint = record.fingerprint().clone();
+        let service = RemoteCredentialAdmissionServiceV1::new(FakeStore {
+            records: Mutex::new(BTreeMap::from([(fingerprint, record)])),
+        });
+        let presented = OpaqueRemoteCredential::new(secret).unwrap();
+        let session = service
+            .admit_before_body(&presented, RemoteCredentialUseV1::Query, UtcMicros(20))
+            .unwrap();
+        let expected_authority = RemoteWriterFenceV1 {
+            brain_id: id("brain.remote"),
+            shard_id: ShardId::new("shard.remote").unwrap(),
+            generation_id: ProjectionGenerationId::new("generation.remote").unwrap(),
+            placement_revision: RemotePlacementRevisionV1::new(1).unwrap(),
+            authority_epoch: AuthorityEpoch(1),
+            authority_node_id: id("node.authority"),
+        };
+        let request = RemoteProtocolRequestV1::new(
+            crate::RequestId::new("request.remote.query").unwrap(),
+            id("brain.remote"),
+            id("node.remote"),
+            4,
+            Some(expected_authority.clone()),
+            UtcMicros(20),
+            RemoteQueryRequestV1 {
+                schema_revision: REMOTE_QUERY_SCHEMA_REVISION_V1,
+                scope: scope(),
+                expected_shards: vec![ExpectedRemoteShardV1 {
+                    brain_id: "brain.remote".to_owned(),
+                    shard_id: "shard.remote".to_owned(),
+                    generation_id: "generation.remote".to_owned(),
+                }],
+                expected_authority,
+                operation: RemoteQueryOperationV1::ExactObservation {
+                    observation_id: CanonicalObservationIdV1::new(format!(
+                        "sha256:{}",
+                        "a".repeat(64)
+                    ))
+                    .unwrap(),
+                },
+            },
+        )
+        .unwrap();
+        <RemoteQueryRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+            &session, &request,
+        )
+        .unwrap();
+
+        let mut foreign_scope = request.clone();
+        foreign_scope.body.scope.snapshot_id =
+            RepositoryStateSnapshotId::new("snapshot.foreign").unwrap();
+        assert_eq!(
+            <RemoteQueryRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+                &session,
+                &foreign_scope,
+            ),
+            Err(RemoteCredentialAdmissionErrorV1::BindingMismatch)
+        );
+
+        let mut missing_authority = request;
+        missing_authority.expected_authority = None;
+        assert_eq!(
+            <RemoteQueryRequestV1 as RemoteSessionBoundProtocolBodyV1>::bind_authenticated_session(
+                &session,
+                &missing_authority,
+            ),
             Err(RemoteCredentialAdmissionErrorV1::BindingMismatch)
         );
     }
