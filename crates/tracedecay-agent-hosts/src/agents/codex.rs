@@ -1455,6 +1455,17 @@ fn remove_codex_retired_autodiscovered_files(install_dir: &Path) -> Result<()> {
             if managed.contains(&file) {
                 continue;
             }
+            let Some(relative) = file
+                .strip_prefix(install_dir)
+                .ok()
+                .and_then(Path::to_str)
+                .map(|relative| relative.replace(std::path::MAIN_SEPARATOR, "/"))
+            else {
+                continue;
+            };
+            if !super::is_auto_discovered_entrypoint(&relative) {
+                continue;
+            }
             let Ok(contents) = std::fs::read_to_string(&file) else {
                 continue;
             };
