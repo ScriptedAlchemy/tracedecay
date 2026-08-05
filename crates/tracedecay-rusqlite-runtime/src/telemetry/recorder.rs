@@ -110,6 +110,10 @@ impl WriterTelemetry {
                     operations.cancelled_operations =
                         operations.cancelled_operations.saturating_add(1)
                 }
+                Ok(RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. }) => {
+                    operations.deadline_exceeded_operations =
+                        operations.deadline_exceeded_operations.saturating_add(1)
+                }
                 Ok(RuntimeSubmitOutcomeV1::Saturated { .. }) => {
                     operations.shed_operations = operations.shed_operations.saturating_add(1)
                 }
