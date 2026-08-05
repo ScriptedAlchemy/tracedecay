@@ -607,7 +607,10 @@ async fn dispatch_decoded(
 impl HookScopedFeedbackV1 for ContextScoutFeedbackCommitV1 {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
         self.feedback.receipt_id == self.receipt.receipt_id
-            && self.receipt.matches_envelope(envelope)
+            && crate::agents::context_scout_v2::context_scout_receipt_matches_envelope(
+                &self.receipt,
+                envelope,
+            )
     }
 }
 

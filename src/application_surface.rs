@@ -105,15 +105,15 @@ use crate::daemon_contract::{
 };
 use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
-mod configuration_wire;
 mod multi_root_http;
+mod wire_schema;
 mod workflow;
 
-use configuration_wire::{
+use multi_root_http::MultiRootExecutorOwner;
+use wire_schema::{
     build_configuration_wire_schema_registry, is_configuration_operation,
     validate_configuration_outcome,
 };
-use multi_root_http::MultiRootExecutorOwner;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -208,184 +208,21 @@ fn compatibility_diagnostics_request(
     }))
 }
 
-pub type FeedbackSurfaceRequest = tracedecay_application::feedback::FeedbackHandleRequestV1;
+pub use tracedecay_application::feedback::{
+    FeedbackAdvisoryCycleRequestV1 as FeedbackAdvisoryCycleSurfaceRequest,
+    FeedbackHandleRequestV1 as FeedbackSurfaceRequest,
+};
+pub use tracedecay_application::retrieval::TestResultsRequestV1 as TestResultsSurfaceRequest;
+pub type AffectedTestsSurfaceRequest = FeedbackSurfaceRequest;
+pub type FeedbackImpactSurfaceRequest = FeedbackSurfaceRequest;
 
-/// Canonical explicit PR13 trigger. Project/root/scope/provider identities and
-/// the resulting read handle are all minted by the authenticated daemon.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackAdvisoryCycleSurfaceRequest {
-    pub document_uri: String,
-}
-
-impl FeedbackAdvisoryCycleSurfaceRequest {
-    fn validate(&self) -> Result<(), ApplicationSurfaceAdapterError> {
-        if self.document_uri.is_empty()
-            || self.document_uri.trim() != self.document_uri
-            || self.document_uri.len() > MAX_REQUEST_HANDLE_BYTES * 16
-            || self.document_uri.chars().any(char::is_control)
-        {
-            return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct AffectedTestsSurfaceRequest {
-    pub request_handle: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct FeedbackImpactSurfaceRequest {
-    pub request_handle: String,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TestResultsSurfaceRequest {}
-
-/// Surface-owned query semantics. Page size remains an invocation control, but
-/// continuation is a request field so CLI, MCP, and HTTP callers all have the
-/// same channel for spending a `next_cursor`. HTTP folds its transport cursor
-/// into this field before decoding, keeping exactly one page authority at the
-/// point of use.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CallableCodeSurfaceMeta {
-    pub projection: ResultProjection,
-    pub order: RetrievalOrder,
-    #[serde(default)]
-    pub cursor: Option<OpaqueCursor>,
-}
-
-impl CallableCodeSurfaceMeta {
-    fn into_application(self, page: PageRequest) -> RetrievalRequestMeta {
-        let Self {
-            projection,
-            order,
-            cursor,
-        } = self;
-        let page = match cursor {
-            Some(cursor) => PageRequest {
-                page_size: page.page_size,
-                cursor: Some(cursor),
-            },
-            None => page,
-        };
-        RetrievalRequestMeta::current(page, projection, order)
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeExactOccurrenceSurfaceRequest {
-    pub literal: String,
-    pub kind: Option<ExactTechnicalTermKindV1>,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeExactOccurrenceSurfaceRequest {
-    pub fn into_application_request(
-        self,
-        page: PageRequest,
-    ) -> Result<ExactOccurrenceRequest, ApplicationContractError> {
-        ExactOccurrenceRequest::new(
-            self.literal,
-            self.kind,
-            self.scope,
-            self.meta.into_application(page),
-        )
-    }
-}
-
-/// Serializable adapter DTO for the request-local phrase query view.
-///
-/// The callable application request deliberately keeps its sanitized query
-/// non-serializable. The owning runtime supplies the exact sanitizer
-/// revisions when converting this transport DTO.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodePhraseSearchSurfaceRequest {
-    pub query: String,
-    pub phrases: Vec<String>,
-    #[serde(default)]
-    pub field_filters: Vec<CodeLexicalFieldFilter>,
-    #[serde(default)]
-    pub fuzzy_budget: u32,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSymbolSearchSurfaceRequest {
-    pub query: String,
-    pub scope: SymbolGraphScope,
-    pub lazy_index_ignored_dependencies: bool,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeSymbolSearchSurfaceRequest {
-    pub(crate) fn into_primitive_request(
-        self,
-        sanitizer_revision: SanitizerRevision,
-        normalization_revision: QueryNormalizationRevision,
-        page: PageRequest,
-    ) -> Result<SymbolSearchPrimitiveRequest, ApplicationContractError> {
-        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
-            self.query,
-            sanitizer_revision,
-            normalization_revision,
-        )?;
-        Ok(SymbolSearchPrimitiveRequest {
-            query,
-            scope: self.scope,
-            lazy_index_ignored_dependencies: self.lazy_index_ignored_dependencies,
-            meta: self.meta.into_application(page),
-        })
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeSignatureSearchSurfaceRequest {
-    pub returns: Option<String>,
-    pub params: Vec<String>,
-    pub is_async: Option<bool>,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeImplementationsSurfaceRequest {
-    pub selector: ImplementationSelector,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeTypeHierarchySurfaceRequest {
-    pub node_id: String,
-    pub maximum_depth: u32,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeCallersSurfaceRequest {
-    pub node_id: String,
-    pub maximum_depth: u32,
-    pub resolve_trait_dispatch: bool,
-    pub scope: SymbolGraphScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
+pub use tracedecay_application::retrieval::{
+    CallableCodeSurfaceMeta, CodeCalleesSurfaceRequest, CodeCallersSurfaceRequest,
+    CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeImplementationsSurfaceRequest,
+    CodeNavigationSurfaceRequest, CodePhraseSearchSurfaceRequest,
+    CodeSignatureSearchSurfaceRequest, CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+    CodeTypeHierarchySurfaceRequest,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum PrimitiveCodeSurfaceRequest {
@@ -408,134 +245,18 @@ impl PrimitiveCodeSurfaceRequest {
                 request.into_primitive_request(sanitizer_revision, normalization_revision, page)?,
             ),
             Self::SignatureSearch(request) => {
-                Pr12PrimitiveRequest::SignatureSearch(SignatureSearchRequest {
-                    returns: request.returns,
-                    params: request.params,
-                    is_async: request.is_async,
-                    scope: request.scope,
-                    meta: request.meta.into_application(page),
-                })
+                Pr12PrimitiveRequest::SignatureSearch(request.into_application_request(page))
             }
             Self::Implementations(request) => {
-                Pr12PrimitiveRequest::Implementations(ImplementationsRequest {
-                    selector: request.selector,
-                    scope: request.scope,
-                    meta: request.meta.into_application(page),
-                })
+                Pr12PrimitiveRequest::Implementations(request.into_application_request(page))
             }
             Self::TypeHierarchy(request) => {
-                Pr12PrimitiveRequest::TypeHierarchy(TypeHierarchyRequest {
-                    node_id: request.node_id,
-                    maximum_depth: request.maximum_depth,
-                    scope: request.scope,
-                    meta: request.meta.into_application(page),
-                })
+                Pr12PrimitiveRequest::TypeHierarchy(request.into_application_request(page))
             }
-            Self::Callers(request) => Pr12PrimitiveRequest::Callers(GraphRelationRequest {
-                node_id: request.node_id,
-                maximum_depth: request.maximum_depth,
-                resolve_trait_dispatch: request.resolve_trait_dispatch,
-                scope: request.scope,
-                meta: request.meta.into_application(page),
-            }),
+            Self::Callers(request) => {
+                Pr12PrimitiveRequest::Callers(request.into_application_request(page))
+            }
         })
-    }
-}
-
-impl CodePhraseSearchSurfaceRequest {
-    pub fn into_application_request(
-        self,
-        sanitizer_revision: SanitizerRevision,
-        normalization_revision: QueryNormalizationRevision,
-        page: PageRequest,
-    ) -> Result<PhraseSearchRequest, ApplicationContractError> {
-        let query = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
-            self.query,
-            sanitizer_revision,
-            normalization_revision,
-        )?;
-        PhraseSearchRequest::new(
-            query,
-            self.phrases,
-            self.field_filters,
-            self.fuzzy_budget,
-            self.scope,
-            self.meta.into_application(page),
-        )
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeCalleesSurfaceRequest {
-    pub node_id: String,
-    pub maximum_depth: u32,
-    pub resolve_trait_dispatch: bool,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeFacetSurfaceRequest {
-    pub dimension: CodeFacetDimension,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeFacetSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeFacetRequest {
-        CodeFacetRequest {
-            dimension: self.dimension,
-            scope: self.scope,
-            meta: self.meta.into_application(page),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeTimelineSurfaceRequest {
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeTimelineSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeTimelineRequest {
-        CodeTimelineRequest {
-            scope: self.scope,
-            meta: self.meta.into_application(page),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CodeNavigationSurfaceRequest {
-    pub node_id: String,
-    pub scope: CodeQueryScope,
-    pub meta: CallableCodeSurfaceMeta,
-}
-
-impl CodeNavigationSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeNavigationRequest {
-        CodeNavigationRequest {
-            node_id: self.node_id,
-            scope: self.scope,
-            meta: self.meta.into_application(page),
-        }
-    }
-}
-
-impl CodeCalleesSurfaceRequest {
-    pub fn into_application_request(self, page: PageRequest) -> CodeRelationRequest {
-        CodeRelationRequest {
-            node_id: self.node_id,
-            maximum_depth: self.maximum_depth,
-            resolve_trait_dispatch: self.resolve_trait_dispatch,
-            scope: self.scope,
-            meta: self.meta.into_application(page),
-        }
     }
 }
 
@@ -552,67 +273,16 @@ pub enum CallableCodeSurfaceRequest {
     References(CodeNavigationSurfaceRequest),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutClaimWindowSurfaceV1 {
-    IdleWindow,
-    OnRequest,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutExactAddressSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutRecentSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    #[serde(default = "default_context_scout_recent_limit")]
-    pub limit: usize,
-}
-
-const fn default_context_scout_recent_limit() -> usize {
-    8
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutControlSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub expected_revision: ConfigurationRevisionId,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutCancelSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub work: crate::agents::context_scout_v2::ContextScoutWorkV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutClaimSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub window: ContextScoutClaimWindowSurfaceV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutDeliverySurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub claim: crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
-    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutFeedbackSurfaceRequest {
-    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
-    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
-    pub feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
-}
+pub use tracedecay_application::context_scout::{
+    ContextScoutCancelRequestV1 as ContextScoutCancelSurfaceRequest,
+    ContextScoutClaimRequestV1 as ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowV1 as ContextScoutClaimWindowSurfaceV1,
+    ContextScoutControlRequestV1 as ContextScoutControlSurfaceRequest,
+    ContextScoutDeliveryRequestV1 as ContextScoutDeliverySurfaceRequest,
+    ContextScoutExactAddressRequestV1 as ContextScoutExactAddressSurfaceRequest,
+    ContextScoutFeedbackRequestV1 as ContextScoutFeedbackSurfaceRequest,
+    ContextScoutRecentRequestV1 as ContextScoutRecentSurfaceRequest,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "operation", content = "request")]
@@ -686,35 +356,9 @@ impl ContextScoutSurfaceRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitPreviewSurfaceRequest {
-    pub operation: GitIndexTransactionOperationV1,
-    /// Compatibility input only. The daemon always replaces this value with a
-    /// freshly minted preview identity before application admission.
-    #[serde(default)]
-    pub preview_id: GitIndexPreviewId,
-    pub repository_snapshot: RepositoryStateSnapshotV1,
-    #[serde(default)]
-    pub selected_hunks: Vec<HunkRefV1>,
-    #[serde(default)]
-    pub commit_intent: Option<GitIndexCommitIntentV1>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitApplySurfaceRequest {
-    pub preview: GitIndexPreviewV1,
-    pub idempotency_key: IdempotencyKey,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct GitReadSurfaceRequest {
-    pub request: crate::application::git_reads::GitReadRequestV1,
-    pub max_entries: u32,
-    pub max_bytes: u64,
-}
+pub use tracedecay_usecases::git_reads::{
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ApplicationSurfaceRequest {
