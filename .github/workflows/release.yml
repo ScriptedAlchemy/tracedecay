@@ -141,6 +141,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Resolve release source feature profile
         id: release-profile
         shell: bash
