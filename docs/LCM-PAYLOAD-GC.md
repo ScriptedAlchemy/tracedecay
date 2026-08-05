@@ -574,28 +574,17 @@ rationale (keep the hot path simple), GC does **not** piggyback on ingest and
 does **not** spawn its own scheduler. It exposes `run_payload_gc` for any caller
 and records `last_gc_at`; scheduling is host-driven.
 
-**Manual / operator invocation** (reuse the existing `lcm_doctor` surface):
+**Invocation is separate from LCM Doctor.** `tracedecay_lcm_doctor` is a
+zero-argument daemon-owned read and never repairs, cleans, or garbage-collects.
+Payload GC remains a distinct store authority:
 
-- `lcm_doctor` with `mode = "gc"` (new mode; parsed alongside `repair`/`clean`
-  in `session.rs:667` `lcm_doctor_mode`). `apply = false` (default) ⇒ dry-run
-  report (§11). `apply = true` ⇒ destructive reap. This reuses the doctor
-  request shape (`DoctorRequest`, `doctor.rs:23`), the backup-before-mutate
-  pattern (`doctor.rs:159`), and the `dry_run` flag already in the doctor
-  response (`doctor.rs:88`).
-- MCP tool surfaces: extend `lcm_doctor` (`templates.rs:561`, handler
-  `session.rs:1199`) to accept `mode: "gc"` + `gc_config`; optionally add a
-  dedicated `lcm_payload_gc` tool alias that maps to the same handler for
-  discoverability. `lcm_status` (`templates.rs:556`, handler `session.rs:1175`)
-  gains the GC health fields below (read-only).
-- A `gc_config` argument carries `LcmGcConfig` (§9), built the same way
-  `LcmCleanConfig` is today (`session.rs:687`).
+- `lcm_preview_payload_gc` reads candidates from a registered snapshot.
+- `lcm_run_payload_gc_apply` owns the explicit writer transactions, backup, reap,
+  and post-commit drain.
+- `LcmGcConfig` (§9) belongs to those GC operations, never to Doctor.
 
-**Recommended host scheduling** (Hermes cronjob / `watchers` skill invoking the
-MCP tool): a frequent **dry-run** report (e.g. every 1–6 h) for visibility, and a
-less frequent **apply** (e.g. daily) gated by `lcm_payload_gc_interval_seconds`
-via `last_gc_at`. The dry-run is cheap (no I/O mutations, no locks beyond reads)
-and safe to run any time. A run skips apply if `now - last_gc_at <
-gc_interval_seconds` unless the operator forces it.
+Any host scheduler or future operator surface must invoke the dedicated payload
+GC authority. It must not route mutation through Doctor.
 
 **Per-store, not global.** Each resolved project store (user-level shard,
 explicit local store, or legacy local store) is GC'd independently against its

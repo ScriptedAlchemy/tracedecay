@@ -9,15 +9,15 @@ use tracedecay_sessions::compatibility::projected_content_hash;
 use tracedecay_sessions::runtime::{
     SessionMessageRecord,
     lcm::{
-        LcmCleanConfig, LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest,
-        LcmDescribeResponse, LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse,
-        LcmExpandRequest, LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters,
-        LcmGrepOutcome, LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest,
-        LcmPreflightRequest, LcmPreflightResponse, LcmRawMessage, LcmRecentSession,
-        LcmSessionBoundaryRequest, LcmSessionBoundaryResponse, LcmSessionReplayRequest,
-        LcmSessionReplaySlice, LcmSourceRef, LcmStatus, LcmSummaryExpansion, LcmSummaryNode,
-        LcmSummaryNodeDraft, LcmSummaryRequest, LcmSummarySourceMessage, LcmSummarySourceRange,
-        compression, dag, doctor, gc, payload, query, raw, schema,
+        LcmCompressionRequest, LcmCompressionResponse, LcmDescribeRequest, LcmDescribeResponse,
+        LcmError, LcmExpandQueryRequest, LcmExpandQueryResponse, LcmExpandRequest,
+        LcmExpandResponse, LcmGcConfig, LcmGcReport, LcmGrepFilters, LcmGrepOutcome,
+        LcmGrepRequest, LcmLoadSessionPage, LcmLoadSessionRequest, LcmPreflightRequest,
+        LcmPreflightResponse, LcmRawMessage, LcmRecentSession, LcmSessionBoundaryRequest,
+        LcmSessionBoundaryResponse, LcmSessionReplayRequest, LcmSessionReplaySlice, LcmSourceRef,
+        LcmStatus, LcmSummaryExpansion, LcmSummaryNode, LcmSummaryNodeDraft, LcmSummaryRequest,
+        LcmSummarySourceMessage, LcmSummarySourceRange, compression, dag, gc, payload, query, raw,
+        schema,
     },
 };
 
@@ -435,75 +435,6 @@ impl RegisteredGlobalDb {
         .await?;
         transaction.commit().await?;
         Ok(receipt.summary)
-    }
-
-    pub async fn lcm_doctor(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-        mode: &str,
-        apply: bool,
-        clean_config: LcmCleanConfig,
-        gc_config: LcmGcConfig,
-    ) -> Result<serde_json::Value, LcmError> {
-        let storage_root = self.lcm_storage_root()?;
-        let request = doctor::DoctorRequest {
-            storage_root,
-            db_path: self.db_path(),
-            provider,
-            session_id,
-            mode,
-            apply,
-            clean_config,
-            gc_config,
-        };
-        if !doctor::request_mutates(&request) {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let result = doctor::doctor(&transaction, request).await?;
-            transaction.rollback().await?;
-            return Ok(result);
-        }
-
-        let applies_payload_gc = apply && mode == "gc";
-        let mut gc_drain = if applies_payload_gc {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            let drain =
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?;
-            transaction.commit().await?;
-            Some(drain)
-        } else {
-            None
-        };
-
-        let transaction = self
-            .begin_write_transaction()
-            .await
-            .map_err(|error| LcmError::Db(error.to_string()))?;
-        let mut result = doctor::doctor(&transaction, request).await?;
-        transaction.commit().await?;
-
-        if let Some(drain) = gc_drain.as_mut() {
-            let transaction = self
-                .begin_write_transaction()
-                .await
-                .map_err(|error| LcmError::Db(error.to_string()))?;
-            drain.merge(
-                gc::drain_pending_payload_deletes_in_transaction(&transaction, storage_root)
-                    .await?,
-            );
-            if let Some(report) = result.pointer_mut("/repairs/gc_report") {
-                gc::finalize_gc_report_value(&transaction, report, std::mem::take(drain)).await?;
-            }
-            transaction.commit().await?;
-        }
-        Ok(result)
     }
 
     pub async fn lcm_session_boundary(

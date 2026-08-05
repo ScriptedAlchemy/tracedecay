@@ -73,14 +73,10 @@ has the full map.
   `delete`, or reap function. The only owner mutation is `reassign_session_payloads`
   (`payload.rs:155`), which moves DB owner rows during compression-boundary carry-over and
   never touches files (refs are stable; files don't move).
-- **Deletes bypass payload-aware code today.** `lcm_doctor mode=clean apply`
-  (`delete_clean_candidates_in_transaction`, `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs:1239`) issues
-  `DELETE FROM lcm_external_payloads` / `lcm_raw_messages` / `lcm_summary_nodes` /
-  `lcm_lifecycle_state` but **never removes payload files**, deliberately converting them
-  into GC candidates. **There is no public session- or message-delete API** anywhere in
-  `src`; the only `DELETE FROM lcm_raw_messages` calls are inside doctor clean
-  (`doctor.rs:1281`, `doctor.rs:1333`). Any future `DELETE FROM sessions` would FK-cascade
-  through `lcm_*` rows and orphan files.
+- **Doctor never deletes payload state.** The retired Doctor cleanup path was
+  removed. Session or message deletion must use a dedicated payload-aware
+  authority or deliberately leave files for the separate payload-GC authority
+  to reap after its grace period.
 - **Memory deletion is a separate subsystem.** Hard-deleting a memory fact
   (`crates/tracedecay-runtime-core/src/memory/store.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`) never touches LCM payloads or
   session storage.
@@ -266,7 +262,7 @@ investigate before the reference is tombstoned.
 | **Memory fact hard-delete** | No LCM effect. Memory facts live in `memory_facts` and never cite LCM payloads (`crates/tracedecay-runtime-core/src/memory/store.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`). Independent subsystem. |
 | **Session delete** (no public API today) | MUST route through the payload-aware deleter for every payload owned by `(provider, session_id)`, **or** explicitly delete the `sessions` row and leave the files for GC. Contract requires one of these two be *documented*; the recommended path is "delete `sessions` row, leave files, let GC reap after grace" because it is simplest and crash-safe (FK cascade drops the `lcm_*` rows; orphan files become GC candidates). The deleter is used only when immediate file removal is required. |
 | **Message delete** (no public API today) | Same two options as session delete, scoped to one message: either call the deleter (removes that message's referenced payloads synchronously) or drop the raw row and let GC reap the now-unreferenced payloads after grace. **Caveat:** because refs can be shared via nested placeholders within the same message, a message-delete reap must verify the ref is referenced by *no* surviving row before removing it. |
-| **`lcm_doctor clean apply`** | Unchanged in effect (deletes DB rows, leaves files) but now **classified**: it is a *deferred* delete that intentionally produces GC candidates. The doctor output must state that payload files will be reaped by GC after the grace period, so operators do not expect immediate disk reclamation. |
+| **Separate payload GC** | Preview reads candidates from a registered snapshot. Apply runs only through the dedicated payload-GC writer authority; Doctor cannot invoke it. |
 | **Direct SQL / FK cascade / operator `rm`** | Unsupported but **tolerated**. GC reconciles on the next pass (orphan files → reaped; dangling placeholders → tombstoned). New delete code MUST NOT rely on this; it must call the deleter. |
 | **Compression-boundary carry-over** | No deletion. `reassign_session_payloads` moves owner rows; refs/files are stable and remain referenced via the carried-over raw messages. GC must not reap a payload whose owner moved within the grace window (covered automatically by referenced-ness re-check). |
 
@@ -347,9 +343,8 @@ The full algorithm is `t_bbd369f2`'s to design, but it MUST satisfy this contrac
   backfill-initialized to `live`; the migration guard (`schema.rs:87-96`) keeps it
   monotonic-safe against DBs written by newer releases. v1 MAY ship on the current schema using
   the two-scan rule.
-- **No breaking change to `lcm_doctor`/`lcm_status` response shapes** is required; the GC task
-  may *add* fields (e.g., `last_gc_at`, `bytes_reclaimable`) but must not remove or rename
-  existing ones.
+- **LCM Doctor remains independent.** GC health may extend `lcm_status`, but the
+  zero-argument daemon-owned Doctor response does not carry GC controls.
 
 ## 12. Edge cases
 

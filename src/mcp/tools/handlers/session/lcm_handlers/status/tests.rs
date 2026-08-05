@@ -1,7 +1,6 @@
 use super::super::super::*;
 use super::super::shared::lcm_status_payload;
 use super::super::test_support::*;
-use super::*;
 
 #[test]
 fn status_envelope_preserves_exact_json_and_markdown_rendering() {

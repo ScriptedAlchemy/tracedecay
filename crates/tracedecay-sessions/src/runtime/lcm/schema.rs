@@ -123,7 +123,7 @@ fn compact_sql(sql: &str) -> String {
 /// Drops any existing raw-message FTS table/triggers (old or new shape),
 /// recreates the v3 content-only structure, and repopulates the index from
 /// `lcm_raw_messages` via the FTS5 `'rebuild'` command. Used by the schema
-/// migration and the doctor repair path; idempotent and data-preserving
+/// migration and separately admitted storage recovery; idempotent and data-preserving
 /// because the index is derived entirely from the content table.
 pub async fn rebuild_raw_fts(conn: &(impl Executor + ?Sized)) -> Option<()> {
     conn.execute_batch(

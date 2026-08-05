@@ -70,13 +70,8 @@ impl LcmDaemonStore for RegisteredLcmDaemonStore {
 
     fn doctor(&self, _query: LcmDoctorQuery) -> StoreFuture<'_, serde_json::Value> {
         Box::pin(async move {
-            serde_json::to_value(
-                crate::global_db::session_temporal::session_temporal_doctor_health_at(
-                    self.database.db_path(),
-                )
-                .await,
-            )
-            .map_err(|error| LcmError::Db(error.to_string()))
+            serde_json::to_value(self.database.session_temporal_doctor_health().await)
+                .map_err(|error| LcmError::Db(error.to_string()))
         })
     }
 }

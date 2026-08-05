@@ -10,10 +10,11 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use tracedecay_usecases::context::{
-    BranchId, CapabilityDigest, ConfigurationDigest, PolicyDigest, ProfileId, RequestBudgets,
-    ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId, SessionStoreId,
-    session_application_grant_digest,
+    BranchId, ProfileId, RequestBudgets, ResolvedGitRoute, ResolvedSessionIdentity, SessionRootId,
+    SessionStoreId, session_application_grant_digest,
 };
+use tracedecay_usecases::session::SessionRequestBinding;
+use tracedecay_usecases::session::lcm::{LcmCompressionEvidence, LcmHostProtocol};
 
 use super::*;
 
@@ -615,6 +616,70 @@ async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages(
             "{table} was mutated by unsupported pressure evidence"
         );
     }
+}
+
+#[tokio::test]
+async fn registered_doctor_reads_snapshot_while_writer_lane_is_held() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+        directory.path(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.profile_database_arc();
+
+    let committed = database.begin_write_transaction().await.unwrap();
+    committed
+        .execute(
+            "INSERT INTO sessions (provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'committed-doctor-read', 'project', '/project')",
+            (),
+        )
+        .await
+        .unwrap();
+    committed.commit().await.unwrap();
+
+    let task_database = Arc::clone(&database);
+    let (writer_ready_tx, writer_ready_rx) = tokio::sync::oneshot::channel();
+    let writer = tokio::spawn(async move {
+        let transaction = task_database.begin_write_transaction().await.unwrap();
+        transaction
+            .execute(
+                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+                 VALUES ('cursor', 'uncommitted-doctor-read', 'project', '/project')",
+                (),
+            )
+            .await
+            .unwrap();
+        writer_ready_tx.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    writer_ready_rx.await.unwrap();
+
+    let authority = DaemonLcmAuthority::registered(database);
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Doctor, true);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        authority.execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: LcmAuthorityTarget::Store,
+            cancellation,
+            request: LcmAuthorityRequest::Doctor(LcmDoctorQuery),
+        }),
+    )
+    .await
+    .expect("daemon Doctor must not wait for writer authority");
+
+    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
+    let Some(LcmAuthorityPayload::Doctor(report)) = response.payload else {
+        panic!("daemon Doctor must return a temporal health report");
+    };
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report.get("reason"), None);
+
+    writer.abort();
+    assert!(writer.await.unwrap_err().is_cancelled());
 }
 
 #[tokio::test]

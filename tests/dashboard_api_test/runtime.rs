@@ -425,18 +425,4 @@ impl DashboardTestRuntimeV1 {
             )
             .await
     }
-
-    pub(crate) async fn lcm_doctor_for_test(
-        &self,
-        provider: &str,
-        session_id: Option<&str>,
-        mode: &str,
-        apply: bool,
-        clean_config: tracedecay::sessions::lcm::LcmCleanConfig,
-        gc_config: tracedecay::sessions::lcm::LcmGcConfig,
-    ) -> std::result::Result<Value, tracedecay::sessions::lcm::LcmError> {
-        self.primary_session_database()
-            .lcm_doctor(provider, session_id, mode, apply, clean_config, gc_config)
-            .await
-    }
 }

@@ -11,7 +11,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ActorId, UtcMicros};
 use tracedecay_store::{StoreShardIdV1, StoreShardScopeV1};
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_tool_catalog::CapabilityId;
 use tracedecay_usecases::context::{
     CancellationToken, CapabilityDigest, ConfigurationDigest, PolicyDigest, RequestBudgets,
     ResolvedSessionIdentity, application_observed_at, session_application_grant_digest,

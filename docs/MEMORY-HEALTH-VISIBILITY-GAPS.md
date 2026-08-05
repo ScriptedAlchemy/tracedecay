@@ -49,8 +49,8 @@ Read, in full:
 - CLI: `src/cli.rs` (subcommand enums), `src/main.rs` handlers (`Status`, `Doctor`,
   `Memory`, `Cost`, `Branch`), `src/doctor.rs`, `src/runtime_telemetry.rs`.
 - MCP: `src/mcp/tools/definitions.rs`, `src/mcp/tools/handlers/mod.rs`,
-  `src/mcp/tools/handlers/memory.rs`, and the LCM doctor at
-  `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` (for the contrast baseline).
+  `src/mcp/tools/handlers/memory.rs`, and the daemon-owned LCM health authority
+  (for the contrast baseline).
 - Dashboard backend: `src/dashboard.rs`, `crates/tracedecay-dashboard-api/src/memory_api.rs`
   (`overview_payload`, `trust_histogram`, `hrr_coverage`).
 - Dashboard frontend: `dashboard/holographic/src/HolographicMemoryPage.tsx`,
@@ -64,20 +64,19 @@ Read-only SQL against the live DB to ground each gap in current numbers.
 
 ## 2. The headline structural gap
 
-**The LCM subsystem has a full doctor; holographic memory does not.**
+**The LCM subsystem has read-only Doctor health; holographic memory does not.**
 
 | Surface | LCM session store | Holographic memory |
 |---|---|---|
-| Diagnose (schema/FTS/integrity/orphan/retention) | ✅ `tracedecay_lcm_doctor` MCP + `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` | ❌ none |
+| Diagnose (schema/FTS/integrity/orphan/retention) | ✅ daemon-owned read-only `tracedecay_lcm_doctor` MCP | ❌ none |
 | Status/telemetry | ✅ `tracedecay_lcm_status` | ⚠️ `tracedecay_memory_status` (counts only — no integrity/health) |
-| Plan + apply repairs (dry-run → backup → apply) | ✅ `doctor(mode=repair/clean)` | ❌ none (`memory curate` is dedup-only) |
-| Cleanup candidates w/ backup | ✅ `clean_lcm_noise` | ❌ none |
+| Plan + apply repairs (dry-run → backup → apply) | separate owner operations; never Doctor | ❌ none (`memory curate` is dedup-only) |
+| Cleanup candidates w/ backup | separate payload lifecycle operation | ❌ none |
 
-`crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` gathers schema version, FTS rebuild-needed flags,
-payload orphan/missing-file diagnostics, summary-source integrity, lifecycle
-frontier checks, retention candidates, and noise cleanup candidates — then plans
-safe repairs, backs up the DB, and applies them, all behind `mode`/`apply`
-flags. **Nothing equivalent exists for `memory_facts` / `memory_entities` /
+The daemon-owned LCM health authority gathers schema version, FTS integrity,
+summary-source integrity, and lifecycle frontier findings without acquiring a
+writer. Recovery and payload lifecycle effects remain separate owner
+operations. **Nothing equivalent exists for `memory_facts` / `memory_entities` /
 `memory_banks` / `memory_oplog`.** That asymmetry is the single biggest
 visibility gap and the natural home for most of the metrics below.
 
@@ -156,7 +155,7 @@ equivalents (`src/mcp/tools/definitions.rs:1801`). **G2 is closed.**
 
 | ID | Gap | Severity | Root cause |
 |---|---|---|---|
-| G1 | **No memory doctor** (vs LCM's full diagnose/repair/clean flow) | High | No `memory` doctor module; only `curate`. |
+| G1 | **No memory doctor** (vs LCM's read-only diagnostic authority) | High | No `memory` doctor module; only `curate`. |
 | ~~G2~~ | ~~**`MemoryStatus` not surfaced** to dashboard or CLI~~ | ~~High~~ | **Resolved by Q3.** `memory status` CLI (`MemoryAction::Status`), `GET /api/plugins/holographic/status`, and a dashboard Memory Health card now surface it. |
 | G3 | **Store size** never broken out by memory table; not in dashboard | High | `doctor`/`--runtime` report whole-DB bytes only; no `dbstat`/per-table rollup. |
 | G4 | **Orphan entities invisible** without a curation run (5 now) | High | No standing diagnostic; only reported inside a curate plan. |
@@ -192,16 +191,14 @@ backend endpoint/data needed. Tiers: **T1** = reuses existing data, low effort;
 | # | Recommendation | Tier | Backend needed |
 |---|---|---|---|
 | C1 | ~~**`tracedecay memory status`** — print `MemoryStatus` (human + `--json`).~~ | T1 | **Done (Q3).** `MemoryAction::Status` in `src/cli.rs`/`src/main.rs` surfaces `cg.memory_status()` (human + `--json`). |
-| C2 | **`tracedecay memory doctor`** — the CLI twin of the dashboard doctor: diagnose → plan → (`--apply`) repair/clean. Mirrors `tracedecay doctor` ergonomics and the LCM `doctor` mode/apply shape. | T3 | The doctor module (§5.3). |
+| C2 | **`tracedecay memory doctor`** — read-only diagnostics whose findings name separately admitted recovery operations. | T3 | The doctor module (§5.3). |
 | C3 | **Extend `tracedecay doctor`** with a "Memory" section: fact/entity/bank counts, missing vectors, orphan entities, FTS sync, oplog rows, memory-subsystem bytes. Reuse the doctor diagnostics so the single command is the one-stop health check. | T2 | Doctor diagnostics (read-only subset). |
 | C4 | **Extend `status --runtime`** (`RuntimeSnapshot`) with memory counts: `fact_count`, `memory_bytes` (subsystem), `vector_bytes`. Currently it only reports graph `node_count`/`edge_count` + whole-DB bytes. | T2 | Add fields to `DatabaseSnapshot`; 2–3 more scalar queries in `sample_database`. |
 
 ### 5.3 Backend — the missing memory doctor (highest-leverage new work)
 
-Model it on `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs`: a `gather_diagnostics` →
-`plan_and_apply_repairs` pipeline with `mode ∈ {diagnose, repair, clean}` and
-`apply: bool`, plus a pre-apply DB backup (LCM already has
-`backup_database`/`checkpoint_wal_for_backup` to reuse).
+Model diagnosis on the daemon-owned LCM health authority. Findings name
+separately admitted recovery operations; Doctor itself has no apply gate.
 
 **Diagnostics to gather** (all cheap read-only SQL; current values in parens):
 
@@ -295,7 +292,7 @@ story.
   `src/runtime_telemetry.rs` (`RuntimeSnapshot:27`, `DatabaseSnapshot:55`).
 - MCP: `src/mcp/tools/definitions.rs:1789` (`def_memory_status`),
   `src/mcp/tools/handlers/memory.rs:333` (`handle_memory_status`),
-  `crates/tracedecay-sessions/src/runtime/lcm/doctor.rs` (parity baseline).
+  daemon-owned LCM health authority (parity baseline).
 - Dashboard backend: `crates/tracedecay-dashboard-api/src/memory_api.rs:184` (`overview_payload`),
   `:145` (`trust_histogram`), `:225` (`hrr_coverage`).
 - Dashboard frontend: `dashboard/holographic/src/HolographicMemoryPage.tsx`,
