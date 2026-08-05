@@ -1,4 +1,4 @@
-//! Explorer planner/coordinator and LCM read-context HTTP binding.
+//! Explorer planner/coordinator and session-context HTTP binding.
 //!
 //! The coordinator composes existing graph, session, and memory authorities.
 //! It preserves source-local ordering and coverage instead of manufacturing a
@@ -18,7 +18,6 @@ use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
 use super::lcm_api::{LcmMessageV1, LcmSummaryNodeV1};
-use super::lcm_service::{self, SearchPayloadArgs};
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, now_micros, scope_from_state,
@@ -615,113 +614,13 @@ async fn code_source(
 }
 
 async fn session_source(
-    state: &DashboardState,
-    request: &ExplorerQueryRequestV1,
+    _state: &DashboardState,
+    _request: &ExplorerQueryRequestV1,
 ) -> ExplorerSourceProgressV1 {
-    let payload = match lcm_service::search_payload(
-        state,
-        SearchPayloadArgs {
-            query: &request.query,
-            limit: request.limit,
-            offset: request.offset,
-            role: "",
-            source: "",
-            session_id: "",
-            since: None,
-            until: None,
-        },
-    )
-    .await
-    {
-        Ok(payload) => payload,
-        Err((_status, Json(_error))) => {
-            return ExplorerSourceProgressV1::error(
-                ExplorerSourceIdV1::Sessions,
-                "session_query_failed",
-                "session query unavailable",
-            );
-        }
-    };
-    if payload.get("exists").and_then(Value::as_bool) != Some(true) {
-        return ExplorerSourceProgressV1::unavailable(
-            ExplorerSourceIdV1::Sessions,
-            "session_store_unavailable",
-            "the active-project session store is not mounted",
-        );
-    }
-    let Some(mut rows) = payload
-        .get("matches")
-        .and_then(Value::as_object)
-        .and_then(|matches| matches.get("messages"))
-        .and_then(Value::as_array)
-        .cloned()
-    else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Sessions,
-            "session_contract_invalid",
-            "session query omitted message matches",
-        );
-    };
-    let Some(summary_rows) = payload
-        .get("matches")
-        .and_then(Value::as_object)
-        .and_then(|matches| matches.get("summary_nodes"))
-        .and_then(Value::as_array)
-        .cloned()
-    else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Sessions,
-            "session_contract_invalid",
-            "session query omitted summary-node matches",
-        );
-    };
-    rows.extend(summary_rows);
-    let Some(total) = payload
-        .get("total")
-        .and_then(Value::as_object)
-        .and_then(|total| {
-            Some(total.get("messages")?.as_u64()? + total.get("summary_nodes")?.as_u64()?)
-        })
-    else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Sessions,
-            "session_contract_invalid",
-            "session query omitted result totals",
-        );
-    };
-    let Some(engine) = payload.get("engine").cloned() else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Sessions,
-            "session_contract_invalid",
-            "session query omitted engine",
-        );
-    };
-    let Some(engine_detail) = payload.get("engine_detail").cloned() else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Sessions,
-            "session_contract_invalid",
-            "session query omitted engine detail",
-        );
-    };
-    let Some(storage_scope) = payload.get("storage_scope").cloned() else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::Sessions,
-            "session_contract_invalid",
-            "session query omitted storage scope",
-        );
-    };
-    ready_source(
+    ExplorerSourceProgressV1::unavailable(
         ExplorerSourceIdV1::Sessions,
-        request,
-        rows,
-        Some(total),
-        json!({
-            "engine": engine,
-            "engine_detail": engine_detail,
-            "storage_scope": storage_scope,
-        }),
-        "session matches",
-        Vec::new(),
+        "lcm_temporal_retrieval_not_mounted",
+        "canonical temporal retrieval and redaction hydration are not mounted",
     )
 }
 
@@ -849,130 +748,25 @@ pub(super) struct ExplorerReadContextV1 {
 
 pub async fn session_size(
     State(state): State<DashboardState>,
-    Path(session_id): Path<String>,
+    Path(_session_id): Path<String>,
 ) -> Response {
-    let payload = match lcm_service::session_payload(&state, &session_id, 1, 0, false).await {
-        Ok(payload) => payload,
-        Err(error) => return error.into_response(),
-    };
-    if payload.get("exists").and_then(Value::as_bool) != Some(true) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"detail": "the active-project session store is not mounted"})),
-        )
-            .into_response();
-    }
-    let Some(counts) = payload
-        .get("counts")
-        .cloned()
-        .and_then(|counts| serde_json::from_value(counts).ok())
-    else {
-        return internal_error("LCM session payload omitted counts");
-    };
-    let storage_scope = payload
-        .get("storage_scope")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let Some(storage_scope) = storage_scope else {
-        return internal_error("LCM session payload omitted storage_scope");
-    };
-    let envelope = DashboardEnvelopeV1::ready(
+    Json(DashboardEnvelopeV1::unavailable(
         scope_from_state(&state),
-        DashboardCoverageV1::complete(1, "session"),
-        ExplorerSessionSizeV1 {
-            session_id,
-            storage_scope,
-            counts,
-        },
-    );
-    Json(envelope).into_response()
+        None::<ExplorerSessionSizeV1>,
+        "lcm_temporal_retrieval_not_mounted",
+    ))
+    .into_response()
 }
 
 pub async fn read_context(
     State(state): State<DashboardState>,
-    Path(session_id): Path<String>,
-    Query(params): Query<ReadContextParams>,
+    Path(_session_id): Path<String>,
+    Query(_params): Query<ReadContextParams>,
 ) -> Response {
-    let limit = params.limit.unwrap_or(200);
-    if !(1..=1_000).contains(&limit) {
-        return bad_request("limit must be between 1 and 1000");
-    }
-    let offset = params.offset.unwrap_or(0);
-    if offset < 0 {
-        return bad_request("offset must not be negative");
-    }
-    let order = params.order.unwrap_or_else(|| "desc".to_owned());
-    if !matches!(order.as_str(), "asc" | "desc") {
-        return bad_request("order must be asc or desc");
-    }
-    let payload =
-        match lcm_service::session_payload(&state, &session_id, limit, offset, order == "desc")
-            .await
-        {
-            Ok(payload) => payload,
-            Err(error) => return error.into_response(),
-        };
-    if payload.get("exists").and_then(Value::as_bool) != Some(true) {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({"detail": "the active-project session store is not mounted"})),
-        )
-            .into_response();
-    }
-    let Some(read_context) = read_context_from_payload(session_id, limit, offset, order, &payload)
-    else {
-        return internal_error("LCM session payload omitted read-context fields");
-    };
-    let eligible = u64::try_from(read_context.counts.message_count)
-        .ok()
-        .zip(u64::try_from(read_context.counts.summary_node_count).ok())
-        .map(|(messages, nodes)| messages.saturating_add(nodes));
-    let examined = (read_context.messages.len() + read_context.summary_nodes.len()) as u64;
-    let coverage = eligible.map_or_else(DashboardCoverageV1::unknown, |eligible| {
-        if read_context.has_more {
-            DashboardCoverageV1::partial(
-                eligible,
-                examined,
-                "context rows",
-                vec!["read-context page limit".to_owned()],
-            )
-        } else {
-            DashboardCoverageV1::complete(eligible, "context rows")
-        }
-    });
-    let domain_state = if read_context.has_more {
-        DashboardDomainStateV1::Partial
-    } else {
-        DashboardDomainStateV1::Ready
-    };
-    let envelope = DashboardEnvelopeV1::new(
+    Json(DashboardEnvelopeV1::unavailable(
         scope_from_state(&state),
-        domain_state,
-        coverage,
-        DashboardFreshnessV1::unknown(),
-        read_context,
-    );
-    Json(envelope).into_response()
-}
-
-fn read_context_from_payload(
-    session_id: String,
-    limit: i64,
-    offset: i64,
-    order: String,
-    payload: &Map<String, Value>,
-) -> Option<ExplorerReadContextV1> {
-    Some(ExplorerReadContextV1 {
-        session_id,
-        storage_scope: payload.get("storage_scope")?.as_str()?.to_owned(),
-        limit,
-        offset,
-        order,
-        counts: serde_json::from_value(payload.get("counts")?.clone()).ok()?,
-        messages: serde_json::from_value(payload.get("messages")?.clone()).ok()?,
-        summary_nodes: serde_json::from_value(payload.get("summary_nodes")?.clone()).ok()?,
-        has_more: payload.get("has_more")?.as_bool()?,
-        has_more_messages: payload.get("has_more_messages")?.as_bool()?,
-        has_more_summary_nodes: payload.get("has_more_summary_nodes")?.as_bool()?,
-    })
+        None::<ExplorerReadContextV1>,
+        "lcm_temporal_retrieval_not_mounted",
+    ))
+    .into_response()
 }
