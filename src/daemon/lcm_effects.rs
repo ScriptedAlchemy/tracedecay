@@ -135,12 +135,10 @@ impl DaemonLcmEffectService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecution;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
-    use crate::sessions::lcm::{
-        LcmContentSlice, LcmExpandRequest, LcmExpandTarget, LcmSourceRef, LcmSummarizerMode,
-    };
+    use crate::sessions::lcm::{LcmSourceRef, LcmSummarizerMode};
     use crate::sessions::{SessionMessageRecord, SessionRecord};
+    use tracedecay_domain::SessionId;
 
     fn session(provider: &str, session_id: &str) -> SessionRecord {
         SessionRecord {
@@ -277,39 +275,41 @@ mod tests {
         );
         assert!(!summary.summary_text.is_empty());
 
+        let session_id = SessionId::new("compress-session").unwrap();
+        let relation_ids = [summary.node_id.clone()];
         let read_control = execution_control();
-        let expansion = RegisteredGlobalDbSessionTemporalExecution::new(&db)
-            .render_lcm_expand(
-                LcmExpandRequest {
-                    provider: "cursor".to_string(),
-                    session_id: "compress-session".to_string(),
-                    target: LcmExpandTarget::SummaryNode {
-                        node_id: summary.node_id.clone(),
-                    },
-                    content_slice: Some(LcmContentSlice {
-                        offset: 0,
-                        limit: usize::MAX,
-                    }),
-                    source_offset: 0,
-                    source_limit: None,
-                },
-                &summary.summary_text,
-                &read_control,
+        let (_, relations) = db
+            .active_session_summary_relations(
+                &session_id,
+                &relation_ids,
+                4_096,
+                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
+                    &read_control,
+                ),
             )
             .await
             .unwrap();
-        assert_eq!(
-            expansion.summary_node.unwrap().source_refs,
-            summary.source_refs
-        );
-        assert_eq!(
-            expansion.summary_sources[0]
-                .raw_message
-                .as_ref()
-                .unwrap()
-                .store_id,
-            source_store_id
-        );
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].sources.len(), summary.source_refs.len());
+
+        let expected_relations = relations.clone();
+        drop(response);
+        drop(db);
+        let harness = harness.restart().await;
+        let restarted = Arc::clone(&harness.registered);
+        let restart_control = execution_control();
+        let (_, restarted_relations) = restarted
+            .active_session_summary_relations(
+                &session_id,
+                &relation_ids,
+                4_096,
+                crate::global_db::session_temporal::store::execution_control_graph_cancellation(
+                    &restart_control,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(restarted_relations, expected_relations);
     }
 
     #[tokio::test]

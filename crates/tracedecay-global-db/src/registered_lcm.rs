@@ -443,13 +443,6 @@ impl RegisteredGlobalDb {
         doctor::doctor(&snapshot, request).await
     }
 
-    pub async fn lcm_session_boundary(
-        &self,
-        request: LcmSessionBoundaryRequest,
-    ) -> Result<LcmSessionBoundaryResponse, LcmError> {
-        self.lcm_session_boundary_guarded(request, || Ok(())).await
-    }
-
     pub async fn lcm_session_boundary_guarded<F>(
         &self,
         request: LcmSessionBoundaryRequest,

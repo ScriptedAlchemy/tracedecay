@@ -12,7 +12,7 @@ use tracedecay_global_db::session_temporal::relations::{
 use tracedecay_graph_db::{GraphDb, GraphDbError};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub(super) enum EmbeddedGraphRuntimeError {
+pub(crate) enum EmbeddedGraphRuntimeError {
     #[error("embedded graph owner identity conflicts with an existing mount")]
     IdentityConflict,
     #[error("embedded graph store requires reset: {0}")]
@@ -51,7 +51,7 @@ struct MountedProjectGraph {
 }
 
 #[derive(Clone, Default)]
-pub(super) struct EmbeddedGraphRuntimeRegistry {
+pub(crate) struct EmbeddedGraphRuntimeRegistry {
     mounted: Arc<Mutex<BTreeMap<SessionRelationScope, MountedProjectGraph>>>,
 }
 
@@ -64,7 +64,7 @@ impl std::fmt::Debug for EmbeddedGraphRuntimeRegistry {
 }
 
 impl EmbeddedGraphRuntimeRegistry {
-    pub(super) fn resolve_scope(
+    pub(crate) fn resolve_scope(
         &self,
         scope: &SessionRelationScope,
         session_store_root: &Path,

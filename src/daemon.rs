@@ -177,7 +177,7 @@ mod core_lifecycle;
 mod core_logging;
 mod core_proxy;
 mod database_owner_registry;
-mod embedded_graph_runtime;
+pub(crate) mod embedded_graph_runtime;
 use database_owner_registry::{DatabaseOwnerRegistry, settle_deferred_post_open_health};
 pub(crate) mod doctor_kernel;
 pub(crate) mod hook_v2_replay;

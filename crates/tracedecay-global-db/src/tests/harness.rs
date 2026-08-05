@@ -158,6 +158,8 @@ impl RegisteredGlobalDbHarness {
         )
         .await
         .expect("open registered profile-sessions runtime");
+        bind_test_session_relation_graph(&registered)
+            .expect("bind registered profile-sessions relation graph");
         Self {
             registered,
             _directory: directory,
@@ -180,6 +182,29 @@ impl RegisteredGlobalDbHarness {
         )
         .await
         .expect("remount registered profile-sessions runtime")
+    }
+
+    pub async fn restart(self) -> Self {
+        let Self {
+            registered,
+            _directory,
+            _scope,
+        } = self;
+        let path = registered.db_path().to_path_buf();
+        drop(registered);
+        let registered = open_registered_test_database(
+            &path,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProfileSessions,
+        )
+        .await
+        .expect("restart registered profile-sessions runtime");
+        bind_test_session_relation_graph(&registered)
+            .expect("bind restarted profile-sessions relation graph");
+        Self {
+            registered,
+            _directory,
+            _scope,
+        }
     }
 
     #[cfg(test)]
@@ -812,7 +837,7 @@ async fn open_registered_test_database(
                 message: format!("{failure:?}"),
             },
         )?;
-    let registered = Arc::new(
+    Ok(Arc::new(
         RegisteredGlobalDb::migrate_and_attach(
             runtime,
             expected_binding,
@@ -820,32 +845,7 @@ async fn open_registered_test_database(
             authority,
         )
         .await?,
-    );
-    let relation_scope = match &registered.binding().shard_id.scope {
-        tracedecay_store::StoreShardScopeV1::ProjectSessions { project_id } => {
-            crate::session_temporal::relations::SessionRelationScope::project(project_id.clone())
-        }
-        tracedecay_store::StoreShardScopeV1::ProfileSessions => {
-            crate::session_temporal::relations::SessionRelationScope::profile(
-                registered.binding().shard_id.profile_id.clone(),
-            )
-        }
-        scope => {
-            return Err(tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "bind registered global-db test relation graph".to_owned(),
-                message: format!("session test database has unsupported shard scope: {scope:?}"),
-            });
-        }
-    };
-    let relation_graph =
-        crate::session_temporal::relations::SessionRelationGraphStore::memory_graph().map_err(
-            |error| tracedecay_runtime_core::errors::TraceDecayError::Database {
-                operation: "open registered global-db test relation graph".to_owned(),
-                message: error.to_string(),
-            },
-        )?;
-    registered.bind_session_relation_graph(relation_scope, relation_graph)?;
-    Ok(registered)
+    ))
 }
 
 #[cfg(test)]
