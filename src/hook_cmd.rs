@@ -2,7 +2,6 @@ use crate::cli::Commands;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HookInput {
-    NoInput,
     Stdin,
 }
 
@@ -39,145 +38,37 @@ pub(crate) fn drain_busy_hook_stdin(command: &Commands) {
     let Some(input_mode) = hook_input(command) else {
         return;
     };
-    if input_mode == HookInput::NoInput || std::io::stdin().is_terminal() {
+    if std::io::stdin().is_terminal() {
         return;
     }
     let _ = drain_hook_input(input_mode, &mut std::io::stdin().lock());
 }
 
-fn drain_hook_input(mode: HookInput, input: &mut impl std::io::Read) -> std::io::Result<u64> {
-    match mode {
-        HookInput::NoInput => Ok(0),
-        HookInput::Stdin => std::io::copy(input, &mut std::io::sink()),
-    }
+fn drain_hook_input(_mode: HookInput, input: &mut impl std::io::Read) -> std::io::Result<u64> {
+    std::io::copy(input, &mut std::io::sink())
 }
 
 pub(crate) fn hook_input(command: &Commands) -> Option<HookInput> {
+    if crate::hook_capture_cmd::is_native_hook_command(command) {
+        return None;
+    }
     match command {
-        Commands::HookPreToolUse => Some(HookInput::NoInput),
-        Commands::HookClaudeSessionStart
-        | Commands::HookClaudePostToolUse
-        | Commands::HookClaudeSubagentStart
-        | Commands::HookPromptSubmit
-        | Commands::HookStop
-        | Commands::HookKiroPreToolUse
-        | Commands::HookKiroPromptSubmit
-        | Commands::HookKiroPostToolUse
-        | Commands::HookCursorSubagentStart
-        | Commands::HookCursorPostToolUse
-        | Commands::HookCursorBeforeSubmitPrompt
-        | Commands::HookCursorPreCompact
-        | Commands::HookCursorAfterFileEdit
-        | Commands::HookCursorSessionStart
-        | Commands::HookCursorSessionEnd
-        | Commands::HookCursorAfterShell
-        | Commands::HookCursorWorkspaceOpen
-        | Commands::HookCursorStop
-        | Commands::HookCodexSessionStart
-        | Commands::HookCodexUserPromptSubmit
-        | Commands::HookCodexSubagentStart
-        | Commands::HookCodexPostToolUse
-        | Commands::HookCodexPostCompact
-        | Commands::HookCodexStop
-        | Commands::HookHermesTerminalReceipt
-        | Commands::HookKimiEvent
-        | Commands::HookOpenCodeEvent
-        | Commands::HookOpenCodeToolAfter => Some(HookInput::Stdin),
+        Commands::HookUserSessionReview => Some(HookInput::Stdin),
         _ => None,
     }
 }
 
 pub(crate) async fn handle_hook_command(command: Commands) -> tracedecay::errors::Result<()> {
-    // Claude command hooks own a single JSON document on stdin. Early lease
-    // admission guarantees this dispatcher runs only while a shared lease is
-    // held; the busy path drains piped input without producing hook output.
+    if let Some(source) = crate::hook_capture_cmd::capture_source_for_command(&command) {
+        exit_if_nonzero(crate::hook_capture_cmd::run_native_capture(source));
+        return Ok(());
+    }
+    if crate::hook_capture_cmd::is_native_hook_command(&command) {
+        return Ok(());
+    }
     match command {
-        Commands::HookPreToolUse => {
-            tracedecay::hooks::hook_pre_tool_use();
-        }
-        Commands::HookPromptSubmit => {
-            tracedecay::hooks::hook_prompt_submit().await;
-        }
-        Commands::HookStop => {
-            tracedecay::hooks::hook_stop().await;
-        }
-        Commands::HookClaudeSessionStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_claude_session_start().await);
-        }
-        Commands::HookClaudePostToolUse => {
-            exit_if_nonzero(tracedecay::hooks::hook_claude_post_tool_use().await);
-        }
-        Commands::HookClaudeSubagentStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_claude_subagent_start().await);
-        }
-        Commands::HookKiroPreToolUse => {
-            exit_if_nonzero(tracedecay::hooks::hook_kiro_pre_tool_use());
-        }
-        Commands::HookKiroPromptSubmit => {
-            exit_if_nonzero(tracedecay::hooks::hook_kiro_prompt_submit().await);
-        }
-        Commands::HookKiroPostToolUse => {
-            exit_if_nonzero(tracedecay::hooks::hook_kiro_post_tool_use().await);
-        }
-        Commands::HookCursorSubagentStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_subagent_start().await);
-        }
-        Commands::HookCursorPostToolUse => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_post_tool_use().await);
-        }
-        Commands::HookCursorBeforeSubmitPrompt => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_before_submit_prompt().await);
-        }
-        Commands::HookCursorPreCompact => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_pre_compact().await);
-        }
-        Commands::HookCursorAfterFileEdit => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_after_file_edit().await);
-        }
-        Commands::HookCursorSessionStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_session_start().await);
-        }
-        Commands::HookCursorSessionEnd => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_session_end().await);
-        }
-        Commands::HookCursorAfterShell => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_after_shell().await);
-        }
-        Commands::HookCursorWorkspaceOpen => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_workspace_open().await);
-        }
-        Commands::HookCursorStop => {
-            exit_if_nonzero(tracedecay::hooks::hook_cursor_stop().await);
-        }
-        Commands::HookCodexSessionStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_session_start().await);
-        }
-        Commands::HookCodexUserPromptSubmit => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_user_prompt_submit().await);
-        }
-        Commands::HookCodexSubagentStart => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_subagent_start().await);
-        }
-        Commands::HookCodexPostToolUse => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_post_tool_use().await);
-        }
-        Commands::HookCodexPostCompact => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_post_compact().await);
-        }
-        Commands::HookCodexStop => {
-            exit_if_nonzero(tracedecay::hooks::hook_codex_stop().await);
-        }
-        Commands::HookHermesTerminalReceipt => {
-            exit_if_nonzero(tracedecay::hooks::hook_hermes_terminal_receipt().await);
-        }
-        Commands::HookKimiEvent => {
-            exit_if_nonzero(tracedecay::hooks::hook_kimi_event().await);
-        }
-        Commands::HookOpenCodeEvent => {
-            exit_if_nonzero(tracedecay::hooks::hook_opencode_event().await);
-        }
-        Commands::HookOpenCodeToolAfter => {
-            exit_if_nonzero(tracedecay::hooks::hook_opencode_tool_after().await);
+        Commands::HookUserSessionReview => {
+            exit_if_nonzero(tracedecay::hooks::hook_user_session_review().await);
         }
         _ => unreachable!("non-hook command passed to hook dispatcher"),
     }
@@ -203,60 +94,59 @@ mod tests {
     };
 
     fn hook_commands() -> Vec<(Commands, HookInput)> {
-        vec![
-            (Commands::HookPreToolUse, HookInput::NoInput),
-            (Commands::HookPromptSubmit, HookInput::Stdin),
-            (Commands::HookStop, HookInput::Stdin),
-            (Commands::HookClaudeSessionStart, HookInput::Stdin),
-            (Commands::HookClaudePostToolUse, HookInput::Stdin),
-            (Commands::HookClaudeSubagentStart, HookInput::Stdin),
-            (Commands::HookKiroPreToolUse, HookInput::Stdin),
-            (Commands::HookKiroPromptSubmit, HookInput::Stdin),
-            (Commands::HookKiroPostToolUse, HookInput::Stdin),
-            (Commands::HookCursorSubagentStart, HookInput::Stdin),
-            (Commands::HookCursorPostToolUse, HookInput::Stdin),
-            (Commands::HookCursorBeforeSubmitPrompt, HookInput::Stdin),
-            (Commands::HookCursorPreCompact, HookInput::Stdin),
-            (Commands::HookCursorAfterFileEdit, HookInput::Stdin),
-            (Commands::HookCursorSessionStart, HookInput::Stdin),
-            (Commands::HookCursorSessionEnd, HookInput::Stdin),
-            (Commands::HookCursorAfterShell, HookInput::Stdin),
-            (Commands::HookCursorWorkspaceOpen, HookInput::Stdin),
-            (Commands::HookCursorStop, HookInput::Stdin),
-            (Commands::HookCodexSessionStart, HookInput::Stdin),
-            (Commands::HookCodexUserPromptSubmit, HookInput::Stdin),
-            (Commands::HookCodexSubagentStart, HookInput::Stdin),
-            (Commands::HookCodexPostToolUse, HookInput::Stdin),
-            (Commands::HookCodexPostCompact, HookInput::Stdin),
-            (Commands::HookCodexStop, HookInput::Stdin),
-            (Commands::HookHermesTerminalReceipt, HookInput::Stdin),
-            (Commands::HookKimiEvent, HookInput::Stdin),
-            (Commands::HookOpenCodeEvent, HookInput::Stdin),
-            (Commands::HookOpenCodeToolAfter, HookInput::Stdin),
-        ]
+        vec![(Commands::HookUserSessionReview, HookInput::Stdin)]
     }
 
     #[test]
-    fn all_hook_commands_have_explicit_input_semantics() {
+    fn lifecycle_guarded_hooks_have_explicit_input_semantics() {
         let hooks = hook_commands();
-        assert_eq!(hooks.len(), 30);
-        assert_eq!(
-            hooks
-                .iter()
-                .filter(|(_, input)| *input == HookInput::NoInput)
-                .count(),
-            1
-        );
         assert_eq!(
             hooks
                 .iter()
                 .filter(|(_, input)| *input == HookInput::Stdin)
                 .count(),
-            29
+            hooks.len()
         );
         for (command, expected) in hooks {
             assert_eq!(hook_input(&command), Some(expected));
             assert!(crate::should_skip_agent_install_maintenance(&command));
+        }
+    }
+
+    #[test]
+    fn native_capture_commands_bypass_the_profile_lifecycle_lease() {
+        for command in [
+            Commands::HookPreToolUse,
+            Commands::HookPromptSubmit,
+            Commands::HookStop,
+            Commands::HookClaudeSessionStart,
+            Commands::HookClaudePostToolUse,
+            Commands::HookClaudeSubagentStart,
+            Commands::HookKiroPreToolUse,
+            Commands::HookKiroPromptSubmit,
+            Commands::HookKiroPostToolUse,
+            Commands::HookCursorSubagentStart,
+            Commands::HookCursorPostToolUse,
+            Commands::HookCursorBeforeSubmitPrompt,
+            Commands::HookCursorPreCompact,
+            Commands::HookCursorAfterFileEdit,
+            Commands::HookCursorSessionStart,
+            Commands::HookCursorSessionEnd,
+            Commands::HookCursorAfterShell,
+            Commands::HookCursorWorkspaceOpen,
+            Commands::HookCursorStop,
+            Commands::HookCodexSessionStart,
+            Commands::HookCodexUserPromptSubmit,
+            Commands::HookCodexSubagentStart,
+            Commands::HookCodexPostToolUse,
+            Commands::HookCodexPostCompact,
+            Commands::HookCodexStop,
+            Commands::HookHermesTerminalReceipt,
+            Commands::HookKimiEvent,
+            Commands::HookOpenCodeEvent,
+            Commands::HookOpenCodeToolAfter,
+        ] {
+            assert_eq!(hook_input(&command), None);
         }
     }
 
@@ -319,17 +209,11 @@ mod tests {
     }
 
     #[test]
-    fn busy_stdin_hooks_drain_but_legacy_no_input_hooks_do_not() {
+    fn busy_stdin_hooks_drain_input() {
         let mut stdin_payload = b"{\"hook_event_name\":\"SessionStart\"}".as_slice();
         let stdin_len = stdin_payload.len() as u64;
         let drained = drain_hook_input(HookInput::Stdin, &mut stdin_payload).unwrap();
         assert_eq!(drained, stdin_len);
         assert!(stdin_payload.is_empty());
-
-        let mut legacy_payload = b"terminal input must remain unread".as_slice();
-        let legacy_len = legacy_payload.len();
-        let drained = drain_hook_input(HookInput::NoInput, &mut legacy_payload).unwrap();
-        assert_eq!(drained, 0);
-        assert_eq!(legacy_payload.len(), legacy_len);
     }
 }

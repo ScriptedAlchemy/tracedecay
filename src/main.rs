@@ -12,6 +12,7 @@ mod cli;
 mod commands;
 mod cost_cmd;
 mod global;
+mod hook_capture_cmd;
 mod hook_cmd;
 mod lsp_cmd;
 mod project_cmd;
@@ -216,6 +217,10 @@ fn is_extract_worker(command: Option<&Commands>) -> bool {
 }
 
 fn main() {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if let Some(code) = hook_capture_cmd::try_run(&args) {
+        process::exit(code);
+    }
     let spawned = std::thread::Builder::new()
         .name("tracedecay-main".to_string())
         .stack_size(ASYNC_STACK_BYTES)
