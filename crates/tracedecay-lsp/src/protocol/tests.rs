@@ -6,6 +6,10 @@ use crate::diagnostics::{DiagnosticSeverity, DiagnosticSource, LspPosition, LspR
 use crate::gateway::{FeedbackCycleRequest, LspLocation, SemanticProviderOutcome, WorkspaceSymbol};
 use crate::overlay::OverlaySnapshot;
 use crate::provider::GenerationDiagnostics;
+use crate::workspace_diagnostics::{
+    WorkspaceDiagnosticSnapshotOutcome, WorkspaceDocumentDiagnostics,
+    WorkspaceGenerationDiagnostics,
+};
 use std::cell::RefCell;
 use std::sync::Mutex;
 use tracedecay_domain::ManifestDigest;

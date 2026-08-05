@@ -607,12 +607,19 @@ impl DaemonInvocationService {
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        let dispatch = session.actor.handle_payload(frame.as_bytes(), now_ms);
+        let admission = session
+            .actor
+            .try_handle_client_payload(frame.as_bytes(), now_ms);
+        let (backpressured, closed) = match admission {
+            ClientFrameAdmission::Consumed(dispatch) => (false, dispatch.closed),
+            ClientFrameAdmission::Backpressured => (true, false),
+            ClientFrameAdmission::Closed => (false, true),
+        };
         DaemonInvocationResponse::with_outcome(
             request_id,
             DaemonInvocationOutcome::LspFrameAccepted {
-                backpressured: dispatch.backpressured,
-                closed: dispatch.closed,
+                backpressured,
+                closed,
             },
         )
     }

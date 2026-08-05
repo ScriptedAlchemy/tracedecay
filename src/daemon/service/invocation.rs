@@ -63,11 +63,12 @@ use tracedecay_domain::{
 use tracedecay_lsp::analyzer::broker::DiagnosticBroker;
 use tracedecay_lsp::analyzer::client::LspRefreshTimeouts;
 use tracedecay_lsp::{
-    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, DaemonLspRuntimeSession,
-    DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
-    GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError, LspRuntimeFailure, LspRuntimeFuture,
-    LspSessionAccess, LspSessionAdmissionPort, LspSessionCredential, LspSessionId,
-    LspSessionOpenRequest, LspSessionRegistry, SessionLifecycle, UpstreamCapabilities,
+    AdmittedRoot, AuthorizedLspSession, AuthorizedLspWorkspace, ClientFrameAdmission,
+    DaemonLspRuntimeSession, DaemonLspSessionEndpoint, DiagnosticTrigger, FeedbackCycleRequest,
+    FeedbackCycleRuntimePort, GatewayCapabilities, LSP_SESSION_TTL_MS, LspEndpointError,
+    LspRuntimeFailure, LspRuntimeFuture, LspSessionAccess, LspSessionAdmissionPort,
+    LspSessionCredential, LspSessionId, LspSessionOpenRequest, LspSessionRegistry,
+    SessionLifecycle, UpstreamCapabilities,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,

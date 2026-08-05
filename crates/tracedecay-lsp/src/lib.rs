@@ -102,8 +102,9 @@ pub use overlay::{
     OverlaySnapshot, OverlayStore,
 };
 pub use protocol::{
-    DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession, DaemonLspProtocolTransport,
-    MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, ProtocolDispatch,
+    ClientFrameAdmission, DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession,
+    DaemonLspProtocolTransport, MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES,
+    ProtocolDispatch,
 };
 pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,
