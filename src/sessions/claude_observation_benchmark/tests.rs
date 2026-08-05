@@ -41,6 +41,18 @@ fn workload_manifest_matches_executable_contract() {
 }
 
 #[test]
+fn acceptance_contract_rejects_unreleased_native_fixture_identity_fields() {
+    let mut value = serde_json::to_value(synthetic_acceptance_result()).unwrap();
+    let identity = value["workload_identity"].as_object_mut().unwrap();
+    let input_paths = identity.remove("input_paths").unwrap();
+    let inputs_sha256 = identity.remove("inputs_sha256").unwrap();
+    identity.insert("native_fixture_paths".to_string(), input_paths);
+    identity.insert("native_fixtures_sha256".to_string(), inputs_sha256);
+
+    assert!(serde_json::from_value::<BenchmarkResult>(value).is_err());
+}
+
+#[test]
 fn checked_in_evidence_retires_mislabeled_provider_result() {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("benchmarks/pr5-observation");
     let acceptance = validate_evidence_directory(&directory, false).unwrap();
@@ -48,7 +60,8 @@ fn checked_in_evidence_retires_mislabeled_provider_result() {
         &fs::read(directory.join("evidence-index.json")).expect("read evidence index"),
     )
     .expect("parse evidence index");
-    assert_eq!(acceptance.as_deref(), index["current_acceptance"].as_str());
+    assert!(acceptance.is_none());
+    assert!(index["current_acceptance"].is_null());
     let historical = index["historical_stale"]
         .as_array()
         .expect("historical evidence list");
