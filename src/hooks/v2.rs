@@ -674,6 +674,7 @@ fn append_for_replay(
     match spool.append(envelope.clone(), binding, now) {
         Ok(_) => SpoolAppendOutcomeV1::Accepted,
         Err(HookSpoolError::SpoolFull) => SpoolAppendOutcomeV1::Full,
+        Err(HookSpoolError::ResetRequired { .. }) => SpoolAppendOutcomeV1::ResetRequired,
         Err(_) => SpoolAppendOutcomeV1::Unavailable,
     }
 }
