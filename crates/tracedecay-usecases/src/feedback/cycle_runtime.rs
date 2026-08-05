@@ -8,6 +8,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Instant;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, DiagnosticProviderIdentity,
@@ -28,8 +30,8 @@ use tracedecay_application::{
     PolicyEvaluationV1, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::feedback::{
-    FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1, FeedbackImpactStateV1,
-    FeedbackImpactV1, FeedbackTriggerV1,
+    FeedbackCycleResultV1, FeedbackDurabilityV1, FeedbackFindingId, FeedbackFindingV1,
+    FeedbackImpactStateV1, FeedbackImpactV1, FeedbackTriggerV1,
 };
 use tracedecay_domain::{
     FileOccurrenceId, RetrievalAnchorId, SymbolOccurrenceId, canonical_sha256,
@@ -101,12 +103,21 @@ impl Pr12FeedbackCycleInvocation {
 ///
 /// The handles grant no authority by possession. Resolving either handle
 /// re-enters the existing feedback read owner, which rechecks route authority.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Pr12FeedbackFindingHandlesV1 {
     pub finding_id: FeedbackFindingId,
     pub retrieval_anchor_id: Option<RetrievalAnchorId>,
     pub get_handle: String,
     pub expansion_handle: Option<String>,
+}
+
+/// Canonical payload returned for a completed advisory feedback cycle.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAdvisoryCycleResultV1 {
+    pub cycle: FeedbackCycleResultV1,
+    pub finding_handles: Vec<Pr12FeedbackFindingHandlesV1>,
 }
 
 /// One transport-neutral Plan 09 result shared by Hook, MCP, HTTP, LSP, CLI,
@@ -116,6 +127,19 @@ pub struct Pr12FeedbackFindingHandlesV1 {
 pub struct Pr12CanonicalFeedbackResultV1 {
     pub execution: FeedbackCycleExecutionResult,
     pub finding_handles: Vec<Pr12FeedbackFindingHandlesV1>,
+}
+
+impl From<Pr12CanonicalFeedbackResultV1> for FeedbackAdvisoryCycleResultV1 {
+    fn from(result: Pr12CanonicalFeedbackResultV1) -> Self {
+        let Pr12CanonicalFeedbackResultV1 {
+            execution,
+            finding_handles,
+        } = result;
+        Self {
+            cycle: execution.cycle,
+            finding_handles,
+        }
+    }
 }
 
 impl Pr12CanonicalFeedbackResultV1 {

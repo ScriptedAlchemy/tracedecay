@@ -3,7 +3,7 @@ use std::pin::Pin;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
 use tracedecay_tool_catalog::SortContractId;
 
@@ -13,8 +13,8 @@ use crate::handlers::ApplicationOperation;
 use crate::result::{
     ApplicationProblem, ApplicationResult, CoverageCompleteness, CoverageDomainState,
     EvidenceCoverage, EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor,
-    OperationBudgetUsage, PageState, RetrievalEvidence, RetryDirective, SafeDiagnostic,
-    TemporalState,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageState, RetrievalEvidence,
+    RetryDirective, SafeDiagnostic, TemporalState,
 };
 
 use super::service::{evidence_envelope, problem_envelope};
@@ -30,6 +30,31 @@ pub const MAX_TEST_FILTER_BYTES: usize = 1_024;
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TestResultsRequestV1 {}
+
+/// One retained result from the latest managed test run.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedTestResultV1 {
+    pub test: String,
+    pub passed: bool,
+}
+
+/// Canonical payload returned by the recent managed-test-results operation.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestResultsResultV1 {
+    pub operation_id: String,
+    pub generation: u64,
+    pub head_commit_id: Option<CommitId>,
+    pub code_generation_id: Option<CodeGenerationId>,
+    pub results: Vec<ManagedTestResultV1>,
+    pub completed: u64,
+    pub total: Option<u64>,
+    pub termination: Option<OperationTermination>,
+    pub receipt: Option<OperationReceipt>,
+    pub result_offset: usize,
+    pub available_results: u64,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

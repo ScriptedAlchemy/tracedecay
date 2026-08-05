@@ -19,8 +19,8 @@ pub use cycle_production::{
     ProductionFeedbackCycleProximityPortV1, resolve_production_feedback_cycle_parts,
 };
 pub use cycle_runtime::{
-    Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
-    Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError, Pr12FeedbackFindingHandlesV1,
-    open_pr12_feedback_cycle_runtime,
+    FeedbackAdvisoryCycleResultV1, Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleInvocation,
+    Pr12FeedbackCycleLspInput, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
+    Pr12FeedbackFindingHandlesV1, open_pr12_feedback_cycle_runtime,
 };
 pub use production::ProductionFeedbackRuntimeStateV1;

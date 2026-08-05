@@ -59,8 +59,9 @@ pub use symbol_graph::{
 };
 pub use test_attribution::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, MAX_TEST_FILTER_BYTES,
-    MAX_TEST_PRIMITIVE_DEPTH, MAX_TEST_PRIMITIVE_FILES, RankedAffectedTestV1, TestMapCoverageV1,
-    TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitiveOperations, TestPrimitivePort,
-    TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
-    TestPrimitiveService, TestReferenceV1, TestResultsRequestV1, UncoveredSourceV1,
+    MAX_TEST_PRIMITIVE_DEPTH, MAX_TEST_PRIMITIVE_FILES, ManagedTestResultV1, RankedAffectedTestV1,
+    TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitiveOperations,
+    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
+    TestPrimitiveService, TestReferenceV1, TestResultsRequestV1, TestResultsResultV1,
+    UncoveredSourceV1,
 };
