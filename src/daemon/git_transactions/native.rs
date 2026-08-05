@@ -213,6 +213,7 @@ impl NativeGitIndexPreviewAssembler {
         };
 
         let configuration_digest = runner.configuration_digest().map_err(map_native_error)?;
+        let attributes_digest = runner.attributes_digest().map_err(map_native_error)?;
         let head = runner.head_state().map_err(map_native_error)?;
         RepositoryStateSnapshotV1::new(
             self.project_id.clone(),
@@ -234,7 +235,7 @@ impl NativeGitIndexPreviewAssembler {
                 ignored_collision_digest,
             },
             status.operation,
-            Some(configuration_digest.clone()),
+            Some(attributes_digest),
             Some(runner.sparse_digest().map_err(map_native_error)?),
             Some(runner.submodule_digest().map_err(map_native_error)?),
             Some(configuration_digest),
@@ -771,6 +772,9 @@ fn unsupported_native_preflight(
     let object_format = runner.object_format().map_err(map_native_error)?;
     if !supported_object_format(&object_format) {
         return Ok(Some(GitIndexUnsupportedStateV1::UnsupportedObjectFormat));
+    }
+    if runner.has_external_drivers().map_err(map_native_error)? {
+        return Ok(Some(GitIndexUnsupportedStateV1::ExternalGitDriver));
     }
     Ok(None)
 }

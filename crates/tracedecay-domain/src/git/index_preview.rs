@@ -38,6 +38,7 @@ pub enum GitIndexUnsupportedStateV1 {
     UnbornBranch,
     IndexLockPresent,
     ApplicableCommitHooks,
+    ExternalGitDriver,
     SigningKeyUnavailable,
     UnmergedIndex,
     IntentToAdd,

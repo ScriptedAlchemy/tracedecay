@@ -324,6 +324,36 @@ impl FixedGitIndexRunner {
         canonical_sha256(&output.stdout).map_err(Into::into)
     }
 
+    pub(crate) fn attributes_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
+        let paths = self.run_git("ls-files", &["ls-files", "-z"])?;
+        let mut command = self.command();
+        command
+            .args(["check-attr", "-z", "-a", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let attributes = run_command_with_stdin(command, "check-attr", &paths.stdout)?;
+        canonical_sha256(&attributes.stdout).map_err(Into::into)
+    }
+
+    pub(crate) fn has_external_drivers(&self) -> Result<bool, NativeGitIndexError> {
+        let output = self.run_git_output(&[
+            "config",
+            "--get-regexp",
+            r"^(merge\..*\.driver|diff\..*\.(command|textconv)|filter\..*\.(clean|smudge|process))$",
+        ])?;
+        if output.status.success() {
+            return Ok(!output.stdout.is_empty());
+        }
+        if output.status.code() == Some(1) {
+            return Ok(false);
+        }
+        Err(NativeGitIndexError::GitFailed {
+            operation: "config",
+            status: output.status.to_string(),
+        })
+    }
+
     pub(crate) fn sparse_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
         let sparse_path = absolute_git_path(
             &self.repository_root,
@@ -715,11 +745,18 @@ impl FixedGitIndexRunner {
         let checksum = canonical_sha256(&self.index_bytes()?)?;
         if checksum != snapshot.index.checksum
             || self.index_tree_under_lock(lock).ok().as_ref() != snapshot.index.tree_id.as_ref()
+            || self.tracked_worktree_digest().ok().as_ref()
+                != Some(&snapshot.working_tree.tracked_digest)
             || self.refs_digest().ok().as_ref() != snapshot.refs_digest.as_ref()
             || self.git_version().ok().as_deref() != snapshot.git_version.as_deref()
             || snapshot.adapter_revision.as_deref() != Some(GIT_INDEX_ADAPTER_REVISION)
             || self.head_state().ok().as_ref() != Some(&snapshot.head)
             || current_operation_state(&self.git_dir) != snapshot.operation_state
+            || self.attributes_digest().ok().as_ref() != snapshot.attributes_digest.as_ref()
+            || self.sparse_digest().ok().as_ref() != snapshot.sparse_digest.as_ref()
+            || self.submodule_digest().ok().as_ref() != snapshot.submodule_digest.as_ref()
+            || self.configuration_digest().ok().as_ref()
+                != snapshot.filesystem_capabilities_digest.as_ref()
         {
             return Err(NativeGitIndexError::StaleRepositoryState);
         }
@@ -900,9 +937,11 @@ impl FixedGitIndexRunner {
         }
         for hook in [
             "pre-commit",
+            "pre-merge-commit",
             "prepare-commit-msg",
             "commit-msg",
             "post-commit",
+            "reference-transaction",
         ] {
             if is_executable_hook(&self.git_dir.join("hooks").join(hook)) {
                 return Err(NativeGitIndexError::UnsupportedHookPolicy);
