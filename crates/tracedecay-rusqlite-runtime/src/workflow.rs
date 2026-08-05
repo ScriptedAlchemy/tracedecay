@@ -318,7 +318,6 @@ impl WorkflowDefinitionAuthorityPort for WorkflowSqliteAuthority {
         let digest = definition_digest(definition)?;
         let transaction = self
             .storage
-            .handle
             .begin_immediate()
             .map_err(definition_unavailable)?;
         let existing = query_tx(
@@ -427,7 +426,6 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
         let scope_payload = encode_json(grant.scope()).map_err(|_| handoff_codec_unavailable())?;
         let transaction = self
             .storage
-            .handle
             .begin_immediate()
             .map_err(handoff_unavailable)?;
         let existing = query_tx(
@@ -469,7 +467,6 @@ impl TaskHandoffAuthorityPort for WorkflowSqliteAuthority {
     ) -> Result<TaskHandoffConsumeOutcome, TaskHandoffAuthorityError> {
         let transaction = self
             .storage
-            .handle
             .begin_immediate()
             .map_err(handoff_unavailable)?;
         let rows = query_tx(
@@ -541,7 +538,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .map_err(|_| workflow_effect_codec_unavailable())?;
         let transaction = self
             .storage
-            .handle
             .begin_immediate()
             .map_err(workflow_effect_unavailable)?;
         let existing = query_tx(
@@ -638,7 +634,6 @@ impl WorkflowEffectAuthorityPortV1 for WorkflowSqliteAuthority {
             .map_err(|_| workflow_effect_codec_unavailable())?;
         let transaction = self
             .storage
-            .handle
             .begin_immediate()
             .map_err(workflow_effect_unavailable)?;
         let current = query_tx(
@@ -846,7 +841,6 @@ fn reconcile_workflow_effect(
         .cloned()
         .ok_or(WorkflowEffectAuthorityErrorV1::InvalidTransition)?;
     let transaction = storage
-        .handle
         .begin_immediate()
         .map_err(workflow_effect_unavailable)?;
     let changed = execute_tx_changed(
