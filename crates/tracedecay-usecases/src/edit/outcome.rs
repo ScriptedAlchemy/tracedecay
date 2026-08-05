@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::{ApiMigrationApplyResultV1, EffectResult, SourceEditVerificationV1};
+use tracedecay_application::{EffectResult, SourceEditVerificationV1};
 use tracedecay_domain::ManifestDigest;
 
 use tracedecay_application::source_edit::{
@@ -55,9 +55,6 @@ impl SourceEditDurableOutcomeV1 {
                 Some(result.applied_imports.len()),
                 Some(result.impact.len()),
             ),
-            SourceEditOutcome::ApiMigration(result) => {
-                (Some(result.changed_sites), None, None, None, None)
-            }
             _ => (None, None, None, None, None),
         };
         Self {
@@ -112,7 +109,6 @@ pub enum SourceEditOutcome {
     Insert(InsertResult),
     AstGrep(AstGrepResult),
     Move(MoveResult),
-    ApiMigration(ApiMigrationApplyResultV1),
     Failed { message: String },
     Cancelled { message: String },
     TimedOut { message: String },
@@ -129,7 +125,6 @@ impl SourceEditOutcome {
             Self::Insert(result) => result.success,
             Self::AstGrep(result) => result.success,
             Self::Move(result) => result.success,
-            Self::ApiMigration(result) => result.success,
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -146,7 +141,6 @@ impl SourceEditOutcome {
             Self::Insert(result) => &result.message,
             Self::AstGrep(result) => &result.message,
             Self::Move(result) => &result.message,
-            Self::ApiMigration(result) => &result.message,
             Self::Failed { message } | Self::Cancelled { message } | Self::TimedOut { message } => {
                 message
             }
@@ -179,7 +173,6 @@ impl SourceEditOutcome {
             Self::Insert(result) => vec![result.file_path.clone()],
             Self::AstGrep(result) => vec![result.file_path.clone()],
             Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
-            Self::ApiMigration(result) => result.changed_files.clone(),
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -196,7 +189,6 @@ impl SourceEditOutcome {
             Self::Insert(result) => vec![result.file_path.clone()],
             Self::AstGrep(result) => vec![result.file_path.clone()],
             Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
-            Self::ApiMigration(result) => result.changed_files.clone(),
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -213,7 +205,6 @@ impl SourceEditOutcome {
             Self::Insert(result) => Some(&result.file_path),
             Self::AstGrep(result) => Some(&result.file_path),
             Self::Move(_)
-            | Self::ApiMigration(_)
             | Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -240,7 +231,6 @@ impl SourceEditOutcome {
             Self::Insert(result) => serde_json::to_value(result),
             Self::AstGrep(result) => serde_json::to_value(result),
             Self::Move(result) => serde_json::to_value(result),
-            Self::ApiMigration(result) => serde_json::to_value(result),
             Self::Failed { message } => Ok(json!({
                 "success": false,
                 "failed": true,

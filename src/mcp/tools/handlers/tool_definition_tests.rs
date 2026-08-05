@@ -21,8 +21,6 @@ fn test_tool_definitions_complete() {
     let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(tool_names.contains(&"tracedecay_search"));
     assert!(tool_names.contains(&"tracedecay_move_symbol"));
-    assert!(tool_names.contains(&"tracedecay_api_migration_plan"));
-    assert!(tool_names.contains(&"tracedecay_api_migration_apply"));
     assert!(tool_names.contains(&"tracedecay_analytics"));
     assert!(tool_names.contains(&"tracedecay_retrieve"));
     assert!(tool_names.contains(&"tracedecay_context"));
@@ -131,8 +129,6 @@ fn test_tool_definitions_complete() {
     assert!(tool_names.contains(&"tracedecay_replace_symbol"));
     assert!(tool_names.contains(&"tracedecay_insert_at_symbol"));
     assert!(tool_names.contains(&"tracedecay_move_symbol"));
-    assert!(tool_names.contains(&"tracedecay_api_migration_plan"));
-    assert!(tool_names.contains(&"tracedecay_api_migration_apply"));
     assert!(tool_names.contains(&"tracedecay_source_edit_reconcile"));
     assert!(tool_names.contains(&"tracedecay_find_exact_symbol"));
 }
@@ -235,7 +231,6 @@ fn test_tool_definitions_have_annotations() {
         "tracedecay_insert_at_symbol",
         "tracedecay_move_symbol",
         "tracedecay_ast_grep_rewrite",
-        "tracedecay_api_migration_apply",
         "tracedecay_source_edit_reconcile",
         "tracedecay_git_apply",
         "tracedecay_run_affected_tests",

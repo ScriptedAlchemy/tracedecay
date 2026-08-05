@@ -901,7 +901,7 @@ benchmarks do not ship.
   [17](17-official-public-api-and-sdks.md),
   [20](20-configuration-control-plane.md),
   [21](21-cli-mcp-tool-surface-and-output-unification.md),
-  [34](34-workspace-refactoring-and-api-migration.md),
+  [34](34-workspace-refactoring.md),
   [35](35-daemon-lsp-gateway-and-universal-diagnostics.md),
   [36](36-git-aware-change-context-and-index-transactions.md), and
   [37](37-branch-aware-feedback-cycle-pr-review-and-agent-proximity.md).
@@ -951,9 +951,8 @@ benchmarks do not ship.
   [13](13-research-provenance-and-context-anchors.md),
   [17](17-official-public-api-and-sdks.md),
   [19](19-system-defragmentation-convergence-and-extensibility.md),
-  [34](34-workspace-refactoring-and-api-migration.md), and every component
-  section whose independently released public API protocol crosses the
-  fresh-store boundary.
+  and every component section whose independently released public API protocol
+  crosses the fresh-store boundary.
 - PR20: [Plan 33](33-end-to-end-performance-optimization.md) and
   [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
   size-telemetry budgets, plus

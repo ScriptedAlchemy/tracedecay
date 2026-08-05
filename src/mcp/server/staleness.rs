@@ -24,8 +24,6 @@ pub(crate) fn needs_lazy_sync_before_dispatch(tool_name: &str) -> bool {
             | "tracedecay_insert_at"
             | "tracedecay_insert_at_symbol"
             | "tracedecay_move_symbol"
-            | "tracedecay_api_migration_plan"
-            | "tracedecay_api_migration_apply"
             | "tracedecay_multi_str_replace"
             | "tracedecay_replace_symbol"
             | "tracedecay_str_replace"

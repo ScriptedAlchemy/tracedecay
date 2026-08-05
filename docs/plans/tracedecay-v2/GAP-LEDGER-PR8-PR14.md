@@ -25,8 +25,6 @@ callable behavior or direct regression evidence.
   ordinary repository verification remained unresolved.
 - Plan 32's minimal real provider/runtime and Work projection belong to PR14;
   residual advanced workflow behavior belongs to PR17.
-- Plan 34's callable API-migration plan/apply journey belongs to the active
-  integration band; final temporary-alias deletion belongs to Plan 19.
 
 This snapshot does not supersede current status in the index or `NEXT.md`.
 

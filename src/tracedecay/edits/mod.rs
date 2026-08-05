@@ -51,7 +51,6 @@
 //! }
 //! ```
 
-mod api_migration;
 mod ast_grep;
 mod file_authority;
 mod plan;
@@ -59,8 +58,6 @@ mod preview;
 mod primitives;
 mod symbols;
 
-#[cfg(test)]
-mod api_migration_graph_tests;
 #[cfg(test)]
 mod execute_tests;
 #[cfg(test)]
