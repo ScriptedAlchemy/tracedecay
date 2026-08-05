@@ -4,7 +4,8 @@ use std::time::Duration;
 use tracedecay_application::session_sync::{
     SessionSyncCommandV1, SessionSyncCompletionReceiptV1, SessionSyncCoverageV1,
     SessionSyncJournalStatusV1, SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
-    SessionSyncScopeV1, SessionSyncSourceCoverageV1, SessionSyncStatsV1, SessionTranscriptImportV1,
+    SessionSyncScopeV1, SessionSyncServicePort, SessionSyncSourceCoverageV1, SessionSyncStatsV1,
+    SessionTranscriptImportV1,
 };
 use tracedecay_application::{
     CancellationSignal, Deadline, IdempotencyKey, OperationTermination, RequestId,
@@ -14,10 +15,10 @@ use super::work::{
     coalesced_alias_local_interruption, git_history_frontier_from_meta, git_history_source_frontier,
 };
 use super::{
-    DaemonSessionSyncService, completed_profile_sweep_covers, completion_termination,
-    decode_matching_journal,
+    DaemonSessionSyncConfig, DaemonSessionSyncService, completed_profile_sweep_covers,
+    completion_termination, decode_matching_journal, journal_key,
 };
-use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
+use tracedecay_domain::{BrainId, ProjectId, UserProfileId, UtcMicros};
 
 #[test]
 fn committed_result_stays_terminal_when_cancel_or_deadline_arrives_late() {
@@ -138,6 +139,139 @@ fn git_recovery_frontier_preserves_the_exact_committed_tuple() {
         })
     );
     assert!(git_history_frontier_from_meta(None, Some(999)).is_none());
+}
+
+#[tokio::test]
+async fn cancel_in_alias_activation_gap_mirrors_primary_terminal_receipt() {
+    let profile_root = tempfile::tempdir().unwrap();
+    let project_root = profile_root.path().join("project");
+    std::fs::create_dir_all(&project_root).unwrap();
+    let project_id = ProjectId::new("project.cancel-alias-race").unwrap();
+    let profile_id = UserProfileId::new("profile.cancel-alias-race").unwrap();
+    let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        profile_root.path(),
+        &project_root,
+        project_id.clone(),
+    )
+    .await
+    .unwrap();
+    let project_sessions = runtime
+        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Project)
+        .unwrap();
+    let profile_sessions = runtime
+        .registered_database_arc(crate::application::host_admission::HostAdmissionScope::Profile)
+        .unwrap();
+    let service = DaemonSessionSyncService::default();
+    service
+        .register_project(DaemonSessionSyncConfig {
+            brain_id: BrainId::new("brain.cancel-alias-race").unwrap(),
+            profile_id: profile_id.clone(),
+            project_id: project_id.clone(),
+            profile_root: profile_root.path().to_path_buf(),
+            project_root,
+            transcript_source_home: None,
+            project_sessions,
+            user_sessions: Arc::clone(&profile_sessions),
+            registry: Arc::clone(&profile_sessions),
+            startup_import: false,
+            project_refresh:
+                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+            user_refresh:
+                crate::daemon::session_temporal_refresh_scheduler::SessionTemporalRefreshWake::unavailable(),
+        })
+        .await
+        .unwrap();
+    let scope = SessionSyncScopeV1::new(project_id, profile_id);
+    let primary_request = SessionSyncRequestV1::new(
+        RequestId::new("session-sync.cancel-primary").unwrap(),
+        IdempotencyKey::new("session-sync.cancel-primary").unwrap(),
+        scope.clone(),
+        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
+        CancellationSignal::active("session-sync.cancel-primary").unwrap(),
+        SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+    );
+    let mut primary = SessionSyncJournalV1::queued(&primary_request, UtcMicros(10));
+    primary.status = SessionSyncJournalStatusV1::Complete;
+    primary.completion = Some(SessionSyncCompletionReceiptV1 {
+        admission: primary.admission.clone(),
+        coalesced_primary: None,
+        completed_at: UtcMicros(20),
+        termination: OperationTermination::Completed,
+        stats: SessionSyncStatsV1 {
+            sessions_imported: 1,
+            ..SessionSyncStatsV1::default()
+        },
+        coverage: vec![SessionSyncSourceCoverageV1 {
+            store_scope: "project".to_owned(),
+            coverage: SessionSyncCoverageV1::Complete,
+        }],
+        source_frontiers: Vec::new(),
+        failure_codes: Vec::new(),
+    });
+    let alias_request = SessionSyncRequestV1::new(
+        RequestId::new("session-sync.cancel-alias").unwrap(),
+        IdempotencyKey::new("session-sync.cancel-alias").unwrap(),
+        scope.clone(),
+        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
+        CancellationSignal::active("session-sync.cancel-alias").unwrap(),
+        SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+    );
+    let alias = SessionSyncJournalV1::coalesced(
+        &alias_request,
+        UtcMicros(11),
+        primary_request.idempotency_key().clone(),
+    );
+    let primary_key = journal_key(&scope, primary_request.idempotency_key());
+    let alias_key = journal_key(&scope, alias_request.idempotency_key());
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
+    let cancel_service = service.clone();
+    let cancel_barrier = Arc::clone(&barrier);
+    let control = tracedecay_application::session_sync::SessionSyncControlV1::new(
+        scope,
+        alias_request.idempotency_key().clone(),
+    );
+    let cancel = tokio::spawn(async move {
+        cancel_barrier.wait().await;
+        SessionSyncServicePort::cancel(&cancel_service, control).await
+    });
+
+    assert!(
+        profile_sessions
+            .insert_session_sync_journal(&primary_key, &serde_json::to_string(&primary).unwrap(),)
+            .await
+            .unwrap()
+    );
+    assert!(
+        profile_sessions
+            .insert_session_sync_journal(&alias_key, &serde_json::to_string(&alias).unwrap())
+            .await
+            .unwrap()
+    );
+    assert!(!service.active_contains(&alias_key));
+    barrier.wait().await;
+
+    assert!(matches!(
+        cancel.await.unwrap(),
+        SessionSyncOutcomeV1::Complete(receipt)
+            if receipt.termination == OperationTermination::Completed
+                && receipt.admission.idempotency_key == *alias_request.idempotency_key()
+                && receipt.coalesced_primary
+                    == Some(primary_request.idempotency_key().clone())
+    ));
+    let persisted: SessionSyncJournalV1 = serde_json::from_str(
+        &profile_sessions
+            .read_session_sync_journal(&alias_key)
+            .await
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(persisted.cancel_requested_at.is_none());
+    assert_eq!(
+        persisted.completion.unwrap().termination,
+        OperationTermination::Completed
+    );
+    drop(runtime);
 }
 
 #[tokio::test]
