@@ -33,7 +33,6 @@ from outcomes import (
     objects as _objects,
     response_problem_code,
     response_handle,
-    search_node_id,
     text_blocks,
 )
 from journeys import JourneyError, api_migration_plan_arguments, prepare as prepare_journey
@@ -487,26 +486,33 @@ def prime_fixture_values(
             raise SweepError(f"required fixture producer is unavailable: {tool}")
         return policy.deadline_ms
 
+    # The code-index search surface publishes canonical code anchors, while the
+    # legacy graph consumer requires a graph node id. Resolve the fixture's
+    # known semantic name through the live qualified-name producer instead of
+    # reconstructing either opaque identity in the harness.
     ends_at = time.monotonic() + 30
     node_id: str | None = None
     while node_id is None:
-        search, elapsed_ms = client.call_tool(
-            "tracedecay_search", {"query": fixture["query"], "semantic_mode": "fallback_allowed"}, deadline("tracedecay_search")
+        resolved, elapsed_ms = client.call_tool(
+            "tracedecay_by_qualified_name", {"qualified_name": fixture["symbol"]}, deadline("tracedecay_by_qualified_name")
         )
-        if search.get("error") is not None or (
-            isinstance(search.get("result"), dict) and search["result"].get("isError") is True
+        if resolved.get("error") is not None or (
+            isinstance(resolved.get("result"), dict) and resolved["result"].get("isError") is True
         ):
-            row = response_row("tool", "tracedecay_search", search, elapsed_ms, deadline("tracedecay_search"))
-            raise SweepError(f"search producer failed: {row['problem_code'] or row['note']}")
-        if duration_us(search) is None:
-            raise SweepError("search producer omitted the enabled _meta.duration_us receipt")
-        node_id = search_node_id(search)
+            row = response_row(
+                "tool", "tracedecay_by_qualified_name", resolved, elapsed_ms, deadline("tracedecay_by_qualified_name")
+            )
+            raise SweepError(f"qualified-name producer failed: {row['problem_code'] or row['note']}")
+        if duration_us(resolved) is None:
+            raise SweepError("qualified-name producer omitted the enabled _meta.duration_us receipt")
+        candidate = first_value(resolved, {"node_id"})
+        node_id = candidate if isinstance(candidate, str) and candidate else None
         if node_id is None:
             if time.monotonic() >= ends_at:
                 break
             time.sleep(0.1)
     if node_id is None:
-        raise SweepError("search producer did not publish the fixture node id")
+        raise SweepError("qualified-name producer did not publish the fixture node id")
     node = _producer_call(client, "tracedecay_node", {"node_id": node_id}, deadline("tracedecay_node"))
     qualified_name = first_value(node, {"qualified_name"})
     if not isinstance(qualified_name, str) or not qualified_name:
@@ -653,69 +659,99 @@ def missing_effect_journey_row(policy: ToolPolicy) -> dict[str, Any]:
 def _journey_call(client: McpClient, tool: str, arguments: dict[str, Any], deadline_ms: int) -> dict[str, Any]:
     response, elapsed_ms = client.call_tool(tool, arguments, deadline_ms)
     row = response_row("tool", tool, response, elapsed_ms, deadline_ms)
-    if row["verdict"] != "PASS":
+    if row["verdict"] != "PASS" and not (
+        tool == "tracedecay_session_end"
+        and arguments == {}
+        and row["problem_code"] == "tool_sweep.success_framed_not_found"
+        and has_status(response, "no_baseline")
+    ):
         raise SweepError(f"{tool} journey call failed: {row['problem_code'] or row['note']}")
     if duration_us(response) is None:
         raise SweepError(f"{tool} journey call omitted the enabled _meta.duration_us receipt")
     return response
 
 
-def _prepared_reconciliation_journal(deadline_s: float) -> dict[str, Any]:
-    data_dir = os.environ.get("TRACEDECAY_DATA_DIR")
-    if not data_dir:
-        raise SweepError("isolated reconciliation journey has no TRACEDECAY_DATA_DIR")
-    path = Path(data_dir) / "source-edit-transactions-v1" / "active.json"
-    ends_at = time.monotonic() + deadline_s
-    while time.monotonic() < ends_at:
-        try:
-            value = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            time.sleep(0.001)
-            continue
-        if isinstance(value, dict) and value.get("state") == "prepared":
-            return value
-    raise SweepError("source edit did not retain a prepared durable journal before recovery")
+def _preview_expected_state(
+    client: McpClient, preview: dict[str, Any], policies: dict[str, ToolPolicy],
+) -> str | None:
+    """Resolve a truncated source preview through its production retrieval handle."""
+    observed = expected_state(preview)
+    if observed is not None:
+        return observed
+    handle = response_handle(preview)
+    retrieve = policies.get("tracedecay_retrieve")
+    if handle is None or retrieve is None or retrieve.availability != "available":
+        return None
+    retrieved = _journey_call(client, retrieve.name, {"handle": handle}, retrieve.deadline_ms)
+    return expected_state(retrieved)
+
+
+def _reconciliation_identity(response: dict[str, Any]) -> tuple[str, str, str]:
+    """Read the original effect identity from the daemon's EffectUnknown result."""
+    if not has_true(response, "effect_unknown"):
+        raise SweepError("source edit producer did not publish an EffectUnknown result")
+    effect_id = first_value(response, {"effect_id"})
+    input_digest = first_value(response, {"input_digest"})
+    idempotency_key = first_value(response, {"idempotency_key"})
+    values = (effect_id, input_digest, idempotency_key)
+    if not all(isinstance(value, str) and value for value in values):
+        raise SweepError("EffectUnknown producer omitted its reconciliation identity")
+    return effect_id, input_digest, idempotency_key
 
 
 def _reconcile_effect(
     client: McpClient, policy: ToolPolicy, fixture: dict[str, str], policies: dict[str, ToolPolicy],
 ) -> dict[str, Any]:
-    """Create a real crash-recovery prerequisite, then reconcile it through MCP."""
-    source = Path(fixture["root"]) / "reconciliation-source.txt"
-    original = "reconciliation anchor\n" + "x" * (2 * 1024 * 1024)
+    """Produce a real EffectUnknown, restart, then reconcile its retained receipt."""
+    locked = Path(fixture["root"]) / "src" / "locked"
+    locked.mkdir()
+    source = locked / "reconciliation-source.txt"
+    original = "reconciliation anchor\n"
     source.write_text(original)
-    preview = _journey_call(
-        client,
-        "tracedecay_str_replace",
-        {"path": source.name, "old_str": "reconciliation anchor", "new_str": "reconciled anchor", "dry_run": True},
-        policies["tracedecay_str_replace"].deadline_ms,
-    )
-    observed = expected_state(preview)
-    if observed is None:
-        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_preview_missing", "source-edit preview omitted expected_state")
-    arguments = {
-        "path": source.name,
-        "old_str": "reconciliation anchor",
-        "new_str": "reconciled anchor",
-        "dry_run": False,
-        "verify": False,
-        "idempotency_key": f"tool-sweep-reconcile-{time.monotonic_ns()}",
-        "expected_state": observed,
-    }
-    request_id = client._new_id()
-    client._send({"jsonrpc": "2.0", "id": request_id, "method": "tools/call", "params": {"name": "tracedecay_str_replace", "arguments": arguments}})
     try:
-        journal = _prepared_reconciliation_journal(5)
+        locked.chmod(0o555)
+        preview = _journey_call(
+            client,
+            "tracedecay_str_replace",
+            {
+                "path": "src/locked/reconciliation-source.txt",
+                "old_str": "reconciliation anchor",
+                "new_str": "reconciled anchor",
+                "dry_run": True,
+            },
+            policies["tracedecay_str_replace"].deadline_ms,
+        )
+        observed = _preview_expected_state(client, preview, policies)
+        if observed is None:
+            return _failure_row(
+                "tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_preview_missing",
+                "source-edit preview omitted expected_state and retrieval handle",
+            )
+        producer, elapsed_ms = client.call_tool(
+            "tracedecay_str_replace",
+            {
+                "path": "src/locked/reconciliation-source.txt",
+                "old_str": "reconciliation anchor",
+                "new_str": "reconciled anchor",
+                "dry_run": False,
+                "verify": False,
+                "idempotency_key": f"tool-sweep-reconcile-{time.monotonic_ns()}",
+                "expected_state": observed,
+            },
+            policies["tracedecay_str_replace"].deadline_ms,
+        )
+        if duration_us(producer) is None:
+            return _failure_row(
+                "tool", policy.name, policy.deadline_ms, "tool_sweep.receipt_missing",
+                "EffectUnknown producer omitted _meta.duration_us with --timings",
+            )
+        effect_id, input_digest, idempotency_key = _reconciliation_identity(producer)
     except Exception as error:
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_prerequisite_missing", str(error))
+    finally:
+        locked.chmod(0o755)
     client.terminate_for_recovery_test()
 
-    effect_id = journal.get("effect_id")
-    input_digest = journal.get("input_digest")
-    request = journal.get("request")
-    idempotency_key = request.get("idempotency_key") if isinstance(request, dict) else None
-    if not all(isinstance(value, str) and value for value in (effect_id, input_digest, idempotency_key)):
-        return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_journal_invalid", "prepared journal omitted reconciliation identity")
     if source.read_text() != original:
         return _failure_row("tool", policy.name, policy.deadline_ms, "tool_sweep.reconciliation_preimage_changed", "crash prerequisite changed source before reconciliation")
     recovery = McpClient(client._process.args[0], Path(fixture["root"]), Path(fixture["root"]) / "reconciliation-mcp.log")
@@ -764,6 +800,9 @@ def execute_effect(
 
         prepared = prepare_journey(
             policy.name, client, fixture, deadline,
+            # Only the documented session inverse may consume `no_baseline`;
+            # every direct coverage row and every other journey rejects a
+            # success-framed not-found response.
             lambda tool, arguments, deadline_ms: _journey_call(client, tool, arguments, deadline_ms),
         )
         if prepared is None:

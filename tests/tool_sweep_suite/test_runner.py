@@ -110,6 +110,62 @@ class ProblemCodeTests(unittest.TestCase):
 
         self.assertEqual(fact_id, 42)
 
+    def test_indented_markdown_node_identity_is_consumable(self) -> None:
+        """Nested Markdown fields from a live qualified-name producer retain their identity."""
+        runner = load_runner()
+
+        node_id = runner.first_value(
+            {"result": {"content": [{"type": "text", "text": "  **node_id:** `function:fixture`\n"}]}},
+            {"node_id"},
+        )
+
+        self.assertEqual(node_id, "function:fixture")
+
+    def test_truncated_markdown_preview_exposes_its_retrieval_handle(self) -> None:
+        """A source preview may defer its full expected state to tracedecay_retrieve."""
+        runner = load_runner()
+
+        handle = runner.response_handle(
+            {"result": {"content": [{"type": "text", "text": "# Truncated Response\n\nRetrieve it with handle `rh_fixture`."}]}}
+        )
+
+        self.assertEqual(handle, "rh_fixture")
+
+    def test_effect_unknown_markdown_exposes_reconciliation_identity(self) -> None:
+        """Reconciliation consumes the daemon's original effect receipt, not a guessed journal."""
+        runner = load_runner()
+
+        identity = runner._reconciliation_identity(
+            {"result": {"content": [{"type": "text", "text": "\n".join((
+                "**effect_unknown:** true",
+                "**effect_id:** `effect.source-edit.fixture`",
+                "**idempotency_key:** fixture-key",
+                "**input_digest:** sha256:" + "a" * 64,
+            ))}]}}
+        )
+
+        self.assertEqual(
+            identity,
+            ("effect.source-edit.fixture", "sha256:" + "a" * 64, "fixture-key"),
+        )
+
+    def test_only_documented_session_absence_can_pass_a_journey_call(self) -> None:
+        """The session rollback has an explicit absence state; generic not-found remains failure."""
+        runner = load_runner()
+
+        class Client:
+            def call_tool(self, _name: str, _arguments: dict[str, object], _deadline_ms: int):
+                return {
+                    "result": {
+                        "_meta": {"duration_us": 1},
+                        "content": [{"type": "text", "text": "**status:** no_baseline\n**message:** No session baseline found."}],
+                    }
+                }, 1
+
+        runner._journey_call(Client(), "tracedecay_session_end", {}, 1_000)
+        with self.assertRaises(runner.SweepError):
+            runner._journey_call(Client(), "tracedecay_node", {}, 1_000)
+
 
 class NegotiatedSurfaceTests(unittest.TestCase):
     def test_initialize_capabilities_control_optional_surface_discovery(self) -> None:

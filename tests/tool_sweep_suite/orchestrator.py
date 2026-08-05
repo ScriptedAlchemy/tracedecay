@@ -13,6 +13,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, BinaryIO
 from xml.sax.saxutils import escape
@@ -220,7 +221,9 @@ def run_bounded_command(
         return CommandOutcome(process.returncode, cancelled=True, reason="whole_run_deadline_exceeded")
 
 
-def _phase_environment(root: Path) -> dict[str, str]:
+def _phase_environment(root: Path, *, temp_root: Path | None = None) -> dict[str, str]:
+    """Build one hermetic phase environment with a pre-created short temp root."""
+    tmp_root = temp_root or root / "tmp"
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -233,9 +236,9 @@ def _phase_environment(root: Path) -> dict[str, str]:
             "XDG_CONFIG_HOME": str(root / "config"),
             "XDG_DATA_HOME": str(root / "data"),
             "XDG_STATE_HOME": str(root / "state"),
-            "TMPDIR": str(root / "tmp"),
-            "TMP": str(root / "tmp"),
-            "TEMP": str(root / "tmp"),
+            "TMPDIR": str(tmp_root),
+            "TMP": str(tmp_root),
+            "TEMP": str(tmp_root),
             "TRACEDECAY_PROFILE_DIR": str(root / "profile"),
             "TRACEDECAY_DATA_DIR": str(root / "profile"),
             "TRACEDECAY_GLOBAL_DB": str(root / "profile" / "global.db"),
@@ -277,11 +280,15 @@ def run_phase(
         command.extend(["--effect", effect])
     if catalog is not None:
         command.extend(["--catalog", str(catalog)])
-    with (root / "stdout.log").open("wb") as stdout, (root / "stderr.log").open("wb") as stderr:
-        outcome = run_bounded_command(
-            command, cwd=repo, environment=_phase_environment(root), remaining_s=deadline.remaining_s(),
-            stdout=stdout, stderr=stderr,
-        )
+    # The daemon wrapper appends another random directory and a Unix socket below
+    # TMPDIR. Keep that root short even when the retained artifact path is deep.
+    with tempfile.TemporaryDirectory(prefix="tds-") as raw_tmp:
+        environment = _phase_environment(root, temp_root=Path(raw_tmp))
+        with (root / "stdout.log").open("wb") as stdout, (root / "stderr.log").open("wb") as stderr:
+            outcome = run_bounded_command(
+                command, cwd=repo, environment=environment, remaining_s=deadline.remaining_s(),
+                stdout=stdout, stderr=stderr,
+            )
     return PhaseResult(label, root, outcome)
 
 
