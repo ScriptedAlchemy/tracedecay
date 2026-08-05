@@ -44,6 +44,7 @@
 
 mod capture;
 mod ingest;
+mod outcome;
 mod sqlite;
 mod store;
 #[cfg(test)]
@@ -53,7 +54,8 @@ pub use capture::{
     build_cursor_composer_capture_request, build_cursor_composer_envelope_capture_request,
     capture_cursor_composer_observation,
 };
-pub use ingest::{CursorComposerSource, CursorComposerSweepOutcome, DEFAULT_COMPOSER_ENVELOPE_CAP};
+pub use ingest::{CursorComposerSource, DEFAULT_COMPOSER_ENVELOPE_CAP};
+pub use outcome::CursorComposerSweepOutcome;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use tracedecay_capture::cursor_composer::{
     normalize_cursor_composer_observation,
