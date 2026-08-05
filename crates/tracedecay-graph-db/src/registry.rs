@@ -16,7 +16,7 @@ use crate::{
 use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
-use self::path::{GraphPathAnchor, validate_managed_graph_path};
+use self::path::{GraphPathAnchor, GraphPathPreparation, validate_managed_graph_path};
 use crate::error::rollback_failure;
 
 #[path = "registry/identity.rs"]
@@ -302,7 +302,7 @@ impl GraphDbRegistry {
         let mut state = self.state_lock()?;
         match opened {
             Ok((owner, mut path_anchor)) => {
-                let publication_error = check_request(
+                let publication_verification = check_request(
                     registration.lifecycle_cancellation.as_ref(),
                     registration.deadline,
                 )
@@ -310,35 +310,40 @@ impl GraphDbRegistry {
                     check_request(registration.cancellation.as_ref(), registration.deadline)
                 })
                 .and_then(|()| path_anchor.verify(&path))
-                .and_then(|()| path_anchor.verify_engine_lock())
-                .err();
-                if let Some(error) = publication_error {
-                    let error = close_and_abort_graph_open(
-                        &owner,
-                        path_anchor,
-                        "reject unpublished registered graph",
-                        error,
-                    );
-                    if retains_fault(&error) {
-                        let retained_owner = (!owner.is_closed()).then(|| Arc::new(owner));
-                        state.entries.insert(
-                            shard_id,
-                            RegistryEntry::Faulted {
-                                authority_lease,
-                                binding,
-                                verified_locator,
-                                path,
-                                expected_format,
-                                owner: retained_owner,
-                                error: error.clone(),
-                            },
+                .and_then(|verification| {
+                    verification.verify_engine_lock()?;
+                    Ok(verification)
+                });
+                let publication_verification = match publication_verification {
+                    Ok(verification) => verification,
+                    Err(error) => {
+                        let error = close_and_abort_graph_open(
+                            &owner,
+                            path_anchor,
+                            "reject unpublished registered graph",
+                            error,
                         );
-                    } else {
-                        state.entries.remove(&shard_id);
+                        if retains_fault(&error) {
+                            let retained_owner = (!owner.is_closed()).then(|| Arc::new(owner));
+                            state.entries.insert(
+                                shard_id,
+                                RegistryEntry::Faulted {
+                                    authority_lease,
+                                    binding,
+                                    verified_locator,
+                                    path,
+                                    expected_format,
+                                    owner: retained_owner,
+                                    error: error.clone(),
+                                },
+                            );
+                        } else {
+                            state.entries.remove(&shard_id);
+                        }
+                        self.inner.changed.notify_all();
+                        return Err(error);
                     }
-                    self.inner.changed.notify_all();
-                    return Err(error);
-                }
+                };
                 path_anchor.commit();
                 let owner = Arc::new(owner);
                 let database = owner.handle();
@@ -354,6 +359,7 @@ impl GraphDbRegistry {
                         last_used: Instant::now(),
                     },
                 );
+                drop(publication_verification);
                 self.inner.changed.notify_all();
                 Ok(database)
             }
@@ -904,12 +910,12 @@ fn open_registered_graph(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
     )?;
-    let mut path_anchor = GraphPathAnchor::acquire(path)?;
+    let preparation = GraphPathPreparation::prepare(path)?;
     if let Err(error) = check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
     ) {
-        return Err(path_anchor.abort(error));
+        return Err(preparation.abort_failed_open(error));
     }
     let owner = match GraphDbOwner::open(GraphDbOpenOptions {
         location: GraphDbLocation::Persistent(path.to_path_buf()),
@@ -918,7 +924,29 @@ fn open_registered_graph(
         cancellation: Arc::clone(&registration.lifecycle_cancellation),
     }) {
         Ok(owner) => owner,
-        Err(error) => return Err(path_anchor.abort(error)),
+        Err(error) => return Err(preparation.abort_failed_open(error)),
+    };
+    let path_anchor = match preparation.complete_after_open() {
+        Ok(path_anchor) => path_anchor,
+        Err(failure) => {
+            let close_result = owner.close();
+            let cleanup_error = match failure.anchor {
+                Some(anchor) => anchor.abort(failure.error),
+                None => rollback_failure(
+                    "refuse created graph cleanup without identity",
+                    failure.error,
+                    "created graph identity was never anchored",
+                ),
+            };
+            return Err(match close_result {
+                Ok(()) => cleanup_error,
+                Err(close_error) => rollback_failure(
+                    "reject unverified registered graph open",
+                    cleanup_error,
+                    close_error,
+                ),
+            });
+        }
     };
     if let Err(error) = check_request(
         registration.lifecycle_cancellation.as_ref(),
@@ -931,15 +959,19 @@ fn open_registered_graph(
             error,
         ));
     }
-    if let Err(error) = path_anchor.verify(path) {
-        return Err(close_and_abort_graph_open(
-            &owner,
-            path_anchor,
-            "reject replaced registered graph open",
-            error,
-        ));
-    }
-    if let Err(error) = path_anchor.verify_engine_lock() {
+    let verification = match path_anchor.verify(path) {
+        Ok(verification) => verification,
+        Err(error) => {
+            return Err(close_and_abort_graph_open(
+                &owner,
+                path_anchor,
+                "reject replaced registered graph open",
+                error,
+            ));
+        }
+    };
+    if let Err(error) = verification.verify_engine_lock() {
+        drop(verification);
         return Err(close_and_abort_graph_open(
             &owner,
             path_anchor,
@@ -1029,7 +1061,7 @@ mod tests {
     use tempfile::tempdir;
     use tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY;
 
-    use super::{GraphPathAnchor, close_and_abort_graph_open};
+    use super::{GraphPathPreparation, close_and_abort_graph_open};
     use crate::{GraphDbError, GraphDbOwner, NeverCancelled};
 
     #[test]
@@ -1038,7 +1070,13 @@ mod tests {
         let private_directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
         tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
         let graph_path = private_directory.join("graph.grafeo");
-        let anchor = GraphPathAnchor::acquire(&graph_path).unwrap();
+        let preparation = GraphPathPreparation::prepare(&graph_path).unwrap();
+        let manager = grafeo_storage::file::GrafeoFileManager::create(&graph_path).unwrap();
+        let anchor = match preparation.complete_after_open() {
+            Ok(anchor) => anchor,
+            Err(failure) => panic!("created graph anchor failed: {}", failure.error),
+        };
+        drop(manager);
         let moved = private_directory.join("moved.grafeo");
         std::fs::rename(&graph_path, &moved).unwrap();
         drop(tracedecay_private_fs::create_private_file(&graph_path).unwrap());

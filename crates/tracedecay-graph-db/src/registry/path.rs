@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
-use grafeo_storage::file::GrafeoFileManager;
 use same_file::Handle;
 use tracedecay_domain::framed_log::{DirectorySyncPolicy, sync_directory};
 use tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY;
@@ -11,97 +10,185 @@ use crate::error::rollback_failure;
 
 pub(super) struct GraphPathAnchor {
     parent: Handle,
+    parent_probe: std::fs::File,
     file: Handle,
     lock_probe: std::fs::File,
     path: PathBuf,
     remove_on_drop: bool,
 }
 
-struct PendingGraphFile {
-    path: PathBuf,
-    file: Handle,
-    lock_probe: std::fs::File,
+pub(super) struct GraphPathVerification {
+    _parent: Handle,
+    _parent_probe: std::fs::File,
+    _file: Handle,
+    _file_probe: std::fs::File,
+    engine_lock_probe: std::fs::File,
 }
 
-impl GraphPathAnchor {
-    pub(super) fn acquire(path: &Path) -> Result<Self, GraphDbError> {
+pub(super) enum GraphPathPreparation {
+    Existing(GraphPathAnchor),
+    Missing {
+        parent: Handle,
+        parent_probe: std::fs::File,
+        path: PathBuf,
+    },
+}
+
+pub(super) struct GraphPathCompletionFailure {
+    pub(super) anchor: Option<GraphPathAnchor>,
+    pub(super) error: GraphDbError,
+}
+
+impl GraphPathPreparation {
+    pub(super) fn prepare(path: &Path) -> Result<Self, GraphDbError> {
         let parent_path = path
             .parent()
             .ok_or_else(|| GraphDbError::invalid("canonical graph path has no parent"))?;
         validate_managed_graph_path(path)?;
-        let parent = tracedecay_private_fs::open_private_directory(parent_path)
-            .and_then(Handle::from_file)
-            .map_err(|error| {
-                GraphDbError::unavailable(format!(
-                    "failed to anchor private graph directory: {error}"
-                ))
-            })?;
-        let (mut pending, existing_file) =
-            match tracedecay_private_fs::open_private_file(path).and_then(anchor_file) {
-                Ok(file) => (None, Some(file)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    (Some(initialize_graph_file(path)?), None)
-                }
-                Err(error) => {
-                    return Err(GraphDbError::unavailable(format!(
-                        "failed to anchor canonical graph database {}: {error}",
-                        path.display()
-                    )));
-                }
-            };
-        if let Err(error) = validate_managed_graph_path(path) {
-            return Err(abort_pending(pending, error));
-        }
-        let current_parent = tracedecay_private_fs::open_private_directory(parent_path)
-            .and_then(Handle::from_file)
-            .map_err(|error| {
-                abort_pending(
-                    pending.take(),
-                    GraphDbError::unavailable(format!(
-                        "failed to re-anchor private graph directory: {error}"
-                    )),
-                )
-            })?;
-        if parent != current_parent {
-            return Err(abort_pending(pending, GraphDbError::Conflict));
-        }
-        let (file, lock_probe, created) = match pending {
-            Some(pending) => {
-                let (file, lock_probe) = pending.finish();
-                (file, lock_probe, true)
-            }
-            None => {
-                let (file, lock_probe) = existing_file.ok_or_else(|| {
-                    GraphDbError::unavailable("canonical graph file anchor disappeared")
-                })?;
-                (file, lock_probe, false)
+        let (parent, parent_probe) = anchor_private_directory(parent_path, "anchor")?;
+        let file = match tracedecay_private_fs::open_private_file(path).and_then(anchor_file) {
+            Ok((file, lock_probe)) => Some((file, lock_probe)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(GraphDbError::unavailable(format!(
+                    "failed to anchor canonical graph database {}: {error}",
+                    path.display()
+                )));
             }
         };
-        verify_lock_available(&lock_probe)?;
-        Ok(Self {
-            parent,
-            file,
-            lock_probe,
-            path: path.to_path_buf(),
-            remove_on_drop: created,
-        })
+        let (current_parent, _current_parent_probe) =
+            anchor_private_directory(parent_path, "re-anchor")?;
+        if parent != current_parent {
+            return Err(GraphDbError::Conflict);
+        }
+        match file {
+            Some((file, lock_probe)) => {
+                let anchor = GraphPathAnchor {
+                    parent,
+                    parent_probe,
+                    file,
+                    lock_probe,
+                    path: path.to_path_buf(),
+                    remove_on_drop: false,
+                };
+                drop(anchor.verify(path)?);
+                verify_lock_available(&anchor.lock_probe)?;
+                Ok(Self::Existing(anchor))
+            }
+            None => {
+                require_path_absent(path)?;
+                Ok(Self::Missing {
+                    parent,
+                    parent_probe,
+                    path: path.to_path_buf(),
+                })
+            }
+        }
     }
 
-    pub(super) fn verify(&self, path: &Path) -> Result<(), GraphDbError> {
+    pub(super) fn complete_after_open(self) -> Result<GraphPathAnchor, GraphPathCompletionFailure> {
+        match self {
+            Self::Existing(anchor) => {
+                let verification = match anchor.verify(&anchor.path) {
+                    Ok(verification) => verification,
+                    Err(error) => {
+                        return Err(GraphPathCompletionFailure {
+                            anchor: Some(anchor),
+                            error,
+                        });
+                    }
+                };
+                if let Err(error) = verification.verify_engine_lock() {
+                    return Err(GraphPathCompletionFailure {
+                        anchor: Some(anchor),
+                        error,
+                    });
+                }
+                Ok(anchor)
+            }
+            Self::Missing {
+                parent,
+                parent_probe,
+                path,
+            } => {
+                let (file, lock_probe) =
+                    match tracedecay_private_fs::make_private_file(&path).and_then(anchor_file) {
+                        Ok(file) => file,
+                        Err(error) => {
+                            return Err(GraphPathCompletionFailure {
+                                anchor: None,
+                                error: GraphDbError::unavailable(format!(
+                                    "failed to anchor created graph database {}: {error}",
+                                    path.display()
+                                )),
+                            });
+                        }
+                    };
+                let anchor = GraphPathAnchor {
+                    parent,
+                    parent_probe,
+                    file,
+                    lock_probe,
+                    path,
+                    remove_on_drop: true,
+                };
+                let verification = match anchor.verify(&anchor.path) {
+                    Ok(verification) => verification,
+                    Err(error) => {
+                        return Err(GraphPathCompletionFailure {
+                            anchor: Some(anchor),
+                            error,
+                        });
+                    }
+                };
+                if let Err(error) = verification.verify_engine_lock() {
+                    return Err(GraphPathCompletionFailure {
+                        anchor: Some(anchor),
+                        error,
+                    });
+                }
+                if let Err(error) = sync_graph_parent(&anchor.path) {
+                    return Err(GraphPathCompletionFailure {
+                        anchor: Some(anchor),
+                        error,
+                    });
+                }
+                Ok(anchor)
+            }
+        }
+    }
+
+    pub(super) fn abort_failed_open(self, primary: GraphDbError) -> GraphDbError {
+        match self {
+            Self::Existing(_) => primary,
+            Self::Missing { path, .. } => match std::fs::symlink_metadata(&path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => primary,
+                Ok(_) => rollback_failure(
+                    "refuse failed graph cleanup without identity",
+                    primary,
+                    "failed open left a graph path that was never anchored",
+                ),
+                Err(error) => {
+                    rollback_failure("inspect failed graph open for cleanup", primary, error)
+                }
+            },
+        }
+    }
+}
+
+impl GraphPathAnchor {
+    pub(super) fn verify(&self, path: &Path) -> Result<GraphPathVerification, GraphDbError> {
         validate_managed_graph_path(path)?;
-        let current_parent = tracedecay_private_fs::open_private_directory(
+        let (current_parent, current_parent_probe) = anchor_private_directory(
             path.parent()
                 .ok_or_else(|| GraphDbError::invalid("canonical graph path has no parent"))?,
-        )
-        .and_then(Handle::from_file)
-        .map_err(|error| {
-            GraphDbError::unavailable(format!("failed to verify private graph directory: {error}"))
-        })?;
+            "verify",
+        )?;
         if self.parent != current_parent {
             return Err(GraphDbError::Conflict);
         }
-        let current = tracedecay_private_fs::open_private_file(path)
-            .and_then(Handle::from_file)
+        let (current, current_probe) = tracedecay_private_fs::open_private_file(path)
+            .and_then(anchor_file)
             .map_err(|error| {
                 GraphDbError::unavailable(format!(
                     "failed to verify canonical graph database {}: {error}",
@@ -111,31 +198,30 @@ impl GraphPathAnchor {
         if self.file != current {
             return Err(GraphDbError::Conflict);
         }
-        Ok(())
+        let engine_lock_probe =
+            self.lock_probe
+                .try_clone()
+                .map_err(|error| GraphDbError::Unavailable {
+                    message: format!(
+                        "failed to retain exact graph lock probe through publication: {error}"
+                    ),
+                })?;
+        Ok(GraphPathVerification {
+            _parent: current_parent,
+            _parent_probe: current_parent_probe,
+            _file: current,
+            _file_probe: current_probe,
+            engine_lock_probe,
+        })
     }
 
     /// Proves Grafeo took its exclusive lock on this exact anchored file.
     ///
-    /// Acquisition first proves this handle was unlocked. Under the
+    /// Preparation first proves an existing handle was unlocked. Under the
     /// owner-private, single-daemon registry invariant, the only permitted
     /// intervening locker is the `GraphDbOwner` opened by this registry.
     pub(super) fn verify_engine_lock(&self) -> Result<(), GraphDbError> {
-        match self.lock_probe.try_lock_exclusive() {
-            Ok(()) => {
-                FileExt::unlock(&self.lock_probe).map_err(|error| {
-                    GraphDbError::DurabilityUncertain {
-                        message: format!(
-                            "failed to release unexpected graph identity probe lock: {error}"
-                        ),
-                    }
-                })?;
-                Err(GraphDbError::Conflict)
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
-            Err(error) => Err(GraphDbError::unavailable(format!(
-                "failed to prove Grafeo owns the anchored graph file: {error}"
-            ))),
-        }
+        verify_engine_lock(&self.lock_probe)
     }
 
     pub(super) fn commit(&mut self) {
@@ -147,61 +233,71 @@ impl GraphPathAnchor {
             return primary;
         }
         self.remove_on_drop = false;
-        cleanup_created_file(&self.path, Some(&self.file), primary)
+        cleanup_created_file(
+            &self.path,
+            &self.parent,
+            &self.parent_probe,
+            &self.file,
+            &self.lock_probe,
+            primary,
+        )
     }
 }
 
-impl PendingGraphFile {
-    fn new(path: &Path, file: Handle, lock_probe: std::fs::File) -> Self {
-        Self {
-            path: path.to_path_buf(),
-            file,
-            lock_probe,
+impl GraphPathVerification {
+    pub(super) fn verify_engine_lock(&self) -> Result<(), GraphDbError> {
+        verify_engine_lock(&self.engine_lock_probe)
+    }
+}
+
+fn verify_engine_lock(lock_probe: &std::fs::File) -> Result<(), GraphDbError> {
+    match lock_probe.try_lock_exclusive() {
+        Ok(()) => {
+            FileExt::unlock(lock_probe).map_err(|error| GraphDbError::DurabilityUncertain {
+                message: format!("failed to release unexpected graph identity probe lock: {error}"),
+            })?;
+            Err(GraphDbError::Conflict)
         }
-    }
-
-    fn abort(self, primary: GraphDbError) -> GraphDbError {
-        cleanup_created_file(&self.path, Some(&self.file), primary)
-    }
-
-    fn finish(self) -> (Handle, std::fs::File) {
-        (self.file, self.lock_probe)
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(error) => Err(GraphDbError::unavailable(format!(
+            "failed to prove Grafeo owns the anchored graph file: {error}"
+        ))),
     }
 }
 
-fn initialize_graph_file(path: &Path) -> Result<PendingGraphFile, GraphDbError> {
-    let initialized = GrafeoFileManager::create(path).map_err(|error| {
-        GraphDbError::unavailable(format!(
-            "failed to initialize canonical graph database {}: {error}",
+fn anchor_private_directory(
+    path: &Path,
+    operation: &str,
+) -> Result<(Handle, std::fs::File), GraphDbError> {
+    tracedecay_private_fs::open_private_directory(path)
+        .and_then(anchor_file)
+        .map_err(|error| {
+            GraphDbError::unavailable(format!(
+                "failed to {operation} private graph directory: {error}"
+            ))
+        })
+}
+
+fn require_path_absent(path: &Path) -> Result<(), GraphDbError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(_) => Err(GraphDbError::Conflict),
+        Err(error) => Err(GraphDbError::unavailable(format!(
+            "failed to verify absent graph database {}: {error}",
             path.display()
-        ))
-    })?;
-    let (file, lock_probe) =
-        match tracedecay_private_fs::make_private_file(path).and_then(anchor_file) {
-            Ok(file) => file,
-            Err(error) => {
-                drop(initialized);
-                return Err(cleanup_created_file(
-                    path,
-                    None,
-                    GraphDbError::unavailable(format!(
-                        "failed to anchor initialized graph database {}: {error}",
-                        path.display()
-                    )),
-                ));
-            }
-        };
-    let pending = PendingGraphFile::new(path, file, lock_probe);
-    drop(initialized);
-    let Some(parent) = path.parent() else {
-        return Err(pending.abort(GraphDbError::invalid("canonical graph path has no parent")));
-    };
-    if let Err(error) = sync_directory(parent, DirectorySyncPolicy::Strict) {
-        return Err(pending.abort(GraphDbError::unavailable(format!(
-            "failed to persist canonical graph database creation: {error}"
-        ))));
+        ))),
     }
-    Ok(pending)
+}
+
+fn sync_graph_parent(path: &Path) -> Result<(), GraphDbError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| GraphDbError::invalid("canonical graph path has no parent"))?;
+    sync_directory(parent, DirectorySyncPolicy::Strict).map_err(|error| {
+        GraphDbError::unavailable(format!(
+            "failed to persist canonical graph database creation: {error}"
+        ))
+    })
 }
 
 fn anchor_file(file: std::fs::File) -> std::io::Result<(Handle, std::fs::File)> {
@@ -224,41 +320,14 @@ fn verify_lock_available(file: &std::fs::File) -> Result<(), GraphDbError> {
     })
 }
 
-fn abort_pending(pending: Option<PendingGraphFile>, primary: GraphDbError) -> GraphDbError {
-    pending.map_or(primary.clone(), |pending| pending.abort(primary))
-}
-
 fn cleanup_created_file(
     path: &Path,
-    expected: Option<&Handle>,
+    expected_parent: &Handle,
+    expected_parent_probe: &std::fs::File,
+    expected: &Handle,
+    expected_probe: &std::fs::File,
     primary: GraphDbError,
 ) -> GraphDbError {
-    let Some(expected) = expected else {
-        return rollback_failure(
-            "refuse graph initialization cleanup without identity",
-            primary,
-            "initialized graph file identity was never anchored",
-        );
-    };
-    {
-        let current =
-            match tracedecay_private_fs::open_private_file(path).and_then(Handle::from_file) {
-                Ok(current) => current,
-                Err(error) => {
-                    return rollback_failure("abort graph initialization", primary, error);
-                }
-            };
-        if &current != expected {
-            return rollback_failure(
-                "abort graph initialization",
-                primary,
-                "initialized graph file identity changed before cleanup",
-            );
-        }
-    }
-    if let Err(error) = std::fs::remove_file(path) {
-        return rollback_failure("abort graph initialization", primary, error);
-    }
     let Some(parent) = path.parent() else {
         return rollback_failure(
             "abort graph initialization",
@@ -266,9 +335,46 @@ fn cleanup_created_file(
             "canonical graph path has no parent",
         );
     };
+    let (current_parent, current_parent_probe) =
+        match tracedecay_private_fs::open_private_directory(parent).and_then(anchor_file) {
+            Ok(current) => current,
+            Err(error) => {
+                return rollback_failure("abort graph initialization", primary, error);
+            }
+        };
+    if &current_parent != expected_parent {
+        return rollback_failure(
+            "abort graph initialization",
+            primary,
+            "private graph directory identity changed before cleanup",
+        );
+    }
+    let (current, current_probe) =
+        match tracedecay_private_fs::open_private_file(path).and_then(anchor_file) {
+            Ok(current) => current,
+            Err(error) => {
+                return rollback_failure("abort graph initialization", primary, error);
+            }
+        };
+    if &current != expected {
+        return rollback_failure(
+            "abort graph initialization",
+            primary,
+            "initialized graph file identity changed before cleanup",
+        );
+    }
+    if let Err(error) = std::fs::remove_file(path) {
+        return rollback_failure("abort graph initialization", primary, error);
+    }
     if let Err(error) = sync_directory(parent, DirectorySyncPolicy::Strict) {
         return rollback_failure("persist graph initialization cleanup", primary, error);
     }
+    let _retained_through_cleanup = (
+        current_parent_probe,
+        expected_parent_probe,
+        current_probe,
+        expected_probe,
+    );
     primary
 }
 
@@ -330,8 +436,43 @@ fn map_private_path_error(description: &str, error: std::io::Error) -> GraphDbEr
 mod tests {
     use tempfile::tempdir;
 
-    use super::GraphPathAnchor;
+    use super::GraphPathPreparation;
     use crate::GraphDbError;
+
+    #[test]
+    fn missing_preparation_never_precreates_a_markerless_graph_file() {
+        let temp = tempdir().unwrap();
+        let private_directory = temp
+            .path()
+            .join(tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY);
+        tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
+        let path = private_directory.join("graph.grafeo");
+
+        let preparation = GraphPathPreparation::prepare(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(matches!(preparation, GraphPathPreparation::Missing { .. }));
+    }
+
+    #[test]
+    fn failed_fresh_open_never_deletes_an_unanchored_path() {
+        let temp = tempdir().unwrap();
+        let private_directory = temp
+            .path()
+            .join(tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY);
+        tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
+        let path = private_directory.join("graph.grafeo");
+        let preparation = GraphPathPreparation::prepare(&path).unwrap();
+        drop(tracedecay_private_fs::create_private_file(&path).unwrap());
+
+        let error = preparation.abort_failed_open(GraphDbError::Cancelled);
+
+        let GraphDbError::DurabilityUncertain { message } = error else {
+            panic!("unanchored cleanup refusal must report uncertain durability");
+        };
+        assert!(message.contains("failed open left a graph path that was never anchored"));
+        assert!(path.is_file(), "unanchored graph path must not be deleted");
+    }
 
     #[test]
     fn engine_lock_proves_the_exact_anchored_file() {
@@ -341,9 +482,12 @@ mod tests {
             .join(tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY);
         tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
         let path = private_directory.join("graph.grafeo");
-        let anchor = GraphPathAnchor::acquire(&path).unwrap();
-
-        let manager = grafeo_storage::file::GrafeoFileManager::open(&path).unwrap();
+        let preparation = GraphPathPreparation::prepare(&path).unwrap();
+        let manager = grafeo_storage::file::GrafeoFileManager::create(&path).unwrap();
+        let anchor = match preparation.complete_after_open() {
+            Ok(anchor) => anchor,
+            Err(failure) => panic!("created graph anchor failed: {}", failure.error),
+        };
         assert_eq!(anchor.verify_engine_lock(), Ok(()));
         drop(manager);
     }
@@ -357,7 +501,9 @@ mod tests {
             .join(tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY);
         tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
         let path = private_directory.join("graph.grafeo");
-        let anchor = GraphPathAnchor::acquire(&path).unwrap();
+        drop(grafeo_storage::file::GrafeoFileManager::create(&path).unwrap());
+        drop(tracedecay_private_fs::make_private_file(&path).unwrap());
+        let preparation = GraphPathPreparation::prepare(&path).unwrap();
         let anchored_away = private_directory.join("anchored-away.grafeo");
         std::fs::rename(&path, &anchored_away).unwrap();
 
@@ -370,8 +516,11 @@ mod tests {
         std::fs::rename(&path, &replacement_away).unwrap();
         std::fs::rename(&anchored_away, &path).unwrap();
 
-        assert_eq!(anchor.verify(&path), Ok(()));
-        assert_eq!(anchor.verify_engine_lock(), Err(GraphDbError::Conflict));
+        let failure = match preparation.complete_after_open() {
+            Ok(_) => panic!("replacement manager must not satisfy the retained file identity"),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.error, GraphDbError::Conflict);
         drop(replacement_manager);
     }
 }
