@@ -80,16 +80,32 @@ impl MsBasic2Extractor {
     /// `file_path` is used for qualified names and node IDs (not for I/O).
     /// `source` is the BASIC source code to parse.
     pub fn extract_msbasic2(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
-
         let tree = match Self::parse_source(source) {
             Ok(tree) => tree,
             Err(msg) => {
+                let start = Instant::now();
+                let mut state = ExtractionState::new(file_path, source);
                 state.errors.push(msg);
                 return Self::build_result(state, start);
             }
         };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
+
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = ExtractionState::new(file_path, source);
 
         // Create the File root node.
         let file_node = Node {
@@ -121,9 +137,14 @@ impl MsBasic2Extractor {
         state.nodes.push(file_node);
         state.node_stack.push((file_path.to_string(), file_node_id));
 
-        // Collect all lines from the AST.
-        let root = tree.root_node();
-        let lines = Self::collect_lines(&state, root);
+        // Collect the selected program lines before synthesizing declarations.
+        let mut selected_lines = Vec::new();
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            if child.kind() == "line" {
+                selected_lines.push((child.start_byte(), child.end_byte()));
+            }
+        });
+        let lines = Self::collect_selected_lines(&state, tree, &selected_lines);
 
         // First pass: extract top-level LET constants (before the first subroutine).
         Self::extract_top_level_lets(&mut state, &lines);
@@ -136,7 +157,11 @@ impl MsBasic2Extractor {
 
         state.node_stack.pop();
 
-        Self::build_result(state, start)
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
     }
 
     /// Parse source code into a tree-sitter AST.
@@ -151,14 +176,20 @@ impl MsBasic2Extractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    /// Collect all lines from the program into a structured list.
-    fn collect_lines<'a>(state: &ExtractionState, root: TsNode<'a>) -> Vec<BasicLine<'a>> {
+    /// Collect the program lines selected by the parsed extraction scope.
+    fn collect_selected_lines<'tree>(
+        state: &ExtractionState,
+        tree: &'tree Tree,
+        selected_lines: &[(usize, usize)],
+    ) -> Vec<BasicLine<'tree>> {
         let mut lines = Vec::new();
+        let root = tree.root_node();
         let mut cursor = root.walk();
         if cursor.goto_first_child() {
             loop {
                 let node = cursor.node();
                 if node.kind() == "line"
+                    && selected_lines.contains(&(node.start_byte(), node.end_byte()))
                     && let Some(basic_line) = Self::parse_line(state, node)
                 {
                     lines.push(basic_line);
@@ -526,5 +557,15 @@ impl crate::LanguageExtractor for MsBasic2Extractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_msbasic2(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }

@@ -260,6 +260,8 @@ pub enum ParseError {
     SourceTooLarge { size: usize, limit: usize },
     #[error("the edit batch does not describe the supplied source: {detail}")]
     InvalidEdit { detail: String },
+    #[error("prepared parser source does not preserve original byte/newline positions")]
+    PreparedSourceShapeMismatch,
     #[error("the next parse identity names another document")]
     IdentityMismatch,
     #[error("the parse report does not describe the retained document's current state")]
@@ -280,6 +282,7 @@ pub struct RetainedParseDocument {
     identity: ParseDocumentIdentity,
     language_id: String,
     source: String,
+    parsed_source: String,
     parser: Parser,
     tree: Tree,
     limits: ParseLimits,
@@ -295,9 +298,32 @@ impl RetainedParseDocument {
     ) -> Result<(Self, ParseReport), ParseError> {
         let language_id = language_id.into();
         let source = source.into();
+        let grammar_key = grammar_key(&language_id, identity.logical_path()).to_owned();
+        Self::open_prepared(
+            identity,
+            language_id,
+            grammar_key,
+            source.clone(),
+            source,
+            limits,
+        )
+    }
+
+    pub fn open_prepared(
+        identity: ParseDocumentIdentity,
+        language_id: impl Into<String>,
+        grammar_key: impl Into<String>,
+        source: impl Into<String>,
+        parsed_source: impl Into<String>,
+        limits: ParseLimits,
+    ) -> Result<(Self, ParseReport), ParseError> {
+        let language_id = language_id.into();
+        let grammar_key = grammar_key.into();
+        let source = source.into();
+        let parsed_source = parsed_source.into();
         ensure_source_bound(&source, limits)?;
-        let grammar_key = grammar_key(&language_id);
-        let language = ts_provider::try_language(grammar_key).map_err(|_| {
+        validate_prepared_source(&source, &parsed_source)?;
+        let language = ts_provider::try_language(&grammar_key).map_err(|_| {
             ParseError::UnsupportedLanguage {
                 language_id: language_id.clone(),
             }
@@ -309,7 +335,7 @@ impl RetainedParseDocument {
                 language_id: language_id.clone(),
                 detail: error.to_string(),
             })?;
-        let (tree, elapsed) = parse_with_deadline(&mut parser, &source, None, limits)?;
+        let (tree, elapsed) = parse_with_deadline(&mut parser, &parsed_source, None, limits)?;
         let changed_ranges = if source.is_empty() {
             Vec::new()
         } else {
@@ -338,6 +364,7 @@ impl RetainedParseDocument {
                 identity,
                 language_id,
                 source,
+                parsed_source,
                 parser,
                 tree,
                 limits,
@@ -369,14 +396,27 @@ impl RetainedParseDocument {
         edits: &[ParseInputEdit],
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
+        let new_source = new_source.into();
+        self.apply_edits_prepared(next_identity, edits, new_source.clone(), new_source)
+    }
+
+    pub fn apply_edits_prepared(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        edits: &[ParseInputEdit],
+        new_source: impl Into<String>,
+        new_parsed_source: impl Into<String>,
+    ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             return Err(ParseError::IdentityMismatch);
         }
         let new_source = new_source.into();
+        let new_parsed_source = new_parsed_source.into();
         ensure_source_bound(&new_source, self.limits)?;
+        validate_prepared_source(&new_source, &new_parsed_source)?;
         validate_edits(self.source.len(), new_source.len(), edits)?;
         if edits.is_empty() {
-            if self.source != new_source {
+            if self.source != new_source || self.parsed_source != new_parsed_source {
                 return Err(ParseError::InvalidEdit {
                     detail: "an empty edit batch changed source bytes".to_owned(),
                 });
@@ -411,7 +451,7 @@ impl RetainedParseDocument {
         }
         let (new_tree, elapsed) = parse_with_deadline(
             &mut self.parser,
-            &new_source,
+            &new_parsed_source,
             Some(&edited_tree),
             self.limits,
         )?;
@@ -442,6 +482,7 @@ impl RetainedParseDocument {
         );
         self.identity = next_identity;
         self.source = new_source;
+        self.parsed_source = new_parsed_source;
         self.tree = new_tree;
         self.state_epoch = next_epoch;
         Ok(report)
@@ -454,11 +495,22 @@ impl RetainedParseDocument {
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
         let new_source = new_source.into();
+        self.reparse_prepared(next_identity, new_source.clone(), new_source)
+    }
+
+    pub fn reparse_prepared(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        new_source: impl Into<String>,
+        new_parsed_source: impl Into<String>,
+    ) -> Result<ParseReport, ParseError> {
+        let new_source = new_source.into();
+        let new_parsed_source = new_parsed_source.into();
         if self.source == new_source {
-            return self.apply_edits(next_identity, &[], new_source);
+            return self.apply_edits_prepared(next_identity, &[], new_source, new_parsed_source);
         }
         let edit = minimal_edit(&self.source, &new_source);
-        self.apply_edits(next_identity, &[edit], new_source)
+        self.apply_edits_prepared(next_identity, &[edit], new_source, new_parsed_source)
     }
 
     /// Parse a whole-document replacement without consulting the prior tree.
@@ -467,13 +519,25 @@ impl RetainedParseDocument {
         next_identity: ParseDocumentIdentity,
         new_source: impl Into<String>,
     ) -> Result<ParseReport, ParseError> {
+        let new_source = new_source.into();
+        self.replace_prepared(next_identity, new_source.clone(), new_source)
+    }
+
+    pub fn replace_prepared(
+        &mut self,
+        next_identity: ParseDocumentIdentity,
+        new_source: impl Into<String>,
+        new_parsed_source: impl Into<String>,
+    ) -> Result<ParseReport, ParseError> {
         if !self.identity.identifies_same_document(&next_identity) {
             return Err(ParseError::IdentityMismatch);
         }
         let new_source = new_source.into();
+        let new_parsed_source = new_parsed_source.into();
         ensure_source_bound(&new_source, self.limits)?;
+        validate_prepared_source(&new_source, &new_parsed_source)?;
         let (new_tree, elapsed) =
-            parse_with_deadline(&mut self.parser, &new_source, None, self.limits)?;
+            parse_with_deadline(&mut self.parser, &new_parsed_source, None, self.limits)?;
         let ranges = if new_source.is_empty() {
             Vec::new()
         } else {
@@ -501,6 +565,7 @@ impl RetainedParseDocument {
         );
         self.identity = next_identity;
         self.source = new_source;
+        self.parsed_source = new_parsed_source;
         self.tree = new_tree;
         self.state_epoch = report.state_epoch;
         Ok(report)
@@ -522,13 +587,23 @@ impl RetainedParseDocument {
             return Err(ParseError::StaleReport);
         }
 
+        let complete_composite_reset = |extracted: ParsedExtraction| match extracted.disposition {
+            ParsedExtractionDisposition::Reset {
+                reason: ParsedExtractionResetReason::CompositeGrammar,
+            } => ParsedExtraction::reset(
+                extractor.extract(self.identity.logical_path(), &self.source),
+                ParsedExtractionResetReason::CompositeGrammar,
+                self.source.len(),
+            ),
+            _ => extracted,
+        };
         let full = |reason: Option<ParsedExtractionResetReason>| {
-            let extracted = extractor.extract_parsed(
+            let extracted = complete_composite_reset(extractor.extract_parsed(
                 self.identity.logical_path(),
                 &self.source,
                 &self.tree,
                 ParsedExtractionScope::FullDocument,
-            );
+            ));
             match reason {
                 Some(reason) => {
                     ParsedExtraction::reset(extracted.result, reason, self.source.len())
@@ -584,7 +659,7 @@ impl RetainedParseDocument {
                     ParsedExtractionScope::ChangedRegions(&report.extraction_ranges),
                 );
                 if matches!(delta.disposition, ParsedExtractionDisposition::Reset { .. }) {
-                    return Ok(delta);
+                    return Ok(complete_composite_reset(delta));
                 }
                 let metrics = delta.metrics;
                 let old_start_row = u32::try_from(edit.start_position.row).map_err(|_| {
@@ -616,6 +691,18 @@ fn ensure_source_bound(source: &str, limits: ParseLimits) -> Result<(), ParseErr
             size: source.len(),
             limit: limits.max_source_bytes,
         });
+    }
+    Ok(())
+}
+
+fn validate_prepared_source(source: &str, prepared: &str) -> Result<(), ParseError> {
+    let same_shape = source.len() == prepared.len()
+        && source
+            .bytes()
+            .zip(prepared.bytes())
+            .all(|(original, parsed)| (original == b'\n') == (parsed == b'\n'));
+    if !same_shape {
+        return Err(ParseError::PreparedSourceShapeMismatch);
     }
     Ok(())
 }
@@ -867,13 +954,21 @@ fn completeness_for(
     }
 }
 
-fn grammar_key(language_id: &str) -> &str {
+fn grammar_key<'a>(language_id: &'a str, logical_path: &str) -> &'a str {
     match language_id {
+        "astro" | "svelte" => "typescript",
         "c#" | "csharp" => "c_sharp",
         "c++" => "cpp",
         "f#" => "fsharp",
+        "metal" => "cpp",
         "objective-c" => "objc",
+        "quickbasic" => "qbasic",
         "javascriptreact" | "jsx" => "javascript",
+        "typescript" => match logical_path.rsplit('.').next() {
+            Some("tsx") => "tsx",
+            Some("js" | "jsx") => "javascript",
+            _ => "typescript",
+        },
         "typescriptreact" => "tsx",
         _ => language_id,
     }

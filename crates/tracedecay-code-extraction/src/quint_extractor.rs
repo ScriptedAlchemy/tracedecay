@@ -79,11 +79,152 @@ enum PendingKind {
     TypeAlias,
 }
 
+#[derive(Default)]
+struct TokenWalker {
+    depth: u32,
+    pending: Option<PendingKind>,
+    pending_open: Option<(String, String)>,
+    import_collect: Option<(Vec<String>, u32)>,
+}
+
+impl TokenWalker {
+    fn visit(&mut self, state: &mut ExtractionState, child: TsNode<'_>) {
+        let kind = child.kind();
+        // The `.` operator extends an import path; everything else
+        // is a terminator handled below.
+        let extends_import =
+            matches!(kind, "identifier") || (kind == "operator" && state.node_text(child) == ".");
+        if !extends_import && let Some((parts, line)) = self.import_collect.take() {
+            QuintExtractor::commit_import(state, &parts, line);
+        }
+
+        match kind {
+            "{" => {
+                self.depth += 1;
+                if let Some((qn, id)) = self.pending_open.take() {
+                    state.scope_stack.push((qn, id, self.depth));
+                }
+            }
+            "}" => {
+                self.depth = self.depth.saturating_sub(1);
+                // Pop module frames whose opening depth is now above the live
+                // depth. Never pop the file frame.
+                while state.scope_stack.len() > 1 {
+                    let opened_at = match state.scope_stack.last() {
+                        Some((_, _, depth)) => *depth,
+                        None => 0,
+                    };
+                    if opened_at > self.depth {
+                        state.scope_stack.pop();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "keyword" => {
+                let text = state.node_text(child);
+                if text == "module" {
+                    self.pending = Some(PendingKind::Module);
+                } else if text == "import" {
+                    self.import_collect = Some((Vec::new(), child.start_position().row as u32));
+                    self.pending = None;
+                }
+            }
+            "storage_modifier" => {
+                // `pure` prefixes `def`/`val`; we just keep updating `pending`
+                // until the meaningful storage modifier arrives.
+                if let Some(kind) = quint_storage_kind(&state.node_text(child)) {
+                    self.pending = Some(kind);
+                }
+            }
+            "identifier" => {
+                if let Some((parts, _)) = self.import_collect.as_mut() {
+                    parts.push(state.node_text(child));
+                } else if let Some(pending) = self.pending.take() {
+                    let name = state.node_text(child);
+                    let id = QuintExtractor::emit_node(state, child, pending, &name);
+                    if matches!(pending, PendingKind::Module) {
+                        let qualified = match state.scope_stack.last() {
+                            Some((qualified_name, _, _)) => format!("{qualified_name}::{name}"),
+                            None => name.clone(),
+                        };
+                        self.pending_open = Some((qualified, id));
+                    }
+                }
+            }
+            "operator" => {
+                // `.` inside an import path is part of the dotted module name
+                // and shouldn't reset pending.
+                if self.import_collect.is_none() {
+                    self.pending = None;
+                }
+            }
+            "line_comment" | "block_comment" | "hashbang" => {
+                // Comments don't reset `pending`: `def /* doc */ f` is still
+                // a definition of `f`.
+            }
+            _ => {
+                // Any other token (string, number, constant, storage_type,
+                // punctuation `( ) [ ] , ;`, etc.) breaks a pending pattern.
+                self.pending = None;
+            }
+        }
+    }
+
+    fn finish(&mut self, state: &mut ExtractionState) {
+        // An import at the end of the selected token stream still needs its
+        // Uses edge.
+        if let Some((parts, line)) = self.import_collect.take() {
+            QuintExtractor::commit_import(state, &parts, line);
+        }
+    }
+}
+
 impl QuintExtractor {
     pub fn extract_quint(file_path: &str, source: &str) -> ExtractionResult {
-        let start = Instant::now();
-        let mut state = ExtractionState::new(file_path, source);
+        let tree = match Self::parse(source) {
+            Ok(tree) => tree,
+            Err(_msg) => {
+                // Parse failed; skip extraction rather than emitting bogus structure.
+                return Self::build_result(
+                    Self::initialize_state(file_path, source),
+                    Instant::now(),
+                );
+            }
+        };
+        Self::extract_tree(
+            file_path,
+            source,
+            &tree,
+            crate::parsed_extraction::ParsedExtractionScope::FullDocument,
+        )
+        .result
+    }
 
+    fn extract_tree(
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        let start = Instant::now();
+        let mut state = Self::initialize_state(file_path, source);
+
+        let mut walker = TokenWalker::default();
+        let metrics = crate::parsed_extraction::visit_root_children(tree, scope, |child| {
+            walker.visit(&mut state, child);
+        });
+        walker.finish(&mut state);
+
+        crate::parsed_extraction::ParsedExtraction::complete(
+            Self::build_result(state, start),
+            scope,
+            metrics,
+        )
+    }
+
+    fn initialize_state(file_path: &str, source: &str) -> ExtractionState {
+        let mut state = ExtractionState::new(file_path, source);
         let file_node = Node {
             id: state.file_node_id.clone(),
             kind: NodeKind::File,
@@ -113,21 +254,7 @@ impl QuintExtractor {
         state
             .scope_stack
             .push((file_path.to_string(), state.file_node_id.clone(), 0));
-
-        match Self::parse(source) {
-            Ok(tree) => Self::walk_tokens(&mut state, tree.root_node()),
-            Err(_msg) => {
-                // Parse failed; skip extraction rather than emitting bogus structure.
-            }
-        }
-
-        ExtractionResult {
-            nodes: state.nodes,
-            edges: state.edges,
-            unresolved_refs: Vec::new(),
-            errors: Vec::new(),
-            duration_ms: start.elapsed().as_millis() as u64,
-        }
+        state
     }
 
     fn parse(source: &str) -> Result<Tree, String> {
@@ -141,118 +268,13 @@ impl QuintExtractor {
             .ok_or_else(|| "tree-sitter parse returned None".to_string())
     }
 
-    fn walk_tokens(state: &mut ExtractionState, root: TsNode<'_>) {
-        let mut depth: u32 = 0;
-        let mut pending: Option<PendingKind> = None;
-        // When we just emitted a Module node, hold its info here. We push
-        // it onto the scope stack on the next `{` so we know the depth at
-        // which the matching `}` should pop it.
-        let mut pending_open: Option<(String, String)> = None; // (qualified_name, id)
-        // Active import collection: dotted parts seen since the `import`
-        // keyword, plus the line of that keyword. Committed (i.e. emits a
-        // Uses edge) when we hit any token that doesn't extend the path
-        // (`from`, `as`, end of stream, another keyword, a storage_modifier,
-        // etc.). The shallow grammar gives us identifiers and `.` operators
-        // — that's enough to reconstruct the dotted import path.
-        let mut import_collect: Option<(Vec<String>, u32)> = None;
-
-        let mut cursor = root.walk();
-        if cursor.goto_first_child() {
-            loop {
-                let child = cursor.node();
-                let kind = child.kind();
-                // The `.` operator extends an import path; everything else
-                // is a terminator handled below.
-                let extends_import = matches!(kind, "identifier")
-                    || (kind == "operator" && state.node_text(child) == ".");
-                if !extends_import && let Some((parts, line)) = import_collect.take() {
-                    Self::commit_import(state, &parts, line);
-                }
-
-                match kind {
-                    "{" => {
-                        depth += 1;
-                        if let Some((qn, id)) = pending_open.take() {
-                            state.scope_stack.push((qn, id, depth));
-                        }
-                    }
-                    "}" => {
-                        depth = depth.saturating_sub(1);
-                        // Pop module frames whose opening depth is now
-                        // above the live depth. Never pop the file frame.
-                        while state.scope_stack.len() > 1 {
-                            let opened_at = match state.scope_stack.last() {
-                                Some((_, _, d)) => *d,
-                                None => 0,
-                            };
-                            if opened_at > depth {
-                                state.scope_stack.pop();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    "keyword" => {
-                        let txt = state.node_text(child);
-                        if txt == "module" {
-                            pending = Some(PendingKind::Module);
-                        } else if txt == "import" {
-                            import_collect = Some((Vec::new(), child.start_position().row as u32));
-                            pending = None;
-                        }
-                    }
-                    "storage_modifier" => {
-                        // `pure` prefixes `def`/`val`; we just keep
-                        // updating `pending` until the meaningful
-                        // storage_modifier arrives.
-                        if let Some(p) = quint_storage_kind(&state.node_text(child)) {
-                            pending = Some(p);
-                        }
-                    }
-                    "identifier" => {
-                        if let Some((parts, _)) = import_collect.as_mut() {
-                            parts.push(state.node_text(child));
-                        } else if let Some(p) = pending.take() {
-                            let name = state.node_text(child);
-                            let id = Self::emit_node(state, child, p, &name);
-                            if matches!(p, PendingKind::Module) {
-                                let qualified = match state.scope_stack.last() {
-                                    Some((qn, _, _)) => format!("{qn}::{name}"),
-                                    None => name.clone(),
-                                };
-                                pending_open = Some((qualified, id));
-                            }
-                        }
-                    }
-                    "operator" => {
-                        // `.` inside an import path is part of the dotted
-                        // module name and shouldn't reset pending.
-                        if import_collect.is_none() {
-                            pending = None;
-                        }
-                    }
-                    "line_comment" | "block_comment" | "hashbang" => {
-                        // Comments don't reset `pending`: `def /* doc */ f`
-                        // is still a definition of `f`.
-                    }
-                    _ => {
-                        // Any other token (string, number, constant,
-                        // storage_type, punctuation `( ) [ ] , ;`, etc.)
-                        // breaks a pending pattern.
-                        pending = None;
-                    }
-                }
-
-                if !cursor.goto_next_sibling() {
-                    break;
-                }
-            }
-        }
-
-        // End-of-file flush: an import at the very end of the file with
-        // no following terminator still needs its Uses edge.
-        if let Some((parts, line)) = import_collect.take() {
-            Self::commit_import(state, &parts, line);
+    fn build_result(state: ExtractionState, start: Instant) -> ExtractionResult {
+        ExtractionResult {
+            nodes: state.nodes,
+            edges: state.edges,
+            unresolved_refs: Vec::new(),
+            errors: Vec::new(),
+            duration_ms: start.elapsed().as_millis() as u64,
         }
     }
 
@@ -370,5 +392,15 @@ impl crate::LanguageExtractor for QuintExtractor {
 
     fn extract(&self, file_path: &str, source: &str) -> ExtractionResult {
         Self::extract_quint(file_path, source)
+    }
+
+    fn extract_parsed(
+        &self,
+        file_path: &str,
+        source: &str,
+        tree: &Tree,
+        scope: crate::parsed_extraction::ParsedExtractionScope<'_>,
+    ) -> crate::parsed_extraction::ParsedExtraction {
+        Self::extract_tree(file_path, source, tree, scope)
     }
 }
