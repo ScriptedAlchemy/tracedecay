@@ -1252,3 +1252,52 @@ async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_iden
         } if reason_code == "project_identity_conflict"
     ));
 }
+
+#[tokio::test]
+async fn session_sync_journal_survives_remount_and_compare_and_swap() {
+    let harness = RegisteredGlobalDbHarness::open("session-sync-journal").await;
+    assert!(
+        harness
+            .registered
+            .insert_session_sync_journal("session-sync.v1.fixture", r#"{"status":"queued"}"#)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !harness
+            .registered
+            .insert_session_sync_journal("session-sync.v1.fixture", r#"{"status":"duplicate"}"#)
+            .await
+            .unwrap()
+    );
+    assert!(
+        harness
+            .registered
+            .compare_and_swap_session_sync_journal(
+                "session-sync.v1.fixture",
+                r#"{"status":"queued"}"#,
+                r#"{"status":"running"}"#,
+            )
+            .await
+            .unwrap()
+    );
+    let remounted = harness.mount().await;
+    assert_eq!(
+        remounted
+            .read_session_sync_journal("session-sync.v1.fixture")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some(r#"{"status":"running"}"#)
+    );
+    assert_eq!(
+        remounted
+            .list_session_sync_journals("session-sync.v1.")
+            .await
+            .unwrap(),
+        vec![(
+            "session-sync.v1.fixture".to_owned(),
+            r#"{"status":"running"}"#.to_owned()
+        )]
+    );
+}

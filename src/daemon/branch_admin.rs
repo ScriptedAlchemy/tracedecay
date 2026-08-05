@@ -447,6 +447,7 @@ pub(super) struct StoreAdministration {
     >,
     host_admission_broker_gate: Arc<tokio::sync::Mutex<()>>,
     profile_host_admission_replay: Arc<ProfileHostAdmissionReplayRegistry>,
+    session_sync_service: Arc<crate::daemon::session_sync::DaemonSessionSyncService>,
     #[cfg(unix)]
     automation_schedulers:
         Arc<tokio::sync::Mutex<HashMap<ProjectServerKey, AutomationSchedulerHandle>>>,
@@ -473,6 +474,9 @@ impl Default for StoreAdministration {
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
+            session_sync_service: Arc::new(
+                crate::daemon::session_sync::DaemonSessionSyncService::default(),
+            ),
             #[cfg(unix)]
             automation_schedulers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             #[cfg(unix)]
@@ -856,6 +860,19 @@ impl StoreAdministration {
 
     pub(super) async fn shutdown_host_admission_replay(&self) {
         self.profile_host_admission_replay.shutdown().await;
+    }
+
+    pub(super) fn session_sync_service(
+        &self,
+    ) -> Arc<crate::daemon::session_sync::DaemonSessionSyncService> {
+        Arc::clone(&self.session_sync_service)
+    }
+
+    pub(super) async fn shutdown_session_sync(&self) {
+        tracedecay_application::session_sync::SessionSyncServicePort::shutdown(
+            self.session_sync_service.as_ref(),
+        )
+        .await;
     }
 
     #[cfg(unix)]

@@ -904,6 +904,10 @@ impl McpServer {
                 self.scope_prefix(),
             )
         });
+        let session_sync_service = self
+            .session_sync_service
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
         let dispatch: std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + '_>,
         > = handle_tool_call_with_registry_and_implicit_project(
@@ -948,7 +952,7 @@ impl McpServer {
                     .cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
-                session_sync_service: self.session_sync_service.as_deref(),
+                session_sync_service: session_sync_service.as_deref(),
                 preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),

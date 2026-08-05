@@ -786,8 +786,7 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     initialize_test_project(&project, &client_identity).await;
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
-    crate::config::save_config(&project, &config)
-        .expect("disable unrelated startup transcript ingestion");
+    crate::config::save_config(&project, &config).expect("disable unrelated startup catch-up");
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "portable-owner-cache-test")
             .expect("daemon database scope");

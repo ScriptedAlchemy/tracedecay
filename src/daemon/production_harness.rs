@@ -439,6 +439,7 @@ async fn shutdown_production_project_harness(mut resources: ProductionProjectHar
         .session_temporal_refresh_schedulers()
         .shutdown()
         .await;
+    resources.store_administration.shutdown_session_sync().await;
     resources
         .store_administration
         .shutdown_host_admission_replay()
