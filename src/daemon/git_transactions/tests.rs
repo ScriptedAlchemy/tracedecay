@@ -130,8 +130,9 @@ fn queued_repository_mutation_observes_live_cancellation() {
     let waiter_queue = Arc::clone(&queue);
     let waiter_cancellation = Arc::clone(&cancellation);
     let waiter_checks = Arc::clone(&checks);
+    let (waiter_result_tx, waiter_result_rx) = std::sync::mpsc::channel();
     let waiter = thread::spawn(move || {
-        waiter_queue
+        let result = waiter_queue
             .with_repository_cancellable(
                 &repository,
                 || {
@@ -142,7 +143,8 @@ fn queued_repository_mutation_observes_live_cancellation() {
                 },
                 |observed| observed.is_some(),
             )
-            .expect("waiter queue")
+            .expect("waiter queue");
+        waiter_result_tx.send(result).expect("waiter result");
     });
 
     while checks.load(Ordering::SeqCst) < 2 {
@@ -153,10 +155,15 @@ fn queued_repository_mutation_observes_live_cancellation() {
     while checks.load(Ordering::SeqCst) == checks_before_cancellation {
         thread::yield_now();
     }
+    assert!(
+        waiter_result_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("cancelled waiter exits before repository holder")
+    );
     release_tx.send(()).expect("release holder");
 
     holder.join().expect("holder joins");
-    assert!(waiter.join().expect("waiter joins"));
+    waiter.join().expect("waiter joins");
 }
 
 #[test]
