@@ -530,10 +530,12 @@ impl DaemonSessionSyncService {
                 source_frontiers,
                 failure_codes,
             } => {
+                let coverage_complete = !coverage.is_empty()
+                    && coverage.iter().all(|entry| entry.coverage.is_complete());
                 let termination = completion_termination(
                     committed,
                     &stats,
-                    coverage.iter().all(|entry| entry.coverage.is_complete()),
+                    coverage_complete,
                     failure_codes.is_empty(),
                 );
                 if self
