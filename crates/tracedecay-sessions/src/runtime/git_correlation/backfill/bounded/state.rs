@@ -502,6 +502,9 @@ async fn finalize_session<S: GitCorrelationSessionStore>(
     {
         return Err(BoundedBackfillInterruption::SourceUnavailable);
     }
+    history_failures::clear_unresolved(&transaction, progress.key.source_rowid)
+        .await
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let persisted = super::super::advance_history_frontier(&transaction, candidate_frontier)
         .await
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;

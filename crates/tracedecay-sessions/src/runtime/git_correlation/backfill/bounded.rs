@@ -1,17 +1,23 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use super::history_failures;
 use super::history_progress::{
-    self, GitHistoryCursorHeadState, GitHistoryPendingRow, GitHistoryProgressKey,
-    GitHistoryProgressRow, GitHistoryScanMode, GitHistorySeenRow, GitHistorySegmentRow,
+    self, GitHistoryPendingRow, GitHistoryProgressKey, GitHistoryProgressRow, GitHistoryScanMode,
+    GitHistorySeenRow, GitHistorySegmentRow,
 };
 use crate::observation::ObservationCancellation;
 
 use super::*;
 
 mod native;
+mod progress;
 mod state;
 
+use progress::{
+    copy_cursor_to_progress, cursor_from_progress, progress_from_cursor, progress_frontier,
+    repository_seal_from_progress, session_row_from_progress,
+};
 use state::{
     advance_graph, advance_reflog_capture, advance_reflog_verification, reset_exact_progress,
 };
@@ -29,7 +35,7 @@ impl BoundedGitControl {
         }
     }
 
-    fn check(&self) -> Result<(), BoundedBackfillInterruption> {
+    pub(super) fn check(&self) -> Result<(), BoundedBackfillInterruption> {
         if self.cancellation.is_cancelled() {
             return Err(BoundedBackfillInterruption::Cancelled);
         }
@@ -73,10 +79,23 @@ pub struct BoundedBackfillOutcome {
     pub committed: bool,
     pub frontier: GitHistoryIndexFrontier,
     pub remaining_sessions: u64,
+    pub unresolved_failures: u64,
     pub interruption: Option<BoundedBackfillInterruption>,
 }
 
 pub async fn run_bounded_history_index_page<S>(
+    session_store: &S,
+    opts: &BackfillOptions,
+    control: &BoundedGitControl,
+) -> Result<BoundedBackfillOutcome, GitCorrelationError>
+where
+    S: GitCorrelationSessionStore,
+{
+    let outcome = run_bounded_history_index_page_inner(session_store, opts, control).await?;
+    history_failures::with_unresolved_count(session_store, outcome).await
+}
+
+async fn run_bounded_history_index_page_inner<S>(
     session_store: &S,
     opts: &BackfillOptions,
     control: &BoundedGitControl,
@@ -173,12 +192,17 @@ where
                 frontier = persisted;
             }
             Ok(StreamGitEvidenceOutcome::Applied(None)) => {}
+            Ok(StreamGitEvidenceOutcome::Failed(persisted)) => {
+                stats.record_skip(BackfillSkipReason::GitError);
+                frontier = persisted;
+            }
             Ok(StreamGitEvidenceOutcome::Progressed) => {
                 return Ok(BoundedBackfillOutcome {
                     stats,
                     committed,
                     frontier,
                     remaining_sessions: 1,
+                    unresolved_failures: 0,
                     interruption: None,
                 });
             }
@@ -193,6 +217,7 @@ where
                     committed,
                     frontier,
                     remaining_sessions: 1,
+                    unresolved_failures: 0,
                     interruption: Some(BoundedBackfillInterruption::SourceUnavailable),
                 });
             }
@@ -202,6 +227,7 @@ where
                     committed,
                     frontier,
                     remaining_sessions: 1,
+                    unresolved_failures: 0,
                     interruption: Some(interruption),
                 });
             }
@@ -242,6 +268,7 @@ where
         committed,
         frontier,
         remaining_sessions: u64::from(has_more),
+        unresolved_failures: 0,
         interruption: None,
     })
 }
@@ -275,6 +302,19 @@ async fn resume_active_progress_page<S: GitCorrelationSessionStore>(
                 committed,
                 frontier,
                 remaining_sessions: 1,
+                unresolved_failures: 0,
+                interruption: None,
+            }
+        }
+        Ok(StreamGitEvidenceOutcome::Failed(persisted)) => {
+            stats.record_skip(BackfillSkipReason::GitError);
+            frontier = persisted;
+            BoundedBackfillOutcome {
+                stats,
+                committed,
+                frontier,
+                remaining_sessions: 1,
+                unresolved_failures: 0,
                 interruption: None,
             }
         }
@@ -284,6 +324,7 @@ async fn resume_active_progress_page<S: GitCorrelationSessionStore>(
                 committed,
                 frontier,
                 remaining_sessions: 1,
+                unresolved_failures: 0,
                 interruption: None,
             }
         }
@@ -294,6 +335,7 @@ async fn resume_active_progress_page<S: GitCorrelationSessionStore>(
                 committed,
                 frontier,
                 remaining_sessions: 1,
+                unresolved_failures: 0,
                 interruption: Some(BoundedBackfillInterruption::SourceUnavailable),
             }
         }
@@ -312,6 +354,7 @@ fn interrupted_outcome(
         committed,
         frontier,
         remaining_sessions: 1,
+        unresolved_failures: 0,
         interruption: Some(interruption),
     }
 }
@@ -320,8 +363,9 @@ const fn bounded_page_has_more(row_count: usize, page_size: usize) -> bool {
     row_count > page_size
 }
 
-enum StreamGitEvidenceOutcome {
+pub(super) enum StreamGitEvidenceOutcome {
     Applied(Option<GitHistoryIndexFrontier>),
+    Failed(GitHistoryIndexFrontier),
     Progressed,
     Skip(BackfillSkipReason),
 }
@@ -388,7 +432,23 @@ async fn stream_git_evidence<S: GitCorrelationSessionStore>(
             native::initialize_reflog_cursor(&native_path, window_end, &native_control)
         })
         .await
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)??;
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+        let cursor = match cursor {
+            Ok(cursor) => cursor,
+            Err(BoundedBackfillInterruption::UnsupportedSourceFraming) => {
+                return history_failures::record_candidate(
+                    session_store,
+                    row,
+                    candidate_frontier,
+                    window_start,
+                    window_end,
+                    control,
+                    committed,
+                )
+                .await;
+            }
+            Err(interruption) => return Err(interruption),
+        };
         let progress = progress_from_cursor(
             key,
             candidate_frontier.activity_timestamp,
@@ -474,6 +534,18 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
                 .await
             }
         };
+        let result = match result {
+            Err(BoundedBackfillInterruption::UnsupportedSourceFraming) => {
+                return history_failures::record_progress(
+                    session_store,
+                    &progress,
+                    control,
+                    committed,
+                )
+                .await;
+            }
+            result => result,
+        };
         if progress.scan_mode != GitHistoryScanMode::Graph
             && matches!(result, Err(BoundedBackfillInterruption::SourceChanged))
         {
@@ -489,146 +561,6 @@ async fn resume_git_evidence<S: GitCorrelationSessionStore>(
             result => return result,
         }
     }
-}
-
-fn session_row_from_progress(progress: &GitHistoryProgressRow) -> SessionActivityRow {
-    SessionActivityRow {
-        provider: progress.provider.clone(),
-        session_id: progress.session_id.clone(),
-        project_path: progress.project_path.clone(),
-        started_at: Some(progress.window_start),
-        ended_at: Some(progress.window_end),
-        message_min_ts: None,
-        message_max_ts: None,
-    }
-}
-
-const fn progress_frontier(progress: &GitHistoryProgressRow) -> GitHistoryIndexFrontier {
-    GitHistoryIndexFrontier {
-        activity_timestamp: progress.activity_timestamp,
-        source_rowid: progress.key.source_rowid,
-    }
-}
-
-fn progress_from_cursor(
-    key: GitHistoryProgressKey,
-    activity_timestamp: i64,
-    row: &SessionActivityRow,
-    window_start: i64,
-    window_end: i64,
-    cursor: native::ReflogCursor,
-) -> Result<GitHistoryProgressRow, BoundedBackfillInterruption> {
-    let (cursor_head_state, cursor_head_branch) = match cursor.state {
-        native::ReflogHeadState::LocalBranch(branch) => {
-            (GitHistoryCursorHeadState::LocalBranch, Some(branch))
-        }
-        native::ReflogHeadState::Detached => (GitHistoryCursorHeadState::Detached, None),
-    };
-    let reflog_byte_length = cursor.byte_offset;
-    Ok(GitHistoryProgressRow {
-        key,
-        activity_timestamp,
-        provider: row.provider.clone(),
-        session_id: row.session_id.clone(),
-        project_path: row.project_path.clone(),
-        window_start,
-        window_end,
-        worktree: native::encode_path(&cursor.worktree)?,
-        worktree_identity: cursor.worktree_identity,
-        git_dir: native::encode_path(&cursor.git_dir)?,
-        git_dir_identity: cursor.git_dir_identity,
-        common_dir: native::encode_path(&cursor.common_dir)?,
-        common_dir_identity: cursor.common_dir_identity,
-        generation: 0,
-        scan_mode: GitHistoryScanMode::ReflogCapture,
-        reflog_path: native::encode_path(&cursor.reflog_path)?,
-        reflog_byte_offset: cursor.byte_offset,
-        reflog_byte_length,
-        source_generation: cursor.source_generation,
-        reflog_digest: cursor.content_chain,
-        capture_target_offset: None,
-        verify_byte_offset: reflog_byte_length,
-        verify_digest: history_progress::initial_reflog_content_chain().to_owned(),
-        source_head_referent: cursor.source_head_referent,
-        source_head_oid: cursor.source_head_oid,
-        cursor_head_state,
-        cursor_head_branch,
-        cursor_oid: cursor.state_oid,
-        segment_end: cursor.segment_end,
-        segment_tip_oid: cursor.segment_tip_oid,
-        segment_cursor: 0,
-        emitted_count: 0,
-        consulted_refs: cursor.consulted_refs,
-    })
-}
-
-fn cursor_from_progress(
-    progress: &GitHistoryProgressRow,
-) -> Result<native::ReflogCursor, BoundedBackfillInterruption> {
-    let state = match progress.cursor_head_state {
-        GitHistoryCursorHeadState::LocalBranch => native::ReflogHeadState::LocalBranch(
-            progress
-                .cursor_head_branch
-                .clone()
-                .ok_or(BoundedBackfillInterruption::SourceUnavailable)?,
-        ),
-        GitHistoryCursorHeadState::Detached => native::ReflogHeadState::Detached,
-    };
-    Ok(native::ReflogCursor {
-        worktree: native::decode_path(&progress.worktree)?,
-        worktree_identity: progress.worktree_identity.clone(),
-        git_dir: native::decode_path(&progress.git_dir)?,
-        git_dir_identity: progress.git_dir_identity.clone(),
-        common_dir: native::decode_path(&progress.common_dir)?,
-        common_dir_identity: progress.common_dir_identity.clone(),
-        reflog_path: native::decode_path(&progress.reflog_path)?,
-        source_generation: progress.source_generation.clone(),
-        source_head_referent: progress.source_head_referent.clone(),
-        source_head_oid: progress.source_head_oid.clone(),
-        byte_offset: progress.reflog_byte_offset,
-        state,
-        state_oid: progress.cursor_oid.clone(),
-        segment_end: progress.segment_end,
-        segment_tip_oid: progress.segment_tip_oid.clone(),
-        next_segment_ordinal: i64::try_from(progress.segment_cursor)
-            .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?,
-        consulted_refs: progress.consulted_refs.clone(),
-        content_chain: progress.reflog_digest.clone(),
-    })
-}
-
-fn repository_seal_from_progress(
-    progress: &GitHistoryProgressRow,
-) -> Result<native::RepositorySeal, BoundedBackfillInterruption> {
-    Ok(native::RepositorySeal {
-        worktree: native::decode_path(&progress.worktree)?,
-        worktree_identity: progress.worktree_identity.clone(),
-        git_dir: native::decode_path(&progress.git_dir)?,
-        git_dir_identity: progress.git_dir_identity.clone(),
-        common_dir: native::decode_path(&progress.common_dir)?,
-        common_dir_identity: progress.common_dir_identity.clone(),
-    })
-}
-
-fn copy_cursor_to_progress(
-    progress: &mut GitHistoryProgressRow,
-    cursor: native::ReflogCursor,
-) -> Result<(), BoundedBackfillInterruption> {
-    progress.reflog_byte_offset = cursor.byte_offset;
-    progress.reflog_digest = cursor.content_chain;
-    (progress.cursor_head_state, progress.cursor_head_branch) = match cursor.state {
-        native::ReflogHeadState::LocalBranch(branch) => {
-            (GitHistoryCursorHeadState::LocalBranch, Some(branch))
-        }
-        native::ReflogHeadState::Detached => (GitHistoryCursorHeadState::Detached, None),
-    };
-    progress.cursor_oid = cursor.state_oid;
-    progress.segment_end = cursor.segment_end;
-    progress.segment_tip_oid = cursor.segment_tip_oid;
-    progress.segment_cursor = u64::try_from(cursor.next_segment_ordinal)
-        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
-    progress.consulted_refs = cursor.consulted_refs;
-    Ok(())
 }
 
 async fn dry_run_native_history(

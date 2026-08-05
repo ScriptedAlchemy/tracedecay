@@ -259,6 +259,87 @@ async fn activity_change_finishes_sealed_candidate_before_newer_row() {
 }
 
 #[tokio::test]
+async fn malformed_source_is_durable_while_later_sessions_advance_and_recovery_clears_it() {
+    let malformed_repository = repository_fixture();
+    let valid_repository = repository_fixture();
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("sessions.db");
+    let store = prepare_store(&database, malformed_repository.path()).await;
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET ended_at = 100 WHERE session_id = 'session-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO sessions(provider, session_id, project_path, started_at, ended_at)
+             VALUES ('codex', 'session-2', ?1, 0, 200)",
+            params![valid_repository.path().to_str().unwrap()],
+        )
+        .await
+        .unwrap();
+    let reflog = malformed_repository.path().join(".git/logs/HEAD");
+    let valid_reflog = std::fs::read(&reflog).unwrap();
+    let mut truncated_reflog = valid_reflog.clone();
+    assert_eq!(truncated_reflog.pop(), Some(b'\n'));
+    std::fs::write(&reflog, truncated_reflog).unwrap();
+    let mut page_options = options(false);
+    page_options.limit_sessions = 2;
+
+    let outcome = run_bounded_history_index_page(
+        &store,
+        &page_options,
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.interruption, None);
+    assert_eq!(outcome.frontier.activity_timestamp, 200);
+    assert_eq!(outcome.stats.skipped_git_error, 1);
+    assert_eq!(outcome.unresolved_failures, 1);
+    assert_eq!(outcome.remaining_sessions, 0);
+    assert!(scalar(&store, "SELECT COUNT(*) FROM session_git_spans").await > 0);
+
+    let empty_pass = run_bounded_history_index_page(
+        &store,
+        &page_options,
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(empty_pass.stats.sessions_scanned, 0);
+    assert_eq!(empty_pass.remaining_sessions, 0);
+    assert_eq!(empty_pass.unresolved_failures, 1);
+
+    std::fs::write(&reflog, valid_reflog).unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE sessions SET ended_at = 300 WHERE session_id = 'session-1'",
+            (),
+        )
+        .await
+        .unwrap();
+    let recovered = run_bounded_history_index_page(
+        &store,
+        &page_options,
+        &BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recovered.frontier.activity_timestamp, 300);
+    assert_eq!(recovered.unresolved_failures, 0);
+    assert_eq!(
+        scalar(&store, "SELECT COUNT(*) FROM git_history_index_failures").await,
+        0
+    );
+}
+
+#[tokio::test]
 async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
     let repository = repository_fixture();
     let directory = tempfile::tempdir().unwrap();
@@ -280,6 +361,7 @@ async fn dry_run_leaves_progress_evidence_and_frontier_untouched() {
         "git_history_index_segments",
         "git_history_index_pending",
         "git_history_index_seen",
+        "git_history_index_failures",
         "session_git_spans",
         "commit_sessions",
         "git_correlation_meta",

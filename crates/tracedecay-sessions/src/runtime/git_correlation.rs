@@ -597,6 +597,7 @@ pub async fn ensure_git_correlation_schema_in_transaction(
         )));
     }
     backfill::history_progress::install_final_schema(conn).await?;
+    backfill::history_failures::install_final_schema(conn).await?;
     if version == Some(GIT_CORRELATION_SCHEMA_VERSION) {
         return Ok(());
     }

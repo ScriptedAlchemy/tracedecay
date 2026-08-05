@@ -10,6 +10,7 @@ use super::{
 };
 
 mod bounded;
+pub(super) mod history_failures;
 pub(super) mod history_progress;
 pub use bounded::{
     BoundedBackfillInterruption, BoundedBackfillOutcome, BoundedGitControl,
