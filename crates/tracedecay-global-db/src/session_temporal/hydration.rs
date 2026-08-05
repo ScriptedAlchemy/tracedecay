@@ -154,6 +154,14 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
         {
             return Err(HydrationError::Unavailable);
         }
+        control.checkpoint()?;
+        let current = match self.backend.resolve_current(snapshot, anchor_id).await? {
+            HydrationResolution::Available(current) => current,
+            HydrationResolution::Unavailable(_) => return Err(HydrationError::Unavailable),
+        };
+        if !same_payload_descriptor(&descriptor, &current) {
+            return Err(HydrationError::Unavailable);
+        }
         if max_chunk_bytes == 0 && !bytes.is_empty() {
             return Err(HydrationError::BudgetExceeded {
                 resource: "chunk bytes",
@@ -165,6 +173,51 @@ impl<B: TemporalHydrationBackend> SessionTemporalHydrationAdapter<B> {
         }
         Ok(control.checkpoint()?)
     }
+}
+
+fn same_payload_descriptor(left: &PayloadDescriptor, right: &PayloadDescriptor) -> bool {
+    left.byte_count == right.byte_count
+        && left.content_hash == right.content_hash
+        && match (&left.source, &right.source) {
+            (
+                PayloadSource::Occurrence {
+                    content: left_content,
+                },
+                PayloadSource::Occurrence {
+                    content: right_content,
+                },
+            ) => left_content.as_slice() == right_content.as_slice(),
+            (
+                PayloadSource::Summary {
+                    session_id: left_session,
+                    summary_id: left_summary,
+                },
+                PayloadSource::Summary {
+                    session_id: right_session,
+                    summary_id: right_summary,
+                },
+            ) => left_session == right_session && left_summary == right_summary,
+            (
+                PayloadSource::External {
+                    provider: left_provider,
+                    session_id: left_session,
+                    payload_ref: left_ref,
+                    char_count: left_chars,
+                },
+                PayloadSource::External {
+                    provider: right_provider,
+                    session_id: right_session,
+                    payload_ref: right_ref,
+                    char_count: right_chars,
+                },
+            ) => {
+                left_provider == right_provider
+                    && left_session == right_session
+                    && left_ref == right_ref
+                    && left_chars == right_chars
+            }
+            _ => false,
+        }
 }
 
 impl<B: TemporalHydrationBackend> TemporalHydrationPort for SessionTemporalHydrationAdapter<B> {
@@ -2510,7 +2563,7 @@ mod tests {
             assert_eq!(output, b"abcdefgh");
             assert_eq!(
                 adapter.backend.calls.lock().expect("calls").as_slice(),
-                ["resolve", "resolve", "read"]
+                ["resolve", "resolve", "read", "resolve"]
             );
         });
     }
@@ -2548,6 +2601,44 @@ mod tests {
             assert_eq!(
                 adapter.backend.calls.lock().expect("calls").as_slice(),
                 ["resolve", "resolve"]
+            );
+        });
+    }
+
+    #[test]
+    fn authorization_revocation_after_read_emits_no_payload() {
+        block_on(async {
+            let payload = b"buffered-until-live-recheck";
+            let backend = FakeBackend {
+                resolutions: Mutex::new(vec![
+                    available(payload.len(), &hash(payload)),
+                    available(payload.len(), &hash(payload)),
+                    HydrationResolution::Unavailable(HydrationStateV1::Unauthorized),
+                ]),
+                payload: Mutex::new(Ok(payload.to_vec())),
+                calls: Mutex::new(Vec::new()),
+            };
+            let adapter = SessionTemporalHydrationAdapter::new(backend);
+            let snapshot = snapshot(ExecutionControl::default());
+
+            assert_eq!(
+                adapter.authorize(&snapshot, &anchor()).await,
+                Ok(HydrationAuthorization::Authorized)
+            );
+            let mut output = Vec::new();
+            assert_eq!(
+                adapter
+                    .read_after_recheck(&snapshot, &anchor(), payload.len(), 8, &mut |chunk| {
+                        output.extend_from_slice(chunk);
+                        Ok(())
+                    })
+                    .await,
+                Err(HydrationError::Unavailable)
+            );
+            assert!(output.is_empty());
+            assert_eq!(
+                adapter.backend.calls.lock().expect("calls").as_slice(),
+                ["resolve", "resolve", "read", "resolve"]
             );
         });
     }
