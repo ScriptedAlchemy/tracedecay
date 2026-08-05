@@ -23,6 +23,7 @@ pub mod feedback;
 pub use tracedecay_domain::framed_log;
 pub mod git;
 pub mod handlers;
+pub mod handoff;
 pub mod hint_outcomes;
 pub mod historical_query;
 mod identity;
@@ -146,6 +147,7 @@ pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use handoff::*;
 pub use hint_outcomes::*;
 pub use invocation::{
     ApplicationInvocation, ApplicationInvocationBinding, ApplicationInvocationContext,
