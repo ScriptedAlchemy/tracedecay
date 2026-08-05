@@ -589,6 +589,55 @@ async fn invoke_project_open_source_edit_reconciliation(
     .await
 }
 
+async fn invoke_project_open_source_edit_rollback(
+    graph: Arc<crate::tracedecay::TraceDecay>,
+    authorization: ProjectOpenSourceEditAuthorizationV1,
+    invocation: crate::mcp::server::SourceEditRollbackInvocationV1,
+) -> Result<crate::application::edit::SourceEditApplicationResult> {
+    let observed_at = now_micros();
+    let effect_control = crate::application::edit::SourceEditEffectControlV1::new(
+        invocation.deadline.clone(),
+        invocation.cancellation.clone(),
+    );
+    let operation = tracedecay_application::source_edit_rollback_operation()
+        .map_err(source_edit_contract_error)?;
+    let access = authorization
+        .current_access(observed_at)
+        .await
+        .map_err(|_| source_edit_authority_error())?;
+    let context = source_edit_request_context(
+        &access,
+        invocation.request_id,
+        &operation,
+        observed_at,
+        invocation.deadline,
+        invocation.cancellation.context(),
+    )?;
+    let current = authorization
+        .current_authority(&context, &operation, observed_at)
+        .await
+        .map_err(|_| source_edit_authority_error())?;
+    let request = tracedecay_application::SourceEditRollbackRequestV1 {
+        context,
+        authority: current.receipt.clone(),
+        effect_id: invocation.effect_id,
+        original_idempotency_key: invocation.original_idempotency_key,
+        idempotency_key: invocation.idempotency_key,
+        original_input_digest: invocation.original_input_digest,
+        expected_state: invocation.expected_state,
+        proof: current.proof,
+        observed_at,
+    };
+    crate::application::edit::execute_source_edit_rollback_with_control(
+        &*graph,
+        &operation,
+        request,
+        &authorization,
+        &effect_control,
+    )
+    .await
+}
+
 /// Publication state of the daemon-owned source-edit mutation lane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SourceEditMutationState {
@@ -674,7 +723,10 @@ fn install_project_open_source_edit_owners(
 ) -> Result<()> {
     let source_edit_graph = Arc::clone(&graph);
     let source_edit_reconciliation_authorization = authorization.clone();
+    let source_edit_rollback_graph = Arc::clone(&graph);
+    let source_edit_rollback_authorization = authorization.clone();
     let source_edit_mutation = Arc::clone(&mutation);
+    let source_edit_rollback_mutation = Arc::clone(&mutation);
     server
         .install_source_edit_executor(Arc::new(move |request| {
             let graph = Arc::clone(&source_edit_graph);
@@ -703,6 +755,19 @@ fn install_project_open_source_edit_owners(
         .map_err(|_| TraceDecayError::Config {
             message: "project-open source edit reconciliation authority was already installed"
                 .to_owned(),
+        })?;
+    server
+        .install_source_edit_rollback_executor(Arc::new(move |request| {
+            let graph = Arc::clone(&source_edit_rollback_graph);
+            let authorization = source_edit_rollback_authorization.clone();
+            let mutation = Arc::clone(&source_edit_rollback_mutation);
+            Box::pin(async move {
+                mutation.authorize_mutation("rollback")?;
+                invoke_project_open_source_edit_rollback(graph, authorization, request).await
+            })
+        }))
+        .map_err(|_| TraceDecayError::Config {
+            message: "project-open source edit rollback authority was already installed".to_owned(),
         })?;
     Ok(())
 }

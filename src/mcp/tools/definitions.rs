@@ -611,6 +611,7 @@ pub(super) fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
         def_move_symbol(),
         def_api_migration_apply(),
         def_source_edit_reconcile(),
+        def_source_edit_rollback(),
         def_find_exact_symbol(),
     ];
     definitions.extend(configuration_definitions());
@@ -871,6 +872,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_api_migration_plan",
     "tracedecay_api_migration_apply",
     "tracedecay_source_edit_reconcile",
+    "tracedecay_source_edit_rollback",
     // git & info
     "tracedecay_branch_list",
     "tracedecay_active_project",
