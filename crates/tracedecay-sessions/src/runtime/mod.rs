@@ -23,6 +23,8 @@ pub mod kimi;
 pub mod kiro;
 pub mod lcm;
 pub mod opencode;
+mod opencode_frontier;
+mod opencode_part_scan;
 mod opencode_snapshot;
 pub mod shared;
 pub mod snapshot_observation;

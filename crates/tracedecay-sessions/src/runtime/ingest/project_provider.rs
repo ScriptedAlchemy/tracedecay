@@ -7,7 +7,10 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 use crate::admission::HostAdmission;
 use crate::observation::ObservationCancellation;
 use crate::runtime::shared::TranscriptIngestStats;
-use crate::runtime::source::{TranscriptDiscoveryBounds, TranscriptSource};
+use crate::runtime::source::{
+    HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptSource,
+    persist_host_provider_coverage,
+};
 use crate::runtime::{
     SessionProvider, claude, claude_observation, cline_like, codex, cursor, cursor_composer,
     hermes, kimi, kiro, opencode, vibe,
@@ -183,15 +186,34 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 run
             }
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
+            Err(error) => {
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "kimi",
+                        "observation",
+                        &error,
+                        "project Kimi observation catch-up failed",
+                    ),
+                    0,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
                     "kimi",
-                    "observation",
-                    &error,
-                    "project Kimi observation catch-up failed",
-                ),
-                0,
-            ),
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "kimi",
+                        "coverage",
+                        &coverage_error,
+                        "project Kimi coverage persistence failed",
+                    ));
+                }
+                run
+            }
         }
     }
 
@@ -224,15 +246,34 @@ impl<'a> ProjectProviderRun<'a> {
                 }
                 run
             }
-            Err(error) => ProviderRunOutcome::failed(
-                warn_transcript_catch_up_failure(
+            Err(error) => {
+                let mut run = ProviderRunOutcome::failed(
+                    warn_transcript_catch_up_failure(
+                        "opencode",
+                        "observation",
+                        &error,
+                        "project OpenCode observation catch-up failed",
+                    ),
+                    0,
+                );
+                if let Err(coverage_error) = persist_host_provider_coverage(
+                    self.facade,
+                    self.scope,
                     "opencode",
-                    "observation",
-                    &error,
-                    "project OpenCode observation catch-up failed",
-                ),
-                0,
-            ),
+                    HostProviderCoverage::Unavailable,
+                    1,
+                )
+                .await
+                {
+                    run.add_failure(warn_transcript_catch_up_failure(
+                        "opencode",
+                        "coverage",
+                        &coverage_error,
+                        "project OpenCode coverage persistence failed",
+                    ));
+                }
+                run
+            }
         }
     }
 

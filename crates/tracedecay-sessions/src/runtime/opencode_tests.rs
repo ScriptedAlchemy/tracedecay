@@ -116,6 +116,186 @@ async fn immutable_database_read_is_scoped_resumable_and_budgeted() {
 }
 
 #[tokio::test]
+async fn steady_state_restart_keeps_high_water_without_per_row_durability_reads() {
+    let (_temp, project, database) = fixture();
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &OpenCodeSource::with_database_for_project(database.clone(), project.clone()),
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let frontier = admission
+        .get_parse_offset(
+            &ObservationScopeV1::Profile,
+            super::OPENCODE_SQL_FRONTIER_KEY,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        frontier.byte_offset > 0,
+        "a completed sweep must retain its durable high-water rowid"
+    );
+    let coverage = admission
+        .get_parse_offset(&ObservationScopeV1::Profile, "host-coverage://opencode/v1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        coverage.file_id,
+        crate::runtime::source::HostProviderCoverage::Complete as u64
+    );
+    assert_eq!(coverage.byte_offset, 0);
+    let reads_after_first_sweep = admission.session_message_read_count();
+
+    let restarted = capture_opencode_observations(
+        &admission,
+        &OpenCodeSource::with_database_for_project(database, project),
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(restarted.stats.messages_upserted, 0);
+    assert_eq!(
+        admission.session_message_read_count(),
+        reads_after_first_sweep,
+        "a quiet restart must not repeat per-row durability lookups"
+    );
+}
+
+#[tokio::test]
+async fn wal_part_append_replaces_the_durable_message_with_complete_content() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project);
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let initial_part_frontier = admission
+        .get_parse_offset(
+            &ObservationScopeV1::Profile,
+            super::OPENCODE_PART_FRONTIER_KEY,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let writer = Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute(
+            "INSERT INTO part(id, message_id, session_id, data)
+             VALUES ('part_late', 'msg_ses_project', 'ses_project', ?1)",
+            [json!({"type": "text", "text": "late-part"}).to_string()],
+        )
+        .unwrap();
+    assert!(database.with_extension("db-wal").is_file());
+
+    let updated = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    let updated_part_frontier = admission
+        .get_parse_offset(
+            &ObservationScopeV1::Profile,
+            super::OPENCODE_PART_FRONTIER_KEY,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(updated_part_frontier.byte_offset > initial_part_frontier.byte_offset);
+    assert_eq!(updated.scan_non_durable_units, 0);
+    assert!(admission.observations().iter().any(|stored| {
+        let payload = stored.observation().payload().to_string();
+        payload.contains("secret-ses_project") && payload.contains("late-part")
+    }));
+    assert_eq!(updated.stats.messages_upserted, 1);
+    drop(writer);
+}
+
+#[tokio::test]
+async fn content_generation_sweep_recovers_deleted_and_reused_rowids() {
+    let (_temp, project, database) = fixture();
+    let source = OpenCodeSource::with_database_for_project(database.clone(), project);
+    let admission = MemoryHostAdmission::default();
+
+    capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database).unwrap();
+    connection.execute("DELETE FROM part", ()).unwrap();
+    connection.execute("DELETE FROM message", ()).unwrap();
+    connection
+        .execute(
+            "INSERT INTO message(id, session_id, time_created, data)
+             VALUES ('msg_reused', 'ses_project', 3, ?1)",
+            [json!({"role": "assistant", "time": {"created": 3}}).to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO part(id, message_id, session_id, data)
+             VALUES ('part_reused', 'msg_reused', 'ses_project', ?1)",
+            [json!({"type": "text", "text": "reused-rowid-content"}).to_string()],
+        )
+        .unwrap();
+    let reused_rowid: i64 = connection
+        .query_row(
+            "SELECT rowid FROM message WHERE id = 'msg_reused'",
+            (),
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(reused_rowid, 1);
+    drop(connection);
+
+    let recovered = capture_opencode_observations(
+        &admission,
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(recovered.stats.messages_upserted, 1);
+    assert!(admission.observations().iter().any(|stored| {
+        stored
+            .observation()
+            .payload()
+            .to_string()
+            .contains("reused-rowid-content")
+    }));
+}
+
+#[tokio::test]
 async fn profile_scope_is_the_complement_of_registered_project_scope() {
     let (_temp, project, database) = fixture();
     let source = OpenCodeSource::with_database_for_user(database, vec![project]);
@@ -253,6 +433,48 @@ async fn malformed_prefix_cannot_starve_later_record() {
 
     assert!(outcome.deferred_by_byte_cap);
     assert_eq!(outcome.scan_non_durable_units, 1);
+    assert_eq!(admission.observations().len(), 1);
+}
+
+#[tokio::test]
+async fn wrong_typed_sqlite_ids_and_data_are_row_local_non_durable_records() {
+    let (_temp, project, database) = fixture();
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE message SET rowid = 10 WHERE id = 'msg_ses_project'",
+            (),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO message(rowid, id, session_id, time_created, data)
+             VALUES (1, X'0102', 'ses_project', 0, '{}')",
+            (),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO message(rowid, id, session_id, time_created, data)
+             VALUES (3, 'msg_wrong_data', 'ses_project', 0, 42)",
+            (),
+        )
+        .unwrap();
+    drop(connection);
+    let admission = MemoryHostAdmission::default();
+
+    let outcome = capture_opencode_observations(
+        &admission,
+        &OpenCodeSource::with_database_for_project(database, project),
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome.scan_non_durable_units, 2);
+    assert_eq!(outcome.stats.messages_upserted, 1);
     assert_eq!(admission.observations().len(), 1);
 }
 
