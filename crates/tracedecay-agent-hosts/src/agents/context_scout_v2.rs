@@ -16,189 +16,31 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::o200k_base_singleton;
+pub use tracedecay_application::context_scout::{
+    ContextScoutAddressV1, ContextScoutBudgetStateV1, ContextScoutCandidateV1,
+    ContextScoutCapabilityStateV1, ContextScoutCategoryV1, ContextScoutControlV1,
+    ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1,
+    ContextScoutDurableQueueEntryV1, ContextScoutErrorV1, ContextScoutEvidenceBindingV1,
+    ContextScoutEvidenceGenerationV1, ContextScoutExplanationV1, ContextScoutFeedbackKindV1,
+    ContextScoutFeedbackV1, ContextScoutLeaseV1, ContextScoutLimitsV1, ContextScoutModelBackendV1,
+    ContextScoutModelReceiptV1, ContextScoutModelRunOutcomeV1, ContextScoutOutcomeV1,
+    ContextScoutRecentDeliveryV1, ContextScoutRecentStateV1, ContextScoutRouteV1,
+    ContextScoutRuntimeModeV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
+    ContextScoutSuggestionEnvelopeV1, ContextScoutSuppressionV1, ContextScoutWorkV1,
+    MAX_SCOUT_ACTIVE_ADDRESSES, MAX_SCOUT_CANDIDATES, MAX_SCOUT_EVIDENCE,
+    MAX_SCOUT_MODEL_INPUT_TOKENS, MAX_SCOUT_MODEL_OUTPUT_TOKENS, MAX_SCOUT_RECENT_DELIVERIES,
+    MAX_SCOUT_TEXT_BYTES,
+};
 use tracedecay_domain::UtcMicros;
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopedFeedbackV1};
 
 use crate::ports::context::{CancellationToken, MonotonicDeadline};
-
-const MAX_SCOUT_TEXT_BYTES: usize = 4 * 1024;
-const MAX_SCOUT_CANDIDATES: usize = 32;
-const MAX_SCOUT_EVIDENCE: usize = 16;
-const MAX_SCOUT_RECENT_DELIVERIES: usize = 32;
-const MAX_SCOUT_ACTIVE_ADDRESSES: usize = 32;
-const MAX_SCOUT_MODEL_INPUT_TOKENS: usize = 2_048;
-const MAX_SCOUT_MODEL_OUTPUT_TOKENS: usize = 256;
 
 mod store;
 #[cfg(test)]
 mod store_tests;
 
 pub use store::ProjectContextScoutDurableStoreV1;
-
-/// Exact destination for one advisory suggestion. Every field is opaque and
-/// fixed-size so a host integration cannot persist prompt/source/path data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ContextScoutAddressV1 {
-    pub profile_id: [u8; 16],
-    pub provider_id: [u8; 16],
-    pub protected_session_id: [u8; 32],
-    pub thread_id: [u8; 16],
-    pub turn_id: [u8; 16],
-    pub agent_id: [u8; 16],
-    pub logical_message_id: [u8; 16],
-    pub project_id: [u8; 16],
-}
-
-impl ContextScoutAddressV1 {
-    fn validate(self) -> Result<(), ContextScoutErrorV1> {
-        if self.profile_id == [0; 16]
-            || self.provider_id == [0; 16]
-            || self.protected_session_id == [0; 32]
-            || self.thread_id == [0; 16]
-            || self.turn_id == [0; 16]
-            || self.agent_id == [0; 16]
-            || self.logical_message_id == [0; 16]
-            || self.project_id == [0; 16]
-        {
-            return Err(ContextScoutErrorV1::InvalidAddress);
-        }
-        Ok(())
-    }
-}
-
-/// Only saved-content and clean-generation evidence is eligible for durable
-/// envelopes. Dirty overlay data is represented only so callers can receive a
-/// typed suppression; it must never cross a durable boundary.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutEvidenceGenerationV1 {
-    SavedContent,
-    CleanGeneration,
-    DirtyOverlay,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct ContextScoutEvidenceBindingV1 {
-    pub anchor_id: [u8; 16],
-    pub content_identity: [u8; 32],
-    pub generation: ContextScoutEvidenceGenerationV1,
-}
-
-impl ContextScoutEvidenceBindingV1 {
-    fn validate(self) -> Result<(), ContextScoutErrorV1> {
-        if self.anchor_id == [0; 16] || self.content_identity == [0; 32] {
-            return Err(ContextScoutErrorV1::InvalidEvidence);
-        }
-        Ok(())
-    }
-
-    const fn durable(self) -> bool {
-        matches!(
-            self.generation,
-            ContextScoutEvidenceGenerationV1::SavedContent
-                | ContextScoutEvidenceGenerationV1::CleanGeneration
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutCategoryV1 {
-    Retrieval,
-    Diagnostic,
-    Coordination,
-    Verification,
-}
-
-/// A daemon-produced candidate. The text is compact prompt-eligible advice;
-/// its evidence remains separately pinned to durable opaque identities.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutCandidateV1 {
-    pub dedupe_key: [u8; 32],
-    pub category: ContextScoutCategoryV1,
-    pub relevance_score: u16,
-    pub suggestion_text: String,
-    pub evidence: Vec<ContextScoutEvidenceBindingV1>,
-    pub expires_at: UtcMicros,
-}
-
-impl ContextScoutCandidateV1 {
-    fn validate(&self, limits: ContextScoutLimitsV1) -> Result<(), ContextScoutErrorV1> {
-        if self.dedupe_key == [0; 32]
-            || !safe_suggestion_text(&self.suggestion_text)
-            || self.suggestion_text.len() > limits.max_text_bytes
-            || self.evidence.is_empty()
-            || self.evidence.len() > limits.max_evidence
-            || self.expires_at.0 <= 0
-        {
-            return Err(ContextScoutErrorV1::InvalidCandidate);
-        }
-        let mut anchors = BTreeSet::new();
-        for evidence in &self.evidence {
-            evidence.validate()?;
-            if !anchors.insert(evidence.anchor_id) {
-                return Err(ContextScoutErrorV1::InvalidCandidate);
-            }
-        }
-        Ok(())
-    }
-
-    fn durable(&self) -> bool {
-        self.evidence.iter().all(|evidence| evidence.durable())
-    }
-}
-
-/// Bounded limits supplied from typed configuration. There is no source-code
-/// default model/provider or delivery timing policy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutLimitsV1 {
-    pub max_candidates: usize,
-    pub max_evidence: usize,
-    pub max_text_bytes: usize,
-    pub max_model_input_tokens: usize,
-    pub max_model_output_tokens: usize,
-}
-
-impl ContextScoutLimitsV1 {
-    pub const fn bounded_defaults() -> Self {
-        Self {
-            max_candidates: MAX_SCOUT_CANDIDATES,
-            max_evidence: MAX_SCOUT_EVIDENCE,
-            max_text_bytes: MAX_SCOUT_TEXT_BYTES,
-            max_model_input_tokens: MAX_SCOUT_MODEL_INPUT_TOKENS,
-            max_model_output_tokens: MAX_SCOUT_MODEL_OUTPUT_TOKENS,
-        }
-    }
-
-    fn validate(self) -> Result<(), ContextScoutErrorV1> {
-        if self.max_candidates == 0
-            || self.max_candidates > MAX_SCOUT_CANDIDATES
-            || self.max_evidence == 0
-            || self.max_evidence > MAX_SCOUT_EVIDENCE
-            || self.max_text_bytes == 0
-            || self.max_text_bytes > MAX_SCOUT_TEXT_BYTES
-            || self.max_model_input_tokens == 0
-            || self.max_model_input_tokens > MAX_SCOUT_MODEL_INPUT_TOKENS
-            || self.max_model_output_tokens == 0
-            || self.max_model_output_tokens > MAX_SCOUT_MODEL_OUTPUT_TOKENS
-        {
-            return Err(ContextScoutErrorV1::InvalidLimits);
-        }
-        Ok(())
-    }
-}
-
-/// The daemon/policy-owned receptivity result. A model adapter cannot choose
-/// this value and no fixed timing threshold is embedded here.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutDeliveryWindowV1 {
-    Immediate,
-    NextBoundary,
-    IdleWindow,
-    OnRequest,
-    Suppressed,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -246,20 +88,6 @@ pub const fn select_context_scout_delivery_window(
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutSuppressionV1 {
-    Disabled,
-    Paused,
-    DirtyOverlay,
-    QuietOrUnreceptive,
-    NoEligibleCandidate,
-    Expired,
-    Duplicate,
-    Cancelled,
-    ModelOutputInvalid,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextScoutSelectionInputV1 {
     pub address: ContextScoutAddressV1,
@@ -270,16 +98,6 @@ pub struct ContextScoutSelectionInputV1 {
     pub delivery_window: ContextScoutDeliveryWindowV1,
     pub delivered_dedupe_keys: BTreeSet<[u8; 32]>,
     pub candidates: Vec<ContextScoutCandidateV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutSuggestionEnvelopeV1 {
-    pub envelope_id: [u8; 16],
-    pub address: ContextScoutAddressV1,
-    pub input_watermark: [u8; 32],
-    pub configuration_revision: [u8; 32],
-    pub delivery_window: ContextScoutDeliveryWindowV1,
-    pub candidate: ContextScoutCandidateV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,14 +114,6 @@ pub enum ContextScoutDecisionV1 {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutRouteV1 {
-    Deterministic,
-    ModelAssisted,
-    DeterministicFallback,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextScoutSelectionV1 {
     pub route: ContextScoutRouteV1,
@@ -312,28 +122,6 @@ pub struct ContextScoutSelectionV1 {
     pub model_outcome: ContextScoutModelRunOutcomeV1,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_receipt: Option<ContextScoutModelReceiptV1>,
-}
-
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
-pub enum ContextScoutErrorV1 {
-    #[error("Context Scout address is incomplete or ambiguous")]
-    InvalidAddress,
-    #[error("Context Scout evidence binding is incomplete")]
-    InvalidEvidence,
-    #[error("Context Scout candidate is malformed or exceeds a bound")]
-    InvalidCandidate,
-    #[error("Context Scout limits are invalid")]
-    InvalidLimits,
-    #[error("Context Scout typed configuration is unavailable")]
-    ConfigurationUnavailable,
-    #[error("Context Scout durable boundary received dirty-overlay evidence")]
-    DirtyOverlayDurabilityViolation,
-    #[error("Context Scout receipt or feedback does not match its envelope")]
-    ReceiptBindingMismatch,
-    #[error("Context Scout cancellation/work token is stale")]
-    StaleWork,
-    #[error("Context Scout bounded work or delivery channel is full")]
-    CapacityExceeded,
 }
 
 /// Deterministically choose at most one candidate without invoking a model,
@@ -458,20 +246,6 @@ pub enum ContextScoutModelErrorV1 {
     InvalidOutput,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutModelRunOutcomeV1 {
-    #[default]
-    NotRequested,
-    Succeeded,
-    Disabled,
-    Unavailable,
-    Cancelled,
-    DeadlineExceeded,
-    TokenBudgetExceeded,
-    InvalidOutput,
-}
-
 impl From<ContextScoutModelErrorV1> for ContextScoutModelRunOutcomeV1 {
     fn from(error: ContextScoutModelErrorV1) -> Self {
         match error {
@@ -483,27 +257,6 @@ impl From<ContextScoutModelErrorV1> for ContextScoutModelRunOutcomeV1 {
             ContextScoutModelErrorV1::InvalidOutput => Self::InvalidOutput,
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutModelBackendV1 {
-    Disabled,
-    CodexAppServer,
-    Unsupported,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutModelReceiptV1 {
-    pub requested_backend: ContextScoutModelBackendV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output_tokens: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub estimated_cost_microusd: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -868,13 +621,6 @@ pub(super) fn serialized_token_count(_value: &impl Serialize) -> Option<usize> {
     None
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutWorkV1 {
-    pub address: ContextScoutAddressV1,
-    pub generation: u64,
-    pub input_watermark: [u8; 32],
-}
-
 /// Exact-address burst coalescer. Superseded generations are visible through a
 /// new token; callers must not persist a result after `is_current` becomes
 /// false.
@@ -1103,38 +849,23 @@ impl ContextScoutSuggestionChannelV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutOutcomeV1 {
-    Attempted,
-    Delayed,
-    Displayed,
-    Expanded,
-    ExplicitlyAccepted,
-    ExplicitlyRejected,
-    Dismissed,
-    ExpiredUnseen,
-    Corrected,
-    Unknown,
-}
+struct ContextScoutHookReceiptV1<'a>(&'a ContextScoutDeliveryReceiptV1);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutDeliveryReceiptV1 {
-    pub receipt_id: [u8; 16],
-    pub envelope_id: [u8; 16],
-    pub delivered_at: UtcMicros,
-    pub outcome: ContextScoutOutcomeV1,
-}
-
-impl HookScopedFeedbackV1 for ContextScoutDeliveryReceiptV1 {
+impl HookScopedFeedbackV1 for ContextScoutHookReceiptV1<'_> {
     fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
-        self.receipt_id != [0; 16]
-            && self.envelope_id != [0; 16]
-            && self.delivered_at.0 > 0
-            && self.receipt_id
-                == context_scout_delivery_receipt_id(envelope.event_id, self.envelope_id)
+        self.0.receipt_id != [0; 16]
+            && self.0.envelope_id != [0; 16]
+            && self.0.delivered_at.0 > 0
+            && self.0.receipt_id
+                == context_scout_delivery_receipt_id(envelope.event_id, self.0.envelope_id)
     }
+}
+
+pub fn context_scout_receipt_matches_envelope(
+    receipt: &ContextScoutDeliveryReceiptV1,
+    envelope: &HookEventEnvelopeV2,
+) -> bool {
+    ContextScoutHookReceiptV1(receipt).matches_envelope(envelope)
 }
 
 pub fn context_scout_delivery_receipt_id(event_id: [u8; 16], envelope_id: [u8; 16]) -> [u8; 16] {
@@ -1161,40 +892,6 @@ pub fn validate_context_scout_delivery_receipt(
         return Err(ContextScoutErrorV1::ReceiptBindingMismatch);
     }
     Ok(())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutFeedbackKindV1 {
-    ExplicitlyAccepted,
-    ExplicitlyRejected,
-    Dismissed,
-    Corrected,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutFeedbackV1 {
-    pub receipt_id: [u8; 16],
-    pub kind: ContextScoutFeedbackKindV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutRecentDeliveryV1 {
-    pub entry: ContextScoutDurableQueueEntryV1,
-    pub receipt: ContextScoutDeliveryReceiptV1,
-    pub feedback: Option<ContextScoutFeedbackV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutRecentStateV1 {
-    pub configuration_revision: [u8; 32],
-    pub observed_at: UtcMicros,
-    pub pending: Vec<ContextScoutDurableQueueEntryV1>,
-    pub deliveries: Vec<ContextScoutRecentDeliveryV1>,
-    pub omitted: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1244,58 +941,6 @@ fn validate_durable_envelope(
     Ok(())
 }
 
-/// One exact durable queue entry. The queue records the work-generation token
-/// next to the envelope, so a replay cannot turn a superseded model result
-/// into a current delivery.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutDurableQueueEntryV1 {
-    pub work: ContextScoutWorkV1,
-    pub route: ContextScoutRouteV1,
-    #[serde(default)]
-    pub model_outcome: ContextScoutModelRunOutcomeV1,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_receipt: Option<ContextScoutModelReceiptV1>,
-    pub envelope: ContextScoutSuggestionEnvelopeV1,
-}
-
-impl ContextScoutDurableQueueEntryV1 {
-    pub fn validate(&self) -> Result<(), ContextScoutErrorV1> {
-        self.work.address.validate()?;
-        if self.work.generation == 0 || self.work.input_watermark == [0; 32] {
-            return Err(ContextScoutErrorV1::StaleWork);
-        }
-        match (self.route, self.model_outcome, self.model_receipt.as_ref()) {
-            (
-                ContextScoutRouteV1::ModelAssisted,
-                ContextScoutModelRunOutcomeV1::Succeeded,
-                Some(receipt),
-            ) if receipt.requested_backend == ContextScoutModelBackendV1::CodexAppServer => {}
-            (
-                ContextScoutRouteV1::Deterministic | ContextScoutRouteV1::DeterministicFallback,
-                ContextScoutModelRunOutcomeV1::NotRequested,
-                None,
-            ) => {}
-            (
-                ContextScoutRouteV1::DeterministicFallback,
-                ContextScoutModelRunOutcomeV1::Disabled
-                | ContextScoutModelRunOutcomeV1::Unavailable
-                | ContextScoutModelRunOutcomeV1::DeadlineExceeded
-                | ContextScoutModelRunOutcomeV1::TokenBudgetExceeded
-                | ContextScoutModelRunOutcomeV1::InvalidOutput,
-                None,
-            ) => {}
-            _ => return Err(ContextScoutErrorV1::InvalidCandidate),
-        }
-        validate_durable_envelope(&self.envelope)?;
-        if self.work.address != self.envelope.address
-            || self.work.input_watermark != self.envelope.input_watermark
-        {
-            return Err(ContextScoutErrorV1::StaleWork);
-        }
-        Ok(())
-    }
-}
-
 /// Result of one daemon/store serialized Scout mutation. `Duplicate` and
 /// `Superseded` are convergent outcomes, while `Unavailable` commits nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1304,29 +949,6 @@ pub enum ContextScoutDurableStoreOutcomeV1 {
     Duplicate,
     Superseded,
     Unavailable,
-}
-
-/// Caller-supplied lease identity and deadline. The store owns no timing
-/// policy; it only applies the exact lease and compares its absolute expiry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutLeaseV1 {
-    pub lease_id: [u8; 16],
-    pub expires_at: UtcMicros,
-}
-
-impl ContextScoutLeaseV1 {
-    fn validate(self, now: UtcMicros) -> Result<(), ContextScoutErrorV1> {
-        if self.lease_id == [0; 16] || now.0 <= 0 || self.expires_at.0 <= now.0 {
-            return Err(ContextScoutErrorV1::StaleWork);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutDurableClaimV1 {
-    pub entry: ContextScoutDurableQueueEntryV1,
-    pub lease: ContextScoutLeaseV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1464,97 +1086,6 @@ where
     ) -> ContextScoutStoreFuture<'a, ContextScoutDurableStoreOutcomeV1> {
         (**self).record_feedback(receipt, feedback)
     }
-}
-
-/// Selected only by the daemon's typed configuration. There is no built-in
-/// model name, route, retry, or timing default in this host-facing runtime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutRuntimeModeV1 {
-    Deterministic,
-    ConfiguredModel,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContextScoutServiceStateV1 {
-    Active,
-    Paused,
-    Disabled,
-}
-
-/// Typed configuration selected by the daemon configuration authority. The
-/// Scout can report and obey this state, but cannot persist or change it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutControlV1 {
-    pub configuration_revision: [u8; 32],
-    pub state: ContextScoutServiceStateV1,
-    pub mode: ContextScoutRuntimeModeV1,
-    pub model_path: Option<ContextScoutModelBackendV1>,
-    pub limits: ContextScoutLimitsV1,
-}
-
-impl ContextScoutControlV1 {
-    fn validate(self) -> Result<(), ContextScoutErrorV1> {
-        if self.configuration_revision == [0; 32]
-            || matches!(
-                (self.mode, self.model_path),
-                (ContextScoutRuntimeModeV1::Deterministic, Some(_))
-                    | (ContextScoutRuntimeModeV1::ConfiguredModel, None)
-            )
-            || self.model_path == Some(ContextScoutModelBackendV1::Disabled)
-        {
-            return Err(ContextScoutErrorV1::InvalidLimits);
-        }
-        self.limits.validate()
-    }
-}
-
-/// Read-only status for host/dashboard projection. Internal Scout work is
-/// suggestion coalescing only and never creates a task or work-graph node.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextScoutStatusV1 {
-    pub configuration_revision: [u8; 32],
-    pub state: ContextScoutServiceStateV1,
-    pub mode: ContextScoutRuntimeModeV1,
-    pub model_path: Option<ContextScoutModelBackendV1>,
-    pub limits: ContextScoutLimitsV1,
-    pub active_suggestions: usize,
-    pub last_route: Option<ContextScoutRouteV1>,
-    pub last_suppression: Option<ContextScoutSuppressionV1>,
-    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
-    pub last_model_receipt: Option<ContextScoutModelReceiptV1>,
-    pub last_delivery_outcome: Option<ContextScoutOutcomeV1>,
-    pub last_feedback: Option<ContextScoutFeedbackKindV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutExplanationV1 {
-    pub status: ContextScoutStatusV1,
-    pub recent: ContextScoutRecentStateV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutCapabilityStateV1 {
-    pub state: ContextScoutServiceStateV1,
-    pub mode: ContextScoutRuntimeModeV1,
-    pub deterministic_available: bool,
-    pub configured_model: Option<ContextScoutModelBackendV1>,
-    pub configured_model_available: bool,
-    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextScoutBudgetStateV1 {
-    pub limits: ContextScoutLimitsV1,
-    pub last_model_outcome: Option<ContextScoutModelRunOutcomeV1>,
-    pub exhausted: bool,
-    pub last_input_tokens: Option<u64>,
-    pub last_output_tokens: Option<u64>,
-    pub last_estimated_cost_microusd: Option<u64>,
 }
 
 /// Result of preparing one suggestion. Silence is a successful, normal output
