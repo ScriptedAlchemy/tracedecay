@@ -274,18 +274,6 @@ impl HostAdmissionTestRuntimeV1 {
         store.replay_observations(request).await
     }
 
-    #[cfg(test)]
-    pub(crate) fn project_observation_database_arc_for_test(
-        &self,
-    ) -> Result<Arc<RegisteredGlobalDb>> {
-        self.project_registered
-            .clone()
-            .ok_or_else(|| TraceDecayError::Database {
-                operation: "bind registered project Work test runtime".to_owned(),
-                message: "registered ProjectSessions mount is unavailable".to_owned(),
-            })
-    }
-
     #[doc(hidden)]
     pub fn session_temporal_store_for_test(
         &self,
