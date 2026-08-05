@@ -189,13 +189,24 @@ pub struct WriteOnlyCredentialMutation {
     pub write_handle: CredentialWriteHandleV1,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivationDriftV1 {
+    Current,
+    NeverActivated,
+    PendingRestart,
+    ActivationFailed,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct ComponentConfigurationState {
     pub component: String,
     pub desired_revision_id: ConfigurationRevisionId,
     pub observed_revision_id: Option<ConfigurationRevisionId>,
+    pub last_working_revision_id: Option<ConfigurationRevisionId>,
     pub restart_required: bool,
     pub activation_error_code: Option<String>,
+    pub drift: ActivationDriftV1,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -256,6 +267,8 @@ pub enum ConfigurationError {
     MutationAuthorityRejected,
     #[error("configuration validation failed: {0}")]
     Validation(String),
+    #[error("configuration reset required: {reason}")]
+    ResetRequired { reason: String },
     #[error("configuration authority is unavailable")]
     Unavailable,
 }

@@ -32,10 +32,7 @@ pub const ANALYZER_SETTINGS_SETTING_KEY: &str = "analyzer.settings.v1";
 pub const WORK_TOPOLOGY_POLICY_SETTING_KEY: &str = "work.topology_policy.v1";
 pub const CONTEXT_SCOUT_SETTINGS_SETTING_KEY: &str = "context_scout.settings.v1";
 
-/// Canonical project-scoped settings imported from the legacy `config.json`
-/// surface. These names deliberately describe behavior rather than a legacy
-/// file layout, so a later control-plane writer can use them without retaining
-/// `config.json` as authority.
+/// Canonical project-scoped runtime settings.
 pub const INDEX_EXCLUDE_SETTING_KEY: &str = "index.exclude.v1";
 pub const INDEX_INCLUDE_SETTING_KEY: &str = "index.include.v1";
 pub const INDEX_MAX_FILE_SIZE_SETTING_KEY: &str = "index.max_file_size.v1";
@@ -81,36 +78,6 @@ pub const CONFIGURATION_SETTING_KEYS_V1: &[&str] = &[
     INDEX_GIT_IGNORE_SETTING_KEY,
     DIAGNOSTICS_PREWARM_SETTING_KEY,
     SEMANTIC_RUNTIME_SETTING_KEY,
-    SYNC_AUTO_WATCH_SETTING_KEY,
-    SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
-    SYNC_WATCH_MAX_PROJECTS_SETTING_KEY,
-    SYNC_READ_REFRESH_SETTING_KEY,
-    SYNC_READ_COOLDOWN_SECS_SETTING_KEY,
-    SYNC_SESSION_START_SYNC_SETTING_KEY,
-    SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY,
-    SYNC_BACKSTOP_INTERVAL_MINS_SETTING_KEY,
-    SYNC_FULL_SYNC_ESCALATION_FILES_SETTING_KEY,
-    SYNC_MAX_CONCURRENT_SYNCS_SETTING_KEY,
-    SYNC_BRANCH_GC_DAYS_SETTING_KEY,
-    SYNC_ORPHAN_DB_GC_DAYS_SETTING_KEY,
-    SYNC_AUTO_INIT_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_BRANCHES_SETTING_KEY,
-    SYNC_AUTO_TRACK_PR_POLL_SECS_SETTING_KEY,
-    TELEMETRY_TIMINGS_SETTING_KEY,
-];
-
-/// Complete inventory of scalar settings that have a legacy `config.json`
-/// counterpart. It excludes path-derived metadata such as `root_dir`, which
-/// cannot become durable configuration authority.
-pub const LEGACY_CONFIG_JSON_SETTING_KEYS_V1: &[&str] = &[
-    INDEX_EXCLUDE_SETTING_KEY,
-    INDEX_INCLUDE_SETTING_KEY,
-    INDEX_MAX_FILE_SIZE_SETTING_KEY,
-    INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
-    INDEX_TRACK_CALL_SITES_SETTING_KEY,
-    INDEX_GIT_IGNORE_SETTING_KEY,
-    DIAGNOSTICS_PREWARM_SETTING_KEY,
     SYNC_AUTO_WATCH_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY,
     SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
