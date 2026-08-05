@@ -1,6 +1,8 @@
 use std::fmt;
+use std::path::Path;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_text::is_canonical_text;
 pub use tracedecay_domain::{
     AuthorityEpoch, BrainId, LocatorDigest, ProjectId, RefId, RepositoryId, UserProfileId,
@@ -8,6 +10,8 @@ pub use tracedecay_domain::{
 };
 
 use super::StorageRuntimeContractErrorV1;
+
+const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1\0";
 
 macro_rules! canonical_id {
     ($name:ident, $field:literal) => {
@@ -392,6 +396,33 @@ impl VerifiedStoreLocatorV1 {
     }
 }
 
+/// Binds one exact canonical or prospective physical path to a verified
+/// runtime locator. Filesystem resolution remains daemon-owned; this pure
+/// function is the sole digest authority shared by resolvers and consumers.
+pub fn canonical_store_locator_digest(
+    path: &Path,
+) -> Result<LocatorDigest, StorageRuntimeContractErrorV1> {
+    if !path.is_absolute() {
+        return Err(StorageRuntimeContractErrorV1::NonCanonical {
+            field: "store locator path",
+        });
+    }
+    let path = path
+        .to_str()
+        .ok_or(StorageRuntimeContractErrorV1::NonCanonical {
+            field: "store locator path",
+        })?;
+    let mut hasher = Sha256::new();
+    hasher.update(LOCATOR_DIGEST_DOMAIN);
+    hasher.update((path.len() as u64).to_be_bytes());
+    hasher.update(path.as_bytes());
+    LocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize()))).map_err(|_| {
+        StorageRuntimeContractErrorV1::NonCanonical {
+            field: "store locator digest",
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +458,17 @@ mod tests {
             serde_json::from_value::<StoreShardIdV1>(encoded).expect("deserialize shard"),
             shard
         );
+    }
+
+    #[test]
+    fn canonical_locator_digest_binds_the_exact_absolute_path() {
+        let first = canonical_store_locator_digest(Path::new("/stores/a/graph.grafeo"))
+            .expect("absolute locator");
+        let second = canonical_store_locator_digest(Path::new("/stores/b/graph.grafeo"))
+            .expect("absolute locator");
+
+        assert_ne!(first, second);
+        assert!(canonical_store_locator_digest(Path::new("relative/graph.grafeo")).is_err());
     }
 
     #[test]

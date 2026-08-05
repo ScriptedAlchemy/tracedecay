@@ -14,7 +14,7 @@ use crate::{
 use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
-use self::path::{canonical_graph_path, validate_managed_graph_path};
+use self::path::{GraphPathAnchor, validate_managed_graph_path};
 
 #[path = "registry/identity.rs"]
 mod identity;
@@ -27,7 +27,7 @@ const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
 pub struct GraphDbRegistration {
     pub binding: StoreRuntimeBindingV1,
     pub verified_locator: VerifiedStoreLocatorV1,
-    pub store_root: PathBuf,
+    pub canonical_path: PathBuf,
     pub cancellation: Arc<dyn GraphCancellation>,
     pub lifecycle_cancellation: Arc<dyn GraphCancellation>,
     pub deadline: Instant,
@@ -39,7 +39,7 @@ impl fmt::Debug for GraphDbRegistration {
             .debug_struct("GraphDbRegistration")
             .field("binding", &self.binding)
             .field("verified_locator", &self.verified_locator)
-            .field("store_root", &self.store_root)
+            .field("canonical_path", &self.canonical_path)
             .field("deadline", &self.deadline)
             .finish_non_exhaustive()
     }
@@ -145,7 +145,8 @@ impl GraphDbRegistry {
     pub fn resolve(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
-        let path = canonical_graph_path(&registration.store_root)?;
+        let path = registration.canonical_path.clone();
+        validate_managed_graph_path(&path)?;
         let expected_format = GraphFormatVersion::current();
         let binding = registration.binding.clone();
         let verified_locator = registration.verified_locator.clone();
@@ -321,7 +322,8 @@ impl GraphDbRegistry {
     pub fn reopen(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
-        let path = canonical_graph_path(&registration.store_root)?;
+        let path = registration.canonical_path.clone();
+        validate_managed_graph_path(&path)?;
         let expected_format = GraphFormatVersion::current();
         if let CloseReservation::Closing(reservation) = self.reserve_close(
             &registration.binding,
@@ -355,7 +357,8 @@ impl GraphDbRegistry {
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(registration)?;
-        let path = canonical_graph_path(&registration.store_root)?;
+        let path = registration.canonical_path.clone();
+        validate_managed_graph_path(&path)?;
         let reservation = match self.reserve_close(
             &registration.binding,
             &registration.verified_locator,
@@ -470,10 +473,26 @@ impl GraphDbRegistry {
         }
     }
 
-    pub fn status(&self, binding: &StoreRuntimeBindingV1) -> Option<GraphDbRegistryStatus> {
-        let state = self.inner.state.lock().ok()?;
-        let entry = state.entries.get(&binding.shard_id)?;
-        (entry_binding(entry) == binding).then(|| status(entry))
+    pub fn status(
+        &self,
+        registration: &GraphDbRegistration,
+    ) -> Result<Option<GraphDbRegistryStatus>, GraphDbError> {
+        validate_registration(registration)?;
+        validate_managed_graph_path(&registration.canonical_path)?;
+        let state = self.state_lock()?;
+        let Some(entry) = state.entries.get(&registration.binding.shard_id) else {
+            return Ok(None);
+        };
+        require_binding(
+            binding(entry),
+            (
+                &registration.binding,
+                &registration.verified_locator,
+                &registration.canonical_path,
+                GraphFormatVersion::current(),
+            ),
+        )?;
+        Ok(Some(status(entry)))
     }
 
     fn reserve_close(
@@ -810,26 +829,29 @@ fn open_registered_graph(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
     )?;
-    let graph_root = path.parent().ok_or_else(|| {
-        GraphDbError::invalid("canonical graph path has no graph directory parent")
-    })?;
-    std::fs::create_dir_all(graph_root).map_err(|error| {
-        GraphDbError::unavailable(format!(
-            "failed to create canonical graph directory {}: {error}",
-            graph_root.display()
-        ))
-    })?;
-    validate_managed_graph_path(graph_root, path)?;
+    let path_anchor = GraphPathAnchor::acquire(path)?;
     check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
     )?;
-    GraphDbOwner::open(GraphDbOpenOptions {
+    let owner = GraphDbOwner::open(GraphDbOpenOptions {
         location: GraphDbLocation::Persistent(path.to_path_buf()),
         expected_format,
         durability: GraphDurability::Sync,
         cancellation: Arc::clone(&registration.lifecycle_cancellation),
-    })
+    })?;
+    if let Err(error) = check_request(
+        registration.lifecycle_cancellation.as_ref(),
+        registration.deadline,
+    ) {
+        owner.close()?;
+        return Err(error);
+    }
+    if let Err(error) = path_anchor.verify(path) {
+        owner.close()?;
+        return Err(error);
+    }
+    Ok(owner)
 }
 
 fn check_cancelled(cancellation: &dyn GraphCancellation) -> Result<(), GraphDbError> {

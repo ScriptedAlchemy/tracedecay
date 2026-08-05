@@ -21,10 +21,9 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use sha2::{Digest, Sha256};
 use tracedecay_store::{
     BrainId, LocatorDigest, ProjectId, StoreShardIdV1, StoreShardScopeV1, UserProfileId,
-    VerifiedStoreLocatorV1,
+    VerifiedStoreLocatorV1, canonical_store_locator_digest as store_locator_digest,
 };
 
 use super::registry::{
@@ -33,9 +32,9 @@ use super::registry::{
 };
 use crate::storage;
 
-const PROFILE_DATABASE_FILENAME: &str = "global.db";
-const LOCATOR_DIGEST_DOMAIN: &[u8] = b"tracedecay.store-runtime.local-locator.v1\0";
+mod graph;
 
+const PROFILE_DATABASE_FILENAME: &str = "global.db";
 /// Explicit local authority for one typed profile.
 ///
 /// `profile_root` is a locator supplied by the daemon's profile authority. It
@@ -939,14 +938,7 @@ fn require_local_filesystem(
 }
 
 fn canonical_locator_digest(path: &Path) -> LocalStoreLocatorResult<LocatorDigest> {
-    let path = path
-        .to_str()
-        .ok_or(LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)?;
-    let mut hasher = Sha256::new();
-    hasher.update(LOCATOR_DIGEST_DOMAIN);
-    hasher.update((path.len() as u64).to_be_bytes());
-    hasher.update(path.as_bytes());
-    LocatorDigest::new(format!("sha256:{}", hex::encode(hasher.finalize())))
+    store_locator_digest(path)
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::LocatorDigestUnavailable)
 }
 

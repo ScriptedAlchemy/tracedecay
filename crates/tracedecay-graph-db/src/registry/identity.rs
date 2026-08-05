@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use tracedecay_store::{StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1};
+use tracedecay_store::{
+    StoreRuntimeBindingV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
+    canonical_store_locator_digest,
+};
 
 use super::{Eviction, GraphDbRegistration, RegistryEntry};
 use crate::{GraphDbError, GraphFormatVersion};
@@ -100,10 +103,13 @@ pub(super) fn validate_registration(
 ) -> Result<(), GraphDbError> {
     if !matches!(
         registration.binding.shard_id.scope,
-        StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProfileSessions
+        StoreShardScopeV1::Project { .. }
+            | StoreShardScopeV1::ProjectSessions { .. }
+            | StoreShardScopeV1::ProfileSessions
+            | StoreShardScopeV1::Code { .. }
     ) {
         return Err(GraphDbError::invalid(
-            "graph registry requires a canonical project or profile-sessions runtime binding",
+            "graph registry requires a canonical project, session, or code runtime binding",
         ));
     }
     if registration.verified_locator.shard_id != registration.binding.shard_id
@@ -111,6 +117,13 @@ pub(super) fn validate_registration(
     {
         return Err(GraphDbError::invalid(
             "verified graph locator does not match the runtime binding",
+        ));
+    }
+    let digest = canonical_store_locator_digest(&registration.canonical_path)
+        .map_err(|error| GraphDbError::invalid(error.to_string()))?;
+    if digest != registration.verified_locator.locator_digest {
+        return Err(GraphDbError::invalid(
+            "verified graph locator digest does not bind the canonical graph path",
         ));
     }
     Ok(())
