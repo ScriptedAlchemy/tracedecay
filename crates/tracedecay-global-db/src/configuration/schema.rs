@@ -18,6 +18,35 @@ pub enum ConfigurationSchemaError {
     Storage(#[from] tracedecay_runtime_core::db::engine::Error),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationResetConfirmation {
+    reason: String,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ConfigurationResetConfirmationError {
+    #[error("configuration reset confirmation requires a typed configuration reset refusal")]
+    NotConfigurationReset,
+}
+
+impl TryFrom<&tracedecay_runtime_core::errors::TraceDecayError> for ConfigurationResetConfirmation {
+    type Error = ConfigurationResetConfirmationError;
+
+    fn try_from(
+        error: &tracedecay_runtime_core::errors::TraceDecayError,
+    ) -> Result<Self, Self::Error> {
+        let Some((authority, reason)) = error.reset_required_context() else {
+            return Err(ConfigurationResetConfirmationError::NotConfigurationReset);
+        };
+        if authority != "configuration" {
+            return Err(ConfigurationResetConfirmationError::NotConfigurationReset);
+        }
+        Ok(Self {
+            reason: reason.to_owned(),
+        })
+    }
+}
+
 const FINAL_CONFIGURATION_SCHEMA_OBJECTS: &[(&str, &str)] = &[
     ("index", "idx_configuration_audit_occurred_at"),
     ("index", "idx_configuration_component_activation_latest"),
@@ -556,7 +585,23 @@ fn quote_identifier(identifier: &str) -> String {
 /// not need to construct a configuration store over incompatible bytes.
 pub async fn reset_configuration_schema(
     connection: &impl Executor,
+    confirmation: &ConfigurationResetConfirmation,
 ) -> Result<(), ConfigurationSchemaError> {
+    match validate_configuration_schema(connection).await {
+        Err(ConfigurationSchemaError::ResetRequired { reason })
+            if reason == confirmation.reason => {}
+        Err(ConfigurationSchemaError::ResetRequired { .. }) => {
+            return Err(ConfigurationSchemaError::ResetRequired {
+                reason: "configuration reset confirmation is stale",
+            });
+        }
+        Err(error) => return Err(error),
+        Ok(_) => {
+            return Err(ConfigurationSchemaError::ResetRequired {
+                reason: "configuration store is already at the final shape",
+            });
+        }
+    }
     let objects = configuration_schema_objects(connection).await?;
     for kind in ["trigger", "index", "view", "table"] {
         for (object_kind, name) in objects
@@ -797,12 +842,34 @@ mod tests {
             )
             .await
             .unwrap();
+        let error = ensure_configuration_schema(&*connection)
+            .await
+            .expect_err("legacy configuration shape must be refused");
+        let ConfigurationSchemaError::ResetRequired { reason } = error else {
+            panic!("legacy shape returned an unrelated error");
+        };
+        let reset_error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            "configuration",
+            reason,
+        );
+        let confirmation = ConfigurationResetConfirmation::try_from(&reset_error)
+            .expect("typed reset failure produces an exact confirmation");
+        let stale_error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            "configuration",
+            "a different refused shape",
+        );
+        let stale_confirmation = ConfigurationResetConfirmation::try_from(&stale_error)
+            .expect("typed reset failure produces an exact confirmation");
         assert!(matches!(
-            ensure_configuration_schema(&*connection).await,
-            Err(ConfigurationSchemaError::ResetRequired { .. })
+            reset_configuration_schema(&*connection, &stale_confirmation).await,
+            Err(ConfigurationSchemaError::ResetRequired {
+                reason: "configuration reset confirmation is stale"
+            })
         ));
 
-        reset_configuration_schema(&*connection).await.unwrap();
+        reset_configuration_schema(&*connection, &confirmation)
+            .await
+            .unwrap();
         ensure_configuration_schema(&*connection).await.unwrap();
 
         let mut unrelated = connection
@@ -830,6 +897,19 @@ mod tests {
         assert_eq!(
             legacy.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn reset_confirmation_rejects_an_unrelated_authority() {
+        let error = tracedecay_runtime_core::errors::TraceDecayError::reset_required(
+            "workflow",
+            "workflow store is incompatible",
+        );
+
+        assert_eq!(
+            ConfigurationResetConfirmation::try_from(&error),
+            Err(ConfigurationResetConfirmationError::NotConfigurationReset)
         );
     }
 }

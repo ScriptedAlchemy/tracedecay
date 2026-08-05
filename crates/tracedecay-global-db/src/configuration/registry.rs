@@ -20,8 +20,8 @@ use tracedecay_domain::configuration::{
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
-    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    safe_work_topology_policy_v1,
+    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
@@ -124,6 +124,16 @@ impl ConfigurationRegistry {
             default_value: ConfigurationValueV1::WorkTopologyPolicy(Box::new(
                 safe_work_topology_policy_v1(),
             )),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::DaemonRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
+            key: setting_key(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::WorkExecutableBindings,
+            default_value: ConfigurationValueV1::WorkExecutableBindings(Vec::new()),
             sensitivity: SettingSensitivityV1::Sensitive,
             scope: SettingScopeV1::Project,
             restart_requirement: RestartRequirementV1::DaemonRestart,
