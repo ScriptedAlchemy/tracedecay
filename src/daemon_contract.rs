@@ -1537,6 +1537,13 @@ impl DaemonInvocationRequest {
             )
     }
 
+    pub(crate) fn is_workflow_application(&self) -> bool {
+        matches!(
+            &self.payload,
+            DaemonInvocationPayload::WorkflowApplication { .. }
+        )
+    }
+
     pub(crate) fn validate(&self) -> Result<(), DaemonInvocationProblem> {
         if self.protocol != DAEMON_INVOCATION_PROTOCOL {
             return Err(DaemonInvocationProblem::InvalidRequest);

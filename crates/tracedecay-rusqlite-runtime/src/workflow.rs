@@ -23,7 +23,11 @@ use crate::exact_sql::{
 mod effect_mutation;
 mod schema;
 
-pub use schema::{WORKFLOW_SCHEMA_V1, install_workflow_schema};
+pub use schema::{
+    WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1, WORKFLOW_SCHEMA_IDENTITY_V1, WORKFLOW_SCHEMA_VERSION_V1,
+    WORKFLOW_TABLE_CONTRACTS_V1, WorkflowColumnContractV1, WorkflowTableContractV1,
+    install_workflow_schema,
+};
 
 const WORKFLOW_EFFECT_SELECT: &str = "SELECT identity_digest, state, terminal_payload,
         identity_payload, identity_payload_digest,
@@ -60,7 +64,7 @@ fn require_workflow_schema(
     let rows = handle
         .query(
             ExactSqlStatement::new(
-                "SELECT name FROM sqlite_master
+                "SELECT name, sql FROM sqlite_master
                  WHERE type = 'table'
                    AND name IN (
                        'workflow_definitions',
@@ -80,17 +84,18 @@ fn require_workflow_schema(
         .rows
         .iter()
         .filter_map(|row| match row.values.first() {
-            Some(ExactSqlValue::Text(value)) => Some(value.as_str()),
+            Some(ExactSqlValue::Text(name)) => match row.values.get(1) {
+                Some(ExactSqlValue::Text(sql)) => Some((name.as_str(), sql.as_str())),
+                _ => None,
+            },
             _ => None,
         })
         .collect::<Vec<_>>();
     if actual
-        != [
-            "workflow_definitions",
-            "workflow_effect_journal",
-            "workflow_handoffs",
-            "workflow_schema",
-        ]
+        != WORKFLOW_TABLE_CONTRACTS_V1
+            .iter()
+            .map(|table| (table.name, table.sql))
+            .collect::<Vec<_>>()
     {
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
@@ -107,81 +112,45 @@ fn require_workflow_schema(
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
     let valid_schema = schema.rows.first().is_some_and(|row| {
-        matches!(row.values.first(), Some(ExactSqlValue::Integer(1)))
-            && matches!(
-                row.values.get(1),
-                Some(ExactSqlValue::Text(digest))
-                    if digest
-                        == schema::WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
-            )
+        matches!(
+            row.values.first(),
+            Some(ExactSqlValue::Integer(WORKFLOW_SCHEMA_VERSION_V1))
+        ) && matches!(
+            row.values.get(1),
+            Some(ExactSqlValue::Text(digest))
+                if digest == WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
+        )
     });
     if !valid_schema {
         return Err(WorkflowSqliteAuthorityBuildError::ResetRequired);
     }
-    require_columns(
-        handle,
-        "workflow_definitions",
-        &[
-            ("definition_id", "TEXT", 1, 1),
-            ("definition_version", "INTEGER", 1, 2),
-            ("payload", "TEXT", 1, 0),
-            ("payload_digest", "TEXT", 1, 0),
-        ],
-    )?;
-    require_columns(
-        handle,
-        "workflow_effect_journal",
-        &[
-            ("idempotency_key", "TEXT", 1, 1),
-            ("identity_digest", "TEXT", 1, 0),
-            ("identity_payload", "TEXT", 1, 0),
-            ("identity_payload_digest", "TEXT", 1, 0),
-            ("prepared_payload", "TEXT", 1, 0),
-            ("prepared_payload_digest", "TEXT", 1, 0),
-            ("operation", "TEXT", 1, 0),
-            ("state", "TEXT", 1, 0),
-            ("terminal_payload", "TEXT", 0, 0),
-            ("terminal_payload_digest", "TEXT", 0, 0),
-            ("created_at", "INTEGER", 1, 0),
-            ("updated_at", "INTEGER", 1, 0),
-        ],
-    )?;
-    require_columns(
-        handle,
-        "workflow_handoffs",
-        &[
-            ("token_digest", "TEXT", 1, 1),
-            ("scope_payload", "TEXT", 1, 0),
-            ("issued_at", "INTEGER", 1, 0),
-            ("expires_at", "INTEGER", 1, 0),
-            ("consumed", "INTEGER", 1, 0),
-        ],
-    )?;
+    for table in WORKFLOW_TABLE_CONTRACTS_V1 {
+        require_columns(handle, table)?;
+    }
     Ok(())
 }
 
 fn require_columns(
     handle: &ExactSqlHandle,
-    table: &str,
-    expected: &[(&str, &str, i64, i64)],
+    table: &WorkflowTableContractV1,
 ) -> Result<(), WorkflowSqliteAuthorityBuildError> {
     let columns = handle
         .query(
-            ExactSqlStatement::new(format!("PRAGMA table_info({table})"), Vec::new())
+            ExactSqlStatement::new(format!("PRAGMA table_info({})", table.name), Vec::new())
                 .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?,
             Duration::from_secs(5),
         )
         .map_err(|_| WorkflowSqliteAuthorityBuildError::Unavailable)?;
-    let exact = columns.rows.len() == expected.len()
+    let exact = columns.rows.len() == table.columns.len()
         && columns
             .rows
             .iter()
-            .zip(expected)
-            .all(|(row, (name, sql_type, not_null, primary_key))| {
-                matches!(row.values.get(1), Some(ExactSqlValue::Text(actual)) if actual == name)
-                    && matches!(row.values.get(2), Some(ExactSqlValue::Text(actual)) if actual == sql_type)
-                    && matches!(row.values.get(3), Some(ExactSqlValue::Integer(actual)) if actual == not_null)
-                    && matches!(row.values.get(5), Some(ExactSqlValue::Integer(actual)) if actual == primary_key)
+            .zip(table.columns)
+            .all(|(row, column)| {
+                matches!(row.values.get(1), Some(ExactSqlValue::Text(actual)) if actual == column.name)
+                    && matches!(row.values.get(2), Some(ExactSqlValue::Text(actual)) if actual == column.sql_type)
+                    && matches!(row.values.get(3), Some(ExactSqlValue::Integer(actual)) if actual == column.not_null)
+                    && matches!(row.values.get(5), Some(ExactSqlValue::Integer(actual)) if actual == column.primary_key)
             });
     if exact {
         Ok(())

@@ -52,10 +52,11 @@ pub(super) async fn execute_portable_daemon_invocation(
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let configuration_reset = request.is_configuration_reset();
+    let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        if !configuration_reset
-            && Box::pin(portable_project_server_for_request(
+        if !configuration_reset {
+            let project_server = Box::pin(portable_project_server_for_request(
                 lifecycle,
                 store_administration.clone(),
                 project_open_gates,
@@ -66,17 +67,13 @@ pub(super) async fn execute_portable_daemon_invocation(
                 #[cfg(test)]
                 project_open_attempts,
             ))
-            .await
-            .is_err()
-        {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                if git_operation {
-                    DaemonInvocationProblem::NotFoundOrNotAuthorized
-                } else {
-                    DaemonInvocationProblem::Unavailable
-                },
-            );
+            .await;
+            if let Err(error) = project_server {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    project_open_problem(&error, workflow_application, git_operation),
+                );
+            }
         }
         let Ok((resolved_project_path, _)) = project_route_for_handshake(handshake) else {
             return DaemonInvocationResponse::problem(
@@ -184,22 +181,19 @@ pub(super) async fn execute_daemon_invocation(
     let request_id = request.request_id.clone();
     let git_operation = invocation_is_git_operation(request.operation());
     let configuration_reset = request.is_configuration_reset();
+    let workflow_application = request.is_workflow_application();
     let mut project_path = None;
     if request.requires_project() {
-        if !configuration_reset
-            && engine
+        if !configuration_reset {
+            let project_server = engine
                 .project_server_for_request(handshake, ProjectServerRequirement::Core)
-                .await
-                .is_err()
-        {
-            return DaemonInvocationResponse::problem(
-                request_id,
-                if git_operation {
-                    service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
-                } else {
-                    service::invocation::DaemonInvocationProblem::Unavailable
-                },
-            );
+                .await;
+            if let Err(error) = project_server {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    project_open_problem(&error, workflow_application, git_operation),
+                );
+            }
         }
         let Ok((resolved_project_path, _)) = DaemonEngine::project_route(handshake) else {
             return DaemonInvocationResponse::problem(
@@ -225,4 +219,43 @@ pub(super) async fn execute_daemon_invocation(
             request,
         )
         .await
+}
+
+fn project_open_problem(
+    error: &crate::errors::TraceDecayError,
+    workflow_application: bool,
+    git_operation: bool,
+) -> service::invocation::DaemonInvocationProblem {
+    if workflow_application
+        && matches!(
+            error,
+            crate::errors::TraceDecayError::ResetRequired { authority, .. }
+                if authority == "workflow"
+        )
+    {
+        service::invocation::DaemonInvocationProblem::ResetRequired
+    } else if git_operation {
+        service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized
+    } else {
+        service::invocation::DaemonInvocationProblem::Unavailable
+    }
+}
+
+#[cfg(test)]
+mod workflow_reset_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_project_open_reset_remains_a_daemon_reset_problem() {
+        let error =
+            crate::errors::TraceDecayError::reset_required("workflow", "partial workflow schema");
+        assert_eq!(
+            project_open_problem(&error, true, false),
+            service::invocation::DaemonInvocationProblem::ResetRequired
+        );
+        assert_eq!(
+            project_open_problem(&error, false, false),
+            service::invocation::DaemonInvocationProblem::Unavailable
+        );
+    }
 }
