@@ -3,7 +3,7 @@
 //! Successive checkout builds can share the same released version, so the
 //! semver alone cannot tell two checkout binaries apart. These tests pin the
 //! SemVer build metadata that does, and pin that the reported version still
-//! starts with the release-plz-owned version so nothing that compares
+//! starts with the Release Please-owned version so nothing that compares
 //! precedence is disturbed.
 
 use std::path::Path;
@@ -99,7 +99,7 @@ fn the_agent_host_bundles_are_stamped_with_this_packages_version() {
 }
 
 /// Build metadata is ignored for precedence, so release comparisons, upgrade
-/// checks, and release-plz all still see the published version.
+/// checks and Release Please still see the released version.
 #[test]
 fn the_reported_version_still_begins_with_the_released_version() {
     let version = reported_version();
