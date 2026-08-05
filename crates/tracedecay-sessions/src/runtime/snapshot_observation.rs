@@ -6,7 +6,7 @@ use tracedecay_domain::{
     CanonicalGitEvidenceKindV1, CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1,
     CanonicalObservationEvidenceV1, CanonicalObservationFactV1, CanonicalObservationRelationsV1,
     CanonicalReasoningVisibilityV1, CanonicalWorkflowEvidenceKindV1, ObservationId,
-    ObservationOrderingDomainV1, ObservationSourceRangeV1,
+    ObservationOrderingDomainV1, ObservationSourceRangeV1, ProviderId, SessionId,
 };
 
 use crate::admission::{
