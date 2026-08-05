@@ -11,11 +11,14 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::{Body, HttpBody};
 use axum::extract::{Request, State};
-use axum::http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
+use axum::http::header::{
+    CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, ETAG, IF_NONE_MATCH,
+};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::get;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tower_http::compression::CompressionLayer;
 use tower_http::compression::predicate::Predicate;
@@ -58,6 +61,8 @@ pub enum EmbeddedAssetError {
     TooManyAssets,
     #[error("embedded asset path is empty, absolute, or exceeds the path limit")]
     InvalidPath,
+    #[error("embedded asset `{path}` occupies the reserved API namespace")]
+    ApiPath { path: &'static str },
     #[error("embedded asset `{path}` exceeds the per-asset body limit")]
     BodyTooLarge { path: &'static str },
     #[error("embedded asset `{path}` has an invalid strong ETag token")]
@@ -85,14 +90,16 @@ struct EmbeddedAssetState {
 /// Applies API/SSE cache policy, conditional request handling, HEAD semantics,
 /// and gzip content negotiation to an Axum router.
 pub fn http_delivery_router(router: Router) -> Router {
-    router.layer(middleware::from_fn(delivery_policy)).layer(
-        CompressionLayer::new()
-            .gzip(true)
-            .no_br()
-            .no_deflate()
-            .no_zstd()
-            .compress_when(DeliveryCompressionPredicate),
-    )
+    router
+        .layer(
+            CompressionLayer::new()
+                .gzip(true)
+                .no_br()
+                .no_deflate()
+                .no_zstd()
+                .compress_when(DeliveryCompressionPredicate),
+        )
+        .layer(middleware::from_fn(delivery_policy))
 }
 
 /// Builds a bounded, filesystem-independent static asset router.
@@ -116,6 +123,9 @@ pub fn embedded_asset_router(
         if !valid_asset_path(asset.path) {
             return Err(EmbeddedAssetError::InvalidPath);
         }
+        if is_api_asset_path(asset.path) {
+            return Err(EmbeddedAssetError::ApiPath { path: asset.path });
+        }
         if asset.contents.len() > MAX_EMBEDDED_ASSET_BYTES {
             return Err(EmbeddedAssetError::BodyTooLarge { path: asset.path });
         }
@@ -123,11 +133,13 @@ pub fn embedded_asset_router(
         let prepared_asset = PreparedAsset {
             contents: asset.contents,
             content_type: HeaderValue::from_static(content_type_for_path(asset.path)),
-            cache_control: HeaderValue::from_static(if is_fingerprinted(asset.path) {
-                IMMUTABLE_CACHE_POLICY
-            } else {
-                SHELL_CACHE_POLICY
-            }),
+            cache_control: HeaderValue::from_static(
+                if is_content_fingerprinted(asset.path, asset.contents) {
+                    IMMUTABLE_CACHE_POLICY
+                } else {
+                    SHELL_CACHE_POLICY
+                },
+            ),
             etag,
         };
         if prepared.insert(asset.path, prepared_asset).is_some() {
@@ -165,6 +177,17 @@ async fn delivery_policy(request: Request, next: Next) -> Response {
             .insert(CACHE_CONTROL, HeaderValue::from_static(API_CACHE_POLICY));
     }
 
+    let gzip_representation = response
+        .headers()
+        .get(CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("gzip"));
+    if gzip_representation
+        && let Some(gzip_etag) = response.headers().get(ETAG).and_then(gzip_semantic_etag)
+    {
+        response.headers_mut().insert(ETAG, gzip_etag);
+    }
+
     if method != Method::GET && method != Method::HEAD {
         return response;
     }
@@ -182,7 +205,9 @@ async fn delivery_policy(request: Request, next: Next) -> Response {
     }
 
     if method == Method::HEAD {
-        if !response.headers().contains_key(CONTENT_LENGTH)
+        if response.headers().contains_key(CONTENT_ENCODING) {
+            response.headers_mut().remove(CONTENT_LENGTH);
+        } else if !response.headers().contains_key(CONTENT_LENGTH)
             && let Some(length) = response.body().size_hint().exact()
             && let Ok(value) = HeaderValue::from_str(&length.to_string())
         {
@@ -198,6 +223,9 @@ async fn serve_embedded_asset(
     request: Request,
 ) -> Response {
     let path = request.uri().path().trim_start_matches('/');
+    if is_api_asset_path(path) {
+        return status_response(StatusCode::NOT_FOUND);
+    }
     if path.is_empty() {
         return match state.assets.get(state.shell_path) {
             Some(shell) => asset_response(shell),
@@ -208,7 +236,7 @@ async fn serve_embedded_asset(
         return asset_response(asset);
     }
 
-    if is_api_asset_path(path) || !is_html_navigation(&request) {
+    if !is_html_navigation(&request) {
         return status_response(StatusCode::NOT_FOUND);
     }
 
@@ -312,6 +340,18 @@ fn normalize_etag(value: &str) -> Option<&str> {
     (value.len() >= 2 && value.starts_with('"') && value.ends_with('"')).then_some(value)
 }
 
+fn gzip_semantic_etag(etag: &HeaderValue) -> Option<HeaderValue> {
+    let etag = etag.to_str().ok()?;
+    let normalized = normalize_etag(etag)?;
+    if etag.starts_with("W/") {
+        return Some(etag.parse().ok()?);
+    }
+    if normalized != etag {
+        return None;
+    }
+    HeaderValue::from_str(&format!("W/{etag}")).ok()
+}
+
 fn valid_asset_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= MAX_EMBEDDED_PATH_BYTES
@@ -326,7 +366,7 @@ fn strong_etag(path: &'static str, token: &'static str) -> Result<HeaderValue, E
         || token.len() > MAX_ETAG_BYTES
         || !token
             .bytes()
-            .all(|byte| byte == b'!' || (b'#'..=b'~').contains(&byte))
+            .all(|byte| byte == b'!' || ((b'#'..=b'~').contains(&byte) && byte != b','))
     {
         return Err(EmbeddedAssetError::InvalidEtag { path });
     }
@@ -334,12 +374,33 @@ fn strong_etag(path: &'static str, token: &'static str) -> Result<HeaderValue, E
         .map_err(|_| EmbeddedAssetError::InvalidEtag { path })
 }
 
-fn is_fingerprinted(path: &str) -> bool {
+fn is_content_fingerprinted(path: &str, contents: &[u8]) -> bool {
+    let digest = Sha256::digest(contents);
     path.rsplit('/')
         .next()
         .unwrap_or(path)
         .split(['.', '-', '_'])
-        .any(|part| part.len() >= 8 && part.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .any(|part| fingerprint_matches_digest(part.as_bytes(), &digest))
+}
+
+fn fingerprint_matches_digest(fingerprint: &[u8], digest: &[u8]) -> bool {
+    if fingerprint.len() < 8 || fingerprint.len() > digest.len() * 2 {
+        return false;
+    }
+    fingerprint.iter().enumerate().all(|(index, encoded)| {
+        let byte = digest[index / 2];
+        let expected = if index % 2 == 0 {
+            byte >> 4
+        } else {
+            byte & 0x0f
+        };
+        encoded.to_ascii_lowercase()
+            == if expected < 10 {
+                b'0' + expected
+            } else {
+                b'a' + expected - 10
+            }
+    })
 }
 
 fn is_api_path(path: &str) -> bool {
@@ -422,7 +483,7 @@ mod tests {
     use axum::body::{Body, to_bytes};
     use axum::http::header::{
         ACCEPT, ACCEPT_ENCODING, CACHE_CONTROL, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE,
-        ETAG, IF_NONE_MATCH,
+        ETAG, IF_NONE_MATCH, VARY,
     };
     use axum::http::{HeaderValue, Method, Request, StatusCode};
     use axum::routing::get;
@@ -484,7 +545,7 @@ mod tests {
                     "shell-v1",
                 ),
                 EmbeddedAsset::new(
-                    "static/app.0123456789abcdef.js",
+                    "static/app.56e5f3600934df7e.js",
                     b"globalThis.TRACEDECAY = 'embedded and compressible';",
                     "app-0123456789abcdef",
                 ),
@@ -493,6 +554,39 @@ mod tests {
             "index.html",
         )
         .expect("valid embedded asset set")
+    }
+
+    #[test]
+    fn embedded_assets_reject_the_api_namespace_at_admission() {
+        let result = embedded_asset_router(
+            [
+                EmbeddedAsset::new("index.html", b"shell", "shell-v1"),
+                EmbeddedAsset::new("api/status.json", b"{}", "api-status-v1"),
+            ],
+            "index.html",
+        );
+        assert!(matches!(
+            result,
+            Err(super::EmbeddedAssetError::ApiPath {
+                path: "api/status.json"
+            })
+        ));
+    }
+
+    #[test]
+    fn embedded_asset_etags_reject_list_delimiters() {
+        let result = embedded_asset_router(
+            [EmbeddedAsset::new(
+                "index.html",
+                b"shell",
+                "shell,revision-1",
+            )],
+            "index.html",
+        );
+        assert!(matches!(
+            result,
+            Err(super::EmbeddedAssetError::InvalidEtag { path: "index.html" })
+        ));
     }
 
     #[tokio::test]
@@ -562,6 +656,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn gzip_head_has_get_equivalent_encoding_metadata_without_a_body() {
+        let response = api_router()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri("/api/data")
+                    .header(ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .expect("valid gzip HEAD request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_ENCODING], "gzip");
+        assert_eq!(response.headers()[VARY], "accept-encoding");
+        assert_eq!(response.headers()[ETAG], "W/\"data-v1\"");
+        assert!(
+            to_bytes(response.into_body(), BODY_LIMIT)
+                .await
+                .expect("bounded body")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn eligible_json_gzip_round_trips() {
         let response = api_router()
             .oneshot(
@@ -586,6 +705,49 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&decoded).expect("valid JSON"),
             json!({"value": "a response large enough to exercise gzip compression"})
         );
+    }
+
+    #[tokio::test]
+    async fn gzip_uses_a_weak_semantic_etag_for_conditional_requests() {
+        let identity = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/data")
+                    .body(Body::empty())
+                    .expect("valid identity request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(identity.headers()[ETAG], "\"data-v1\"");
+
+        let gzip = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/data")
+                    .header(ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .expect("valid gzip request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(gzip.headers()[CONTENT_ENCODING], "gzip");
+        assert_eq!(gzip.headers()[ETAG], "W/\"data-v1\"");
+
+        let current = api_router()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/data")
+                    .header(ACCEPT_ENCODING, "gzip")
+                    .header(IF_NONE_MATCH, "\"data-v1\"")
+                    .body(Body::empty())
+                    .expect("valid conditional gzip request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(current.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(current.headers()[CONTENT_ENCODING], "gzip");
+        assert_eq!(current.headers()[VARY], "accept-encoding");
+        assert_eq!(current.headers()[ETAG], "W/\"data-v1\"");
     }
 
     #[tokio::test]
@@ -638,7 +800,7 @@ mod tests {
         let fingerprinted = static_router()
             .oneshot(
                 Request::builder()
-                    .uri("/static/app.0123456789abcdef.js")
+                    .uri("/static/app.56e5f3600934df7e.js")
                     .body(Body::empty())
                     .expect("valid asset request"),
             )
@@ -664,6 +826,32 @@ mod tests {
             .expect("infallible router");
         assert_eq!(plain.headers()[CONTENT_TYPE], "text/css; charset=utf-8");
         assert_eq!(plain.headers()[CACHE_CONTROL], "no-cache");
+    }
+
+    #[tokio::test]
+    async fn hex_like_filename_without_matching_content_digest_is_not_immutable() {
+        let router = embedded_asset_router(
+            [
+                EmbeddedAsset::new("index.html", b"shell", "shell-v1"),
+                EmbeddedAsset::new(
+                    "static/app.0123456789abcdef.js",
+                    b"content whose digest is not the filename token",
+                    "asset-v1",
+                ),
+            ],
+            "index.html",
+        )
+        .expect("valid embedded asset set");
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/static/app.0123456789abcdef.js")
+                    .body(Body::empty())
+                    .expect("valid asset request"),
+            )
+            .await
+            .expect("infallible router");
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
     }
 
     #[tokio::test]
