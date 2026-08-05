@@ -599,8 +599,7 @@ impl CommandFamily {
             | Commands::HookHermesTerminalReceipt
             | Commands::HookKimiEvent
             | Commands::HookOpenCodeEvent
-            | Commands::HookOpenCodeToolAfter
-            | Commands::HookUserSessionReview => Self::Hook,
+            | Commands::HookOpenCodeToolAfter => Self::Hook,
             Commands::Upgrade { .. }
             | Commands::Update { .. }
             | Commands::PostUpdate { .. }
@@ -1137,8 +1136,7 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
         | Commands::HookHermesTerminalReceipt
         | Commands::HookKimiEvent
         | Commands::HookOpenCodeEvent
-        | Commands::HookOpenCodeToolAfter
-        | Commands::HookUserSessionReview) => {
+        | Commands::HookOpenCodeToolAfter) => {
             hook_cmd::handle_hook_command(hook_command).await?;
         }
         _ => unreachable!("non-hook command passed to hook dispatcher"),

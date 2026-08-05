@@ -114,19 +114,21 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
         (HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
         (HookHostV1::Codex, PromptBoundary | ToolLifecycle) => Unavailable,
         (HookHostV1::CursorDesktop, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::CursorCloud, SessionBoundary) => Native,
-        (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, TestLifecycle) => ReceiptDerived,
+        (HookHostV1::CursorDesktop, TestLifecycle) => ReceiptDerived,
         (HookHostV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
-        (HookHostV1::CursorCloud, PromptBoundary | ToolLifecycle | SavedEdit) => Unavailable,
+        (
+            HookHostV1::CursorCloud,
+            SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
         (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
         (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
         (HookHostV1::Hermes, PromptBoundary) => Unavailable,
-        (HookHostV1::Kiro, PromptBoundary) => Native,
-        (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
-            Unavailable
-        }
-        (HookHostV1::KimiCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
-        (HookHostV1::KimiCode, PromptBoundary | TestLifecycle) => Unavailable,
+        (
+            HookHostV1::Kiro,
+            SessionBoundary | PromptBoundary | ToolLifecycle | SavedEdit | TestLifecycle,
+        ) => Unavailable,
+        (HookHostV1::KimiCode, ToolLifecycle | SavedEdit) => Native,
+        (HookHostV1::KimiCode, SessionBoundary | PromptBoundary | TestLifecycle) => Unavailable,
         (HookHostV1::OpenCode, SessionBoundary | ToolLifecycle | SavedEdit) => Native,
         (HookHostV1::OpenCode, PromptBoundary | TestLifecycle) => Unavailable,
         (
@@ -465,6 +467,21 @@ mod tests {
         assert_eq!(
             stock_event_support(HookHostV1::Kiro, HookEventFamily::SavedEdit),
             HookEventSupportV1::Unavailable
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::Kiro, HookEventFamily::PromptBoundary),
+            HookEventSupportV1::Unavailable,
+            "the documented Kiro callback has no replay-safe provider event identity"
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::KimiCode, HookEventFamily::SessionBoundary),
+            HookEventSupportV1::Unavailable,
+            "the captured Kimi Stop callback has no provider event identity"
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::CursorCloud, HookEventFamily::SessionBoundary),
+            HookEventSupportV1::Unavailable,
+            "Cursor Desktop captures cannot prove a Cursor Cloud callback"
         );
         assert_eq!(
             stock_event_support(HookHostV1::Hermes, HookEventFamily::TestLifecycle),

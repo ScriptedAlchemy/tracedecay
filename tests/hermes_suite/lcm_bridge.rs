@@ -400,7 +400,9 @@ class NoToolCtx:
 ctx = NoToolCtx()
 plugin.register(ctx)
 
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
+assert [name for name, _ in ctx.hooks] == [
+    "pre_llm_call", "post_tool_call", "on_session_end"
+]
 assert len(ctx.memory_providers) == 1
 assert len(ctx.context_engines) == 1
 assert isinstance(ctx.context_engines[0], plugin.TraceDecayContextEngine)
@@ -440,11 +442,126 @@ ctx = RaisingToolCtx()
 plugin.register(ctx)
 
 assert ctx.tool_calls
-assert [name for name, _ in ctx.hooks] == ["pre_llm_call", "post_tool_call"]
+assert [name for name, _ in ctx.hooks] == [
+    "pre_llm_call", "post_tool_call", "on_session_end"
+]
 assert len(ctx.memory_providers) == 1
 assert len(ctx.context_engines) == 1
 "#,
         "generated plugin registration should continue when register_tool raises",
+    );
+}
+
+#[test]
+fn generated_native_callbacks_forward_content_free_edit_and_stop_events() {
+    run_generated_plugin_script(
+        "check_native_hook_forwarding.py",
+        r#"
+import copy
+
+captured = []
+plugin._notify_host_receipt = (
+    lambda event, thread_name: captured.append((copy.deepcopy(event), thread_name)) or True
+)
+plugin._code_project_root = lambda **_kwargs: "/workspace/project"
+
+plugin._post_tool_call(
+    hook_event_name="post_tool_call",
+    session_id="session-hermes-native",
+    turn_id="turn-hermes-native",
+    tool_call_id="call-hermes-native",
+    tool_name="write_file",
+    tool_input={"path": "/workspace/project/secret.txt", "content": "secret"},
+    result={"files_modified": ["/workspace/project/secret.txt"]},
+    cwd="/workspace/project",
+    status="ok",
+)
+plugin._on_session_end(
+    hook_event_name="on_session_end",
+    session_id="session-hermes-native",
+    turn_id="turn-hermes-native",
+    task_id="task-hermes-native",
+    cwd="/workspace/project",
+    completed=True,
+    interrupted=False,
+    model="test-model",
+    platform="cli",
+)
+
+assert len(captured) == 2, captured
+saved_edit, edit_thread = captured[0]
+assert edit_thread == "tracedecay-native-post-tool"
+assert saved_edit == {
+    "hook_event_name": "post_tool_call",
+    "cwd": "/workspace/project",
+    "session_id": "session-hermes-native",
+    "tool_input": {},
+    "tool_name": "write_file",
+    "extra": {
+        "status": "ok",
+        "tool_call_id": "call-hermes-native",
+        "turn_id": "turn-hermes-native",
+    },
+    "_project_candidate": "/workspace/project",
+    "_trusted_project": False,
+    "_hermes_home": None,
+}
+stop, stop_thread = captured[1]
+assert stop_thread == "tracedecay-native-session-end"
+assert stop["hook_event_name"] == "on_session_end"
+assert stop["cwd"] == "/workspace/project"
+assert stop["session_id"] == "session-hermes-native"
+assert stop["tool_input"] is None and stop["tool_name"] is None
+assert stop["extra"]["turn_id"] == "turn-hermes-native"
+assert stop["extra"]["task_id"] == "task-hermes-native"
+assert "content" not in repr(captured)
+assert "secret.txt" not in repr(captured)
+
+class Ctx:
+    def __init__(self):
+        self.hooks = []
+    def register_hook(self, name, handler):
+        self.hooks.append((name, handler))
+
+ctx = Ctx()
+plugin.register(ctx)
+assert [name for name, _ in ctx.hooks] == [
+    "pre_llm_call",
+    "post_tool_call",
+    "on_session_end",
+]
+"#,
+        "generated Hermes callbacks must forward native edit/stop identity without content",
+    );
+}
+
+#[test]
+fn generated_native_callback_queue_applies_explicit_backpressure() {
+    run_generated_plugin_script(
+        "check_native_hook_queue_bound.py",
+        r#"
+class DormantThread:
+    def __init__(self, *args, **kwargs):
+        pass
+    def start(self):
+        pass
+
+plugin.threading.Thread = DormantThread
+plugin._HOST_RECEIPT_QUEUE.clear()
+plugin._HOST_RECEIPT_WORKER_ACTIVE = False
+
+outcomes = [
+    plugin._notify_host_receipt({"sequence": sequence}, "test-native-hook")
+    for sequence in range(plugin._HOST_RECEIPT_QUEUE_LIMIT + 1)
+]
+assert outcomes[:-1] == [True] * plugin._HOST_RECEIPT_QUEUE_LIMIT
+assert outcomes[-1] is False
+assert len(plugin._HOST_RECEIPT_QUEUE) == plugin._HOST_RECEIPT_QUEUE_LIMIT
+assert [event["sequence"] for event in plugin._HOST_RECEIPT_QUEUE] == list(
+    range(plugin._HOST_RECEIPT_QUEUE_LIMIT)
+)
+"#,
+        "generated Hermes callback queue must reject overflow without evicting admitted events",
     );
 }
 

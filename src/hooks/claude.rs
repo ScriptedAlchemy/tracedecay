@@ -283,7 +283,7 @@ pub async fn hook_prompt_submit() {
         && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
             .await
     {
-        super::schedule_user_session_review("claude", session_id.as_deref());
+        super::schedule_user_session_review("claude", session_id.as_deref()).await;
     }
     if let Some(root) = root.as_deref()
         && let Err(error) = super::daemon_hook_action(
@@ -545,15 +545,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_start_and_post_tool_use_admit_once_without_local_fallbacks() {
+    async fn only_post_tool_use_with_provider_event_identity_is_admitted() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         bind_v2_project(&project_root, "proj_claude_native_admission");
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
-            accepted_admission(),
-            accepted_admission(),
-        ]);
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([accepted_admission()]);
 
         let session_start = serde_json::json!({
             "hook_event_name": "SessionStart",
@@ -584,21 +581,17 @@ mod tests {
         assert_eq!(claude_post_tool_use_response(&post_tool).await, None);
 
         let calls = daemon.calls();
-        assert_eq!(calls.len(), 2);
-        assert_v2_admission(&calls[0], &project_root, "claude-session-start");
-        assert_v2_admission(&calls[1], &project_root, "claude-post-tool");
+        assert_eq!(calls.len(), 1);
+        assert_v2_admission(&calls[0], &project_root, "claude-post-tool");
     }
 
     #[tokio::test]
-    async fn session_start_and_post_tool_use_fail_open_after_one_unavailable_admission() {
+    async fn session_start_stays_unavailable_and_post_tool_use_fails_open() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         bind_v2_project(&project_root, "proj_claude_native_unavailable");
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([
-            unavailable_admission(),
-            unavailable_admission(),
-        ]);
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([unavailable_admission()]);
 
         let session_start = serde_json::json!({
             "hook_event_name": "SessionStart",
@@ -629,9 +622,12 @@ mod tests {
         assert_eq!(claude_post_tool_use_response(&post_tool).await, None);
 
         let calls = daemon.calls();
-        assert_eq!(calls.len(), 2, "each event gets one daemon admission");
-        assert_v2_admission(&calls[0], &project_root, "claude-session-start-unavailable");
-        assert_v2_admission(&calls[1], &project_root, "claude-post-tool-unavailable");
+        assert_eq!(
+            calls.len(),
+            1,
+            "only the callback with provider event identity reaches admission"
+        );
+        assert_v2_admission(&calls[0], &project_root, "claude-post-tool-unavailable");
     }
 
     #[tokio::test]

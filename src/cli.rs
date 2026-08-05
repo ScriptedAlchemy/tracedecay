@@ -421,9 +421,6 @@ pub enum Commands {
     /// OpenCode direct tool.execute.after Hook V2 handler.
     #[command(name = "hook-opencode-tool-after", hide = true)]
     HookOpenCodeToolAfter,
-    /// Detached profile user-session automation review.
-    #[command(name = "hook-user-session-review", hide = true)]
-    HookUserSessionReview,
     /// Serve the local dashboard UI (holographic memory + LCM + code graph explorers)
     #[command(long_about = DASHBOARD_LONG_ABOUT, after_help = DASHBOARD_AFTER_HELP)]
     Dashboard {

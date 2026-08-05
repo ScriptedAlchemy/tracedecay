@@ -267,6 +267,7 @@ struct NativeIdentityInput {
 #[derive(Default, Deserialize)]
 struct NativeIdentityExtra {
     tool_call_id: Option<String>,
+    turn_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -348,6 +349,11 @@ impl NativeIdentityFields {
                 self.extra
                     .as_ref()
                     .and_then(|extra| extra.tool_call_id.as_deref())
+            })
+            .or_else(|| {
+                self.extra
+                    .as_ref()
+                    .and_then(|extra| extra.turn_id.as_deref())
             })
             .or_else(|| {
                 self.receipt
@@ -817,10 +823,7 @@ fn native_material(
     observed_at: UtcMicros,
 ) -> Option<NativeEnvelopeMaterialV1> {
     let session = fields.session_id()?;
-    let event_id = fields.event_key().map_or_else(
-        || typed_native_event_fallback(session, family, observed_at),
-        |event_key| hash16(event_key.as_bytes()),
-    );
+    let event_id = hash16(fields.event_key()?.as_bytes());
     Some(NativeEnvelopeMaterialV1 {
         event_id,
         protected_session_id: protected_session_id_for_native(session),
@@ -833,25 +836,6 @@ fn native_material(
             .as_ref()
             .map_or(1, |edits| edits.len().min(64) as u8),
     })
-}
-
-fn typed_native_event_fallback(
-    session_id: &str,
-    family: tracedecay_hooks::HookEventFamily,
-    observed_at: UtcMicros,
-) -> [u8; 16] {
-    let family = match family {
-        tracedecay_hooks::HookEventFamily::SessionBoundary => 1u8,
-        tracedecay_hooks::HookEventFamily::PromptBoundary => 2,
-        tracedecay_hooks::HookEventFamily::ToolLifecycle => 3,
-        tracedecay_hooks::HookEventFamily::SavedEdit => 4,
-        tracedecay_hooks::HookEventFamily::TestLifecycle => 5,
-    };
-    let mut material = Vec::with_capacity(session_id.len() + 10);
-    material.extend_from_slice(session_id.as_bytes());
-    material.push(family);
-    material.extend_from_slice(&observed_at.0.to_le_bytes());
-    hash16(&material)
 }
 
 fn hash16(bytes: &[u8]) -> [u8; 16] {

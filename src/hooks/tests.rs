@@ -1,8 +1,8 @@
-#[cfg(target_os = "linux")]
-use super::spawn_reaped_hook_child;
 #[cfg(unix)]
 use super::{daemon_tool_json, run_with_test_env_lock};
-use super::{hook_route_metadata_from_event, parse_daemon_tool_json_content};
+use super::{
+    hook_route_metadata_from_event, parse_daemon_tool_json_content, schedule_user_session_review,
+};
 
 #[cfg(unix)]
 #[test]
@@ -151,19 +151,28 @@ fn hook_route_metadata_preserves_camel_case_session_ids() {
     assert_eq!(route.session_id.as_deref(), Some("conversation-camel"));
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[test]
-fn detached_hook_child_is_reaped_after_exit() {
-    let mut command = std::process::Command::new("sh");
-    command.arg("-c").arg("exit 0");
-    let pid = spawn_reaped_hook_child(command, b"").expect("spawn disposable hook child");
-    let process_path = std::path::PathBuf::from(format!("/proc/{pid}"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
-    while process_path.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(
-        !process_path.exists(),
-        "the exited hook child remained as an unreaped process"
-    );
+fn session_review_hint_routes_exact_identity_to_the_daemon() {
+    run_with_test_env_lock(async {
+        let daemon = super::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "user_review",
+            "status": "accepted",
+        })]);
+
+        schedule_user_session_review("claude", Some("session-native-17")).await;
+
+        assert_eq!(
+            daemon.calls(),
+            [(
+                None,
+                serde_json::json!({
+                    "action": "user_review",
+                    "format": "json",
+                    "provider": "claude",
+                    "session_id": "session-native-17",
+                }),
+            )]
+        );
+    });
 }
