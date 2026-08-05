@@ -58,10 +58,11 @@ impl ObservabilityAggregateExportPort for RegisteredAggregateShareExporterV1<'_>
                 .map_err(ApplicationContractError::Domain)?;
             let source_capped = rows.len() > EVENT_LIMIT;
             if source_capped {
-                rows.remove(0);
+                rows.truncate(EVENT_LIMIT);
             }
             let mut accumulators = BTreeMap::new();
             let mut invalid_source = false;
+            let mut events = Vec::with_capacity(rows.len());
             for row in rows {
                 let Some(envelope) = row
                     .metadata_json
@@ -72,7 +73,33 @@ impl ObservabilityAggregateExportPort for RegisteredAggregateShareExporterV1<'_>
                     invalid_source = true;
                     continue;
                 };
-                accumulate(&mut accumulators, &envelope);
+                events.push(envelope);
+            }
+            let explicit_drop_carriers = events
+                .iter()
+                .filter_map(|event| match &event.payload {
+                    ObservabilityPayloadV1::TelemetryDrop(drop) => Some((
+                        (
+                            event.process_boot_id.clone(),
+                            drop.last_missing_sequence.saturating_add(1),
+                        ),
+                        drop.proved_drop_lower_bound,
+                    )),
+                    _ => None,
+                })
+                .collect::<BTreeMap<_, _>>();
+            for envelope in &events {
+                accumulate(&mut accumulators, envelope);
+                if !matches!(envelope.payload, ObservabilityPayloadV1::TelemetryDrop(_)) {
+                    let represented = explicit_drop_carriers
+                        .get(&(envelope.process_boot_id.clone(), envelope.producer_sequence))
+                        .copied()
+                        .unwrap_or(0);
+                    let fallback = envelope.dropped_count.saturating_sub(represented);
+                    if fallback > 0 {
+                        accumulate_telemetry_drop(&mut accumulators, envelope, fallback);
+                    }
+                }
             }
             let candidate_cell_count = accumulators.len();
             let mut cells = accumulators
@@ -142,9 +169,7 @@ impl CellAccumulator {
     ) {
         let (eligible, observed, completed, censored, unknown, value) = contribution;
         let day = event.event_time_micros.div_euclid(86_400_000_000);
-        if !self.windows.insert(day) {
-            return;
-        }
+        self.windows.insert(day);
         self.eligible = self.eligible.saturating_add(eligible);
         self.observed = self.observed.saturating_add(observed);
         self.completed = self.completed.saturating_add(completed);
@@ -262,15 +287,7 @@ fn accumulate(cells: &mut BTreeMap<CellKey, CellAccumulator>, event: &Observabil
             );
         }
         ObservabilityPayloadV1::TelemetryDrop(value) => {
-            accumulator(
-                cells,
-                CellKey {
-                    metric: AggregateShareMetricV1::TelemetryDropsLowerBound,
-                    unit: AggregateShareUnitV1::Events,
-                    capability: AggregateCapabilityV1::Runtime,
-                },
-            )
-            .observe(event, (1, 1, 1, 0, 0, value.proved_drop_lower_bound as f64));
+            accumulate_telemetry_drop(cells, event, value.proved_drop_lower_bound);
         }
         ObservabilityPayloadV1::Storage(value) => {
             if let Some(duration_micros) = value.duration_micros {
@@ -302,6 +319,22 @@ fn accumulate(cells: &mut BTreeMap<CellKey, CellAccumulator>, event: &Observabil
     }
 }
 
+fn accumulate_telemetry_drop(
+    cells: &mut BTreeMap<CellKey, CellAccumulator>,
+    event: &ObservabilityEnvelopeV1,
+    dropped: u64,
+) {
+    accumulator(
+        cells,
+        CellKey {
+            metric: AggregateShareMetricV1::TelemetryDropsLowerBound,
+            unit: AggregateShareUnitV1::Events,
+            capability: AggregateCapabilityV1::Runtime,
+        },
+    )
+    .observe(event, (1, 1, 1, 0, 0, dropped as f64));
+}
+
 fn accumulate_adoption_eligibility(
     cells: &mut BTreeMap<CellKey, CellAccumulator>,
     event: &ObservabilityEnvelopeV1,
@@ -318,12 +351,12 @@ fn accumulate_adoption_eligibility(
     .observe(
         event,
         (
-            u64::from(value.eligible > 0),
-            u64::from(value.eligible > 0),
-            u64::from(value.available > 0),
+            value.eligible,
+            value.eligible,
+            value.available,
             0,
             0,
-            u64::from(value.eligible > 0) as f64,
+            value.eligible as f64,
         ),
     );
 }
@@ -344,12 +377,15 @@ fn accumulate_adoption_outcome(
     .observe(
         event,
         (
-            u64::from(value.invoked > 0),
-            u64::from(value.terminal > 0 || value.censored > 0 || value.unknown > 0),
-            u64::from(value.independently_useful > 0),
-            u64::from(value.censored > 0),
-            u64::from(value.unknown > 0),
-            u64::from(value.independently_useful > 0) as f64,
+            value.invoked,
+            value
+                .terminal
+                .saturating_add(value.censored)
+                .saturating_add(value.unknown),
+            value.independently_useful,
+            value.censored,
+            value.unknown,
+            value.independently_useful as f64,
         ),
     );
 }
