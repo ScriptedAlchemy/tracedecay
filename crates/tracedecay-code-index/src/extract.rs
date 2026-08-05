@@ -441,7 +441,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         let extraction_source = &source[..parsed_len];
         let source_was_capped = parsed_len < source.len();
 
-        let mut result = parser.extract(&file.file.logical_path, extraction_source);
+        let result = parser.extract(&file.file.logical_path, extraction_source);
         finish_extraction(
             authority,
             file,
