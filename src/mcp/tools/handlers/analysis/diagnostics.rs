@@ -88,28 +88,45 @@ fn diagnostics_warming_result(project_root: &std::path::Path, args: &Value) -> T
         "diagnostic_count": 0,
     });
     generic_tool_result(Some(project_root), args, &payload, vec![])
+        .with_semantic_error(true)
+        .with_failure_message("compiler diagnostics are still warming")
 }
 
-/// Best-effort per-project session↔git correlation index health for the
-/// diagnostics payload. Read-only and fail-open: a missing or unopenable store,
-/// or absent correlation tables, is reported as an explicitly *empty* index
-/// (with a remediation notice) rather than omitted — so an unpopulated
-/// `session_git_spans` (which makes `tracedecay_sessions_for` silently return
-/// nothing) is always visible here.
+/// Per-project session↔git correlation index health for the diagnostics
+/// payload. The supplemental read does not block compiler diagnostics, but a
+/// missing authority, failed query, or absent tables remains a typed
+/// `unavailable` state rather than a fabricated empty index. A present,
+/// successfully queried index may truthfully report zero rows.
 async fn session_correlation_health_json(
     session_db: Option<&crate::global_db::RegisteredGlobalDb>,
 ) -> Value {
     let health = match session_db {
-        Some(db) => crate::store::GlobalDbGitCorrelationStore::new(db)
+        Some(db) => match crate::store::GlobalDbGitCorrelationStore::new(db)
             .correlation_index_health()
             .await
-            .ok(),
-        None => None,
+        {
+            Ok(health) => health,
+            Err(error) => {
+                return json!({
+                    "status": "unavailable",
+                    "reason": "session_correlation_query_failed",
+                    "message": error.to_string(),
+                });
+            }
+        },
+        None => {
+            return json!({
+                "status": "unavailable",
+                "reason": "session_store_unavailable",
+                "message": "daemon project session authority is unavailable",
+            });
+        }
     };
     match health {
-        Some(health) if health.tables_present => {
+        health if health.tables_present => {
             let empty = health.is_empty();
             json!({
+                "status": "current",
                 "tables_present": true,
                 "span_count": health.span_count,
                 "commit_count": health.commit_count,
@@ -124,6 +141,8 @@ async fn session_correlation_health_json(
             })
         }
         _ => json!({
+            "status": "unavailable",
+            "reason": "session_correlation_tables_missing",
             "tables_present": false,
             "span_count": 0,
             "commit_count": 0,
@@ -342,5 +361,20 @@ mod diagnostics_warming_tests {
             .unwrap_or_else(|err| panic!("format=json should stay parseable JSON: {err}"));
         assert_eq!(json_payload["status"], "warming");
         assert_eq!(json_payload["diagnostic_count"], 0);
+        assert_eq!(json_result.semantic_error(), Some(true));
+        assert_eq!(
+            json_result.failure_message(),
+            Some("compiler diagnostics are still warming")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_session_correlation_authority_is_unavailable_not_empty() {
+        let health = super::session_correlation_health_json(None).await;
+
+        assert_eq!(health["status"], "unavailable");
+        assert_eq!(health["reason"], "session_store_unavailable");
+        assert!(health.get("span_count").is_none());
+        assert!(health.get("commit_count").is_none());
     }
 }

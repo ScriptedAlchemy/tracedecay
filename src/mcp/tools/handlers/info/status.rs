@@ -26,11 +26,12 @@ pub(crate) async fn handle_admin_sync(cg: &TraceDecay, args: Value) -> Result<To
             "duration_ms": result.duration_ms,
         })
     };
+    let output = serde_json::to_string(&output)?;
     Ok(ToolResult::new(
         json!({
             "content": [{
                 "type": "text",
-                "text": serde_json::to_string(&output).unwrap_or_default(),
+                "text": output,
             }]
         }),
         Vec::new(),
@@ -58,7 +59,7 @@ fn attach_compact_branch_summary(cg: &TraceDecay, output: &mut Value) {
     }
 }
 
-fn attach_full_branch_status(cg: &TraceDecay, args: &Value, output: &mut Value) {
+fn attach_full_branch_status(cg: &TraceDecay, args: &Value, output: &mut Value) -> Result<()> {
     let branch_diagnostics = cg.branch_diagnostics();
     if let Some(open_branch) = branch_diagnostics.open_active_branch.as_deref() {
         output["active_branch"] = json!(open_branch);
@@ -84,8 +85,7 @@ fn attach_full_branch_status(cg: &TraceDecay, args: &Value, output: &mut Value) 
     output["serving_db_path"] = json!(branch_diagnostics.serving_db_path);
     output["serving_db_exists"] = json!(branch_diagnostics.serving_db_exists);
     if status_arg_flag(args, "include_branch_diagnostics", true) {
-        output["branch_diagnostics"] =
-            serde_json::to_value(&branch_diagnostics).unwrap_or(json!({}));
+        output["branch_diagnostics"] = serde_json::to_value(&branch_diagnostics)?;
     }
     if branch_diagnostics.branch_drifted {
         output["branch_mismatch"] = json!({
@@ -106,6 +106,7 @@ fn attach_full_branch_status(cg: &TraceDecay, args: &Value, output: &mut Value) 
     if !branch_diagnostics.warnings.is_empty() {
         output["branch_warnings"] = json!(branch_diagnostics.warnings);
     }
+    Ok(())
 }
 
 /// Handles `tracedecay_status` tool calls.
@@ -141,25 +142,19 @@ pub(crate) async fn handle_status(
     let include_staleness = status_arg_flag(&args, "include_staleness", true);
 
     let stats = cg.get_stats().await?;
-    let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
+    let mut output: Value = serde_json::to_value(&stats)?;
     let graph_rebuild = cg.graph_rebuild_status().await?;
     if !matches!(
         &graph_rebuild,
         crate::tracedecay::GraphRebuildStatusV1::Current { .. }
     ) {
-        output["graph_rebuild"] = serde_json::to_value(&graph_rebuild).unwrap_or_else(|error| {
-            json!({
-                "state": "failed",
-                "reason": format!("could not serialize graph rebuild state: {error}"),
-            })
-        });
+        output["graph_rebuild"] = serde_json::to_value(&graph_rebuild)?;
         output["graph_rebuild_warning"] =
             json!("graph counts are not authoritative while the graph rebuild is pending");
     }
     if include_storage_health {
         let mut storage_health =
-            serde_json::to_value(crate::runtime_telemetry::collect_database(cg, false).await?)
-                .unwrap_or_else(|_| json!({}));
+            serde_json::to_value(crate::runtime_telemetry::collect_database(cg, false).await?)?;
         if server_stats.is_some() {
             storage_health["daemon_owner_pid"] = json!(std::process::id());
             storage_health["daemon_generation"] = json!(crate::runtime_identity::process_run_id());
@@ -171,7 +166,7 @@ pub(crate) async fn handle_status(
     }
 
     if include_branch_diagnostics {
-        attach_full_branch_status(cg, &args, &mut output);
+        attach_full_branch_status(cg, &args, &mut output)?;
     } else {
         attach_compact_branch_summary(cg, &mut output);
     }
@@ -193,14 +188,7 @@ pub(crate) async fn handle_status(
                 }
                 Some(db) => match db.cursor_session_ingest_health().await {
                     Ok(ingest) => {
-                        output["session_ingest"] =
-                            serde_json::to_value(&ingest).unwrap_or_else(|error| {
-                                json!({
-                                    "status": "unavailable",
-                                    "reason": "session_ingest_serialization_failed",
-                                    "message": error.to_string(),
-                                })
-                            });
+                        output["session_ingest"] = serde_json::to_value(&ingest)?;
                         // `session_ingest` stays cursor-scoped so it keeps matching the
                         // doctor-owned signal. Historical catch-up is measured across
                         // providers and remains explicitly partial while the retained

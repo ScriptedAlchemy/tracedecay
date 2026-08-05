@@ -19,7 +19,10 @@ pub(in crate::mcp::tools) fn text_tool_result(text: &str) -> ToolResult {
 }
 
 pub(in crate::mcp::tools) fn json_result(value: &Value) -> ToolResult {
-    text_tool_result(&serde_json::to_string(value).unwrap_or_default())
+    let rendered = serde_json::to_string(value).unwrap_or_else(|_| {
+        "{\"status\":\"unavailable\",\"reason\":\"tool_result_serialization_failed\"}".to_owned()
+    });
+    text_tool_result(&rendered)
 }
 
 pub(super) fn boxed_send<'a, T, F>(
@@ -143,8 +146,7 @@ pub(super) fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResul
                     "created_at": record.created_at,
                     "expires_at": record.expires_at,
                     "content": record.content,
-                }))
-                .unwrap_or_default()
+                }))?
             } else {
                 format!(
                     "## Retrieved Response\n**handle:** `{}` ({} chars, expires at {})\n\n{}",

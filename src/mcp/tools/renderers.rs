@@ -309,7 +309,8 @@ fn compact_json_summary(value: &Value) -> String {
                 }
             }
             if parts.is_empty() {
-                serde_json::to_string(value).unwrap_or_default()
+                serde_json::to_string(value)
+                    .unwrap_or_else(|_| "[response value serialization failed]".to_owned())
             } else {
                 parts.join("; ")
             }

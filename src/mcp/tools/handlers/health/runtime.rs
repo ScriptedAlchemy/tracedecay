@@ -8,21 +8,15 @@ const SESSION_TEMPORAL_HEALTH_BUDGET: Duration = Duration::from_secs(8);
 
 async fn session_temporal_health_value(
     project_session_db: Option<&crate::global_db::RegisteredGlobalDb>,
-) -> Value {
-    match project_session_db {
+) -> Result<Value> {
+    Ok(match project_session_db {
         Some(db) => match tokio::time::timeout(
             SESSION_TEMPORAL_HEALTH_BUDGET,
             db.session_temporal_doctor_health(),
         )
         .await
         {
-            Ok(health) => serde_json::to_value(health).unwrap_or_else(|_| {
-                json!({
-                    "status": "unavailable",
-                    "findings": [],
-                    "message": "session temporal health serialization failed",
-                })
-            }),
+            Ok(health) => serde_json::to_value(health)?,
             Err(_) => json!({
                 "status": "timed_out",
                 "findings": [],
@@ -33,7 +27,7 @@ async fn session_temporal_health_value(
             "status": "unavailable",
             "findings": [],
         }),
-    }
+    })
 }
 
 /// Runs the exhaustive observation-authority audit for the routed project
@@ -88,11 +82,11 @@ async fn observation_authority_audit(
 async fn literal_workspace_placeholder_transcript_paths(
     conn: &impl crate::db::engine::QueryExecutor,
     limit: usize,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     if limit == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let Ok(mut rows) = conn
+    let mut rows = conn
         .query(
             "SELECT DISTINCT transcript_path FROM sessions
              WHERE transcript_path IS NOT NULL
@@ -104,16 +98,28 @@ async fn literal_workspace_placeholder_transcript_paths(
             crate::db::engine::params![i64::try_from(limit).unwrap_or(i64::MAX)],
         )
         .await
-    else {
-        return Vec::new();
-    };
+        .map_err(|error| TraceDecayError::Database {
+            operation: "query literal workspace placeholder transcript paths".to_owned(),
+            message: error.to_string(),
+        })?;
     let mut paths = Vec::new();
-    while let Ok(Some(row)) = rows.next().await {
-        if let Ok(path) = row.get::<String>(0) {
-            paths.push(path);
-        }
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            operation: "read literal workspace placeholder transcript path".to_owned(),
+            message: error.to_string(),
+        })?
+    {
+        paths.push(
+            row.get::<String>(0)
+                .map_err(|error| TraceDecayError::Database {
+                    operation: "decode literal workspace placeholder transcript path".to_owned(),
+                    message: error.to_string(),
+                })?,
+        );
     }
-    paths
+    Ok(paths)
 }
 
 /// Handles `tracedecay_runtime` tool calls.
@@ -132,8 +138,10 @@ async fn attach_doctor_report(
                 "report": admitted.report,
                 "table_growth_evidence": admitted.table_growth_evidence,
             }),
-            Err(_) => json!({
-                "kind": "unknown",
+            Err(error) => json!({
+                "kind": "unavailable",
+                "reason": "doctor_report_read_failed",
+                "message": error.to_string(),
                 "table_growth_evidence": [],
             }),
         },
@@ -156,7 +164,7 @@ pub(crate) async fn handle_runtime(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let snap = crate::runtime_telemetry::collect_with_integrity(cg, authority_audit).await?;
-    let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
+    let mut value = serde_json::to_value(&snap)?;
     // Doctor historically keys temporal health off `authority_audit`. Keep that
     // coupling, and also allow an explicit independent opt-in.
     let include_session_temporal_health = authority_audit
@@ -195,7 +203,7 @@ pub(crate) async fn handle_runtime(
             );
         }
         if let Some(temporal) = temporal {
-            value["session_temporal_health"] = temporal;
+            value["session_temporal_health"] = temporal?;
         }
     }
     if args
@@ -206,13 +214,7 @@ pub(crate) async fn handle_runtime(
         match project_session_db {
             Some(db) => {
                 value["cursor_session_ingest"] = match db.cursor_session_ingest_health().await {
-                    Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
-                        json!({
-                            "status": "unavailable",
-                            "reason": "session_ingest_serialization_failed",
-                            "message": error.to_string(),
-                        })
-                    }),
+                    Ok(health) => serde_json::to_value(health)?,
                     Err(error) => json!({
                         "status": "unavailable",
                         "reason": "session_ingest_query_failed",
@@ -222,11 +224,14 @@ pub(crate) async fn handle_runtime(
                 match db.read_snapshot().await {
                     Ok(snapshot) => {
                         value["cursor_session_placeholder_paths"] = json!(
-                            literal_workspace_placeholder_transcript_paths(&snapshot, 10).await
+                            literal_workspace_placeholder_transcript_paths(&snapshot, 10).await?
                         );
                     }
-                    Err(_) => {
-                        value["cursor_session_placeholder_paths"] = json!([]);
+                    Err(error) => {
+                        return Err(TraceDecayError::Database {
+                            operation: "open session placeholder-path snapshot".to_owned(),
+                            message: error.to_string(),
+                        });
                     }
                 }
             }
@@ -246,28 +251,47 @@ pub(crate) async fn handle_runtime(
     {
         attach_doctor_report(&mut value, doctor_report_reader).await;
     }
-    let semantic_configuration = cg
-        .configuration_runtime()
-        .client()
-        .current()
-        .await
-        .ok()
-        .and_then(|pinned| {
-            crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
+    let semantic_configuration = match cg.configuration_runtime().client().current().await {
+        Ok(pinned) => {
+            match crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
                 &crate::application::configuration::ConfigurationCurrentStateV1 {
                     revision_id: pinned.revision_id,
                     snapshot: pinned.snapshot,
                 },
-            )
-            .ok()
-        });
-    if let Some(semantic) =
-        crate::application::semantic_runtime::project_semantic_application_status(
-            cg.project_root(),
-            semantic_configuration,
-        )
-    {
-        value["semantic_runtime"] = serde_json::to_value(&semantic).unwrap_or_else(|_| json!({}));
+            ) {
+                Ok(configuration) => Some(configuration),
+                Err(error) => {
+                    value["semantic_runtime"] = json!({
+                        "status": "unavailable",
+                        "reason": "semantic_configuration_invalid",
+                        "message": error.to_string(),
+                    });
+                    None
+                }
+            }
+        }
+        Err(error) => {
+            value["semantic_runtime"] = json!({
+                "status": "unavailable",
+                "reason": "configuration_authority_unavailable",
+                "message": error.to_string(),
+            });
+            None
+        }
+    };
+    if semantic_configuration.is_some() {
+        value["semantic_runtime"] =
+            match crate::application::semantic_runtime::project_semantic_application_status(
+                cg.project_root(),
+                semantic_configuration,
+            ) {
+                Some(semantic) => serde_json::to_value(&semantic)?,
+                None => json!({
+                    "status": "unavailable",
+                    "reason": "semantic_runtime_unavailable",
+                    "message": "the project semantic runtime is not mounted",
+                }),
+            };
     }
     Ok(generic_tool_result(
         Some(cg.project_root()),

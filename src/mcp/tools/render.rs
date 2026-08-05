@@ -48,7 +48,10 @@ where
 {
     match format {
         RequestedOutputFormat::Json => {
-            let json = serde_json::to_string(value).unwrap_or_default();
+            let json = serde_json::to_string(value).unwrap_or_else(|_| {
+                "{\"status\":\"unavailable\",\"reason\":\"response_serialization_failed\"}"
+                    .to_owned()
+            });
             truncated_json_envelope_with_handle(project_root, &json)
         }
         RequestedOutputFormat::Markdown => {
@@ -121,7 +124,10 @@ pub(super) fn truncated_json_envelope_with_handle(
                 object.insert("handle_status".to_string(), status.clone());
             }
         }
-        let text = serde_json::to_string_pretty(&envelope).unwrap_or_default();
+        let text = serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| {
+            "{\"status\":\"unavailable\",\"reason\":\"response_envelope_serialization_failed\"}"
+                .to_owned()
+        });
         if text.len() <= MAX_RESPONSE_CHARS || end == 0 {
             observe_response_truncation(
                 formatted.len(),
@@ -813,7 +819,8 @@ fn scalar_str(v: &Value) -> String {
         }
         Value::Bool(b) => b.to_string(),
         Value::Null => String::new(),
-        _ => serde_json::to_string(v).unwrap_or_default(),
+        _ => serde_json::to_string(v)
+            .unwrap_or_else(|_| "[response value serialization failed]".to_owned()),
     }
 }
 
@@ -1088,7 +1095,8 @@ fn render_object(md: &mut Md, map: &serde_json::Map<String, Value>, depth: u8) {
         if depth >= GENERIC_MAX_DEPTH {
             md.line(&format!(
                 "`{}`",
-                serde_json::to_string(v).unwrap_or_default()
+                serde_json::to_string(v)
+                    .unwrap_or_else(|_| "[response value serialization failed]".to_owned())
             ));
         } else {
             render_value(md, v, depth + 1);
