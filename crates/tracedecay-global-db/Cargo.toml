@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-global-db"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 license = "MIT"
 description = "TraceDecay user-level global database: project registry, observations, session temporal store"
