@@ -244,7 +244,7 @@ fn feedback_sources_share_one_cycle_result_and_canonical_anchors() {
     GitHubReviewReadResponseV1 {
         ingress: stale_without_evidence,
         checkpoint: GitHubReviewReadCheckpointV1 {
-            etag: Some(GitHubReviewEtagV1::new("W/\"pr13-fixture\"").unwrap()),
+            etag: Some(GitHubReviewEtagV1::new("W/\"advisory-fixture\"").unwrap()),
             ..empty_checkpoint.clone()
         },
     }

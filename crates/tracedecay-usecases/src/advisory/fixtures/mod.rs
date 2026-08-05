@@ -31,49 +31,48 @@ use super::github_runtime::{
 };
 use super::proximity_runtime::CanonicalProximityEvidenceV1;
 
-pub const PR13_FIXTURE_ROOT_V1: &str = "src/application/advisory/fixtures/pr13_branch_pr";
-pub const PR13_SCENARIO_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/scenario.json";
-pub const PR13_PULL_REQUEST_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/pull_request.json";
-pub const PR13_REVIEW_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/review.json";
-pub const PR13_REVIEW_COMMENT_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/review_comment.json";
-pub const PR13_REVIEW_THREAD_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/review_thread.graphql.json";
-pub const PR13_WORKFLOW_RUN_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/workflow_run.json";
-pub const PR13_WORKFLOW_JOB_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/workflow_job.json";
-pub const PR13_CHECK_RUN_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/check_run.json";
-pub const PR13_CHECK_ANNOTATIONS_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/check_annotations.json";
-pub const PR13_PROXIMITY_SESSIONS_FIXTURE_V1: &str =
-    "src/application/advisory/fixtures/pr13_branch_pr/proximity_sessions.json";
+pub const ADVISORY_FIXTURE_ROOT_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review";
+pub const ADVISORY_SCENARIO_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/scenario.json";
+pub const ADVISORY_PULL_REQUEST_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/pull_request.json";
+pub const ADVISORY_REVIEW_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review.json";
+pub const ADVISORY_REVIEW_COMMENT_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_comment.json";
+pub const ADVISORY_REVIEW_THREAD_FIXTURE_V1: &str = "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/review_thread.graphql.json";
+pub const ADVISORY_WORKFLOW_RUN_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_run.json";
+pub const ADVISORY_WORKFLOW_JOB_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/workflow_job.json";
+pub const ADVISORY_CHECK_RUN_FIXTURE_V1: &str =
+    "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_run.json";
+pub const ADVISORY_CHECK_ANNOTATIONS_FIXTURE_V1: &str = "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/check_annotations.json";
+pub const ADVISORY_PROXIMITY_SESSIONS_FIXTURE_V1: &str = "crates/tracedecay-usecases/src/advisory/fixtures/provider_branch_review/proximity_sessions.json";
 
-const SCENARIO_JSON: &str = include_str!("pr13_branch_pr/scenario.json");
-const PULL_REQUEST_JSON: &str = include_str!("pr13_branch_pr/pull_request.json");
-const REVIEW_JSON: &str = include_str!("pr13_branch_pr/review.json");
-const REVIEW_COMMENT_JSON: &str = include_str!("pr13_branch_pr/review_comment.json");
-const REVIEW_THREAD_JSON: &str = include_str!("pr13_branch_pr/review_thread.graphql.json");
-const WORKFLOW_RUN_JSON: &str = include_str!("pr13_branch_pr/workflow_run.json");
-const WORKFLOW_JOB_JSON: &str = include_str!("pr13_branch_pr/workflow_job.json");
-const CHECK_RUN_JSON: &str = include_str!("pr13_branch_pr/check_run.json");
-const CHECK_ANNOTATIONS_JSON: &str = include_str!("pr13_branch_pr/check_annotations.json");
-const PROXIMITY_SESSIONS_JSON: &str = include_str!("pr13_branch_pr/proximity_sessions.json");
+const SCENARIO_JSON: &str = include_str!("provider_branch_review/scenario.json");
+const PULL_REQUEST_JSON: &str = include_str!("provider_branch_review/pull_request.json");
+const REVIEW_JSON: &str = include_str!("provider_branch_review/review.json");
+const REVIEW_COMMENT_JSON: &str = include_str!("provider_branch_review/review_comment.json");
+const REVIEW_THREAD_JSON: &str = include_str!("provider_branch_review/review_thread.graphql.json");
+const WORKFLOW_RUN_JSON: &str = include_str!("provider_branch_review/workflow_run.json");
+const WORKFLOW_JOB_JSON: &str = include_str!("provider_branch_review/workflow_job.json");
+const CHECK_RUN_JSON: &str = include_str!("provider_branch_review/check_run.json");
+const CHECK_ANNOTATIONS_JSON: &str = include_str!("provider_branch_review/check_annotations.json");
+const PROXIMITY_SESSIONS_JSON: &str =
+    include_str!("provider_branch_review/proximity_sessions.json");
 
 #[derive(Debug, Error)]
-pub enum Pr13SourceBackedFixtureErrorV1 {
-    #[error("invalid PR13 fixture JSON: {0}")]
+pub enum AdvisorySourceBackedFixtureErrorV1 {
+    #[error("invalid advisory fixture JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("inconsistent PR13 source-backed fixture: {0}")]
+    #[error("inconsistent advisory source-backed fixture: {0}")]
     Inconsistent(&'static str),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13GitHubReviewFixtureV1 {
+pub struct AdvisoryGitHubReviewFixtureV1 {
     pub pull_request_id: GitHubPullRequestIdV1,
     pub review_id: GitHubReviewIdV1,
     pub thread_id: GitHubReviewThreadIdV1,
@@ -93,7 +92,7 @@ pub struct Pr13GitHubReviewFixtureV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13CiFixtureV1 {
+pub struct AdvisoryCiFixtureV1 {
     pub run: CiFailureRunIdentityV1,
     pub state: CiFailureLocalizationStateV1,
     pub coverage: CiFailureCoverageV1,
@@ -107,28 +106,28 @@ pub struct Pr13CiFixtureV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13ProximityFixtureV1 {
+pub struct AdvisoryProximityFixtureV1 {
     pub branch: String,
     pub source_sessions: Vec<SessionId>,
     pub worktree_digest: ManifestDigest,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct Pr13SourceBackedCompositeFixtureV1 {
+pub struct AdvisorySourceBackedCompositeFixtureV1 {
     pub provider_repository_id: u64,
     pub pull_request_number: u64,
     pub branch: String,
     pub base_commit_id: CommitId,
     pub head_commit_id: CommitId,
     pub merge_base_commit_id: CommitId,
-    pub github: Pr13GitHubReviewFixtureV1,
-    pub ci: Pr13CiFixtureV1,
+    pub github: AdvisoryGitHubReviewFixtureV1,
+    pub ci: AdvisoryCiFixtureV1,
     pub ci_provider_record: GitHubCiProviderRecordV1,
-    pub proximity: Pr13ProximityFixtureV1,
+    pub proximity: AdvisoryProximityFixtureV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13GitHubFixtureAnchorsV1 {
+pub struct AdvisoryGitHubFixtureAnchorsV1 {
     pub original: GitHubReviewImmutableAnchorV1,
     pub author_anchor: RetrievalAnchorId,
     pub body_anchor: RetrievalAnchorId,
@@ -138,7 +137,7 @@ pub struct Pr13GitHubFixtureAnchorsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13CiFixtureEvidenceV1 {
+pub struct AdvisoryCiFixtureEvidenceV1 {
     pub parser: CiFailureParserIdentityV1,
     pub failure_anchor: RetrievalAnchorId,
     pub generation: Option<CiFailureGenerationEvidenceV1>,
@@ -150,7 +149,7 @@ pub struct Pr13CiFixtureEvidenceV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Pr13ProximityFixtureEvidenceV1 {
+pub struct AdvisoryProximityFixtureEvidenceV1 {
     pub observations: Vec<CanonicalObservationEnvelopeV1>,
     pub retrieval_anchor_ids: Vec<RetrievalAnchorId>,
     pub address: ProximityAddressV1,
@@ -163,12 +162,12 @@ pub struct Pr13ProximityFixtureEvidenceV1 {
     pub coverage: ProximityCoverageV1,
 }
 
-impl Pr13SourceBackedCompositeFixtureV1 {
+impl AdvisorySourceBackedCompositeFixtureV1 {
     /// Verifies that canonical observations belong to at least two of the
     /// captured concurrent sessions before producing proximity-provider input.
     pub fn proximity_evidence(
         &self,
-        evidence: Pr13ProximityFixtureEvidenceV1,
+        evidence: AdvisoryProximityFixtureEvidenceV1,
     ) -> Option<CanonicalProximityEvidenceV1> {
         let allowed = self
             .proximity
@@ -206,10 +205,10 @@ impl Pr13SourceBackedCompositeFixtureV1 {
 }
 
 /// Loads and cross-checks the captured source files. The acceptance agent can
-/// combine this identity with its existing PR12 diagnostic/impact result,
+/// combine this identity with its existing diagnostic/impact result,
 /// authorized anchors, and effective Plan 20 threshold snapshot.
-pub fn load_pr13_source_backed_composite_fixture_v1()
--> Result<Pr13SourceBackedCompositeFixtureV1, Pr13SourceBackedFixtureErrorV1> {
+pub fn load_advisory_source_backed_composite_fixture_v1()
+-> Result<AdvisorySourceBackedCompositeFixtureV1, AdvisorySourceBackedFixtureErrorV1> {
     let scenario = parse(SCENARIO_JSON)?;
     let pull_request = parse(PULL_REQUEST_JSON)?;
     let review = parse(REVIEW_JSON)?;
@@ -439,7 +438,7 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
         return Err(inconsistent("concurrent proximity sessions"));
     }
 
-    Ok(Pr13SourceBackedCompositeFixtureV1 {
+    Ok(AdvisorySourceBackedCompositeFixtureV1 {
         provider_repository_id: repository_id,
         pull_request_number,
         branch: branch.clone(),
@@ -447,7 +446,7 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
         head_commit_id: CommitId::new(head_sha).map_err(|_| inconsistent("head commit id"))?,
         merge_base_commit_id: CommitId::new(merge_base_sha)
             .map_err(|_| inconsistent("merge-base commit id"))?,
-        github: Pr13GitHubReviewFixtureV1 {
+        github: AdvisoryGitHubReviewFixtureV1 {
             pull_request_id: GitHubPullRequestIdV1::new(pull_request_id.to_string())
                 .map_err(|_| inconsistent("pull request id"))?,
             review_id: GitHubReviewIdV1::new(review_id.to_string())
@@ -483,7 +482,7 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
             current_line: optional_u64_at(&comment, "/response/line")?,
             safe_url: str_at(&comment, "/response/html_url")?,
         },
-        ci: Pr13CiFixtureV1 {
+        ci: AdvisoryCiFixtureV1 {
             run: CiFailureRunIdentityV1 {
                 workflow_id: workflow_id.to_string(),
                 job_id: job_id.to_string(),
@@ -506,7 +505,7 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
             annotation_end_line,
         },
         ci_provider_record,
-        proximity: Pr13ProximityFixtureV1 {
+        proximity: AdvisoryProximityFixtureV1 {
             branch,
             source_sessions,
             worktree_digest: digest_at(&proximity_sessions, "/redacted/worktree_path/sha256")?,
@@ -514,18 +513,21 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
     })
 }
 
-fn parse(source: &str) -> Result<Value, Pr13SourceBackedFixtureErrorV1> {
+fn parse(source: &str) -> Result<Value, AdvisorySourceBackedFixtureErrorV1> {
     serde_json::from_str(source).map_err(Into::into)
 }
 
-fn str_at(value: &Value, pointer: &'static str) -> Result<String, Pr13SourceBackedFixtureErrorV1> {
+fn str_at(
+    value: &Value,
+    pointer: &'static str,
+) -> Result<String, AdvisorySourceBackedFixtureErrorV1> {
     str_at_value(value, pointer)
 }
 
 fn str_at_value(
     value: &Value,
     pointer: &'static str,
-) -> Result<String, Pr13SourceBackedFixtureErrorV1> {
+) -> Result<String, AdvisorySourceBackedFixtureErrorV1> {
     value
         .pointer(pointer)
         .and_then(Value::as_str)
@@ -533,14 +535,17 @@ fn str_at_value(
         .ok_or_else(|| inconsistent(pointer))
 }
 
-fn u64_at(value: &Value, pointer: &'static str) -> Result<u64, Pr13SourceBackedFixtureErrorV1> {
+fn u64_at(value: &Value, pointer: &'static str) -> Result<u64, AdvisorySourceBackedFixtureErrorV1> {
     value
         .pointer(pointer)
         .and_then(Value::as_u64)
         .ok_or_else(|| inconsistent(pointer))
 }
 
-fn bool_at(value: &Value, pointer: &'static str) -> Result<bool, Pr13SourceBackedFixtureErrorV1> {
+fn bool_at(
+    value: &Value,
+    pointer: &'static str,
+) -> Result<bool, AdvisorySourceBackedFixtureErrorV1> {
     value
         .pointer(pointer)
         .and_then(Value::as_bool)
@@ -550,7 +555,7 @@ fn bool_at(value: &Value, pointer: &'static str) -> Result<bool, Pr13SourceBacke
 fn optional_u64_at(
     value: &Value,
     pointer: &'static str,
-) -> Result<Option<u64>, Pr13SourceBackedFixtureErrorV1> {
+) -> Result<Option<u64>, AdvisorySourceBackedFixtureErrorV1> {
     let candidate = value
         .pointer(pointer)
         .ok_or_else(|| inconsistent(pointer))?;
@@ -567,11 +572,11 @@ fn optional_u64_at(
 fn digest_at(
     value: &Value,
     pointer: &'static str,
-) -> Result<ManifestDigest, Pr13SourceBackedFixtureErrorV1> {
+) -> Result<ManifestDigest, AdvisorySourceBackedFixtureErrorV1> {
     ManifestDigest::new(str_at(value, pointer)?).map_err(|_| inconsistent(pointer))
 }
 
-fn raw_text_digest(value: &str) -> Result<ManifestDigest, Pr13SourceBackedFixtureErrorV1> {
+fn raw_text_digest(value: &str) -> Result<ManifestDigest, AdvisorySourceBackedFixtureErrorV1> {
     ManifestDigest::new(format!(
         "sha256:{}",
         hex::encode(Sha256::digest(value.as_bytes()))
@@ -583,12 +588,12 @@ fn require_eq<T: PartialEq>(
     actual: T,
     expected: T,
     field: &'static str,
-) -> Result<(), Pr13SourceBackedFixtureErrorV1> {
+) -> Result<(), AdvisorySourceBackedFixtureErrorV1> {
     (actual == expected)
         .then_some(())
         .ok_or_else(|| inconsistent(field))
 }
 
-const fn inconsistent(field: &'static str) -> Pr13SourceBackedFixtureErrorV1 {
-    Pr13SourceBackedFixtureErrorV1::Inconsistent(field)
+const fn inconsistent(field: &'static str) -> AdvisorySourceBackedFixtureErrorV1 {
+    AdvisorySourceBackedFixtureErrorV1::Inconsistent(field)
 }

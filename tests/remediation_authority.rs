@@ -33,7 +33,10 @@ fn preview_target() -> DoctorRemediationTargetV1 {
     DoctorRemediationTargetV1::ConfigurationProtectedPreview(
         ConfigurationProtectedPreviewSurfaceRequest {
             change: ProtectedChange::ReplaceWorkTopologyPolicy(safe_work_topology_policy_v1()),
-            expected_revision: ConfigurationRevisionId::new("configuration-revision.pr14").unwrap(),
+            expected_revision: ConfigurationRevisionId::new(
+                "configuration-revision.remediation",
+            )
+            .unwrap(),
         },
     )
 }
@@ -41,15 +44,19 @@ fn preview_target() -> DoctorRemediationTargetV1 {
 fn apply_target() -> DoctorRemediationTargetV1 {
     DoctorRemediationTargetV1::ConfigurationProtectedApply(
         ConfigurationProtectedApplySurfaceRequest {
-            plan_id: ChangePlanId::new("change-plan.pr14").unwrap(),
-            expected_base_revision_id: ConfigurationRevisionId::new("configuration-revision.pr14")
-                .unwrap(),
+            plan_id: ChangePlanId::new("change-plan.remediation").unwrap(),
+            expected_base_revision_id: ConfigurationRevisionId::new(
+                "configuration-revision.remediation",
+            )
+            .unwrap(),
             operation_digest: ManifestDigest::new(
                 "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .unwrap(),
-            idempotency_key: ConfigurationIdempotencyKey::new("configuration-idempotency.pr14")
-                .unwrap(),
+            idempotency_key: ConfigurationIdempotencyKey::new(
+                "configuration-idempotency.remediation",
+            )
+            .unwrap(),
         },
     )
 }
@@ -159,7 +166,7 @@ async fn application_authority_independently_verifies_and_persists_owner_result(
         operation: operation(),
         target: apply_target(),
         preview_id: preview.preview_id,
-        idempotency_key: IdempotencyKey::new("idempotency.pr14").unwrap(),
+        idempotency_key: IdempotencyKey::new("idempotency.remediation").unwrap(),
     };
 
     let applied = authority.apply(command.clone(), true).await.unwrap();
@@ -276,6 +283,6 @@ async fn denial_confirmation_and_cancelled_truth_remain_distinct() {
 
 #[test]
 fn operation_id_is_application_owned_request_identity() {
-    let id = OperationId::from_request(RequestId::new("request.pr14").unwrap());
-    assert_eq!(id.to_string(), "request.pr14");
+    let id = OperationId::from_request(RequestId::new("request.remediation-authority").unwrap());
+    assert_eq!(id.to_string(), "request.remediation-authority");
 }

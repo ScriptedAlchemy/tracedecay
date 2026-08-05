@@ -1,6 +1,6 @@
-//! Reachability contract for the PR12 daemon-owned production path.
+//! Reachability contract for the daemon-owned application production path.
 //!
-//! These tests boot a real daemon, open a real project, and drive a PR12
+//! These tests boot a real daemon, open a real project, and drive the
 //! primitive through the shipped MCP, HTTP, and CLI surfaces. They fail when
 //! the path stops executing; source text and catalog declarations are not
 //! accepted as reachability evidence.
@@ -29,7 +29,7 @@ use tracedecay_application::{
 /// than this must cross a page boundary to answer at all.
 const SURFACE_PAGE_SIZE: usize = 10;
 const PROBE_SYMBOL_COUNT: usize = 24;
-const PROBE_TOKEN: &str = "pr12_pagination_probe";
+const PROBE_TOKEN: &str = "application_pagination_probe";
 
 struct ProductionFixture {
     _daemon: common::DaemonProcess,
@@ -87,7 +87,7 @@ fn write_pagination_probe(project: &Path) {
     }
     let destination = project.join("src");
     std::fs::create_dir_all(&destination).expect("probe destination");
-    std::fs::write(destination.join("pr12_pagination_probe.rs"), source)
+    std::fs::write(destination.join("application_pagination_probe.rs"), source)
         .expect("write the paginated symbol probe");
 }
 
@@ -311,7 +311,8 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     // waiting for the generation-backed symbol owner used below.
     let immediate_tests = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::TestResults,
-        RequestId::new("request.pr12-reachability.open.immediate-tests").expect("request id"),
+        RequestId::new("request.application-reachability.open.immediate-tests")
+            .expect("request id"),
         parse_application_surface_request(
             ApplicationSurfaceOperation::TestResults,
             serde_json::json!({}),
@@ -337,7 +338,11 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     );
 
     let immediate =
-        invoke_mcp_symbol_search(&fixture.client, "request.pr12-reachability.open.immediate").await;
+        invoke_mcp_symbol_search(
+            &fixture.client,
+            "request.application-reachability.open.immediate",
+        )
+        .await;
     let immediate = evidence_payload(&immediate).clone();
     assert_first_page_of_many("immediate post-open MCP", &immediate);
 
@@ -352,10 +357,10 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     let client_c = fresh_client();
     let client_d = fresh_client();
     let (a, b, c, d) = tokio::join!(
-        invoke_mcp_symbol_search(&client_a, "request.pr12-reachability.open.concurrent-a"),
-        invoke_mcp_symbol_search(&client_b, "request.pr12-reachability.open.concurrent-b"),
-        invoke_mcp_symbol_search(&client_c, "request.pr12-reachability.open.concurrent-c"),
-        invoke_mcp_symbol_search(&client_d, "request.pr12-reachability.open.concurrent-d"),
+        invoke_mcp_symbol_search(&client_a, "request.application-reachability.open.concurrent-a"),
+        invoke_mcp_symbol_search(&client_b, "request.application-reachability.open.concurrent-b"),
+        invoke_mcp_symbol_search(&client_c, "request.application-reachability.open.concurrent-c"),
+        invoke_mcp_symbol_search(&client_d, "request.application-reachability.open.concurrent-d"),
     );
     for (label, result) in [
         ("concurrent-a", a),
@@ -374,7 +379,7 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     for suffix in ["repeat-a", "repeat-b"] {
         let result = invoke_mcp_symbol_search(
             &fixture.client,
-            &format!("request.pr12-reachability.open.{suffix}"),
+            &format!("request.application-reachability.open.{suffix}"),
         )
         .await;
         assert_eq!(
@@ -385,21 +390,21 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     }
 }
 
-/// Every operation formerly checked only by scanning the PR12 declaration must
-/// execute through all three shipped adapters. Missing fixture resources are
+/// Every catalog operation must execute through all three shipped adapters.
+/// Missing fixture resources are
 /// allowed to produce a typed terminal problem, but an absent binding, adapter
 /// rejection, daemon disconnect, or placeholder response fails this test.
 #[tokio::test(flavor = "multi_thread")]
-async fn pr12_operation_family_executes_through_cli_mcp_and_http() {
+async fn operation_family_executes_through_cli_mcp_and_http() {
     let fixture = production_fixture().await;
     let cases = [
         (
             ApplicationSurfaceOperation::FeedbackImpact,
-            serde_json::json!({ "request_handle": "rh_missing-pr12-reachability" }),
+            serde_json::json!({ "request_handle": "rh_missing-application-reachability" }),
         ),
         (
             ApplicationSurfaceOperation::AffectedTests,
-            serde_json::json!({ "request_handle": "rh_missing-pr12-reachability" }),
+            serde_json::json!({ "request_handle": "rh_missing-application-reachability" }),
         ),
         (
             ApplicationSurfaceOperation::TestResults,
@@ -408,7 +413,7 @@ async fn pr12_operation_family_executes_through_cli_mcp_and_http() {
         (
             ApplicationSurfaceOperation::SessionLookup,
             serde_json::json!({
-                "session_id": "session.pr12-reachability.missing",
+                "session_id": "session.application-reachability.missing",
                 "meta": {
                     "temporal": { "kind": "current" },
                     "page": { "page_size": 10, "cursor": null },
@@ -431,7 +436,10 @@ async fn pr12_operation_family_executes_through_cli_mcp_and_http() {
             .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()));
         let mcp = resolve_mcp_application_surface(
             operation,
-            RequestId::new(format!("request.pr12-family.mcp.{}", operation.as_str()))
+            RequestId::new(format!(
+                "request.application-family.mcp.{}",
+                operation.as_str()
+            ))
                 .expect("MCP request id"),
             request,
             RequestedOutputFormat::Json,
@@ -443,7 +451,10 @@ async fn pr12_operation_family_executes_through_cli_mcp_and_http() {
             .unwrap_or_else(|error| panic!("parse {} request: {error}", operation.as_str()));
         let http = resolve_http_application_surface(
             operation,
-            RequestId::new(format!("request.pr12-family.http.{}", operation.as_str()))
+            RequestId::new(format!(
+                "request.application-family.http.{}",
+                operation.as_str()
+            ))
                 .expect("HTTP request id"),
             request,
             RequestedOutputFormat::Json,
@@ -500,7 +511,7 @@ async fn pr12_operation_family_executes_through_cli_mcp_and_http() {
     }
 }
 
-/// Project open must mount the PR12 primitive runtime, and that runtime must
+/// Project open must mount the primitive runtime, and that runtime must
 /// answer a read whose result set crosses a page boundary in both directions:
 /// minting a continuation and honouring it.
 ///
@@ -518,7 +529,7 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     let fixture = production_fixture().await;
     let result = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.pr12-reachability.symbol-search.mcp").expect("request id"),
+        RequestId::new("request.application-reachability.symbol-search.mcp").expect("request id"),
         symbol_search_surface_request(PROBE_TOKEN, None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
@@ -534,7 +545,8 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
         .to_owned();
     let resumed = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.pr12-reachability.symbol-search.resume").expect("request id"),
+        RequestId::new("request.application-reachability.symbol-search.resume")
+            .expect("request id"),
         symbol_search_surface_request(PROBE_TOKEN, Some(cursor.as_str())),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
@@ -547,7 +559,8 @@ async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     // cursor above is the pagination path executing rather than a constant.
     let single = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.pr12-reachability.symbol-search.single").expect("request id"),
+        RequestId::new("request.application-reachability.symbol-search.single")
+            .expect("request id"),
         symbol_search_surface_request(&format!("{PROBE_TOKEN}_07"), None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
@@ -573,7 +586,7 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
 
     let mcp = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.pr12-reachability.parity.mcp").expect("request id"),
+        RequestId::new("request.application-reachability.parity.mcp").expect("request id"),
         symbol_search_surface_request(PROBE_TOKEN, None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
@@ -585,7 +598,7 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
 
     let http = resolve_http_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
-        RequestId::new("request.pr12-reachability.parity.http").expect("request id"),
+        RequestId::new("request.application-reachability.parity.http").expect("request id"),
         symbol_search_surface_request(PROBE_TOKEN, None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),

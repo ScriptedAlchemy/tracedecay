@@ -54,12 +54,12 @@ const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Dashboard,
 ];
 
-/// PR13 advisory producers retain the shared transport reads and additionally
+/// advisory producers retain the shared transport reads and additionally
 /// project the same canonical result through the mounted LSP/native host path.
 /// Hook delivery is host-registration metadata rather than a callable catalog
 /// surface. Dashboard consumes their results through the canonical feedback
 /// readers above rather than advertising producer operations it cannot invoke.
-const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
+const ADVISORY_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
@@ -69,7 +69,7 @@ const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
 /// Producer contributions are application-callable only through the combined
 /// cycle. They remain visible capability metadata for LSP/native projection,
 /// but do not create three independent network orchestration paths.
-const PR13_PROVIDER_CONTRIBUTION_SURFACES: [BindingSurface; 0] = [];
+const ADVISORY_PROVIDER_CONTRIBUTION_SURFACES: [BindingSurface; 0] = [];
 
 const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
     FeedbackSurfaceSpec {
@@ -166,7 +166,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Run one authorized four-pillar feedback cycle and return a daemon-minted canonical read handle.",
         example: "Run the complete advisory cycle for this saved document",
         paginated: false,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &ADVISORY_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
@@ -178,7 +178,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Contribute allowlisted existing GitHub review comments and threads to feedback_advisory_cycle without an independent write or orchestration path.",
         example: "Read existing review threads for this pull request",
         paginated: true,
-        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
+        surfaces: &ADVISORY_PROVIDER_CONTRIBUTION_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
@@ -190,7 +190,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Contribute anchored CI localization to feedback_advisory_cycle without running CI or exposing an independent orchestration path.",
         example: "Localize this reported CI failure",
         paginated: false,
-        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
+        surfaces: &ADVISORY_PROVIDER_CONTRIBUTION_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: PROXIMITY_CAPABILITY_ID_V1,
@@ -202,7 +202,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Contribute immediate or configured-threshold proximity evidence to feedback_advisory_cycle without locks, scheduling, continuation, or an independent orchestration path.",
         example: "Inspect concurrent-work proximity for this branch",
         paginated: false,
-        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
+        surfaces: &ADVISORY_PROVIDER_CONTRIBUTION_SURFACES,
     },
 ];
 
@@ -280,7 +280,7 @@ pub fn feedback_surface_operation(
         .transpose()
 }
 
-/// Exact PR12 operation set consumed by `FeedbackReadService`.
+/// Exact feedback-read operation set consumed by `FeedbackReadService`.
 pub fn feedback_read_operations() -> Result<FeedbackReadOperationsV1, ApplicationContractError> {
     FeedbackReadOperationsV1::new(
         application_operation(&FEEDBACK_SPECS[0])?,

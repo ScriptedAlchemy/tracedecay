@@ -274,7 +274,7 @@ pub enum FeedbackReadOwnerErrorV1 {
     Unavailable,
 }
 
-/// Complete daemon-mountable PR12 owner: opaque request authority plus the
+/// Complete daemon-mountable feedback owner: opaque request authority plus the
 /// canonical authorized application service.
 pub struct DaemonFeedbackReadOwnerV1<R, P, A> {
     requests: R,

@@ -332,7 +332,7 @@ jobs:
         # The ONLY default-feature (not --all-features) lifecycle run.
         run: >-
           cargo nextest run --locked
-          --test pr13_host_bundle_acceptance
+          --test host_bundle_acceptance
           --no-tests=fail
 
       - name: FastEmbed fixture pin check
@@ -662,7 +662,7 @@ jobs:
       - name: Cache Windows Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-pr12-pr13-lite-windows-msvc
+          shared-key: ci-application-advisory-lite-windows-msvc
           cache-on-failure: true
 
       - name: Lite feature compile check
@@ -673,7 +673,7 @@ jobs:
         shell: bash
         run: >-
           cargo nextest run --locked
-          --test pr13_host_bundle_acceptance
+          --test host_bundle_acceptance
           --no-tests=fail
 
       - name: Merge Windows junit

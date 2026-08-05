@@ -191,7 +191,7 @@ master); storage `row_string/row_i64/...` = one generic `row_get<T>` split into 
   contracts with ephemeral PR numbers in stable identifiers. Rename before the format freezes.
 - **Pervasive `...V1` suffix noise** on ~every type in `src/agents` (HostKindV1 ×249) with no
   V2 and versioning already enforced elsewhere; forces `as State` aliasing.
-- **Tests assert on production source text** (`tests/pr12_production_reachability.rs`
+- **Tests assert on production source text** (`tests/application_production_reachability.rs`
   include_str!s 11 .rs files + asserts byte-offset call ordering) — architecture-by-grep,
   guaranteed to rot on any rename/reorder.
 - **Dead code**: `dashboard/codegen` (~1100 lines, output imported by nothing), legacy Zod

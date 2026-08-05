@@ -1,4 +1,4 @@
-//! Mandatory PR13 daemon journey gate over production startup authorities.
+//! Mandatory daemon journey over production startup authorities.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -118,7 +118,11 @@ fn scout_evidence(now: UtcMicros) -> ContextScoutEvidenceEnvelopeV1 {
 async fn authentic_callback_to_all_delivery_surfaces() {
     let (_environment, project) = common::IsolatedEnv::acquire().await;
     std::fs::create_dir_all(project.join("src")).unwrap();
-    std::fs::write(project.join("src/lib.rs"), "pub fn pr13_callback() {}\n").unwrap();
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn advisory_callback() {}\n",
+    )
+    .unwrap();
     TraceDecay::init(&project)
         .await
         .expect("production project initialization");
@@ -166,7 +170,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     .expect("authentic callback binds to project-open Hook V2 scope");
     assert_eq!(envelope.event.family(), decoded.family());
 
-    let spool_root = layout.data_root.join("pr13-hook-replay");
+    let spool_root = layout.data_root.join("advisory-hook-replay");
     let (mut spool, _) = HookSpoolV1::open(
         &spool_root,
         HookSpoolConfigV1::stock(HookHostV1::ClaudeCode),
