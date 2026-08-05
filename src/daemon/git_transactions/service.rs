@@ -101,17 +101,23 @@ pub(crate) struct DaemonGitIndexTransactionPort<S, N, C, A> {
     native: N,
     classifier: C,
     authorization: A,
-    queue: RepositoryMutationQueue,
+    queue: std::sync::Arc<RepositoryMutationQueue>,
 }
 
 impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A> {
-    pub(crate) fn new(store: S, native: N, classifier: C, authorization: A) -> Self {
+    pub(crate) fn new(
+        store: S,
+        native: N,
+        classifier: C,
+        authorization: A,
+        queue: std::sync::Arc<RepositoryMutationQueue>,
+    ) -> Self {
         Self {
             store,
             native,
             classifier,
             authorization,
-            queue: RepositoryMutationQueue::default(),
+            queue,
         }
     }
 }

@@ -301,6 +301,7 @@ fn test_port(
             native,
             GitEffectClassifierV1::default(),
             policy,
+            Arc::new(RepositoryMutationQueue::default()),
         ),
         preview,
         request,
@@ -536,8 +537,13 @@ fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
     let policy = TestPolicy::allowing();
     policy.allow.store(false, Ordering::SeqCst);
     let policy_calls = Arc::clone(&policy.calls);
-    let port =
-        DaemonGitIndexTransactionPort::new(store, native, GitEffectClassifierV1::default(), policy);
+    let port = DaemonGitIndexTransactionPort::new(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        policy,
+        Arc::new(RepositoryMutationQueue::default()),
+    );
 
     let replay = port.apply(&request).expect("expired terminal replay");
     assert_eq!(
@@ -634,8 +640,13 @@ fn nonterminal_key_is_recovery_only_and_startup_recovery_is_idempotent() {
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
     let policy = TestPolicy::allowing();
-    let port =
-        DaemonGitIndexTransactionPort::new(store, native, GitEffectClassifierV1::default(), policy);
+    let port = DaemonGitIndexTransactionPort::new(
+        store,
+        native,
+        GitEffectClassifierV1::default(),
+        policy,
+        Arc::new(RepositoryMutationQueue::default()),
+    );
 
     assert_eq!(
         port.apply(&request),
@@ -674,6 +685,7 @@ fn startup_service_recovers_before_exposing_the_mutation_port() {
         native,
         GitEffectClassifierV1::default(),
         TestPolicy::allowing(),
+        Arc::new(RepositoryMutationQueue::default()),
         UtcMicros(20),
     )
     .expect("startup recovery completes before service publication");
@@ -701,6 +713,7 @@ fn startup_recovery_failure_returns_no_mutation_service() {
         native,
         GitEffectClassifierV1::default(),
         TestPolicy::allowing(),
+        Arc::new(RepositoryMutationQueue::default()),
         UtcMicros(20),
     );
 
@@ -810,6 +823,13 @@ async fn daemon_owner_isolates_worktrees_sharing_a_project_database() {
     assert!(
         !Arc::ptr_eq(&primary, &linked),
         "worktrees sharing one store need independent native executors"
+    );
+    assert!(
+        Arc::ptr_eq(
+            primary.mutation_queue_for_test(),
+            linked.mutation_queue_for_test()
+        ),
+        "all Git mutation services must serialize through the daemon registry queue"
     );
     let primary_owner = registry
         .for_repository_root(directory.path())
