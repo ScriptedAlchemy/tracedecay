@@ -408,6 +408,26 @@ impl RegisteredGlobalDb {
         })
     }
 
+    /// Attaches the single-use handoff-open authority through the same
+    /// registered Work exact-SQL handle as Work projections and workflow
+    /// state. The composition root supplies the target-version recheck port.
+    pub fn handoff_open_storage(
+        &self,
+    ) -> tracedecay_runtime_core::errors::Result<
+        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority,
+    > {
+        let storage = self.work_storage()?;
+        tracedecay_rusqlite_runtime::handoff::HandoffOpenSqliteAuthority::from_work_storage(
+            &storage,
+        )
+        .map_err(|error| {
+            registered_error(
+                "attach registered handoff-open storage",
+                format!("{error:?}"),
+            )
+        })
+    }
+
     // Root-owned adapter, deliberately not built here: `work_runtime` returned
     // `crate::daemon::work_runtime::DaemonWorkRuntimeV1<WorkSqliteStorage>`,
     // which lives above this crate. The composition root builds it from
