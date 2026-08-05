@@ -1,0 +1,149 @@
+use sha2::{Digest, Sha256};
+
+/// Exact identities of auto-discovered Codex skills retired from previously
+/// shipped plugin bundles. Cleanup is deliberately closed over these
+/// path-and-content pairs: a name, frontmatter field, or TraceDecay tool
+/// reference is not ownership evidence.
+const CODEX_RETIRED_ENTRYPOINT_IDENTITIES: &[(&str, &str)] = &[
+    (
+        "skills/curating-project-memory/SKILL.md",
+        "06eeb9b654516e880bd9f4e2a4887b5e4b89f0542068de58ebe5a4a71344cc5c",
+    ),
+    (
+        "skills/recalling-project-memory/SKILL.md",
+        "27373ccba172c2577c7c870f26c39ec3b1e7681794d54c30daee8163ab394741",
+    ),
+    (
+        "skills/recalling-session-context/SKILL.md",
+        "9831eadc387bc7830f5886932ab4b9d59eedae0df6dd151e715f86af4160624d",
+    ),
+    (
+        "skills/recalling-session-context/SKILL.md",
+        "8baea6f4050fdecbd273eab8ff4131179ffb3ae8c9d6bfe64a88a73ce62acbb7",
+    ),
+    (
+        "skills/retrieving-cached-context/SKILL.md",
+        "fb1b2fa3e50d7f6e5a472259ed37c1e8135e29ced0ebb3e3cbb3bb2c5eab7300",
+    ),
+    (
+        "skills/retrieving-project-memory/SKILL.md",
+        "e3a2fd2d24836e9319e8e177d4eebb06f15d8253d42d85bfd8b911fb27b488d5",
+    ),
+    (
+        "skills/storing-project-memory/SKILL.md",
+        "0ac3f8a41bb88c61bcac0121aebe1b8ff239adfaee4ccaeb9904850c66521bfd",
+    ),
+    (
+        "skills/tracedecay-audit-safety/SKILL.md",
+        "d31189e7edcd510ddf574b8a0406f8f87b95fed980bc833911b946d3389d9985",
+    ),
+    (
+        "skills/tracedecay-audit-safety/SKILL.md",
+        "bb196c87c451d75a148c47cfad3f50f3c8a0eff887d79de14169fa57df453d8e",
+    ),
+    (
+        "skills/tracedecay-check-health/SKILL.md",
+        "34ce491ee8ff4d5a887b4d9ddad7589734f548221d7014e4585aff3c07025537",
+    ),
+    (
+        "skills/tracedecay-check-health/SKILL.md",
+        "14a48887d0b0759053031f5a7f5ca04ca5c47e41a4b01b6e21c8109bb58cadb5",
+    ),
+    (
+        "skills/tracedecay-clean-dead-code/SKILL.md",
+        "e45b29417511f335a395d10985e646c4eb8ce104f772148418c95cbb62304d7f",
+    ),
+    (
+        "skills/tracedecay-clean-dead-code/SKILL.md",
+        "3fdfaa6bf98063f988b4daba7710c7329d97e8f2b50b199058647528c4a006c2",
+    ),
+    (
+        "skills/tracedecay-compare-branches/SKILL.md",
+        "4540d196228e8cebfcd6211fe616fefa664ad7f0347fe6cdef575b1643509d74",
+    ),
+    (
+        "skills/tracedecay-compare-branches/SKILL.md",
+        "cbf0a7a1a3b40deead079008d5a263a021ec4a7deffea6e65c5f1c022b1cbea7",
+    ),
+    (
+        "skills/tracedecay-curate-memory/SKILL.md",
+        "6b05eec049940a25f28eb0186853fb0b95747707750c2e3cbaa04643213b6fee",
+    ),
+    (
+        "skills/tracedecay-curate-memory/SKILL.md",
+        "662615971acb8286540ce4b788ff765e1042deae83e7e329222a2e187f6ccedf",
+    ),
+    (
+        "skills/tracedecay-draft-commit/SKILL.md",
+        "9a17774f196d2840a14824144273cc1981d5ef01a72f254fa3a270df493ada52",
+    ),
+    (
+        "skills/tracedecay-draft-commit/SKILL.md",
+        "ac6d44274d05a9e55f2ab6c215ccead1db9eebe69c3926eb958f2bd06df29ff3",
+    ),
+    (
+        "skills/tracedecay-find-impact/SKILL.md",
+        "184540ec2da7673dd535868f659fb2eff48bcd07abc5f651aa1272795a2bf640",
+    ),
+    (
+        "skills/tracedecay-find-impact/SKILL.md",
+        "349da2f8b490085b7515f106cc052980bbad9d98c09cc0815171a83e0a7f418f",
+    ),
+    (
+        "skills/tracedecay-fix-build/SKILL.md",
+        "64a876ea2615f1b940116bf3570d4cf722a03af06bdcf1faf716601eb72f9739",
+    ),
+    (
+        "skills/tracedecay-fix-build/SKILL.md",
+        "c22aafad7165101fa012e92419eda3e18ad7ecf5859259e65636ce1431e3f75a",
+    ),
+    (
+        "skills/tracedecay-map-architecture/SKILL.md",
+        "6bf5800ace17a547bc6d2e7c2112a1140923f9890102c653c35c4659f6ea0fef",
+    ),
+    (
+        "skills/tracedecay-map-architecture/SKILL.md",
+        "2242ed70968d832fc40f917784e7c4571690ec07850ba1edfbbdfd69b344e0ac",
+    ),
+    (
+        "skills/tracedecay-port-code/SKILL.md",
+        "08c5b95fb3ca8abdb2a077645a4c97a805518f1ca98d15d4a90751801097a546",
+    ),
+    (
+        "skills/tracedecay-port-code/SKILL.md",
+        "9c222985b6bd7d9f1a4c60c4844587dfa86c5a8c77bc90ea71b67eb201df1a44",
+    ),
+    (
+        "skills/tracedecay-recall-memory/SKILL.md",
+        "6481a0780a031108e2a8084d7da926d06d524f8ab7f3b1428ae8f7c236cfd4a4",
+    ),
+    (
+        "skills/tracedecay-recall-memory/SKILL.md",
+        "6bc0fa8061bd2aa704ac8a28811b433297411bbf63aabc39522009417ffb3717",
+    ),
+    (
+        "skills/tracedecay-review-diff/SKILL.md",
+        "f977e9bd0dec65569905a7c360bd232c6652e1644d870ad15fe48b80d70e71cf",
+    ),
+    (
+        "skills/tracedecay-review-diff/SKILL.md",
+        "9ad0572e2abbd1cd5784848042fc5c16fb44b6d1a57b2bdead89f6ad8e9ae018",
+    ),
+    (
+        "skills/tracedecay-test-changes/SKILL.md",
+        "04481d6cd6c110efddd8db93129767003443ef57687d6e6dd775186b437bb85b",
+    ),
+    (
+        "skills/tracedecay-test-changes/SKILL.md",
+        "aec63d5a77d238eae959c579bd490068b283a859769c0a11d111ce257eeaf38f",
+    ),
+];
+
+pub(super) fn has_exact_identity(relative: &str, contents: &[u8]) -> bool {
+    let digest = hex::encode(Sha256::digest(contents));
+    CODEX_RETIRED_ENTRYPOINT_IDENTITIES
+        .iter()
+        .any(|(owned_relative, owned_digest)| {
+            relative == *owned_relative && digest == *owned_digest
+        })
+}
