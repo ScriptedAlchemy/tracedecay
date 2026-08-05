@@ -505,12 +505,17 @@ fn run_post_update_subcommand(
 }
 
 /// The result of a tracked-agent reinstall pass. Version markers may only
-/// advance on [`ReinstallOutcome::AllOk`]; a partial failure leaves the
-/// markers untouched so the startup silent reinstall retries the work.
+/// advance on [`ReinstallOutcome::AllOk`]; a failure or a required native host
+/// action leaves the markers untouched so the startup silent reinstall retries
+/// the work.
 pub(crate) enum ReinstallOutcome {
     /// Every tracked agent reinstalled successfully (an empty tracked list is
     /// also `AllOk`).
     AllOk,
+    /// One or more tracked agents require a host-native action before their
+    /// staged source can be tracked. This is incomplete, not a successful
+    /// reinstall pass, so version markers must remain armed.
+    DeferredUserAction { deferred: Vec<String> },
     /// One or more tracked agents failed to reinstall; `failed` lists ids (or
     /// a descriptive pseudo-id when the environment could not be resolved).
     PartialFailure { failed: Vec<String> },
@@ -528,6 +533,7 @@ pub(crate) fn partition_reinstall_results(
     // Carry the reason, not just the name, so the operator can diagnose a
     // failed integration refresh without reading the installer source.
     let mut failed = Vec::new();
+    let mut deferred_actions = Vec::new();
     for (id, result) in results {
         match result {
             Ok(crate::agent_cmd::AgentReinstallOutcome::Installed) => {}
@@ -539,14 +545,19 @@ pub(crate) fn partition_reinstall_results(
                 for path in deferred.staged_paths {
                     eprintln!("    staged: {}", path.display());
                 }
+                deferred_actions.push(format!("{id}: {}", deferred.remediation));
             }
             Err(error) => failed.push(format!("{id}: {error}")),
         }
     }
-    if failed.is_empty() {
-        ReinstallOutcome::AllOk
-    } else {
+    if !failed.is_empty() {
         ReinstallOutcome::PartialFailure { failed }
+    } else if !deferred_actions.is_empty() {
+        ReinstallOutcome::DeferredUserAction {
+            deferred: deferred_actions,
+        }
+    } else {
+        ReinstallOutcome::AllOk
     }
 }
 
@@ -596,8 +607,9 @@ pub(crate) fn install_pass_covers_tracked_agents(
 /// superset of `refresh_generated_plugins`, which rewrites generated artifacts
 /// only. Mirrors the canonical `handle_reinstall_command` (global scope:
 /// `project_root: None`). Continues past a failing agent; returns
-/// [`ReinstallOutcome::PartialFailure`] listing every failure (an empty tracked
-/// list is [`ReinstallOutcome::AllOk`]). If the home or binary cannot be
+/// [`ReinstallOutcome::PartialFailure`] listing every failure or
+/// [`ReinstallOutcome::DeferredUserAction`] when a native host action remains
+/// (an empty tracked list is [`ReinstallOutcome::AllOk`]). If the home or binary cannot be
 /// resolved, no install runs and a descriptive failure is reported so the
 /// version markers stay put.
 pub(crate) async fn reinstall_tracked_agents(user_config: &UserConfig) -> ReinstallOutcome {
@@ -732,6 +744,14 @@ async fn run_post_update_mutations(
                     "  \x1b[33mwarning:\x1b[0m agent install failed for: {}; \
                  it will be retried on the next tracedecay command.",
                     failed.join(", ")
+                );
+                Ok(())
+            }
+            ReinstallOutcome::DeferredUserAction { deferred } => {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m agent refresh needs native host action: {}; \\
+                 it will be retried on the next tracedecay command.",
+                    deferred.join("; ")
                 );
                 Ok(())
             }
@@ -961,11 +981,16 @@ mod tests {
     }
 
     #[test]
-    fn partition_deferred_user_action_is_non_blocking() {
-        assert!(matches!(
-            partition_reinstall_results(vec![ok("claude"), deferred("kimi")]),
-            ReinstallOutcome::AllOk
-        ));
+    fn partition_deferred_user_action_keeps_reinstall_incomplete() {
+        match partition_reinstall_results(vec![ok("claude"), deferred("kimi")]) {
+            ReinstallOutcome::DeferredUserAction { deferred } => assert_eq!(
+                deferred,
+                vec!["kimi: run /plugins install staged-kimi".to_string()]
+            ),
+            ReinstallOutcome::AllOk | ReinstallOutcome::PartialFailure { .. } => {
+                panic!("a deferred host action must keep markers armed")
+            }
+        }
     }
 
     /// Kimi owns a canonical component set, so the receipt-backed transaction
@@ -1058,7 +1083,9 @@ mod tests {
                     ],
                 );
             }
-            ReinstallOutcome::AllOk => panic!("expected a partial failure"),
+            ReinstallOutcome::AllOk | ReinstallOutcome::DeferredUserAction { .. } => {
+                panic!("expected a partial failure")
+            }
         }
     }
 
@@ -1106,7 +1133,9 @@ mod tests {
                     vec!["cursor: config error: install failed".to_string()]
                 );
             }
-            ReinstallOutcome::AllOk => panic!("a real install() failure must gate markers"),
+            ReinstallOutcome::AllOk | ReinstallOutcome::DeferredUserAction { .. } => {
+                panic!("a real install() failure must gate markers")
+            }
         }
     }
 
@@ -1140,12 +1169,28 @@ mod tests {
             ReinstallOutcome::PartialFailure { .. } => {
                 // Intentionally do not advance markers.
             }
-            ReinstallOutcome::AllOk => panic!("expected PartialFailure"),
+            ReinstallOutcome::AllOk | ReinstallOutcome::DeferredUserAction { .. } => {
+                panic!("expected PartialFailure")
+            }
         }
         assert_eq!(config.previous_version, "9.0.0");
         assert!(config.last_installed_version.is_empty());
         // A subsequent full install pass would still have work to record.
         assert!(config.mark_version_installed(running));
+
+        let mut config = UserConfig {
+            installed_agents: vec!["kimi".to_string()],
+            previous_version: "9.0.0".to_string(),
+            ..UserConfig::default()
+        };
+        match partition_reinstall_results(vec![deferred("kimi")]) {
+            ReinstallOutcome::DeferredUserAction { .. } => {}
+            ReinstallOutcome::AllOk | ReinstallOutcome::PartialFailure { .. } => {
+                panic!("expected deferred native action")
+            }
+        }
+        assert_eq!(config.previous_version, "9.0.0");
+        assert!(config.last_installed_version.is_empty());
     }
 
     /// Defect: `tracedecay reinstall` recorded only `last_installed_version`,

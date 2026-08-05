@@ -1581,10 +1581,16 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => true,
         };
-        if self.project_path.is_none()
-            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
-            && self.should_apply
-        {
+        let global_kimi = self.project_path.is_none()
+            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode;
+        if global_kimi && all_current {
+            // A native `/plugins install` retry has already completed Kimi's
+            // registration. Repair may record/refresh TraceDecay-owned source
+            // receipts, but it must not demand a nonexistent programmatic
+            // registration action from Kimi.
+            self.should_apply = false;
+        }
+        if global_kimi && self.should_apply {
             // Kimi's global plugin lifecycle is interactive (`/plugins`) only.
             // Project-local registration is a separate MCP/prompt integration
             // implemented by `install_local`, so it remains eligible for this

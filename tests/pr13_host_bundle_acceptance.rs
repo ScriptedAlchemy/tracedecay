@@ -135,9 +135,9 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, &content.bytes).unwrap();
     }
-    let managed_dir = artifact_root
+    let staged_dir = artifact_root
         .path()
-        .join(".kimi-code/plugins/managed/tracedecay")
+        .join(".tracedecay/host-bundle-stage/kimi/tracedecay")
         .canonicalize()
         .unwrap();
     let installed_path = artifact_root
@@ -152,7 +152,7 @@ fn receipt_backed_doctor_checks_deployed_digests_registration_and_repair() {
                 "id": "tracedecay",
                 "enabled": true,
                 "source": "local-path",
-                "root": managed_dir,
+                "root": staged_dir,
             }],
         }))
         .unwrap(),

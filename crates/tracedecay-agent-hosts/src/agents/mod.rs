@@ -1570,6 +1570,19 @@ Pass schema fields inside the JSON object; never invent per-key flags or enum va
 Fall back to that CLI instead of querying `.tracedecay` databases directly or abandoning tracedecay."
 );
 
+/// True when a `SKILL.md` carries a TraceDecay authorship marker. Retired
+/// plugin artifacts use this narrow check so same-name user workflows remain
+/// outside TraceDecay's cleanup authority.
+pub(crate) fn skill_contents_have_tracedecay_marker(contents: &str) -> bool {
+    contents.lines().map(str::trim).any(|line| {
+        line.starts_with("name: tracedecay:")
+            || line.starts_with("description: TraceDecay ")
+            || line.contains("TraceDecay MCP")
+            || line.contains("tracedecay_")
+            || line.contains("`tracedecay:")
+    })
+}
+
 /// Recursively collect every regular file under `root` (following the same
 /// hand-rolled walk both the Cursor and Codex installers rely on).
 pub(crate) fn collect_regular_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
