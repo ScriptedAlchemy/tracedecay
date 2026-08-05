@@ -17,6 +17,9 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, params
 
 use super::SessionMessageRecord;
 
+mod error;
+pub use error::GitCorrelationError;
+
 /// Schema version recorded in `session_schema_migrations`.
 ///
 /// v4 adds no columns: it is the one-shot [`compact_session_git_spans`] repair
@@ -53,32 +56,6 @@ pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark"
 /// Row-id tie-breaker paired with [`AUTO_BACKFILL_WATERMARK_KEY`] so sessions
 /// sharing one activity timestamp resume without duplication or omission.
 pub const GIT_HISTORY_ROWID_FRONTIER_KEY: &str = "git_history_session_rowid_frontier";
-
-/// Errors from the git-correlation store.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitCorrelationError {
-    /// Underlying database failure.
-    Db(String),
-    /// Caller-supplied argument was invalid (bad ref kind, empty value, …).
-    InvalidArgument(String),
-}
-
-impl std::fmt::Display for GitCorrelationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Db(message) => write!(f, "git correlation db error: {message}"),
-            Self::InvalidArgument(message) => write!(f, "{message}"),
-        }
-    }
-}
-
-impl std::error::Error for GitCorrelationError {}
-
-impl From<tracedecay_runtime_core::db::engine::Error> for GitCorrelationError {
-    fn from(err: tracedecay_runtime_core::db::engine::Error) -> Self {
-        Self::Db(err.to_string())
-    }
-}
 
 /// Where a span row came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
