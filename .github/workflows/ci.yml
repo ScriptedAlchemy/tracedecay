@@ -662,7 +662,7 @@ jobs:
       - name: Cache Windows Rust build outputs
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-pr12-pr13-lite-windows-msvc
+          shared-key: ci-application-advisory-lite-windows-msvc
           cache-on-failure: true
 
       - name: Lite feature compile check
