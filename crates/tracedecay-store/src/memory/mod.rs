@@ -44,7 +44,8 @@ pub use compatibility::{
     CompatibilityFactTargetV1, CompatibilityFactUnavailableV1, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1, CompatibilityFactV1,
     CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
-    FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    CompatibilityRelationProvenanceV1, FactProposalPromotionStateV1, PromoteFactProposal,
+    PromoteFactProposalOutcome,
 };
 pub use error::{
     FactCompatibilityResult, FactCompatibilityStoreError, FactProposalStoreError, FactStoreError,

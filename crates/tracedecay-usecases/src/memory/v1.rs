@@ -28,7 +28,7 @@ use super::compatibility::{
 use super::context::MemoryOperationContext;
 use super::error::MemoryApplicationError;
 use super::sanitize::{
-    sanitize_add_fact_request, sanitize_optional_memory_text, sanitize_update_fact_request,
+    prepare_tainted_update_fact_request, sanitize_add_fact_request, sanitize_optional_memory_text,
 };
 
 /// V1 update preserves the existing rejected-secret response without issuing a
@@ -339,7 +339,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
                 ),
             });
         }
-        let Some(request) = sanitize_update_fact_request(request)? else {
+        let Some(request) = prepare_tainted_update_fact_request(request)? else {
             return Ok(V1UpdateFactOutcome::RejectedSecretLike {
                 reason: "rejected_secret_like: content or structured payload was rejected by the privacy sanitizer".to_owned(),
             });

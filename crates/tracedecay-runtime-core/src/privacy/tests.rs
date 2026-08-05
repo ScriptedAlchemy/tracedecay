@@ -5,7 +5,8 @@ use tracedecay_domain::{
     ClaudeByteRangeV1, ClaudeFileGenerationV1, ClaudeObservationIdentityMaterialV1,
     ClaudeSourceIdentityV1, ComponentVersion, ObservationContractError, ObservationId,
     ObservationOrderingDomainV1, ObservationScopeV1, ObservationSourceIdentityV1,
-    PayloadReferenceV1, ProviderId, RetentionClass, SanitizerDispositionV1, SensitivityV1,
+    PayloadReferenceV1, ProviderId, RetentionClass, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, SensitivityV1,
     SessionId,
 };
 
@@ -17,11 +18,12 @@ use super::sanitize::{CLAUDE_SANITIZER_VERSION_V1, OBSERVATION_SANITIZER_VERSION
 use super::{
     CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
     ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
-    LcmSensitiveRedactionPolicyV1, MAX_OBSERVATION_RECORD_BYTES, PrivacyDetectorV1,
-    PrivacySanitizerError, SanitizationActionV1, SanitizationFindingV1,
-    SanitizedPayloadVerificationError, parse_claude_record_v1,
+    LcmSensitiveRedactionPolicyV1, MAX_OBSERVATION_RECORD_BYTES, MEMORY_FACT_SANITIZER_VERSION_V1,
+    MemoryFactSanitizationV1, PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1,
+    SanitizationFindingV1, SanitizedPayloadVerificationError, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
-    redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_provider_metadata_json,
+    redact_lcm_sensitive_payload, sanitize_code_source_bytes, sanitize_memory_fact_payload,
+    sanitize_provider_metadata_json, verify_memory_fact_sanitization,
     verify_sanitized_json_payload,
 };
 
@@ -158,6 +160,32 @@ fn payload_verifier_rejects_stale_receipts_and_exact_content_mismatch() {
         verify_sanitized_json_payload(&json!({"different": true}), &receipt, &revision),
         Err(SanitizedPayloadVerificationError::PayloadMismatch)
     );
+}
+
+#[test]
+fn memory_fact_verifier_rejects_a_self_authored_receipt() {
+    let MemoryFactSanitizationV1::Durable { payload, receipt } =
+        sanitize_memory_fact_payload(json!({"content": "safe"})).expect("sanitize fact")
+    else {
+        panic!("safe fact should be durable");
+    };
+    let forged = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            SanitizationReceiptId::new("memory-fact-receipt.v1.forged").unwrap(),
+            ComponentVersion::new(MEMORY_FACT_SANITIZER_VERSION_V1).unwrap(),
+        )
+        .unwrap(),
+        receipt.disposition(),
+        receipt.sensitivity(),
+        receipt.payload().cloned(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        verify_memory_fact_sanitization(&payload, &forged),
+        Err(SanitizedPayloadVerificationError::ReceiptAuthorityMismatch)
+    );
+    assert!(verify_memory_fact_sanitization(&payload, &receipt).is_ok());
 }
 
 #[test]

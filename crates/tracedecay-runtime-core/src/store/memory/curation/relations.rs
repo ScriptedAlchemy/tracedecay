@@ -16,7 +16,9 @@ use super::super::projection::{
 use crate::db::Database;
 use crate::db::DatabaseMemoryTransaction as Transaction;
 use crate::db::engine::params;
-use crate::privacy::{MemoryFactSanitizationV1, sanitize_memory_fact_payload};
+use crate::privacy::{
+    MemoryFactSanitizationV1, sanitize_memory_fact_payload, verify_memory_fact_sanitization,
+};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use tracedecay_domain::{
@@ -26,7 +28,8 @@ use tracedecay_domain::{
 use tracedecay_store::{
     CompatibilityFactIdV1, CompatibilityFactLinkV1, CompatibilityFactMappingV1,
     CompatibilityFactNormalizeTagsV1, CompatibilityFactRelationV1, CompatibilityFactTargetV1,
-    FactStoreError, FactStoreResult, FactWriteBatch, StoredFactV1,
+    CompatibilityRelationProvenanceV1, FactStoreError, FactStoreResult, FactWriteBatch,
+    StoredFactV1,
 };
 pub(super) fn compatibility_relation_label(relation: CompatibilityFactRelationV1) -> &'static str {
     match relation {
@@ -144,13 +147,12 @@ pub(super) async fn compatibility_record_curated_correction_provenance_tx(
     )?;
     let source_label =
         compatibility_source_label(Some(&format!("compatibility_curation_{operation}")))?;
-    let provenance_json = to_json(
-        &json!({
-            "actor_id": actor.map(ActorId::as_str),
-            "operation": operation,
-        }),
-        "serialize curated correction provenance",
-    )?;
+    let provenance = compatibility_sanitized_relation_provenance(&json!({
+        "actor_id": actor.map(ActorId::as_str),
+        "operation": operation,
+    }))
+    .await?;
+    let provenance_json = to_json(&provenance, "serialize curated correction provenance")?;
     if evidence_fact_ids
         .iter()
         .any(|evidence_fact_id| evidence_fact_id == corrected_fact_id)
@@ -212,18 +214,34 @@ pub(super) async fn compatibility_curation_mappings_from_ids_tx(
     Ok(mappings)
 }
 
-pub(super) async fn compatibility_sanitized_relation_metadata(
+pub(super) async fn compatibility_sanitized_relation_provenance(
     metadata: &Value,
-) -> FactStoreResult<Value> {
+) -> FactStoreResult<CompatibilityRelationProvenanceV1> {
     match sanitize_memory_fact_payload(metadata.clone())
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?
     {
-        MemoryFactSanitizationV1::Durable { payload, .. } => Ok(payload),
+        MemoryFactSanitizationV1::Durable { payload, receipt } => {
+            CompatibilityRelationProvenanceV1::new(payload, receipt)
+        }
         MemoryFactSanitizationV1::Quarantined => Err(storage_message(
             COMPATIBILITY_WRITE_OPERATION,
             "compatibility relation metadata was rejected by the privacy sanitizer",
         )),
     }
+}
+
+pub(super) async fn compatibility_legacy_relation_provenance(
+    value: &Value,
+) -> FactStoreResult<CompatibilityRelationProvenanceV1> {
+    if value.get("metadata").is_some() || value.get("sanitization_receipt").is_some() {
+        return serde_json::from_value(value.clone()).map_err(|error| {
+            storage_error(
+                COMPATIBILITY_WRITE_OPERATION,
+                format!("invalid receipt-bound legacy relation provenance: {error}"),
+            )
+        });
+    }
+    compatibility_sanitized_relation_provenance(value).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -234,9 +252,11 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
     relation: CompatibilityFactRelationV1,
     confidence: Confidence,
     source_label: &str,
-    metadata: &Value,
+    provenance: &CompatibilityRelationProvenanceV1,
     timestamp: i64,
 ) -> FactStoreResult<()> {
+    verify_memory_fact_sanitization(provenance.metadata(), provenance.sanitization_receipt())
+        .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     let mut rows = transaction
         .query(
             "SELECT relation FROM memory_fact_relations
@@ -286,7 +306,7 @@ pub(super) async fn compatibility_upsert_legacy_relation_tx(
                 compatibility_relation_label(relation),
                 confidence.as_f64(),
                 source_label,
-                to_json(metadata, "serialize compatibility relation metadata")?,
+                to_json(provenance, "serialize compatibility relation provenance")?,
                 timestamp,
             ],
         )
@@ -302,6 +322,11 @@ pub(super) async fn compatibility_link_facts_tx(
     operation: &CompatibilityFactLinkV1,
     now: UtcMicros,
 ) -> FactStoreResult<(Vec<FactId>, Option<FactEventId>)> {
+    verify_memory_fact_sanitization(
+        operation.provenance().metadata(),
+        operation.provenance().sanitization_receipt(),
+    )
+    .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;
     let (source_fact_id, source_fact, source_mapping) =
         compatibility_available_curation_fact_tx(transaction, operation.source()).await?;
     let (target_fact_id, _, target_mapping) =
@@ -316,7 +341,7 @@ pub(super) async fn compatibility_link_facts_tx(
         compatibility_curation_evidence_ids_tx(transaction, owner, operation.evidence_facts())
             .await?;
     let source_label = compatibility_source_label(Some(operation.source_label()))?;
-    let metadata = compatibility_sanitized_relation_metadata(operation.metadata()).await?;
+    let provenance = operation.provenance();
     let key = OwnerKey::new(owner)?;
     let evidence_fact_ids_json = to_json(
         &evidence_fact_ids
@@ -325,7 +350,7 @@ pub(super) async fn compatibility_link_facts_tx(
             .collect::<Vec<_>>(),
         "serialize compatibility relation evidence",
     )?;
-    let provenance_json = to_json(&metadata, "serialize compatibility relation provenance")?;
+    let provenance_json = to_json(provenance, "serialize compatibility relation provenance")?;
     transaction
         .execute(
             "INSERT INTO memory_v2_fact_relations(
@@ -403,7 +428,7 @@ pub(super) async fn compatibility_link_facts_tx(
         operation.relation(),
         operation.confidence(),
         &source_label,
-        &metadata,
+        provenance,
         compatibility_legacy_timestamp(now),
     )
     .await?;

@@ -1263,6 +1263,56 @@ fn automation_run_identity_is_typed_not_fact_payload_metadata() {
 }
 
 #[test]
+fn fact_add_preserves_the_authoritative_sanitizer_receipt() {
+    let mut request = legacy_add_request();
+    request.metadata = serde_json::json!({
+        "api_key": "fixture-secret-value-that-must-be-redacted",
+        "fixture": "retained",
+    });
+    let (_, expected_receipt) = super::sanitize::sanitize_add_fact_request(request.clone())
+        .unwrap()
+        .unwrap()
+        .into_parts();
+
+    let command = automation_fact_proposal_add_command(
+        owner(),
+        request,
+        "run_01J4A7P5MQ1X9DX2P9BQNQW75T",
+        "proposal-receipt-provenance",
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(command.sanitization_receipt(), &expected_receipt);
+    assert_eq!(
+        command.metadata().get("api_key"),
+        Some(&serde_json::Value::String(
+            "[TraceDecay redacted: sensitive field]".to_owned()
+        ))
+    );
+}
+
+#[test]
+fn relation_provenance_keeps_metadata_bound_to_its_receipt() {
+    let provenance = super::sanitize::sanitize_curation_metadata(serde_json::json!({
+        "token": "secret-fixture-value",
+        "reason": "fixture",
+    }))
+    .unwrap();
+
+    assert_eq!(
+        provenance.sanitization_receipt().payload(),
+        Some(&tracedecay_domain::PayloadReferenceV1::for_payload(provenance.metadata()).unwrap())
+    );
+    assert_eq!(
+        provenance.metadata().get("token"),
+        Some(&serde_json::Value::String(
+            "[TraceDecay redacted: sensitive field]".to_owned()
+        ))
+    );
+}
+
+#[test]
 fn stored_fact_fixture_remains_canonical() {
     let stored = stored_fact(owner(), "operation.memory.fixture", UtcMicros(2));
     let fact_id = stored.fact_id().clone();

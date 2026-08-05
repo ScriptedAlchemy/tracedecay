@@ -1,16 +1,41 @@
 //! Request sanitizers for legacy V1 memory payloads.
 
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tracedecay_domain::{FactCategoryV1, SanitizationReceiptV1};
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
 use tracedecay_runtime_core::memory::types::{AddFactRequest, UpdateFactRequest};
 use tracedecay_runtime_core::privacy::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
+use tracedecay_store::CompatibilityRelationProvenanceV1;
 
 use super::error::MemoryApplicationError;
 
+pub(super) struct SanitizedAddFactRequestV1 {
+    request: AddFactRequest,
+    receipt: SanitizationReceiptV1,
+}
+
+impl SanitizedAddFactRequestV1 {
+    pub(super) fn into_parts(self) -> (AddFactRequest, SanitizationReceiptV1) {
+        (self.request, self.receipt)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SanitizedFactPayloadWireV1 {
+    content: String,
+    category: FactCategoryV1,
+    tags: Vec<String>,
+    entities: Vec<String>,
+    metadata: Value,
+}
+
 pub(super) fn sanitize_add_fact_request(
     mut request: AddFactRequest,
-) -> Result<Option<AddFactRequest>, MemoryApplicationError> {
+) -> Result<Option<SanitizedAddFactRequestV1>, MemoryApplicationError> {
     strip_reserved_automation_run_id(&mut request.metadata);
     // The canonical payload sorts labels before hashing; the sanitizer receipt
     // is computed over this wire, so it must see the same canonical order.
@@ -22,28 +47,42 @@ pub(super) fn sanitize_add_fact_request(
     let Some(source) = sanitize_optional_memory_text(request.source.clone()) else {
         return Ok(None);
     };
-    let wire = serde_json::to_value(&request).map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy add request serialization",
-        }
-    })?;
-    let MemoryFactSanitizationV1::Durable { payload, .. } = sanitize_memory_fact_payload(wire)
+    let wire = json!({
+        "content": &request.content,
+        "category": FactCategoryV1::from(request.category),
+        "tags": &request.tags,
+        "entities": &request.entities,
+        "metadata": &request.metadata,
+    });
+    let MemoryFactSanitizationV1::Durable { payload, receipt } = sanitize_memory_fact_payload(wire)
         .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "legacy add request privacy sanitizer",
         })?
     else {
         return Ok(None);
     };
-    let mut sanitized = serde_json::from_value::<AddFactRequest>(payload).map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "sanitized legacy add request",
-        }
-    })?;
-    sanitized.source = source;
-    Ok(Some(sanitized))
+    let sanitized =
+        serde_json::from_value::<SanitizedFactPayloadWireV1>(payload).map_err(|_| {
+            MemoryApplicationError::InvalidCompatibilityInput {
+                invariant: "sanitized legacy fact payload",
+            }
+        })?;
+    request.content = sanitized.content;
+    request.category = sanitized.category.into();
+    request.tags = sanitized.tags;
+    request.entities = sanitized.entities;
+    request.metadata = sanitized.metadata;
+    request.source = source;
+    Ok(Some(SanitizedAddFactRequestV1 { request, receipt }))
 }
 
-pub(super) fn sanitize_update_fact_request(
+/// Prepares a typed compatibility patch without claiming it is durable-safe.
+///
+/// The exact durable fact payload does not exist until the authority merges
+/// this patch with the current assertion. The authority therefore sanitizes
+/// that merged value once and persists the resulting receipt; pre-sanitizing
+/// this partial patch would create an unrelated receipt and then discard it.
+pub(super) fn prepare_tainted_update_fact_request(
     mut request: UpdateFactRequest,
 ) -> Result<Option<UpdateFactRequest>, MemoryApplicationError> {
     if let Some(metadata) = request.metadata.as_mut() {
@@ -66,25 +105,8 @@ pub(super) fn sanitize_update_fact_request(
     let Some(source) = sanitize_optional_memory_text(request.source.clone()) else {
         return Ok(None);
     };
-    let wire = serde_json::to_value(&request).map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy update request serialization",
-        }
-    })?;
-    let MemoryFactSanitizationV1::Durable { payload, .. } = sanitize_memory_fact_payload(wire)
-        .map_err(|_| MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "legacy update request privacy sanitizer",
-        })?
-    else {
-        return Ok(None);
-    };
-    let mut sanitized = serde_json::from_value::<UpdateFactRequest>(payload).map_err(|_| {
-        MemoryApplicationError::InvalidCompatibilityInput {
-            invariant: "sanitized legacy update request",
-        }
-    })?;
-    sanitized.source = source;
-    Ok(Some(sanitized))
+    request.source = source;
+    Ok(Some(request))
 }
 
 /// `automation_run_id` is typed command metadata. Never permit a caller to
@@ -123,13 +145,16 @@ pub(super) fn sanitize_curation_texts(
 
 pub(super) fn sanitize_curation_metadata(
     value: serde_json::Value,
-) -> Result<serde_json::Value, MemoryApplicationError> {
+) -> Result<CompatibilityRelationProvenanceV1, MemoryApplicationError> {
     match sanitize_memory_fact_payload(value).map_err(|_| {
         MemoryApplicationError::InvalidCompatibilityInput {
             invariant: "dashboard curation metadata privacy sanitizer",
         }
     })? {
-        MemoryFactSanitizationV1::Durable { payload, .. } => Ok(payload),
+        MemoryFactSanitizationV1::Durable { payload, receipt } => {
+            CompatibilityRelationProvenanceV1::new(payload, receipt)
+                .map_err(MemoryApplicationError::Store)
+        }
         MemoryFactSanitizationV1::Quarantined => {
             Err(MemoryApplicationError::InvalidCompatibilityInput {
                 invariant: "dashboard curation metadata rejected by privacy sanitizer",
