@@ -3,7 +3,6 @@ use std::fs;
 use tempfile::TempDir;
 use tracedecay_runtime_core::db::{
     Database, DatabaseAuthority, TestDatabaseRuntimeMode, TestDatabaseRuntimeScope,
-    engine::QueryExecutor,
 };
 use tracedecay_runtime_core::errors::TraceDecayError;
 use tracedecay_rusqlite_runtime::workflow::{

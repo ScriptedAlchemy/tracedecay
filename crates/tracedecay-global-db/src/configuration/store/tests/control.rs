@@ -3,20 +3,18 @@
 use super::super::audit::audit_target_commitment;
 use super::super::mutation::apply_direct_mutation_to_snapshot;
 use super::super::read::read_change_plan_from_executor;
-use super::super::revision::insert_revision;
 use super::super::{
     ConfigurationControlStore, ConfigurationError, GlobalDbConfigurationControlStore,
     OwnedGlobalDbConfigurationControlStore, params,
 };
 use super::{
     HostAdmissionScope, control_authority, digest, direct_project_layer, evidence_for,
-    global_setup, id, protected_plan_for, root_revision, source_binding_snapshot,
+    global_setup, id, protected_plan_for,
 };
 use crate::configuration::contracts::{ConfigurationRollbackRequest, DirectConfigurationMutation};
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::registry_default_candidate;
 use crate::configuration::resolver::resolve_configuration;
-use crate::tests::harness::HostAdmissionTestRuntimeV1;
 use std::collections::BTreeSet;
 use tracedecay_domain::configuration::CredentialReferenceMetadataV1;
 use tracedecay_domain::configuration::{
