@@ -1,12 +1,12 @@
 use std::fs;
 
-use serde_json::json;
 use super::super::{
     ClaudeObservationIngestError, MAX_PROJECTIONS_PER_PASS, ObservationCancellation,
 };
 use super::Fixture;
 use crate::admission::HostAdmissionOutcome;
 use crate::runtime::source::TranscriptIngestError;
+use serde_json::json;
 
 #[tokio::test]
 async fn capped_projection_backlog_marks_claude_source_deferred_until_the_next_pass() {
