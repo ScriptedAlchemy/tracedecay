@@ -282,9 +282,10 @@ execution is appropriate.
 
 For LCM/session issues, pair `tracedecay_lcm_status` with the read-only LCM
 diagnostics (`tracedecay_lcm_doctor`, or the native Hermes `lcm_doctor` wrapper).
-Inspect reported retention, payload, provenance, and coverage states. Any
-authorized retention or repair effect is a separate daemon operation with its
-own preview/confirmation and receipt; the diagnostic path never applies it.
+Inspect reported retention, payload, provenance, and coverage states.
+Authorized retention and maintenance effects are separate daemon operations
+with their own previews, confirmations, and receipts; the diagnostic path never
+applies them.
 
 Known Hermes API caveats: native `lcm_*` tool dispatch receives
 `messages=messages`, but direct registered live-ingest tools should remain

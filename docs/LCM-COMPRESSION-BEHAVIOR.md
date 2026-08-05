@@ -51,6 +51,6 @@ Start session diagnosis with `lcm_status` and `lcm_doctor`. They are read-only
 and report session identity, retention, payload/provenance, coverage, and
 compression state. `needs_summary`, `warming`, `partial`, `unavailable`,
 `denied`, and `refresh_required` are explicit outcomes. They do not authorize a
-host to re-ingest, repair, delete, or rebuild session storage. Any retention or
-repair effect is a separate authorized daemon operation with its own preview
-and receipt.
+host to re-ingest, delete, or rebuild session storage. Retention and other
+maintenance effects are separate authorized daemon operations with their own
+previews and receipts.
