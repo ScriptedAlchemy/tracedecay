@@ -395,15 +395,17 @@ async fn copy_active_projection(
          FROM session_agents WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_occurrences (
             session_id, generation, occurrence_id, source_observation_id,
-            projection_output_ordinal, retrieval_anchor_id, thread_id,
+            source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
             thread_grouping_json, turn_id, turn_grouping_json, message_id,
             agent_id, role, knowledge_at, valid_time_json, evidence_json,
+            sanitized_content_digest, sanitized_content_bytes,
             snippet_text, index_text
          )
          SELECT session_id, ?2, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, thread_id,
+                source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
                 thread_grouping_json, turn_id, turn_grouping_json, message_id,
                 agent_id, role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
                 snippet_text, index_text
          FROM session_occurrences WHERE session_id = ?1 AND generation = ?3",
         "INSERT INTO session_logical_copy_edges (

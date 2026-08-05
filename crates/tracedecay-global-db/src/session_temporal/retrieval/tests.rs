@@ -420,36 +420,42 @@ impl HostAdmissionTestRuntimeV1 {
                 );
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, message_id, turn_id,
-                role, knowledge_at, valid_time_json, evidence_json, snippet_text, index_text
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                message_id, turn_id, role, knowledge_at, valid_time_json,
+                evidence_json, sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside',
-                    'observation-plan-inside', 0, 'anchor-plan-inside',
+                    'observation-plan-inside', 'claude', 0, 'anchor-plan-inside',
                     'message-plan-inside', 'turn-plan-inside', 'user', 20,
                     '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 38,
                     'needle candidate derived needle inside',
                     'needle candidate derived needle inside'
                 ),
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside-old',
-                    'observation-plan-inside', 1, 'anchor-plan-inside-old',
+                    'observation-plan-inside', 'claude', 1, 'anchor-plan-inside-old',
                     'message-plan-inside-old', 'turn-plan-inside-old', 'assistant', 10,
                     '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 27,
                     'derived needle older member', 'derived needle older member'
                 ),
                 (
                     'session-plan-inside', 1, 'occurrence-plan-inside-last',
-                    'observation-plan-inside', 2, 'anchor-plan-inside-last',
+                    'observation-plan-inside', 'claude', 2, 'anchor-plan-inside-last',
                     'message-plan-inside-last', 'turn-plan-inside-last', 'assistant', 5,
                     '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 26,
                     'derived needle last member', 'derived needle last member'
                 ),
                 (
                     'session-plan-outside', 1, 'occurrence-plan-outside',
-                    'observation-plan-outside', 0, 'anchor-plan-outside',
+                    'observation-plan-outside', 'claude', 0, 'anchor-plan-outside',
                     'message-plan-outside', 'turn-plan-outside', 'user', 30,
                     '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 39,
                     'needle candidate derived needle outside',
                     'needle candidate derived needle outside'
                 );
@@ -673,22 +679,27 @@ impl HostAdmissionTestRuntimeV1 {
                 ('other-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                valid_time_json, evidence_json, snippet_text, index_text
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES
                 (
-                    'session-a', 1, 'same-id', 'observation-shared', 0,
+                    'session-a', 1, 'same-id', 'observation-shared', 'claude', 0,
                     'same-anchor', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 12,
                     'same content', 'same content'
                 ),
                 (
-                    'session-b', 1, 'same-id', 'observation-shared', 0,
+                    'session-b', 1, 'same-id', 'observation-shared', 'claude', 0,
                     'same-anchor', 'user', 5, '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 12,
                     'same content', 'same content'
                 ),
                 (
-                    'session-b', 1, 'source-b', 'observation-shared', 1,
+                    'session-b', 1, 'source-b', 'observation-shared', 'claude', 1,
                     'source-anchor-b', 'user', 4, '{\"kind\":\"unknown\"}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000', 6,
                     'source', 'source'
                 );
              INSERT INTO session_logical_copy_edges (
@@ -748,12 +759,14 @@ impl HostAdmissionTestRuntimeV1 {
                 ('derived-span-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                valid_time_json, evidence_json, snippet_text, index_text
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES (
                 'session-snapshot', 1,
                 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
-                'derived-observation', 0,
+                'derived-observation', 'claude', 0,
                 'source-occurrence-anchor', 'user', 5, '{\"kind\":\"unknown\"}',
                 '{
                     \"authority\":\"provider_native\",
@@ -764,6 +777,7 @@ impl HostAdmissionTestRuntimeV1 {
                         \"sanitizer_version\":\"derived-sanitizer\"
                     }
                 }',
+                '0000000000000000000000000000000000000000000000000000000000000000', 15,
                 'derived content', 'derived content'
              );
              INSERT INTO session_derived_evidence (
@@ -828,12 +842,16 @@ impl HostAdmissionTestRuntimeV1 {
             &writer,
             "INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                valid_time_json, evidence_json, snippet_text, index_text
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES (
                 'session-snapshot', 1, 'occurrence-oversized', 'observation-1',
-                0, 'anchor-evidence', 'user', 1,
-                '{\"kind\":\"unknown\"}', ?1, 'snippet', 'index'
+                'claude', 0, 'anchor-evidence', 'user', 1,
+                '{\"kind\":\"unknown\"}', ?1,
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                5, 'snippet', 'index'
              )",
             [oversized_json.clone()],
         )
@@ -989,14 +1007,18 @@ impl HostAdmissionTestRuntimeV1 {
                 ('anchor-summary-provider', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                valid_time_json, evidence_json, snippet_text, index_text
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES (
                 'session-snapshot', 1, 'occurrence-claude', 'observation-claude',
-                0, 'source-claude', 'user', 1, '{\"kind\":\"unknown\"}',
+                'claude', 0, 'source-claude', 'user', 1, '{\"kind\":\"unknown\"}',
                 '{\"authority\":\"canonical\",\"evidence_class\":\"observed\",
                   \"source_anchor_id\":\"source-claude\",
                   \"sanitization_receipt\":{\"receipt_id\":\"receipt-1\"}}',
+                '0000000000000000000000000000000000000000000000000000000000000000',
+                7,
                 'snippet', 'index'
              );
              INSERT INTO session_summary_nodes (
@@ -1049,19 +1071,25 @@ impl HostAdmissionTestRuntimeV1 {
                 ('successor-summary-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
-                projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                valid_time_json, evidence_json, snippet_text, index_text
+                source_provider, projection_output_ordinal, retrieval_anchor_id,
+                role, knowledge_at, valid_time_json, evidence_json,
+                sanitized_content_digest, sanitized_content_bytes,
+                snippet_text, index_text
              ) VALUES
                 (
                     'session-snapshot', 1, 'summary-source-at-5',
-                    'summary-history-observation', 0, 'shared-summary-source',
+                    'summary-history-observation', 'claude', 0, 'shared-summary-source',
                     'user', 5, '{\"kind\":\"known\",\"valid_at\":5}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000',
+                    11,
                     'source at 5', 'source at 5'
                 ),
                 (
                     'session-snapshot', 1, 'summary-source-at-10',
-                    'summary-history-observation', 1, 'shared-summary-source',
+                    'summary-history-observation', 'claude', 1, 'shared-summary-source',
                     'user', 10, '{\"kind\":\"known\",\"valid_at\":10}', '{}',
+                    '0000000000000000000000000000000000000000000000000000000000000000',
+                    12,
                     'source at 10', 'source at 10'
                 );
              INSERT INTO session_current_entities (

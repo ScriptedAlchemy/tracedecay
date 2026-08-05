@@ -95,13 +95,23 @@ pub(super) fn fixture() -> Fixture {
                   0, 'assert', 0, 'super', 0, 'curr', 0, 'fts', 2);
              INSERT INTO session_occurrences(
                  session_id, generation, occurrence_id, source_observation_id,
-                 projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
-                 valid_time_json, evidence_json, snippet_text, index_text
+                 source_provider, projection_output_ordinal, retrieval_anchor_id,
+                 role, knowledge_at, valid_time_json, evidence_json,
+                 sanitized_content_digest, sanitized_content_bytes,
+                 snippet_text, index_text
              ) VALUES
-                 ('session-1', 1, 'occurrence-1', 'observation-1', 0, 'anchor-1', 'user', 1,
-                  '{\"kind\":\"unknown\"}', '{}', 'snippet', 'index'),
-                 ('session-1', 1, 'occurrence-2', 'observation-1', 1, 'anchor-2', 'assistant', 2,
-                  '{\"kind\":\"unknown\"}', '{}', 'snippet', 'index');
+                 (
+                    'session-1', 1, 'occurrence-1', 'observation-1', 'codex',
+                    0, 'anchor-1', 'user', 1, '{\"kind\":\"unknown\"}', '{}',
+                    'd3086fc13819f64ed130eb6e6faeecd99fa36010867d2a58eba7a848807af612',
+                    7, 'snippet', 'index'
+                 ),
+                 (
+                    'session-1', 1, 'occurrence-2', 'observation-1', 'codex',
+                    1, 'anchor-2', 'assistant', 2, '{\"kind\":\"unknown\"}', '{}',
+                    'd3086fc13819f64ed130eb6e6faeecd99fa36010867d2a58eba7a848807af612',
+                    7, 'snippet', 'index'
+                 );
              INSERT INTO session_logical_copy_edges(
                  session_id, generation, occurrence_id, copied_from_occurrence_id,
                  proof_json, knowledge_at, valid_time_json, created_at

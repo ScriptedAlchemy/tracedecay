@@ -15,6 +15,8 @@ use tracedecay_store::{
     SessionTemporalCapabilityV1, SessionTemporalSnapshotV1,
 };
 
+use crate::repository::support::sha256_hex;
+
 use super::*;
 
 const OBSERVATION_DIGEST: &str =
@@ -100,11 +102,20 @@ fn projection_schema(connection: &Connection) {
                     created_at INTEGER NOT NULL,
                     PRIMARY KEY(session_id, generation, agent_id)
                 );
+                CREATE TABLE session_messages (
+                    provider TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    PRIMARY KEY(provider, message_id)
+                );
                 CREATE TABLE session_occurrences (
                     session_id TEXT NOT NULL,
                     generation INTEGER NOT NULL,
                     occurrence_id TEXT NOT NULL,
                     source_observation_id TEXT NOT NULL,
+                    source_provider TEXT NOT NULL,
                     projection_output_ordinal INTEGER NOT NULL,
                     retrieval_anchor_id TEXT NOT NULL,
                     thread_id TEXT,
@@ -117,6 +128,8 @@ fn projection_schema(connection: &Connection) {
                     knowledge_at INTEGER NOT NULL,
                     valid_time_json TEXT NOT NULL,
                     evidence_json TEXT NOT NULL,
+                    sanitized_content_digest TEXT NOT NULL,
+                    sanitized_content_bytes INTEGER NOT NULL,
                     snippet_text TEXT NOT NULL,
                     index_text TEXT NOT NULL,
                     PRIMARY KEY(session_id, generation, occurrence_id)
@@ -276,6 +289,23 @@ fn projection_batch() -> SessionTemporalProjectionBatchV1 {
     .unwrap()
 }
 
+fn seed_projected_messages(connection: &Connection, batch: &SessionTemporalProjectionBatchV1) {
+    for ordinal in 0..3 {
+        connection
+            .execute(
+                "INSERT INTO session_messages (
+                    provider, message_id, session_id, role, text
+                 ) VALUES ('claude', ?1, ?2, 'user', ?3)",
+                params![
+                    format!("message.prepare-cache.{ordinal}"),
+                    batch.session_id().as_str(),
+                    format!("sanitized message {ordinal}"),
+                ],
+            )
+            .unwrap();
+    }
+}
+
 fn summary_request() -> SessionSummaryPublicationRequestV1 {
     let session_id = session_id();
     let watermarks = SessionFrozenWatermarksV1::new(generation(7), 51, 47, 43);
@@ -323,6 +353,7 @@ fn projection_batch_prepares_each_insert_once() {
             ],
         )
         .unwrap();
+    seed_projected_messages(&connection, &batch);
     let prepares = install_insert_prepare_counter(&connection);
 
     let savepoint = connection.savepoint().unwrap();
@@ -330,6 +361,34 @@ fn projection_batch_prepares_each_insert_once() {
         .execute_projection_write(&savepoint, &batch)
         .unwrap();
     savepoint.commit().unwrap();
+
+    for ordinal in 0..3 {
+        let expected_content = format!("sanitized message {ordinal}");
+        let stored = connection
+            .query_row(
+                "SELECT source_provider, sanitized_content_digest,
+                        sanitized_content_bytes
+                 FROM session_occurrences
+                 WHERE session_id = ?1 AND occurrence_id = ?2",
+                params![batch.session_id().as_str(), occurrence_id(ordinal).as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            (
+                "claude".to_owned(),
+                sha256_hex(expected_content.as_bytes()),
+                i64::try_from(expected_content.len()).unwrap(),
+            )
+        );
+    }
 
     let prepares = prepares.lock().unwrap();
     for table in [
