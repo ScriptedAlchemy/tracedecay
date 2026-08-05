@@ -55,7 +55,9 @@ pub use capture::{
     capture_cursor_composer_observation,
 };
 pub use ingest::{CursorComposerSource, DEFAULT_COMPOSER_ENVELOPE_CAP};
-pub use outcome::CursorComposerSweepOutcome;
+pub use outcome::{
+    CursorComposerSweepFailure, CursorComposerSweepOutcome, CursorComposerSweepResult,
+};
 #[cfg(any(test, feature = "test-helpers"))]
 pub use tracedecay_capture::cursor_composer::{
     normalize_cursor_composer_observation,
@@ -65,3 +67,77 @@ pub use tracedecay_capture::cursor_composer::{
 /// Provider id shared with the JSONL Cursor source so both land in the same
 /// per-project `sessions.db` namespace and dedupe by `(provider, message_id)`.
 pub const PROVIDER: &str = "cursor";
+
+impl CursorComposerSource {
+    /// Ingest composer sessions belonging to `project_root`, bounded to
+    /// `envelope_cap` newly changed sessions.
+    pub async fn ingest(
+        &self,
+        admission: &dyn crate::admission::HostAdmission,
+        project_root: &std::path::Path,
+        project_id: tracedecay_domain::ProjectId,
+        envelope_cap: usize,
+    ) -> CursorComposerSweepResult {
+        self.ingest_capped(
+            admission,
+            project_root,
+            project_id,
+            envelope_cap,
+            Some(sqlite::DEFAULT_COMPOSER_SWEEP_BYTES),
+        )
+        .await
+    }
+
+    /// [`Self::ingest`] with an aggregate serialized-payload byte budget.
+    pub async fn ingest_capped(
+        &self,
+        admission: &dyn crate::admission::HostAdmission,
+        project_root: &std::path::Path,
+        project_id: tracedecay_domain::ProjectId,
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+    ) -> CursorComposerSweepResult {
+        self.ingest_capped_with_cancellation(
+            admission,
+            project_root,
+            project_id,
+            envelope_cap,
+            max_new_bytes,
+            &crate::observation::ObservationCancellation::default(),
+        )
+        .await
+    }
+
+    pub async fn ingest_user(
+        &self,
+        admission: &dyn crate::admission::HostAdmission,
+        registered_roots: &[std::path::PathBuf],
+        envelope_cap: usize,
+    ) -> CursorComposerSweepResult {
+        self.ingest_user_capped(
+            admission,
+            registered_roots,
+            envelope_cap,
+            Some(sqlite::DEFAULT_COMPOSER_SWEEP_BYTES),
+        )
+        .await
+    }
+
+    /// [`Self::ingest_user`] with an aggregate serialized-payload byte budget.
+    pub async fn ingest_user_capped(
+        &self,
+        admission: &dyn crate::admission::HostAdmission,
+        registered_roots: &[std::path::PathBuf],
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+    ) -> CursorComposerSweepResult {
+        self.ingest_user_capped_with_cancellation(
+            admission,
+            registered_roots,
+            envelope_cap,
+            max_new_bytes,
+            &crate::observation::ObservationCancellation::default(),
+        )
+        .await
+    }
+}

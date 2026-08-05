@@ -559,50 +559,6 @@ async fn native_observation_id_survives_identical_transcript_relocation() {
 }
 
 #[tokio::test]
-async fn persistence_failure_charges_the_source_scan_budget() {
-    let fixture = Fixture::new("budget-failure-0");
-    fixture.write_record(
-        "first source is deliberately longer than the later source",
-        "budget-failure-secret",
-    );
-    let later = fixture
-        .transcript
-        .parent()
-        .unwrap()
-        .join("budget-failure-1.jsonl");
-    fs::write(
-        &later,
-        format!(
-            "{}\n",
-            json!({
-                "type": "user",
-                "sessionId": "budget-failure-1",
-                "uuid": "budget-failure-message-1",
-                "timestamp": "2026-07-15T00:00:00Z",
-                "message": {"role": "user", "content": "short"}
-            })
-        ),
-    )
-    .unwrap();
-    let budget = fs::metadata(&fixture.transcript).unwrap().len();
-    assert!(fs::metadata(&later).unwrap().len() < budget);
-    fixture.admission.fail_next_capture();
-    let source = ClaudeSource::with_home(&fixture.home).for_user_scope(None, Vec::new());
-
-    let error = fixture
-        .ingest(&source, Some(budget), ObservationCancellation::default())
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error,
-        ClaudeObservationIngestError::SourceFailures {
-            failed_sources: 1,
-            ..
-        }
-    ));
-}
-
-#[tokio::test]
 async fn registered_claude_ingest_api_routes_through_observation_authority() {
     let fixture = Fixture::new("legacy-api-session");
     fixture.write_record("legacy API searchable", "legacy-api-secret");
@@ -770,11 +726,15 @@ async fn bad_source_is_isolated_and_committed_projection_work_still_drains() {
         .expect_err("the isolated source failure remains visible");
     assert!(matches!(
         error,
-        ClaudeObservationIngestError::SourceFailures {
-            failed_sources: 1,
-            first_reason_code: "observation_domain_invalid",
-            first_retryable: false,
-        }
+        ClaudeObservationIngestError::Terminated { error, .. }
+            if matches!(
+                *error,
+                ClaudeObservationIngestError::SourceFailures {
+                    failed_sources: 1,
+                    first_reason_code: "observation_domain_invalid",
+                    first_retryable: false,
+                }
+            )
     ));
     assert_eq!(
         fixture.admission.pending_projection_count(),

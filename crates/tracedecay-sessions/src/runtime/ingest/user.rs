@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::authority::{IngestAdmissionBinding, SessionIngestAuthority};
@@ -120,12 +121,50 @@ pub(super) struct BoundedProviderOutcome {
     pub(super) deferred_by_byte_cap: bool,
 }
 
+impl BoundedProviderOutcome {
+    fn from_composer(outcome: &cursor_composer::CursorComposerSweepOutcome) -> Self {
+        Self {
+            stats: TranscriptIngestStats {
+                sessions_upserted: outcome.sessions_upserted,
+                messages_upserted: outcome.messages_upserted,
+            },
+            bytes_consumed: outcome.bytes_consumed,
+            deferred_by_byte_cap: outcome.deferred_by_byte_cap,
+        }
+    }
+}
+
+pub(super) struct BoundedProviderFailure {
+    pub(super) outcome: BoundedProviderOutcome,
+    pub(super) error: source::TranscriptIngestError,
+}
+
+fn merge_user_cursor_sweep(
+    composer: &cursor_composer::CursorComposerSweepOutcome,
+    mut session_ids: BTreeSet<String>,
+    sweep: cursor::CursorSweepIngestOutcome,
+) -> BoundedProviderOutcome {
+    session_ids.extend(sweep.session_ids);
+    BoundedProviderOutcome {
+        stats: TranscriptIngestStats {
+            sessions_upserted: u64::try_from(session_ids.len()).unwrap_or(u64::MAX),
+            messages_upserted: composer
+                .messages_upserted
+                .saturating_add(sweep.stats.messages_upserted),
+        },
+        bytes_consumed: composer
+            .bytes_consumed
+            .saturating_add(sweep.stats.bytes_consumed),
+        deferred_by_byte_cap: composer.deferred_by_byte_cap || sweep.stats.source_deferred,
+    }
+}
+
 pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     registered_roots: Vec<PathBuf>,
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     cancellation: &ObservationCancellation,
-) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
+) -> Result<BoundedProviderOutcome, BoundedProviderFailure> {
     if cancellation.is_cancelled() {
         return Ok(BoundedProviderOutcome {
             stats: TranscriptIngestStats::default(),
@@ -134,7 +173,7 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
         });
     }
     let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
-        source
+        match source
             .ingest_user_capped_with_cancellation(
                 admission,
                 &registered_roots,
@@ -142,41 +181,43 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
                 max_new_bytes,
                 cancellation,
             )
-            .await?
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(failure) => {
+                return Err(BoundedProviderFailure {
+                    outcome: BoundedProviderOutcome::from_composer(&failure.outcome),
+                    error: failure.error,
+                });
+            }
+        }
     } else {
         cursor_composer::CursorComposerSweepOutcome::default()
     };
     if cancellation.is_cancelled() {
-        return Ok(BoundedProviderOutcome {
-            stats: TranscriptIngestStats {
-                sessions_upserted: composer.sessions_upserted,
-                messages_upserted: composer.messages_upserted,
-            },
-            bytes_consumed: composer.bytes_consumed,
-            deferred_by_byte_cap: composer.deferred_by_byte_cap,
-        });
+        return Ok(BoundedProviderOutcome::from_composer(&composer));
     }
+    let projected_session_ids = composer.projected_session_ids();
+    let jsonl_skip_session_ids = composer.jsonl_skip_session_ids();
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
-    let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_admission(
+    let composer_outcome = BoundedProviderOutcome::from_composer(&composer);
+    let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_session_ids(
         &registered_roots,
         admission,
         remaining,
-        composer.owned_session_ids,
+        jsonl_skip_session_ids,
         cancellation,
     )
-    .await?;
-    Ok(BoundedProviderOutcome {
-        stats: TranscriptIngestStats {
-            sessions_upserted: composer
-                .sessions_upserted
-                .saturating_add(sweep.sessions_upserted),
-            messages_upserted: composer
-                .messages_upserted
-                .saturating_add(sweep.messages_upserted),
-        },
-        bytes_consumed: composer.bytes_consumed.saturating_add(sweep.bytes_consumed),
-        deferred_by_byte_cap: composer.deferred_by_byte_cap || sweep.source_deferred,
-    })
+    .await
+    .map_err(|error| BoundedProviderFailure {
+        outcome: composer_outcome,
+        error,
+    })?;
+    Ok(merge_user_cursor_sweep(
+        &composer,
+        projected_session_ids,
+        sweep,
+    ))
 }
 
 async fn drain_observation_projections(
@@ -365,6 +406,7 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
         profile_id,
     });
     let facade = facade.as_ref();
+    let mut claude_projected_session_ids = BTreeSet::new();
 
     'providers: for &index in &plan.admitted_indices {
         if cancellation.is_cancelled() {
@@ -387,7 +429,7 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
             if grant == 0 {
                 break 'providers;
             }
-            let mut unit_result = run_user_provider(
+            let provider_run = run_user_provider(
                 &transcript_store,
                 profile_root,
                 &roots,
@@ -397,6 +439,8 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
                 cancellation,
             )
             .await;
+            claude_projected_session_ids.extend(provider_run.claude_projected_session_ids);
+            let mut unit_result = provider_run.outcome;
             let within_byte_grant = unit_result.bytes_consumed <= grant;
             unit_result.byte_bounds_enforced &= within_byte_grant;
             remaining_bytes = remaining_bytes.saturating_sub(unit_result.bytes_consumed.min(grant));
@@ -434,7 +478,13 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
         .await
         {
             Ok(projection_stats) => {
-                provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
+                provider_runs.stats = provider_runs.stats.merge(
+                    projection_stats
+                        .deduplicated_transcript_stats(&mut claude_projected_session_ids),
+                );
+                provider_runs.deferred_units = provider_runs
+                    .deferred_units
+                    .saturating_add(projection_stats.deferred_sources);
             }
             Err(error) => {
                 let failure = observation_catch_up_failure("observation", "projection", &error);
@@ -518,5 +568,43 @@ pub async fn ingest_user_global_sources_for_provider_with_roots_bounded<
         units_completed: provider_runs.units_completed,
         units_failed: provider_runs.units_failed,
         byte_bounds_enforced: provider_runs.byte_bounds_enforced,
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use std::collections::BTreeSet;
+
+    use crate::runtime::cursor::{CursorSweepIngestOutcome, CursorTranscriptIngestStats};
+    use crate::runtime::cursor_composer::CursorComposerSweepOutcome;
+
+    use super::merge_user_cursor_sweep;
+
+    #[test]
+    fn user_cursor_run_unions_cross_source_session_identity() {
+        let mut composer = CursorComposerSweepOutcome::default();
+        composer.sessions_upserted = 1;
+        composer.messages_upserted = 2;
+        composer.bytes_consumed = 10;
+        let sweep = CursorSweepIngestOutcome {
+            stats: CursorTranscriptIngestStats {
+                sessions_upserted: 1,
+                messages_upserted: 3,
+                bytes_consumed: 4,
+                source_deferred: true,
+            },
+            session_ids: BTreeSet::from(["shared-session".to_string()]),
+        };
+
+        let outcome = merge_user_cursor_sweep(
+            &composer,
+            BTreeSet::from(["shared-session".to_string()]),
+            sweep,
+        );
+
+        assert_eq!(outcome.stats.sessions_upserted, 1);
+        assert_eq!(outcome.stats.messages_upserted, 5);
+        assert_eq!(outcome.bytes_consumed, 14);
+        assert!(outcome.deferred_by_byte_cap);
     }
 }

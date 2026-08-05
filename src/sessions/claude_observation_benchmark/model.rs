@@ -81,6 +81,7 @@ impl NoOpTotals {
             projections_skipped,
             projection_duplicates,
             deferred_sources,
+            ..
         } = stats;
         let TranscriptIngestStats {
             sessions_upserted,
