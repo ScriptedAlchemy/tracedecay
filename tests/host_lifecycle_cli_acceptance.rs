@@ -44,10 +44,16 @@ const CODEX_CONFIGS: &[(&str, &[u8])] = &[(
     ".codex/config.toml",
     b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy = \"on-failure\"\n\n[mcp_servers.foreign]\ncommand = \"foreign-bin\"\nargs = [\"--stdio\"]\n",
 )];
-const HERMES_CONFIGS: &[(&str, &[u8])] = &[(
-    ".hermes/config.yaml",
-    b"theme: dark\nplugins:\n  enabled:\n    - foreign\n",
-)];
+const HERMES_CONFIGS: &[(&str, &[u8])] = &[
+    (
+        ".hermes/config.yaml",
+        b"theme: dark\nplugins:\n  enabled:\n    - foreign\n",
+    ),
+    (
+        ".hermes/profiles/review/config.yaml",
+        b"theme: light\nplugins:\n  enabled:\n    - foreign\n",
+    ),
+];
 const KIRO_CONFIGS: &[(&str, &[u8])] = &[
     (
         ".kiro/settings/mcp.json",
@@ -254,6 +260,22 @@ fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
         serde_json::to_vec_pretty(&marketplaces).unwrap(),
     )
     .unwrap();
+    let cache_root = cli
+        .home
+        .path()
+        .join(".claude/plugins/cache/tracedecay/tracedecay/current");
+    if active {
+        fs::create_dir_all(cache_root.join(".claude-plugin")).unwrap();
+        fs::copy(
+            cli.home
+                .path()
+                .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json"),
+            cache_root.join(".claude-plugin/plugin.json"),
+        )
+        .unwrap();
+    } else if cache_root.exists() {
+        fs::remove_dir_all(cache_root).unwrap();
+    }
 }
 
 fn assert_seeded_bytes(cli: &IsolatedCli, originals: &BTreeMap<PathBuf, Vec<u8>>) {
@@ -701,7 +723,40 @@ fn claude_lifecycle_tracks_assets_only_after_native_activation() {
         "catalog install rewrote Claude-owned activation state"
     );
 
-    assert_success(case.id, "catalog update", cli.run(&["update-plugin"]));
+    let cache_manifest = cli
+        .home
+        .path()
+        .join(".claude/plugins/cache/tracedecay/tracedecay/current/.claude-plugin/plugin.json");
+    fs::write(
+        &cache_manifest,
+        br#"{"name":"tracedecay","version":"stale"}"#,
+    )
+    .unwrap();
+    let before_stale_update = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
+    let stale_update = cli.run(&["update-plugin"]);
+    assert!(!stale_update.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_update.stderr).contains("loaded TraceDecay cache is stale"),
+        "Claude stale cache did not produce native-update remediation: {}",
+        String::from_utf8_lossy(&stale_update.stderr)
+    );
+    assert_eq!(
+        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
+        before_stale_update,
+        "stale native cache changed the component receipt"
+    );
+    fs::copy(
+        cli.home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json"),
+        &cache_manifest,
+    )
+    .unwrap();
+    assert_success(
+        case.id,
+        "catalog update after native cache refresh",
+        cli.run(&["update-plugin"]),
+    );
     assert_success(case.id, "catalog repair", cli.run(&["reinstall"]));
     for (phase, (entrypoint, fixture)) in ["edit", "stop"]
         .into_iter()

@@ -8,7 +8,8 @@ use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use tempfile::TempDir;
-use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
+use tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin;
+use tracedecay::agents::host_bundle_v2::{HostBundleComponentV1, HostKindV1};
 use tracedecay::external_tools::ast_grep_command;
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 
@@ -67,28 +68,13 @@ spec.loader.exec_module(plugin)
 /// Part of the bundle fingerprint: changing it changes the rendered plugin.
 const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
 
-fn make_install_ctx(home: &Path) -> InstallContext {
-    InstallContext {
-        home: home.to_path_buf(),
-        tracedecay_bin: FIXTURE_TRACEDECAY_BIN.to_string(),
-        tool_permissions: Vec::new(),
-        project_root: None,
-        // The LCM bridge checks never touch the dashboard deploy, and
-        // skipping it avoids writing ~430KB of embedded bundles per install;
-        // dashboard deployment has dedicated coverage in `dashboard.rs`.
-        dashboard: false,
-    }
-}
-
 /// One unpinned Hermes install shared by every check.
 ///
-/// `HermesIntegration::install` regenerates the full plugin from embedded
+/// The embedded host catalog regenerates the full plugin from embedded
 /// templates, so the output is identical for every unpinned install — there
 /// is no reason to redo it per test. Each check writes its own uniquely
 /// named script into the shared plugin dir and only mutates state inside its
-/// own python interpreter, so tests stay independent. Checks that need a
-/// different `InstallContext` (e.g. a pinned project root) keep a private
-/// `TempDir` install.
+/// own python interpreter, so tests stay independent.
 ///
 /// The bundle is also shared across *processes* (see [`cached_install_home`]):
 /// nextest runs one process per test, so a `LazyLock` alone re-renders the
@@ -143,9 +129,22 @@ fn fake_tools_dir_for(home: &Path) -> PathBuf {
 /// Hermes plugin plus the immutable fake `tracedecay` binaries the subprocess
 /// failure-mode check executes.
 fn render_install(home: &Path) -> std::io::Result<()> {
-    HermesIntegration
-        .install(&make_install_ctx(home))
-        .map_err(std::io::Error::other)?;
+    let component_set = verified_embedded_host_component_set_with_tracedecay_bin(
+        HostKindV1::Hermes,
+        &[HostBundleComponentV1::Core],
+        0,
+        FIXTURE_TRACEDECAY_BIN,
+    )
+    .map_err(std::io::Error::other)?;
+    for component in component_set.component_set.components {
+        for artifact in component.contents {
+            let path = home.join(artifact.relative_path);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(path, artifact.bytes)?;
+        }
+    }
     write_fake_tracedecay_binaries(&fake_tools_dir_for(home))
 }
 
@@ -5215,145 +5214,5 @@ unpinned.on_session_start(session_id="s3", cwd="/cwd/fallback")
 assert unpinned.project_root == "/cwd/fallback", unpinned.project_root
 "#,
         "generated engine must prefer explicit project and real cwd over host config",
-    );
-}
-
-/// Legacy profile pins may still exist long enough for migration, but the
-/// generated runtime must ignore them for all TraceDecay routing.
-#[test]
-fn generated_plugin_ignores_legacy_profile_project_root_pin() {
-    // Pinned install: the shared unpinned fixture cannot cover this, so it
-    // keeps a private TempDir. The pin only affects config.yaml/tools
-    // dispatch, so the dashboard deploy is skipped for speed (pinned
-    // dashboard deploys are covered in `dashboard.rs`).
-    let home = TempDir::new().unwrap();
-    let ctx = InstallContext {
-        home: home.path().to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
-        tool_permissions: Vec::new(),
-        project_root: Some(std::path::PathBuf::from("/pinned/project")),
-        dashboard: false,
-    };
-    HermesIntegration.install(&ctx).unwrap();
-
-    let plugin_dir = home.path().join(".hermes/plugins/tracedecay");
-    let script = plugin_dir.join("check_project_root_pin.py");
-    std::fs::write(
-        &script,
-        format!(
-            "{PYYAML_FALLBACK_PRELUDE}\n{}",
-            r#"
-import importlib.machinery
-import importlib.util
-import json
-import os
-import pathlib
-import sys
-import types
-
-plugin_dir = pathlib.Path(sys.argv[1])
-parent_name = "_hermes_user_pin"
-parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
-parent_spec.submodule_search_locations = []
-parent_module = importlib.util.module_from_spec(parent_spec)
-sys.modules[parent_name] = parent_module
-
-module_name = f"{parent_name}.tracedecay"
-spec = importlib.util.spec_from_file_location(
-    module_name,
-    plugin_dir / "__init__.py",
-    submodule_search_locations=[str(plugin_dir)],
-)
-plugin = importlib.util.module_from_spec(spec)
-sys.modules[module_name] = plugin
-spec.loader.exec_module(plugin)
-
-tools = plugin.tools
-# A legacy pin may exist in config.yaml, but generated code exposes no reader.
-assert not hasattr(tools, "PINNED_PROJECT_ROOT")
-assert not hasattr(tools, "config_pinned_project_root")
-
-# Default CLI dispatch uses the real process cwd, never the profile pin.
-captured = []
-
-class FakeResult:
-    returncode = 0
-    stdout = "{}"
-    stderr = ""
-
-def fake_run(argv, **kwargs):
-    captured.append(argv)
-    return FakeResult()
-
-tools.subprocess.run = fake_run
-tools.call_tracedecay_tool("tracedecay_status", {})
-assert captured, "expected a subprocess invocation"
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-assert argv[idx + 1] != "/pinned/project", argv
-
-# An explicit project still wins over the pin.
-tools.call_tracedecay_tool("tracedecay_status", {}, project_root="/explicit/root")
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == "/explicit/root", argv
-
-# Memory tools follow the same real cwd route.
-tools.call_tracedecay_tool("tracedecay_fact_store", {})
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-
-# A stale MCP `project_root` argument is not translated. The normal cwd route
-# still selects the user-profile project store, and the strict CLI rejects the
-# unknown argument instead of silently preserving a compatibility protocol.
-tools.call_tracedecay_tool(
-    "tracedecay_lcm_status",
-    {"project_root": "/tmp/hermes-profile"},
-)
-argv = captured[-1]
-idx = argv.index("--project")
-assert argv[idx + 1] == os.getcwd(), argv
-payload = json.loads(argv[argv.index("--args") + 1])
-assert payload["project_root"] == "/tmp/hermes-profile", payload
-
-# Engine resolution never consults the legacy profile pin.
-engine = plugin.TraceDecayContextEngine(config={})
-assert engine.project_root is None, engine.project_root
-plugin._resolved_project_scope = lambda path, *_args: path
-engine.on_session_start(session_id="s1", cwd="/somewhere/else")
-assert engine.project_root == "/somewhere/else", engine.project_root
-
-configured = plugin.TraceDecayContextEngine(config={"project_root": "/from/config"})
-assert configured.project_root == "/from/config", configured.project_root
-
-explicit = plugin.TraceDecayContextEngine(config={})
-explicit.on_session_start(session_id="s2", project_root="/explicit/root")
-assert explicit.project_root == "/explicit/root", explicit.project_root
-"#
-        ),
-    )
-    .unwrap();
-
-    let mut check = python_command();
-    check
-        .arg(&script)
-        .arg(&plugin_dir)
-        // Reading the config-block pin requires a yaml module; the script
-        // falls back to this shim only when the real PyYAML is missing.
-        .arg(write_pyyaml_shim(home.path()))
-        // expanduser reads HOME on POSIX and USERPROFILE on Windows.
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env_remove("HERMES_HOME");
-    let output = check
-        .output()
-        .expect("python3 should run generated Hermes plugin check");
-    assert!(
-        output.status.success(),
-        "generated plugin must ignore legacy profile project-root pins\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
     );
 }

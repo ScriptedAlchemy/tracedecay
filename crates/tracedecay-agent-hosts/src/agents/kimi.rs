@@ -52,11 +52,6 @@ impl AgentIntegration for KimiIntegration {
         "kimi"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let deferred = stage_kimi_install_action(ctx)?;
-        Err(deferred_user_action_error(deferred))
-    }
-
     fn preflight_non_interactive_install(
         &self,
         ctx: &InstallContext,
@@ -87,36 +82,6 @@ impl AgentIntegration for KimiIntegration {
 
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let mcp_path = project_path.join(".kimi-code/mcp.json");
-        let agents_md = project_path.join("AGENTS.md");
-        super::ensure_project_local_safe_paths(
-            project_path,
-            [mcp_path.as_path(), agents_md.as_path()],
-        )?;
-        std::fs::create_dir_all(project_path.join(".kimi-code")).ok();
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
-        install_prompt_rules(&agents_md)?;
-        super::install_managed_skill_prompt_index(
-            &ctx.home,
-            &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::Kimi,
-        )
-    }
-
-    fn uninstall_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let mcp_path = project_path.join(".kimi-code/mcp.json");
-        uninstall_mcp_server(&mcp_path);
-        let agents_md = project_path.join("AGENTS.md");
-        super::remove_managed_skill_prompt_index(
-            &ctx.home,
-            &agents_md,
-            crate::automation::skill_targets::SkillInstallTarget::Kimi,
-        )?;
-        uninstall_prompt_rules(&agents_md);
-        Ok(())
     }
 
     fn activate_project_host_component_registration(
@@ -178,17 +143,6 @@ impl AgentIntegration for KimiIntegration {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
         stage_kimi_install_action(ctx).map(UpdatePluginOutcome::DeferredUserAction)
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let code_home = kimi_code_home(&ctx.home);
-        if installed_json_has_tracedecay(&code_home) {
-            return Err(deferred_user_action_error(
-                kimi_official_lifecycle_unavailable("remove", None),
-            ));
-        }
-
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {

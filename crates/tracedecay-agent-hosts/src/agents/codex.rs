@@ -23,11 +23,6 @@ use super::{
 /// reads this host-native state but never writes it.
 const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
-/// Exact one-time host-native activation command.
-fn codex_manual_activation_step(marketplace_name: &str) -> String {
-    format!("codex plugin add tracedecay@{marketplace_name}")
-}
-
 /// `OpenAI` Codex CLI agent.
 pub struct CodexIntegration;
 
@@ -38,20 +33,6 @@ impl AgentIntegration for CodexIntegration {
 
     fn id(&self) -> &'static str {
         "codex"
-    }
-
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        install_codex_plugin(&ctx.home, &ctx.tracedecay_bin)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!(
-            "  2. Run: {}",
-            codex_manual_activation_step(&codex_cached_marketplace_name(&ctx.home))
-        );
-        eprintln!("  3. Start a new Codex session — tracedecay tools are now available");
-        Ok(())
     }
 
     fn supports_local_install(&self) -> bool {
@@ -83,29 +64,6 @@ impl AgentIntegration for CodexIntegration {
                 codex_personal_marketplace_path(&ctx.home),
             ],
         )
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        for path in [
-            codex_repo_plugin_install_dir(project_path).join(".codex-plugin/plugin.json"),
-            codex_repo_plugin_install_dir(project_path).join(".mcp.json"),
-            codex_repo_marketplace_path(project_path),
-        ] {
-            super::ensure_project_local_safe_path(project_path, &path)?;
-        }
-        install_codex_repo_plugin(&ctx.home, project_path, &ctx.tracedecay_bin)?;
-        Ok(())
-    }
-
-    fn uninstall_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let local = InstallContext {
-            home: ctx.home.clone(),
-            tracedecay_bin: ctx.tracedecay_bin.clone(),
-            tool_permissions: ctx.tool_permissions.clone(),
-            project_root: Some(project_path.to_path_buf()),
-            dashboard: ctx.dashboard,
-        };
-        uninstall_codex_repo_plugin_if_present(&local)
     }
 
     fn activate_project_host_component_registration(
@@ -147,28 +105,6 @@ impl AgentIntegration for CodexIntegration {
             dashboard: ctx.dashboard,
         };
         uninstall_codex_repo_plugin_if_present(&local)
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        if !codex_plugin_is_natively_active(&ctx.home)? {
-            let install_dir = codex_plugin_install_dir(&ctx.home);
-            if install_dir.join(".codex-plugin/plugin.json").is_file()
-                && codex_plugin_dir_is_tracedecay(&install_dir)
-            {
-                remove_codex_plugin_install(&install_dir)?;
-            }
-            remove_codex_marketplace_entry_at(
-                &codex_personal_marketplace_path(&ctx.home),
-                "personal",
-            )?;
-            return Ok(());
-        }
-        let marketplace_name = codex_cached_marketplace_name(&ctx.home);
-        Err(TraceDecayError::Config {
-            message: format!(
-                "Codex owns its native plugin cache and activation state. Run `codex plugin remove tracedecay@{marketplace_name}` before removing the staged TraceDecay source package."
-            ),
-        })
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
@@ -311,10 +247,11 @@ impl AgentIntegration for CodexIntegration {
             Err(()) => return State::Corrupt,
         }
 
-        let candidates = [
+        let mut candidates = codex_plugin_cached_install_dirs(&ctx.home);
+        candidates.extend([
             ctx.home.join(".codex/plugins/tracedecay"),
             codex_plugin_install_dir(&ctx.home),
-        ];
+        ]);
         let Some(plugin_dir) = candidates
             .into_iter()
             .find(|path| path.join(".codex-plugin/plugin.json").is_file())
@@ -1097,6 +1034,10 @@ fn codex_registration_residue(home: &Path) -> std::result::Result<bool, ()> {
 /// `Err(())` marks a config TraceDecay cannot read, which the caller reports as
 /// a corrupt registration rather than a merely repairable one.
 fn codex_plugin_activation_state(home: &Path) -> std::result::Result<bool, ()> {
+    Ok(codex_plugin_enabled(home)? && codex_loaded_cache_matches_catalog_version(home)?)
+}
+
+fn codex_plugin_enabled(home: &Path) -> std::result::Result<bool, ()> {
     let config_path = codex_config_path(home);
     if !config_path.exists() {
         return Ok(false);
@@ -1108,14 +1049,26 @@ fn codex_plugin_activation_state(home: &Path) -> std::result::Result<bool, ()> {
     let Some(plugins) = plugins.as_table() else {
         return Err(());
     };
-    let enabled = plugins.iter().any(|(key, record)| {
+    Ok(plugins.iter().any(|(key, record)| {
         key.starts_with(CODEX_PLUGIN_ACTIVATION_KEY_PREFIX)
             && record
                 .get("enabled")
                 .and_then(toml::Value::as_bool)
                 .unwrap_or(false)
-    });
-    Ok(enabled && !codex_plugin_cached_install_dirs(home).is_empty())
+    }))
+}
+
+fn codex_loaded_cache_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
+    for cache in codex_plugin_cached_install_dirs(home) {
+        let manifest =
+            load_json_file_strict(&cache.join(".codex-plugin/plugin.json")).map_err(|_| ())?;
+        if manifest.get("version").and_then(serde_json::Value::as_str)
+            == Some(crate::PRODUCT_VERSION)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn codex_plugin_is_natively_active(home: &Path) -> Result<bool> {
@@ -1135,6 +1088,22 @@ fn codex_non_interactive_install_state(
         return Ok(NonInteractiveInstallOutcome::Ready);
     }
     let marketplace_name = codex_cached_marketplace_name(home);
+    if codex_plugin_enabled(home).map_err(|()| TraceDecayError::Config {
+        message: format!(
+            "could not read Codex native plugin activation state at {}",
+            codex_config_path(home).display()
+        ),
+    })? && !codex_plugin_cached_install_dirs(home).is_empty()
+    {
+        return Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+            DeferredUserAction {
+                remediation: format!(
+                    "Codex's loaded TraceDecay cache is stale. Run `codex plugin update tracedecay@{marketplace_name}`, re-trust changed hooks, then retry the TraceDecay lifecycle."
+                ),
+                staged_paths,
+            },
+        ));
+    }
     Ok(NonInteractiveInstallOutcome::DeferredUserAction(
         DeferredUserAction {
             remediation: format!(

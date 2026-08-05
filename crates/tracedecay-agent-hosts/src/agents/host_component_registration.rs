@@ -313,6 +313,7 @@ impl CatalogHostComponentRegistrationAuthority {
             CatalogRegistrationMode::ProjectRegistration
         } else if component_set.host == crate::agents::host_bundle_v2::HostKindV1::ClaudeCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Codex
+            || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Hermes
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
             || component_set.host == crate::agents::host_bundle_v2::HostKindV1::Kiro
             || (component_set.host == crate::agents::host_bundle_v2::HostKindV1::OpenCode
@@ -326,7 +327,7 @@ impl CatalogHostComponentRegistrationAuthority {
         {
             CatalogRegistrationMode::DeployedActivation
         } else {
-            // Cursor, Hermes, and component sets without native activation
+            // Cursor and component sets without native activation
             // are fully represented by their catalog artifacts. Unsupported
             // hosts are refused by the catalog before this authority exists.
             CatalogRegistrationMode::ArtifactOnly
@@ -1527,6 +1528,14 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             };
             if native_state_already_matches {
                 self.should_apply = false;
+            } else if matches!(
+                self.operation,
+                crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
+                    | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair
+            ) || states.iter().any(|state| {
+                *state == crate::agents::host_bundle_v2::HostBundleRegistrationStateV1::Repairable
+            }) {
+                return Err(crate::agents::host_bundle_v2::HostBundleError::NativeUpdateRequired);
             } else {
                 // Native-only activation must complete in the host before the
                 // transaction claims or removes any staged artifact.

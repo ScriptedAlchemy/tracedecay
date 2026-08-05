@@ -1,9 +1,9 @@
 //! Hook memory-injection configuration gate.
 //!
-//! Hooks no longer query fact or LCM tools or persist their own recall/dedupe
-//! sidecars. Authorized memory and session guidance is owned by daemon
-//! admission and later delivery surfaces. This module remains only as the
-//! registered host-integration configuration gate.
+//! Hooks do not query fact or LCM tools or persist recall/dedupe state.
+//! Authorized memory and session guidance is owned by daemon admission and
+//! later delivery surfaces. This module remains only as the registered
+//! host-integration configuration gate.
 
 /// Whether daemon-owned memory guidance is enabled: the environment override
 /// wins when set, otherwise the user configuration applies.

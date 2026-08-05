@@ -6,14 +6,9 @@
 
 use std::path::Path;
 
-use serde_json::json;
-
-use crate::errors::Result;
-
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, McpDoctorLabels,
-    McpUninstallPolicy, doctor_check_mcp_registration, install_mcp_server_entry, load_jsonc_file,
-    load_jsonc_file_strict, uninstall_mcp_server_entry,
+    AgentIntegration, DoctorCounters, HealthcheckContext, McpDoctorLabels,
+    doctor_check_mcp_registration, load_jsonc_file,
 };
 
 /// Kilo CLI agent.
@@ -36,42 +31,8 @@ impl AgentIntegration for KiloIntegration {
         "kilo"
     }
 
-    fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let config_dir = kilo_config_dir(&ctx.home);
-        std::fs::create_dir_all(&config_dir).ok();
-        let config_path = kilo_config_path(&ctx.home);
-        install_mcp_server(&config_path, &ctx.tracedecay_bin)?;
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!("  2. Start a new Kilo CLI session — tracedecay tools are now available");
-        Ok(())
-    }
-
     fn supports_local_install(&self) -> bool {
         true
-    }
-
-    fn install_local(&self, ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        let mcp_path = project_path.join("kilo.json");
-        super::ensure_project_local_safe_path(project_path, &mcp_path)?;
-        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)
-    }
-
-    fn uninstall_local(&self, _ctx: &InstallContext, project_path: &Path) -> Result<()> {
-        uninstall_mcp_server(&project_path.join("kilo.json"));
-        Ok(())
-    }
-
-    fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
-        let config_path = kilo_config_path(&ctx.home);
-        uninstall_mcp_server(&config_path);
-
-        eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Kilo CLI.");
-        eprintln!("Start a new Kilo CLI session for changes to take effect.");
-        Ok(())
     }
 
     fn healthcheck(&self, dc: &mut DoctorCounters, ctx: &HealthcheckContext) {
@@ -123,33 +84,6 @@ impl AgentIntegration for KiloIntegration {
         let servers = json.get("mcp");
         servers.and_then(|v| v.get("tracedecay")).is_some()
     }
-}
-
-// ---------------------------------------------------------------------------
-// Uninstall helpers
-// ---------------------------------------------------------------------------
-
-fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    install_mcp_server_entry(
-        config_path,
-        "mcp",
-        json!({
-            "type": "local",
-            "command": [tracedecay_bin, "serve"],
-            "enabled": true
-        }),
-        "Kilo CLI",
-        load_jsonc_file_strict,
-    )
-}
-
-fn uninstall_mcp_server(config_path: &Path) {
-    uninstall_mcp_server_entry(
-        config_path,
-        "mcp",
-        load_jsonc_file,
-        McpUninstallPolicy::default(),
-    );
 }
 
 // ---------------------------------------------------------------------------

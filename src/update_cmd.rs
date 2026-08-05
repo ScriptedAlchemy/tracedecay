@@ -39,7 +39,7 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
 /// For those hosts the receipt-backed component-set transaction is the sole
 /// writer of the deployed artifacts: `reinstall_agent_integrations` routes them
 /// through `apply_default_canonical_component_set` and never calls
-/// `install` / `update_plugin`. A second writer outside that transaction (this
+/// `update_plugin`. A second writer outside that transaction (this
 /// generated-artifact refresh) rewrote the very files the receipt claims,
 /// before the transaction resealed them, so every version bump left the
 /// receipt stale and Doctor reported a component-ownership conflict.
