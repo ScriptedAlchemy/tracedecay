@@ -168,7 +168,12 @@ product tests and normal cross-platform CI are stable.
 
 ## Release
 
-V2 library crates publish through the workspace release flow while the root
-package owns the Git tag and GitHub release. A new crate's first crates.io
-publication may require one-time trusted-publisher or token bootstrap; this is a
-release setup step, not an alternate development workflow.
+The current Rust release publishes GitHub artifacts from the workspace while
+the root package owns the Git tag and GitHub release. crates.io publication is
+a later release step after the crate structure is settled; it is not part of
+current acceptance.
+
+The TypeScript npm SDK publishes later through npm OIDC trusted publishing
+once the Rust/GitHub release path, daemon wire contracts, and lifecycle
+fixtures are stable. npm publication is not coupled to Rust crate release day
+and is not gated on performance optimization work.
