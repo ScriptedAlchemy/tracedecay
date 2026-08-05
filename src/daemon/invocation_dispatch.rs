@@ -127,7 +127,7 @@ pub(super) async fn write_tool_list_changed_notification(
 
 pub(super) async fn resolve_multi_root_projects(
     store_administration: &StoreAdministration,
-    service: &service::invocation::DaemonInvocationService,
+    _service: &service::invocation::DaemonInvocationService,
     selectors: &[tracedecay_application::RegisteredRootSelectorV1],
 ) -> std::result::Result<
     Vec<(
@@ -187,9 +187,6 @@ pub(super) async fn resolve_multi_root_projects(
             &selector.project_id,
         )
         .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
-        if !service.lsp_owner_matches_scope(&root, &scope).await {
-            return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
-        }
         let locator = tracedecay_application::RegisteredRootLocatorV1::new(
             selector.project_id.clone(),
             profile_id.clone(),
@@ -207,6 +204,108 @@ pub(super) async fn resolve_multi_root_projects(
         return Err(service::invocation::DaemonInvocationProblem::InvalidRequest);
     }
     Ok(roots)
+}
+
+#[cfg(unix)]
+async fn mount_multi_root_owners(
+    engine: &DaemonEngine,
+    handshake: &DaemonHandshake,
+    active_project_root: &Path,
+    request: &DaemonInvocationRequest,
+) -> std::result::Result<(), service::invocation::DaemonInvocationProblem> {
+    let roots = match &request.payload {
+        service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+            request,
+            ..
+        } => {
+            resolve_multi_root_projects(
+                &engine.store_administration,
+                &engine.invocation.service,
+                &request.roots,
+            )
+            .await?
+        }
+        service::invocation::DaemonInvocationPayload::MultiRootExecute {
+            request,
+            observed_at,
+            deadline,
+            cancellation,
+        } => {
+            let storage = engine
+                .store_administration
+                .registered_profile_database()
+                .await
+                .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?
+                .authorized_scope_set_storage()
+                .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+            let scope_set = engine
+                .invocation
+                .service
+                .persisted_scope_set(
+                    active_project_root,
+                    Some(&storage),
+                    &request.scope_set_id,
+                    tracedecay_application::MultiRootApplicationOperation::Execute,
+                    *observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+                .filter(|scope_set| {
+                    scope_set.revision() == request.scope_set_revision
+                        && scope_set.digest() == &request.scope_set_digest
+                })
+                .ok_or(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized)?;
+            let selectors = scope_set
+                .roots()
+                .iter()
+                .map(|root| {
+                    let locator = root.locator().ok_or(
+                        service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    )?;
+                    tracedecay_application::RegisteredRootSelectorV1::new(
+                        locator.project_id.clone(),
+                        &locator.canonical_root,
+                    )
+                    .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            resolve_multi_root_projects(
+                &engine.store_administration,
+                &engine.invocation.service,
+                &selectors,
+            )
+            .await?
+        }
+        _ => return Ok(()),
+    };
+    for (root, scope, _) in roots {
+        if engine
+            .invocation
+            .service
+            .lsp_owner_matches_scope(&root, &scope)
+            .await
+        {
+            continue;
+        }
+        let mut root_handshake = handshake.clone();
+        root_handshake.project_path = Some(root.clone());
+        root_handshake.allow_init = false;
+        root_handshake.allow_initialize_root_routing = false;
+        engine
+            .project_server_for_request(&root_handshake, ProjectServerRequirement::Core)
+            .await
+            .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+        if !engine
+            .invocation
+            .service
+            .lsp_owner_matches_scope(&root, &scope)
+            .await
+        {
+            return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -249,6 +348,12 @@ pub(super) async fn execute_daemon_invocation(
             );
         }
         project_path = Some(resolved_project_path);
+    }
+    if let Some(active_project_root) = project_path.as_deref()
+        && let Err(problem) =
+            mount_multi_root_owners(engine, handshake, active_project_root, &request).await
+    {
+        return DaemonInvocationResponse::problem(request_id, problem);
     }
     engine
         .invocation

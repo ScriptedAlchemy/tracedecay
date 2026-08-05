@@ -9,6 +9,17 @@ pub(super) enum AuthorizedRootResolution {
     Unavailable(tracedecay_domain::ScopeUnavailableReasonV1),
 }
 
+pub(super) async fn canonical_scope_set_storage(
+    store_administration: &StoreAdministration,
+) -> Option<tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage> {
+    store_administration
+        .registered_profile_database()
+        .await
+        .ok()?
+        .authorized_scope_set_storage()
+        .ok()
+}
+
 pub(super) async fn resolve_authorized_root(
     store_administration: &StoreAdministration,
     database: &crate::global_db::RegisteredGlobalDb,
@@ -91,6 +102,7 @@ pub(super) async fn execute_one_multi_root_operation(
     observed_at: tracedecay_domain::UtcMicros,
     deadline: tracedecay_application::Deadline,
     cancellation: tracedecay_application::CancellationContext,
+    pinned_generation: &code_index_scheduler::LatestCompleteCodeIndexV1,
 ) -> std::result::Result<
     (
         Value,
@@ -98,6 +110,7 @@ pub(super) async fn execute_one_multi_root_operation(
     ),
     service::invocation::DaemonInvocationProblem,
 > {
+    ensure_pinned_generation(state, scope, pinned_generation).await?;
     match operation {
         tracedecay_application::MultiRootOperationV1::Work { request } => {
             let mut request = serde_json::from_value::<
@@ -154,7 +167,9 @@ pub(super) async fn execute_one_multi_root_operation(
             if &actual_scope != scope {
                 return Err(service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized);
             }
-            extract_work_application_payload(&outcome)
+            let result = extract_work_application_payload(&outcome)?;
+            ensure_pinned_generation(state, scope, pinned_generation).await?;
+            Ok(result)
         }
         tracedecay_application::MultiRootOperationV1::Git { request }
         | tracedecay_application::MultiRootOperationV1::Feedback { request }
@@ -181,6 +196,7 @@ pub(super) async fn execute_one_multi_root_operation(
                     store_administration.clone(),
                     root.to_path_buf(),
                     scope.clone(),
+                    pinned_generation.clone(),
                 )),
                 wire.operation,
                 tracedecay_application::RequestId::new(format!(
@@ -196,10 +212,27 @@ pub(super) async fn execute_one_multi_root_operation(
             )
             .await
             .map_err(|_| service::invocation::DaemonInvocationProblem::Unavailable)?;
+            ensure_pinned_generation(state, scope, pinned_generation).await?;
             Ok((
                 payload,
                 cursor.map(tracedecay_application::MultiRootRootContinuationV1::Page),
             ))
         }
     }
+}
+
+async fn ensure_pinned_generation(
+    state: &DaemonInvocationState,
+    scope: &tracedecay_application::ResolvedScope,
+    pinned: &code_index_scheduler::LatestCompleteCodeIndexV1,
+) -> std::result::Result<(), service::invocation::DaemonInvocationProblem> {
+    let current = state
+        .code_index_schedulers
+        .latest_complete_ready_for_scope(scope)
+        .await
+        .ok_or(service::invocation::DaemonInvocationProblem::Unavailable)?;
+    if published_root_generation(scope, &current)? != published_root_generation(scope, pinned)? {
+        return Err(service::invocation::DaemonInvocationProblem::Unavailable);
+    }
+    Ok(())
 }

@@ -11,6 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 use super::*;
 
 mod multi_root;
+mod query_authority;
 
 /// Daemon-generation-local state for the closed invocation protocol.
 ///
@@ -100,49 +101,6 @@ impl DaemonInvocationState {
 
     pub(super) fn lsp_owner_registrar(&self) -> DaemonLspOwnerRegistrar {
         DaemonLspOwnerRegistrar::new(&self.service)
-    }
-
-    pub(super) async fn mount_query_authority_for_project(
-        &self,
-        project_root: &Path,
-        scope: &tracedecay_application::ResolvedScope,
-    ) -> std::result::Result<(), code_index_scheduler::query_runtime::QueryRuntimeMountErrorV1>
-    {
-        code_index_scheduler::query_runtime::mount_query_authority_on_project_open(
-            &self.code_index_schedulers,
-            project_root,
-            scope,
-            &self.query_authority_provider,
-        )
-        .await
-    }
-
-    pub(super) fn restore_initial_query_authority_for_project(
-        &self,
-        scope: tracedecay_application::ResolvedScope,
-        state: crate::config::retrieval::RetrievalProfileStateV1,
-        cursor_keys: Arc<crate::global_db::session_temporal::GlobalDbCursorKeyProvider>,
-    ) -> std::result::Result<
-        query_authority_provider::QueryAuthorityProviderStatusV1,
-        query_authority_provider::QueryAuthorityUpdateErrorV1,
-    > {
-        self.query_authority_provider
-            .install_evaluated_initial_state(scope, state, cursor_keys)
-    }
-
-    pub(super) fn query_activation_registrar(
-        &self,
-        project_root: &Path,
-        session_db: Arc<crate::global_db::RegisteredGlobalDb>,
-    ) -> Arc<dyn crate::application::semantic_runtime::RetrievalProfileActivationObserverV1> {
-        Arc::new(
-            query_authority_provider::DaemonQueryActivationRegistrarV1::new(
-                self.query_authority_provider.clone(),
-                self.code_index_schedulers.clone(),
-                project_root.to_path_buf(),
-                session_db,
-            ),
-        )
     }
 
     pub(super) async fn mount_code_index(
@@ -250,10 +208,18 @@ impl DaemonInvocationState {
                 },
             );
         }
+        let Some(storage) = multi_root::canonical_scope_set_storage(store_administration).await
+        else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        };
         let Some(scope_set) = self
             .service
             .persisted_scope_set(
                 active_project_root,
+                Some(&storage),
                 &request.scope_set_id,
                 tracedecay_application::MultiRootApplicationOperation::Execute,
                 observed_at,
@@ -441,7 +407,7 @@ impl DaemonInvocationState {
                 );
             };
             generations.push(generation);
-            resolved_roots.push(Some(root));
+            resolved_roots.push(Some((root, latest)));
         }
         let authorization =
             match tracedecay_application::MultiRootAuthorizationBindingV1::from_contexts(&contexts)
@@ -557,7 +523,7 @@ impl DaemonInvocationState {
             .enumerate()
         {
             let scope = authorized_root.scope();
-            let Some(root) = root else {
+            let Some((root, pinned_generation)) = root else {
                 continue;
             };
             let Some(admitted_context) = &root_contexts[ordinal] else {
@@ -620,6 +586,7 @@ impl DaemonInvocationState {
                 observed_at,
                 deadline.clone(),
                 cancellation.clone(),
+                pinned_generation,
             )
             .await;
             let outcome = match value {
@@ -804,10 +771,12 @@ impl DaemonInvocationState {
                     service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
                 );
             };
+            let storage = multi_root::canonical_scope_set_storage(store_administration).await;
             let scope_set = self
                 .service
                 .persisted_scope_set(
                     active_project_root,
+                    storage.as_ref(),
                     &scope_set_request.scope_set_id,
                     tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
                     *observed_at,
@@ -894,12 +863,20 @@ impl DaemonInvocationState {
                     service::invocation::DaemonInvocationProblem::InvalidRequest,
                 );
             };
+            let Some(storage) = multi_root::canonical_scope_set_storage(store_administration).await
+            else {
+                return DaemonInvocationResponse::problem(
+                    request.request_id,
+                    service::invocation::DaemonInvocationProblem::Unavailable,
+                );
+            };
             return match self
                 .service
                 .compare_and_swap_scope_set(
                     active_project_root,
                     &request.request_id,
                     scope_set_request.clone(),
+                    &storage,
                     roots,
                     *observed_at,
                     deadline,

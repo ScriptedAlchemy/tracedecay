@@ -149,6 +149,7 @@ impl DaemonInvocationService {
     pub(crate) async fn persisted_scope_set(
         &self,
         project_root: &Path,
+        storage: Option<&tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage>,
         scope_set_id: &ScopeSetId,
         operation: tracedecay_application::MultiRootApplicationOperation,
         observed_at: UtcMicros,
@@ -172,11 +173,15 @@ impl DaemonInvocationService {
             &use_case,
         )
         .await?;
-        self.lsp_owner(Some(project_root))
-            .await?
-            .scope_set_storage?
-            .read(scope_set_id)
-            .ok()?
+        let storage = match storage {
+            Some(storage) => storage.clone(),
+            None => {
+                self.lsp_owner(Some(project_root))
+                    .await?
+                    .scope_set_storage?
+            }
+        };
+        storage.read(scope_set_id).ok()?
     }
 
     pub(crate) async fn authorize_lsp_workspace(

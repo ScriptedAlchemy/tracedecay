@@ -437,6 +437,7 @@ fn durable_scope_set_cas_replays_terminal_results_and_rejects_key_reuse() {
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Pending(first.clone())
     );
+    assert_eq!(store.storage.read(first.scope_set_id()).unwrap(), None);
     assert_eq!(
         store
             .storage
@@ -489,6 +490,7 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Pending(_)
     ));
+    assert_eq!(store.storage.read(first.scope_set_id()).unwrap(), None);
     store
         .storage
         .record_durable_replica(idempotency_key, &command_digest, &replica_a)
@@ -504,6 +506,7 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Pending(_)
     ));
+    assert_eq!(store.storage.read(first.scope_set_id()).unwrap(), None);
     store
         .storage
         .record_durable_replica(idempotency_key, &command_digest, &replica_b)
@@ -518,6 +521,14 @@ fn durable_scope_set_cas_requires_exact_replica_receipts() {
             )
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Applied(first)
+    );
+    assert_eq!(
+        store
+            .storage
+            .read(&ScopeSetId::new("scope-set.test").unwrap())
+            .unwrap()
+            .map(|scope_set| scope_set.revision()),
+        Some(ScopeSetRevision::new(1).unwrap())
     );
 }
 
@@ -543,12 +554,128 @@ fn durable_scope_set_cas_persists_replica_conflict_for_replay() {
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Conflict(Some(divergent.clone()))
     );
+    assert_eq!(store.storage.read(first.scope_set_id()).unwrap(), None);
     assert_eq!(
         store
             .storage
             .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &first)
             .unwrap(),
         AuthorizedScopeSetDurableCasV1::Conflict(Some(divergent))
+    );
+}
+
+#[test]
+fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict() {
+    let coordinator = RegisteredScopeSetStore::start("durable-coordinator", |_| {});
+    let replica = RegisteredScopeSetStore::start("durable-participant", |_| {});
+    let next = scope_set_for_actor(1, "actor.owner");
+    let command_digest = digest('2');
+    let replica_digest = digest('3');
+    let idempotency_key = "request.scope-set.hidden-prepare";
+
+    assert!(matches!(
+        coordinator
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &next)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    assert!(matches!(
+        replica
+            .storage
+            .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &next)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    assert_eq!(coordinator.storage.read(next.scope_set_id()).unwrap(), None);
+    assert_eq!(replica.storage.read(next.scope_set_id()).unwrap(), None);
+    coordinator
+        .storage
+        .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+        .unwrap();
+    assert!(matches!(
+        coordinator
+            .storage
+            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &[replica_digest],)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Applied(_)
+    ));
+    assert_eq!(
+        coordinator.storage.read(next.scope_set_id()).unwrap(),
+        Some(next.clone())
+    );
+    assert_eq!(replica.storage.read(next.scope_set_id()).unwrap(), None);
+
+    let conflict_coordinator =
+        RegisteredScopeSetStore::start("durable-conflict-coordinator", |_| {});
+    let conflict_replica = RegisteredScopeSetStore::start("durable-conflict-participant", |_| {});
+    let divergent = scope_set_for_actor(1, "actor.other");
+    conflict_replica
+        .storage
+        .compare_and_swap(None, &divergent)
+        .unwrap();
+    let conflict_key = "request.scope-set.hidden-conflict";
+    let conflict_digest = digest('4');
+    conflict_coordinator
+        .storage
+        .begin_durable_compare_and_swap(conflict_key, &conflict_digest, None, &next)
+        .unwrap();
+    let AuthorizedScopeSetDurableCasV1::Conflict(current) = conflict_replica
+        .storage
+        .begin_durable_compare_and_swap(conflict_key, &conflict_digest, None, &next)
+        .unwrap()
+    else {
+        panic!("divergent replica must conflict");
+    };
+    assert!(matches!(
+        conflict_coordinator
+            .storage
+            .conflict_durable_compare_and_swap(conflict_key, &conflict_digest, current.as_ref(),)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Conflict(_)
+    ));
+    assert_eq!(
+        conflict_coordinator
+            .storage
+            .read(next.scope_set_id())
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        conflict_replica.storage.read(next.scope_set_id()).unwrap(),
+        Some(divergent)
+    );
+}
+
+#[test]
+fn durable_scope_set_cas_revalidates_expected_state_at_publication() {
+    let store = RegisteredScopeSetStore::start("durable-publication-race", |_| {});
+    let next = scope_set_for_actor(1, "actor.owner");
+    let concurrent = scope_set_for_actor(1, "actor.concurrent");
+    let command_digest = digest('6');
+    let replica_digest = digest('7');
+    let idempotency_key = "request.scope-set.publication-race";
+
+    store
+        .storage
+        .begin_durable_compare_and_swap(idempotency_key, &command_digest, None, &next)
+        .unwrap();
+    store
+        .storage
+        .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
+        .unwrap();
+    store.storage.compare_and_swap(None, &concurrent).unwrap();
+
+    assert_eq!(
+        store
+            .storage
+            .complete_durable_compare_and_swap(idempotency_key, &command_digest, &[replica_digest],)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Conflict(Some(concurrent.clone()))
+    );
+    assert_eq!(
+        store.storage.read(next.scope_set_id()).unwrap(),
+        Some(concurrent)
     );
 }
 

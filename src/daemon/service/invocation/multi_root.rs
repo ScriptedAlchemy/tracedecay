@@ -8,6 +8,7 @@ impl DaemonInvocationService {
         active_project_root: &Path,
         idempotency_key: &str,
         request: MultiRootScopeSetCasRequestV1,
+        coordinator_storage: &tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetSqliteStorage,
         mut roots: Vec<(
             PathBuf,
             ResolvedScope,
@@ -49,18 +50,15 @@ impl DaemonInvocationService {
             &use_case,
         )
         .await?;
-        let active_owner = self.lsp_owner(Some(active_project_root)).await?;
-        let active_storage = active_owner.scope_set_storage?;
         let next_revision = match request.expected_revision {
             Some(expected) => expected.checked_next().ok()?,
             None => ScopeSetRevision::new(1).ok()?,
         };
         let mut admissions = Vec::with_capacity(roots.len());
-        let mut storages = vec![(active_scope.scope_digest.clone(), active_storage.clone())];
+        let mut replicas = Vec::with_capacity(roots.len());
         for (ordinal, (project_root, scope, locator)) in roots.iter().enumerate() {
             let owner = self.lsp_owner(Some(project_root)).await?;
             let storage = owner.scope_set_storage?;
-            storages.push((scope.scope_digest.clone(), storage));
             let context = self
                 .multi_root_query_context(
                     project_root,
@@ -77,6 +75,7 @@ impl DaemonInvocationService {
                 tracedecay_application::AuthorizedRootAdmission::new(context, locator.clone())
                     .ok()?,
             );
+            replicas.push((ordinal, project_root.clone(), scope.clone(), storage));
         }
         let next = AuthorizedScopeSetAuthority::authorize_registered(
             request.scope_set_id,
@@ -93,7 +92,7 @@ impl DaemonInvocationService {
             next.digest(),
         ))
         .ok()?;
-        let coordinator = match active_storage
+        let coordinator = match coordinator_storage
             .begin_durable_compare_and_swap(
                 idempotency_key,
                 &command_digest,
@@ -131,20 +130,46 @@ impl DaemonInvocationService {
         if coordinator != next {
             return None;
         }
-        storages.sort_by(|left, right| left.0.cmp(&right.0));
-        storages.dedup_by(|left, right| left.0 == right.0);
-        let replica_digests = storages
+        replicas.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
+        replicas.dedup_by(|left, right| left.2.scope_digest == right.2.scope_digest);
+        let replica_digests = replicas
             .iter()
-            .map(|(digest, _)| digest.clone())
+            .map(|(_, _, scope, _)| scope.scope_digest.clone())
             .collect::<Vec<_>>();
-        for (replica_digest, storage) in &storages {
-            if cancellation.is_cancelled() || deadline.is_elapsed_at(current_micros()) {
+        for (ordinal, project_root, scope, storage) in &replicas {
+            let revalidated_at = current_micros();
+            if deadline.is_elapsed_at(revalidated_at) {
                 return None;
             }
-            match storage.compare_and_swap(request.expected_revision, &next) {
-                Err(_) => {
-                    let current = storage.read(next.scope_set_id()).ok()?;
-                    let terminal = active_storage
+            self.multi_root_query_context(
+                project_root,
+                scope,
+                *ordinal,
+                revalidated_at,
+                deadline,
+                cancellation,
+                &capability,
+                &use_case,
+            )
+            .await?;
+            match storage
+                .begin_durable_compare_and_swap(
+                    idempotency_key,
+                    &command_digest,
+                    request.expected_revision,
+                    &next,
+                )
+                .ok()?
+            {
+                tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Conflict(
+                    current,
+                ) => {
+                    for (_, _, _, prepared) in &replicas {
+                        prepared
+                            .discard_durable_prepare(idempotency_key, &command_digest)
+                            .ok()?;
+                    }
+                    let terminal = coordinator_storage
                         .conflict_durable_compare_and_swap(
                             idempotency_key,
                             &command_digest,
@@ -165,44 +190,34 @@ impl DaemonInvocationService {
                         },
                     ));
                 }
-                Ok(tracedecay_store::runtime::ScopeSetCasOutcomeV1::Applied(_)) => {}
-                Ok(tracedecay_store::runtime::ScopeSetCasOutcomeV1::Conflict { .. }) => {
-                    let stored = storage.read(next.scope_set_id()).ok()?;
-                    if stored.as_ref() != Some(&next) {
-                        let terminal = active_storage
-                            .conflict_durable_compare_and_swap(
-                                idempotency_key,
-                                &command_digest,
-                                stored.as_ref(),
-                            )
-                            .ok()?;
-                        let tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Conflict(
-                            current,
-                        ) = terminal
-                        else {
-                            return None;
-                        };
-                        return Some((
-                            active_scope,
-                            MultiRootScopeSetCasResultV1 {
-                                status: MultiRootScopeSetCasStatusV1::Conflict,
-                                scope_set: current,
-                            },
-                        ));
-                    }
-                }
+                tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Pending(
+                    pending,
+                )
+                | tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Applied(
+                    pending,
+                ) if pending == next => {}
+                _ => return None,
             }
-            if cancellation.is_cancelled() || deadline.is_elapsed_at(current_micros()) {
-                return None;
-            }
-            active_storage
-                .record_durable_replica(idempotency_key, &command_digest, replica_digest)
+            coordinator_storage
+                .record_durable_replica(idempotency_key, &command_digest, &scope.scope_digest)
                 .ok()?;
         }
-        if cancellation.is_cancelled() || deadline.is_elapsed_at(current_micros()) {
+        let commit_at = current_micros();
+        if deadline.is_elapsed_at(commit_at) {
             return None;
         }
-        match active_storage
+        self.multi_root_query_context(
+            active_project_root,
+            &active_scope,
+            replicas.len(),
+            commit_at,
+            deadline,
+            cancellation,
+            &capability,
+            &use_case,
+        )
+        .await?;
+        match coordinator_storage
             .complete_durable_compare_and_swap(idempotency_key, &command_digest, &replica_digests)
             .ok()?
         {

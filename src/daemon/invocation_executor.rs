@@ -268,6 +268,7 @@ pub(super) struct InProcessDaemonInvocationExecutor {
     store_administration: StoreAdministration,
     project_path: PathBuf,
     scope: tracedecay_application::ResolvedScope,
+    generation: code_index_scheduler::LatestCompleteCodeIndexV1,
 }
 
 impl InProcessDaemonInvocationExecutor {
@@ -276,23 +277,53 @@ impl InProcessDaemonInvocationExecutor {
         store_administration: StoreAdministration,
         project_path: PathBuf,
         scope: tracedecay_application::ResolvedScope,
+        generation: code_index_scheduler::LatestCompleteCodeIndexV1,
     ) -> Self {
         Self {
             invocation,
             store_administration,
             project_path,
             scope,
+            generation,
         }
     }
 
     async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
-        self.invocation
+        let request_id = request.request_id.clone();
+        if !self.generation_is_current().await {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        }
+        let response = self
+            .invocation
             .invoke_for_project(
                 &self.store_administration,
                 Some(&self.project_path),
                 request,
             )
+            .await;
+        if !self.generation_is_current().await {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                service::invocation::DaemonInvocationProblem::Unavailable,
+            );
+        }
+        response
+    }
+
+    async fn generation_is_current(&self) -> bool {
+        let Some(current) = self
+            .invocation
+            .code_index_schedulers
+            .latest_complete_ready_for_scope(&self.scope)
             .await
+        else {
+            return false;
+        };
+        published_root_generation(&self.scope, &current).ok()
+            == published_root_generation(&self.scope, &self.generation).ok()
     }
 }
 

@@ -284,7 +284,6 @@ impl AuthorizedScopeSetSqliteStorage {
             transaction.rollback()?;
             return Err(AuthorizedScopeSetStoreError::OwnershipMismatch);
         }
-        write_registered_scope_set(&transaction, next)?;
         insert_durable_cas(
             &transaction,
             idempotency_key,
@@ -393,6 +392,44 @@ impl AuthorizedScopeSetSqliteStorage {
                     transaction.rollback()?;
                     return Ok(AuthorizedScopeSetDurableCasV1::Pending(next));
                 }
+                let current = decode_registered_rows(
+                    transaction
+                        .query(registered_read_statement(next.scope_set_id())?)?
+                        .rows,
+                )?;
+                let expected_revision = match next.revision().get() {
+                    1 => None,
+                    revision => Some(ScopeSetRevision::new(revision - 1).map_err(|error| {
+                        AuthorizedScopeSetStoreError::InvalidData(error.to_string())
+                    })?),
+                };
+                if current.as_ref().map(AuthorizedScopeSet::revision) != expected_revision {
+                    let result_payload = current
+                        .as_ref()
+                        .map(serde_json::to_vec)
+                        .transpose()?
+                        .map_or(ExactSqlValue::Null, ExactSqlValue::Blob);
+                    transaction.execute(ExactSqlStatement::new(
+                        "UPDATE authorized_scope_set_transactions_v1
+                         SET status = 'conflict', result_payload = ?2
+                         WHERE idempotency_key = ?1 AND status = 'pending'"
+                            .to_owned(),
+                        vec![
+                            ExactSqlValue::Text(idempotency_key.to_owned()),
+                            result_payload,
+                        ],
+                    )?)?;
+                    transaction.commit()?;
+                    return Ok(AuthorizedScopeSetDurableCasV1::Conflict(current));
+                }
+                if current
+                    .as_ref()
+                    .is_some_and(|current| current.actor_id() != next.actor_id())
+                {
+                    transaction.rollback()?;
+                    return Err(AuthorizedScopeSetStoreError::OwnershipMismatch);
+                }
+                write_registered_scope_set(&transaction, &next)?;
                 transaction.execute(ExactSqlStatement::new(
                     "UPDATE authorized_scope_set_transactions_v1
                      SET status = 'applied', result_payload = next_payload
@@ -404,6 +441,38 @@ impl AuthorizedScopeSetSqliteStorage {
                 Ok(AuthorizedScopeSetDurableCasV1::Applied(next))
             }
         }
+    }
+
+    /// Remove a non-terminal replica prepare after the canonical coordinator
+    /// has either published or rejected the command.
+    pub fn discard_durable_prepare(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+    ) -> Result<(), AuthorizedScopeSetStoreError> {
+        let transaction = self.handle.begin_immediate()?;
+        let Some(state) = read_durable_cas(&transaction, idempotency_key, command_digest)? else {
+            transaction.rollback()?;
+            return Ok(());
+        };
+        if !matches!(state, AuthorizedScopeSetDurableCasV1::Pending(_)) {
+            transaction.rollback()?;
+            return Ok(());
+        }
+        transaction.execute(ExactSqlStatement::new(
+            "DELETE FROM authorized_scope_set_replica_receipts_v1
+             WHERE idempotency_key = ?1"
+                .to_owned(),
+            vec![ExactSqlValue::Text(idempotency_key.to_owned())],
+        )?)?;
+        transaction.execute(ExactSqlStatement::new(
+            "DELETE FROM authorized_scope_set_transactions_v1
+             WHERE idempotency_key = ?1 AND status = 'pending'"
+                .to_owned(),
+            vec![ExactSqlValue::Text(idempotency_key.to_owned())],
+        )?)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn conflict_durable_compare_and_swap(

@@ -426,6 +426,7 @@ async fn run_authenticated_multi_root_journey() {
                 .service
                 .persisted_scope_set(
                     root,
+                    None,
                     &lsp_scope_set_id,
                     tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
                     read_observed_at,
@@ -481,6 +482,9 @@ async fn run_authenticated_multi_root_journey() {
     let stored = cas_result
         .scope_set
         .expect("applied CAS must return the scope set");
+    let canonical_scope_sets = registry
+        .authorized_scope_set_storage()
+        .expect("canonical scope-set storage");
     let read_observed_at = now();
     let (read_deadline, read_cancellation) = controls("cas-scope-set-read", read_observed_at);
     for root in [first.path(), second.as_path(), third.path()] {
@@ -490,6 +494,7 @@ async fn run_authenticated_multi_root_journey() {
                 .service
                 .persisted_scope_set(
                     root,
+                    Some(&canonical_scope_sets),
                     &scope_set_id,
                     tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
                     read_observed_at,
@@ -499,7 +504,7 @@ async fn run_authenticated_multi_root_journey() {
                 .await
                 .as_ref(),
             Some(&stored),
-            "an applied CAS must be durable in every participating store"
+            "an applied CAS must be durable in the canonical profile store"
         );
     }
     let mut stored_locators = stored
@@ -555,7 +560,12 @@ async fn run_authenticated_multi_root_journey() {
                 stored.revision(),
                 tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
                     .expect("digest"),
-                MultiRootOperationV1::Query { request: json!({}) },
+                MultiRootOperationV1::Work {
+                    request: json!({
+                        "operation": "snapshot",
+                        "request": { "page_size": 1 }
+                    }),
+                },
                 0,
                 None,
             )
@@ -861,35 +871,18 @@ async fn run_authenticated_multi_root_journey() {
         .open_project_server(&first_handshake)
         .await
         .expect("restarted primary owner");
-    restarted
-        .open_project_server(&second_handshake)
+    let restarted_scope_sets = restarted
+        .store_administration
+        .registered_profile_database()
         .await
-        .expect("restarted linked worktree owner");
-    restarted
-        .open_project_server(&third_handshake)
-        .await
-        .expect("restarted distinct project owner");
-    let read_observed_at = now();
-    let (read_deadline, read_cancellation) = controls("restart-scope-set-read", read_observed_at);
-    for root in [first.path(), second.as_path(), third.path()] {
-        assert_eq!(
-            restarted
-                .invocation
-                .service
-                .persisted_scope_set(
-                    root,
-                    &scope_set_id,
-                    tracedecay_application::MultiRootApplicationOperation::ScopeSetRead,
-                    read_observed_at,
-                    &read_deadline,
-                    &read_cancellation,
-                )
-                .await
-                .as_ref(),
-            Some(&stored),
-            "restart must retain each exact registered root locator"
-        );
-    }
+        .expect("restarted profile database")
+        .authorized_scope_set_storage()
+        .expect("restarted scope-set storage");
+    assert_eq!(
+        restarted_scope_sets.read(&scope_set_id).unwrap().as_ref(),
+        Some(&stored),
+        "restart must retain the canonical scope set"
+    );
     let observed_at = now();
     let (deadline, cancellation) = controls("restart-execute", observed_at);
     let restarted_execute = execute_daemon_invocation(
@@ -901,7 +894,12 @@ async fn run_authenticated_multi_root_journey() {
                 scope_set_id,
                 stored.revision(),
                 stored.digest().clone(),
-                MultiRootOperationV1::Query { request: json!({}) },
+                MultiRootOperationV1::Work {
+                    request: json!({
+                        "operation": "snapshot",
+                        "request": { "page_size": 1 }
+                    }),
+                },
                 0,
                 None,
             )
@@ -920,5 +918,16 @@ async fn run_authenticated_multi_root_journey() {
         "restart must execute the persisted linked-worktree locator: {:#?}",
         restarted_execute.outcome
     );
+    for root in stored.roots() {
+        let locator = root.locator().expect("registered root locator");
+        assert!(
+            restarted
+                .invocation
+                .service
+                .lsp_owner_matches_scope(&locator.canonical_root, root.scope())
+                .await,
+            "execute must cold-mount each exact registered root"
+        );
+    }
     restarted.shutdown_all().await;
 }
