@@ -14,8 +14,8 @@ use std::process::{Command, Output, Stdio};
 use thiserror::Error;
 use tracedecay_domain::{
     DomainError, GitBlobExpectationV1, GitFileModeV1, GitHeadStateV1, GitIndexEntryExpectationV1,
-    GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitIndexTransactionOperationV1, GitOidV1,
-    HunkDirectionV1, HunkRefV1, ManifestDigest, canonical_sha256,
+    GitIndexPreviewDispositionV1, GitIndexPreviewV1, GitOidV1, HunkDirectionV1, HunkRefV1,
+    ManifestDigest, canonical_sha256,
 };
 use tracedecay_runtime_core::git_discovery::{
     GitRepositoryIdentity, GitRepositoryIdentityOutcome, discover_repository_identity_bounded,

@@ -27,11 +27,7 @@ impl FixedGitIndexRunner {
             .split(|byte| *byte == 0)
             .filter(|entry| !entry.is_empty())
         {
-            let (_, path) = entry.split_once(|byte| *byte == b'\t').ok_or(
-                NativeGitIndexError::MalformedOutput {
-                    operation: "ls-files",
-                },
-            )?;
+            let path = index_entry_path(entry)?;
             paths.insert(path.to_vec());
         }
         // An untracked path may become an index entry during the intended
@@ -239,4 +235,49 @@ fn nul_paths(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
         .filter(|path| !path.is_empty())
         .map(<[u8]>::to_vec)
         .collect()
+}
+
+fn index_entry_path(entry: &[u8]) -> Result<&[u8], NativeGitIndexError> {
+    let delimiter = entry.iter().position(|byte| *byte == b'\t').ok_or(
+        NativeGitIndexError::MalformedOutput {
+            operation: "ls-files",
+        },
+    )?;
+    let (metadata, path_with_delimiter) = entry.split_at(delimiter);
+    let Some(path) = path_with_delimiter.get(1..).filter(|path| !path.is_empty()) else {
+        return Err(NativeGitIndexError::MalformedOutput {
+            operation: "ls-files",
+        });
+    };
+    if metadata.is_empty() {
+        return Err(NativeGitIndexError::MalformedOutput {
+            operation: "ls-files",
+        });
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NativeGitIndexError, index_entry_path};
+
+    #[test]
+    fn index_entry_path_rejects_missing_or_empty_path_bytes() {
+        for malformed in [
+            b"100644 deadbeef 0 path.txt".as_slice(),
+            b"100644 deadbeef 0\t".as_slice(),
+            b"\tpath.txt".as_slice(),
+        ] {
+            assert!(matches!(
+                index_entry_path(malformed),
+                Err(NativeGitIndexError::MalformedOutput {
+                    operation: "ls-files"
+                })
+            ));
+        }
+        assert_eq!(
+            index_entry_path(b"100644 deadbeef 0\tpath\twith-tab.txt").expect("valid entry"),
+            b"path\twith-tab.txt"
+        );
+    }
 }
