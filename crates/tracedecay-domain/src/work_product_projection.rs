@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     TaskId, UtcMicros, WorkGraphVersionV1, WorkItemV1, WorkProductContractError,
-    WorkProductGraphV1, WorkProviderAdmissionV1,
+    WorkProductGraphV1, WorkProviderAdmissionV1, WorkProviderOutcomeV1, WorkProviderTerminalV1,
 };
 
 #[derive(
@@ -53,6 +53,13 @@ impl WorkKanbanProjectionV1 {
             .iter()
             .find(|card| &card.task_id == task_id)
             .map(|card| card.lane)
+    }
+
+    pub fn legal_actions_for(&self, task_id: &TaskId) -> Option<&BTreeSet<WorkLegalActionV1>> {
+        self.cards
+            .iter()
+            .find(|card| &card.task_id == task_id)
+            .map(|card| &card.legal_actions)
     }
 }
 
@@ -193,6 +200,7 @@ pub struct WorkProductProjectionBundleV1 {
 
 impl WorkProductProjectionBundleV1 {
     pub fn from_graph(graph: &WorkProductGraphV1) -> Result<Self, WorkProductContractError> {
+        graph.validate()?;
         let accepted = graph
             .items()
             .iter()
@@ -370,7 +378,7 @@ fn lane(item: &WorkItemV1, accepted: &BTreeSet<&TaskId>, now: UtcMicros) -> Work
     if item.is_accepted() {
         return WorkTimelineLaneV1::Done;
     }
-    if !item.provider_outcomes().is_empty() {
+    if item.current_provider_outcome().is_some() {
         return WorkTimelineLaneV1::Review;
     }
     match item.provider_admission() {
@@ -403,7 +411,7 @@ fn legal_actions(item: &WorkItemV1, accepted: &BTreeSet<&TaskId>) -> BTreeSet<Wo
         actions.insert(WorkLegalActionV1::Archive);
         return actions;
     }
-    if item.provider_outcomes().is_empty() && item.provider_admission().is_none() {
+    if item.current_provider_outcome().is_none() && item.provider_admission().is_none() {
         actions.insert(WorkLegalActionV1::GenerateProposal);
         actions.insert(WorkLegalActionV1::AcceptProposal);
     }
@@ -417,7 +425,9 @@ fn legal_actions(item: &WorkItemV1, accepted: &BTreeSet<&TaskId>) -> BTreeSet<Wo
         actions.insert(WorkLegalActionV1::AdmitProvider);
     }
     match item.provider_admission() {
-        Some(WorkProviderAdmissionV1::Admitted { .. }) if item.provider_outcomes().is_empty() => {
+        Some(WorkProviderAdmissionV1::Admitted { .. })
+            if item.current_provider_outcome().is_none() =>
+        {
             actions.insert(WorkLegalActionV1::RecordOutcome);
             actions.insert(WorkLegalActionV1::CancelAttempt);
             actions.insert(WorkLegalActionV1::RollbackAdmission);
@@ -425,9 +435,15 @@ fn legal_actions(item: &WorkItemV1, accepted: &BTreeSet<&TaskId>) -> BTreeSet<Wo
         Some(WorkProviderAdmissionV1::Cancelled { .. }) => {
             actions.insert(WorkLegalActionV1::RetryAttempt);
         }
-        _ if !item.provider_outcomes().is_empty() => {
+        _ if item.current_provider_outcome().is_some() => {
             actions.insert(WorkLegalActionV1::RetryAttempt);
-            actions.insert(WorkLegalActionV1::AcceptTask);
+            if matches!(
+                item.current_provider_outcome()
+                    .map(WorkProviderOutcomeV1::terminal),
+                Some(WorkProviderTerminalV1::Completed)
+            ) {
+                actions.insert(WorkLegalActionV1::AcceptTask);
+            }
         }
         _ => {}
     }
