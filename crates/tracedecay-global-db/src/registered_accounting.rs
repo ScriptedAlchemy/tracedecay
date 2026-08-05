@@ -374,12 +374,16 @@ impl RegisteredGlobalDb {
         &self,
         turns: &[tracedecay_domain::observability::CostTurn],
         cursor_path: &str,
+        expected_cursor: super::ParseOffset,
         cursor: super::ParseOffset,
     ) -> Result<(usize, f64, u64), String> {
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| format!("failed to begin accounting import transaction: {error}"))?;
+        super::transcript::require_expected_offset(&transaction, cursor_path, expected_cursor)
+            .await
+            .map_err(|error| format!("failed to claim accounting import cursor: {error}"))?;
         let mut inserted = 0usize;
         let mut cost_usd = 0.0;
         let mut tokens = 0u64;

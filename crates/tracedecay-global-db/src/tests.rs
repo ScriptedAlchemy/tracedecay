@@ -512,6 +512,7 @@ async fn analytics_import_cursor_failure_rolls_back_events() {
         db.append_analytics_events_with_cursor(
             &[event],
             "hook_analytics:fixture",
+            ParseOffset::default(),
             ParseOffset {
                 byte_offset: 42,
                 mtime: 7,
@@ -523,6 +524,56 @@ async fn analytics_import_cursor_failure_rolls_back_events() {
     );
     assert_eq!(row_count(db, "analytics_events").await, 0);
     assert_eq!(db.get_parse_offset("hook_analytics:fixture").await, None);
+}
+
+#[tokio::test]
+async fn analytics_import_cursor_conflict_rolls_back_events() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-cursor-conflict").await;
+    let db = &harness.registered;
+    let claimed = ParseOffset {
+        byte_offset: 42,
+        mtime: 7,
+        file_id: 0,
+    };
+    db.set_parse_offset("hook_analytics:fixture", claimed)
+        .await
+        .unwrap();
+    let event = AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: Some("session".to_string()),
+        timestamp: 1,
+        event_kind: "hook_route".to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: None,
+        metadata_json: None,
+    };
+
+    let error = db
+        .append_analytics_events_with_cursor(
+            &[event],
+            "hook_analytics:fixture",
+            ParseOffset::default(),
+            ParseOffset {
+                byte_offset: 84,
+                mtime: 8,
+                file_id: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("parse offset conflict"), "{error}");
+    assert_eq!(row_count(db, "analytics_events").await, 0);
+    assert_eq!(
+        db.get_parse_offset("hook_analytics:fixture").await,
+        Some(claimed)
+    );
 }
 
 #[tokio::test]
@@ -606,6 +657,7 @@ async fn accounting_import_cursor_failure_rolls_back_turns() {
         db.insert_turns_with_cursor(
             &[turn],
             "accounting:fixture",
+            ParseOffset::default(),
             ParseOffset {
                 byte_offset: 42,
                 mtime: 7,
@@ -617,6 +669,55 @@ async fn accounting_import_cursor_failure_rolls_back_turns() {
     );
     assert_eq!(row_count(db, "turns").await, 0);
     assert_eq!(db.get_parse_offset("accounting:fixture").await, None);
+}
+
+#[tokio::test]
+async fn accounting_import_cursor_conflict_rolls_back_turns() {
+    let harness = RegisteredGlobalDbHarness::open("accounting-cursor-conflict").await;
+    let db = &harness.registered;
+    let claimed = ParseOffset {
+        byte_offset: 42,
+        mtime: 7,
+        file_id: 0,
+    };
+    db.set_parse_offset("accounting:fixture", claimed)
+        .await
+        .unwrap();
+    let turn = tracedecay_domain::observability::CostTurn {
+        message_id: "accounting-cursor-turn".to_string(),
+        project_hash: "project".to_string(),
+        session_id: "session".to_string(),
+        model: "test-model".to_string(),
+        timestamp: 1,
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_write_tokens: 0,
+        cache_read_tokens: 0,
+        cost_usd: 0.01,
+        category: "test".to_string(),
+        tool_names: String::new(),
+    };
+
+    let error = db
+        .insert_turns_with_cursor(
+            &[turn],
+            "accounting:fixture",
+            ParseOffset::default(),
+            ParseOffset {
+                byte_offset: 84,
+                mtime: 8,
+                file_id: 0,
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(error.contains("parse offset conflict"), "{error}");
+    assert_eq!(row_count(db, "turns").await, 0);
+    assert_eq!(
+        db.get_parse_offset("accounting:fixture").await,
+        Some(claimed)
+    );
 }
 
 #[tokio::test]

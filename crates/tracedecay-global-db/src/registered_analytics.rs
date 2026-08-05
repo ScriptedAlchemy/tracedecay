@@ -118,12 +118,16 @@ impl RegisteredGlobalDb {
         &self,
         events: &[AnalyticsEventInsert],
         cursor_path: &str,
+        expected_cursor: super::ParseOffset,
         cursor: super::ParseOffset,
     ) -> Result<Vec<i64>, String> {
         let transaction = self
             .begin_write_transaction()
             .await
             .map_err(|error| format!("failed to begin analytics import transaction: {error}"))?;
+        super::transcript::require_expected_offset(&transaction, cursor_path, expected_cursor)
+            .await
+            .map_err(|error| format!("failed to claim analytics import cursor: {error}"))?;
         let mut ids = Vec::with_capacity(events.len());
         for event in events {
             ids.push(append_analytics_event_in_existing_tx(&transaction, event).await?);

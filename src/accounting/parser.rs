@@ -312,6 +312,7 @@ async fn ingest_files(gdb: &RegisteredGlobalDb, files: &[PathBuf]) -> IngestStat
             .insert_turns_with_cursor(
                 &turns,
                 &path_str,
+                prev,
                 crate::global_db::ParseOffset {
                     byte_offset: current_offset,
                     mtime,
