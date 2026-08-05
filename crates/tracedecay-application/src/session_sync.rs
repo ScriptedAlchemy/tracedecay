@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Exact project/profile authority bound to one daemon session-sync service.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSyncScopeV1 {
     project_id: ProjectId,
     profile_id: UserProfileId,
@@ -37,7 +37,7 @@ impl SessionSyncScopeV1 {
 }
 
 /// Imports current and historical transcripts through every native host parser.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTranscriptImportV1;
 
 impl SessionTranscriptImportV1 {
@@ -47,7 +47,7 @@ impl SessionTranscriptImportV1 {
 }
 
 /// Bounded session/Git convergence request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionGitSyncV1 {
     since_unix: i64,
     max_sessions: usize,
@@ -90,7 +90,8 @@ impl SessionGitSyncV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "source", content = "options")]
 pub enum SessionSyncCommandV1 {
     ImportTranscripts(SessionTranscriptImportV1),
     SynchronizeGit(SessionGitSyncV1),
@@ -168,7 +169,7 @@ pub enum SessionSyncAdmissionErrorV1 {
     DeadlineExceeded,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSyncAdmissionReceiptV1 {
     pub operation_id: RequestId,
     pub idempotency_key: IdempotencyKey,
@@ -185,7 +186,7 @@ pub struct SessionSyncStatsV1 {
     pub skipped: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSyncCompletionReceiptV1 {
     pub admission: SessionSyncAdmissionReceiptV1,
     pub completed_at: UtcMicros,
@@ -205,6 +206,85 @@ pub enum SessionSyncOutcomeV1 {
     Unavailable { reason_code: &'static str },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionSyncControlV1 {
+    scope: SessionSyncScopeV1,
+    idempotency_key: IdempotencyKey,
+}
+
+impl SessionSyncControlV1 {
+    pub fn new(scope: SessionSyncScopeV1, idempotency_key: IdempotencyKey) -> Self {
+        Self {
+            scope,
+            idempotency_key,
+        }
+    }
+
+    pub fn scope(&self) -> &SessionSyncScopeV1 {
+        &self.scope
+    }
+
+    pub fn idempotency_key(&self) -> &IdempotencyKey {
+        &self.idempotency_key
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionSyncJournalStatusV1 {
+    Queued,
+    Running,
+    Complete,
+}
+
+/// Durable source/frontier and terminal evidence for one exact idempotency key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSyncJournalV1 {
+    pub admission: SessionSyncAdmissionReceiptV1,
+    pub scope: SessionSyncScopeV1,
+    pub source: SessionSyncCommandV1,
+    pub deadline: Deadline,
+    pub status: SessionSyncJournalStatusV1,
+    pub frontier: SessionSyncStatsV1,
+    pub cancel_requested_at: Option<UtcMicros>,
+    pub completion: Option<SessionSyncCompletionReceiptV1>,
+    pub updated_at: UtcMicros,
+}
+
+impl SessionSyncJournalV1 {
+    pub fn queued(request: &SessionSyncRequestV1, accepted_at: UtcMicros) -> Self {
+        Self {
+            admission: SessionSyncAdmissionReceiptV1 {
+                operation_id: request.operation_id().clone(),
+                idempotency_key: request.idempotency_key().clone(),
+                accepted_at,
+            },
+            scope: request.scope().clone(),
+            source: request.command(),
+            deadline: request.deadline().clone(),
+            status: SessionSyncJournalStatusV1::Queued,
+            frontier: SessionSyncStatsV1::default(),
+            cancel_requested_at: request.cancellation().cancelled_at(),
+            completion: None,
+            updated_at: accepted_at,
+        }
+    }
+
+    pub fn outcome(&self) -> SessionSyncOutcomeV1 {
+        match (&self.status, &self.completion) {
+            (SessionSyncJournalStatusV1::Queued | SessionSyncJournalStatusV1::Running, _) => {
+                SessionSyncOutcomeV1::Joined(self.admission.clone())
+            }
+            (SessionSyncJournalStatusV1::Complete, Some(receipt)) => {
+                SessionSyncOutcomeV1::Complete(receipt.clone())
+            }
+            (SessionSyncJournalStatusV1::Complete, None) => SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_sync_journal_incomplete",
+            },
+        }
+    }
+}
+
 pub type SessionSyncFuture<'a> = Pin<Box<dyn Future<Output = SessionSyncOutcomeV1> + Send + 'a>>;
 pub type SessionSyncShutdownFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
@@ -212,13 +292,16 @@ pub type SessionSyncShutdownFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send 
 /// bounded convergence and return without awaiting transcript discovery.
 pub trait SessionSyncServicePort: Send + Sync {
     fn execute(&self, request: SessionSyncRequestV1) -> SessionSyncFuture<'_>;
+    fn status(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_>;
+    fn cancel(&self, control: SessionSyncControlV1) -> SessionSyncFuture<'_>;
     fn shutdown(&self) -> SessionSyncShutdownFuture<'_>;
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionSyncCommandV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionTranscriptImportV1,
+        SessionSyncCommandV1, SessionSyncJournalStatusV1, SessionSyncJournalV1,
+        SessionSyncOutcomeV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionTranscriptImportV1,
     };
     use crate::{CancellationSignal, Deadline, IdempotencyKey, RequestId};
     use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
@@ -257,5 +340,38 @@ mod tests {
         );
 
         assert!(request.admit_at(UtcMicros(11)).is_err());
+    }
+
+    #[test]
+    fn durable_journal_round_trip_preserves_source_frontier_status_and_cancel() {
+        let cancellation = CancellationSignal::active("session-sync.journal").unwrap();
+        let request = SessionSyncRequestV1::new(
+            RequestId::new("session-sync.journal").unwrap(),
+            IdempotencyKey::new("session-sync.journal").unwrap(),
+            SessionSyncScopeV1::new(
+                ProjectId::new("project.fixture").unwrap(),
+                UserProfileId::new("profile.fixture").unwrap(),
+            ),
+            Deadline::new(UtcMicros(200)).unwrap(),
+            cancellation,
+            SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
+        );
+        let mut journal = SessionSyncJournalV1::queued(&request, UtcMicros(10));
+        journal.status = SessionSyncJournalStatusV1::Running;
+        journal.frontier.sessions_imported = 3;
+        journal.frontier.messages_imported = 8;
+        journal.cancel_requested_at = Some(UtcMicros(50));
+        let encoded = serde_json::to_string(&journal).unwrap();
+        let restored: SessionSyncJournalV1 = serde_json::from_str(&encoded).unwrap();
+
+        assert_eq!(restored.source, request.command());
+        assert_eq!(restored.frontier.sessions_imported, 3);
+        assert_eq!(restored.frontier.messages_imported, 8);
+        assert_eq!(restored.status, SessionSyncJournalStatusV1::Running);
+        assert_eq!(restored.cancel_requested_at, Some(UtcMicros(50)));
+        assert!(matches!(
+            restored.outcome(),
+            SessionSyncOutcomeV1::Joined(_)
+        ));
     }
 }

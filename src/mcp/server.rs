@@ -270,7 +270,7 @@ pub struct McpServer {
     project_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     user_session_refresh_service: Option<Arc<dyn SessionRefreshServicePort>>,
     session_sync_service:
-        Option<Arc<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
+        Option<std::sync::Weak<dyn tracedecay_application::session_sync::SessionSyncServicePort>>,
     project_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     user_session_retrieval_service: Option<Arc<dyn SessionRetrievalServicePort>>,
     /// Owned cancellable project replay worker (daemon-owned servers). Joined on
@@ -672,6 +672,7 @@ impl McpServer {
             user_session_db,
             registered_session_db,
             registered_user_session_db,
+            session_sync_service,
             host_admission_broker,
             project_session_refresh_wake,
             user_session_refresh_wake,
@@ -800,45 +801,6 @@ impl McpServer {
                     None,
                 )) as Arc<dyn SessionRefreshServicePort>
             });
-        let session_sync_service = profile_identity
-            .as_ref()
-            .zip(active_project_id.as_deref())
-            .zip(registered_session_db.as_ref())
-            .zip(registered_user_session_db.as_ref())
-            .zip(registry_db.as_ref())
-            .and_then(
-                |((((identity, project_id), project_sessions), user_sessions), registry)| {
-                    let project_id = match tracedecay_domain::ProjectId::new(project_id) {
-                        Ok(project_id) => project_id,
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                "daemon session sync authority rejected active project identity"
-                            );
-                            return None;
-                        }
-                    };
-                    Some(
-                        Arc::new(crate::daemon::session_sync::DaemonSessionSyncService::new(
-                            crate::daemon::session_sync::DaemonSessionSyncConfig {
-                                brain_id: identity.brain_id().clone(),
-                                profile_id: identity.profile_id().clone(),
-                                project_id,
-                                profile_root: identity.profile_root().to_path_buf(),
-                                project_root: cg.project_root().to_path_buf(),
-                                transcript_source_home: transcript_source_home.clone(),
-                                project_sessions: Arc::clone(project_sessions),
-                                user_sessions: Arc::clone(user_sessions),
-                                registry: Arc::clone(registry),
-                                analytics: accounting_db.clone(),
-                            },
-                        ))
-                            as Arc<
-                                dyn tracedecay_application::session_sync::SessionSyncServicePort,
-                            >,
-                    )
-                },
-            );
         let project_registry_reads = registry_db.as_ref().map(|registry| {
             Arc::new(DaemonProjectRegistryReadService::new(Arc::clone(registry)))
                 as Arc<dyn ProjectRegistryReadPort>
@@ -995,24 +957,15 @@ impl McpServer {
         // D1: startup catch-up sync. Reconciles changes made while the server
         // was down (terminal `git pull`, IDE edits before launch, another
         // tool's writes) so read-only sessions start fresh instead of serving
-        // a stale index forever. `run_startup_catch_up_sync` is non-blocking-
-        // safe (detached transcript ingest, flags flipped on every exit path),
-        // so we spawn it detached and return immediately.
+        // a stale index forever. `run_startup_catch_up_sync` advances its
+        // state on every exit path, so we spawn it and return immediately.
         //
         // Gated on `SyncConfig.session_start_sync` (default true) and single-
         // flighted by the machine's dispatch claim so it runs at most once
         // per server even if two `new_with_dbs` paths overlap.
         //
-        // Claiming dispatch *is* the transition into `Syncing`, which is what
-        // used to require pre-clearing two default-`true` completion flags
-        // before the spawn. Without that pre-clear there was a window between
-        // the spawn and the task's first instruction where both flags still
-        // read `true`, so a caller that reached `wait_for_startup_catch_up`
-        // in that window observed "done" and returned immediately — then the
-        // detached catch-up sync ran concurrently with the caller's own work
-        // (e.g. racing it to index a just-written file). The window cannot
-        // reopen now: no state exists in which a claimed dispatch reads as
-        // settled.
+        // Claiming dispatch is the transition into `Syncing`, so no waiter
+        // can observe a claimed startup walk as already settled.
         if startup_catch_up_enabled
             && server.sync_config.session_start_sync
             && server.startup_catch_up.try_claim_dispatch()

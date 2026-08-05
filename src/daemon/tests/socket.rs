@@ -1412,8 +1412,7 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .expect("daemon profile registry");
     let mut config = crate::config::load_config(&linked).expect("load project config");
     config.sync.session_start_sync = false;
-    crate::config::save_config(&linked, &config)
-        .expect("disable unrelated startup transcript ingestion");
+    crate::config::save_config(&linked, &config).expect("disable unrelated startup catch-up");
 
     registry
         .upsert_code_project(

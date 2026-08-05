@@ -306,9 +306,8 @@ use project_routing::{
 #[cfg(test)]
 use project_server_lifecycle::replay_user_profile_host_admission_for_identity;
 use project_server_lifecycle::{
-    await_user_profile_host_admission_replay_for_identity, cancel_project_server_startup_ingests,
-    schedule_project_server_retirement, schedule_user_profile_host_admission_replay_for_identity,
-    shutdown_project_servers,
+    await_user_profile_host_admission_replay_for_identity, schedule_project_server_retirement,
+    schedule_user_profile_host_admission_replay_for_identity, shutdown_project_servers,
 };
 mod query_mcp_admission;
 #[cfg(unix)]

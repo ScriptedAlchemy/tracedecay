@@ -256,7 +256,6 @@ async fn startup_catch_up_spawned_once_per_server() {
         "startup catch-up should settle"
     );
     assert!(server.startup_catch_up_done());
-    assert!(server.transcript_ingest_done());
 
     // The claim is one-shot for the life of the server: a hypothetical
     // second new_with_dbs-style dispatch is refused even now that the
@@ -268,7 +267,6 @@ async fn startup_catch_up_spawned_once_per_server() {
     // The refused claim must not have dragged the settled machine back into
     // a pending phase.
     assert!(server.startup_catch_up_done());
-    assert!(server.transcript_ingest_done());
 }
 
 /// A dispatched catch-up must never read as settled before it runs. This is
@@ -281,27 +279,18 @@ async fn a_claimed_dispatch_is_never_observed_as_settled() {
 
     let machine = StartupCatchUpMachineV1::default();
     // Undispatched machines are ready: nothing will ever run.
-    assert!(machine.sync_phase_settled_for_test());
-    assert!(machine.ingest_phase_settled_for_test());
+    assert!(machine.settled_for_test());
 
     assert!(machine.try_claim_dispatch());
     assert!(machine.dispatch_claimed());
-    // Claiming the dispatch is itself the transition into `Syncing`, so
-    // there is no window in which both phases read settled.
-    assert!(!machine.sync_phase_settled_for_test());
-    assert!(!machine.ingest_phase_settled_for_test());
-
-    machine.enter_ingesting_for_test();
-    assert!(machine.sync_phase_settled_for_test());
-    assert!(!machine.ingest_phase_settled_for_test());
+    // Claiming dispatch is itself the transition into `Syncing`.
+    assert!(!machine.settled_for_test());
 
     machine.settle_for_test();
-    assert!(machine.sync_phase_settled_for_test());
-    assert!(machine.ingest_phase_settled_for_test());
+    assert!(machine.settled_for_test());
 }
 
-/// Shutdown must leave both phases readable as settled, so a waiter can
-/// never block on a task that was just aborted.
+/// Shutdown must leave the startup sync readable as settled.
 #[tokio::test]
 async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
     use crate::mcp::server::lifecycle::StartupCatchUpMachineV1;
@@ -309,15 +298,11 @@ async fn a_cancelled_machine_reads_as_settled_and_refuses_further_phases() {
     let machine = StartupCatchUpMachineV1::default();
     assert!(machine.try_claim_dispatch());
     machine.mark_cancelled_for_test();
-    assert!(machine.sync_phase_settled_for_test());
-    assert!(machine.ingest_phase_settled_for_test());
+    assert!(machine.settled_for_test());
 
-    // A late in-flight task settling after shutdown must not resurrect the
-    // machine into a non-terminal phase.
-    machine.enter_ingesting_for_test();
+    // A late in-flight task settling after shutdown cannot resurrect it.
     machine.settle_for_test();
-    assert!(machine.sync_phase_settled_for_test());
-    assert!(machine.ingest_phase_settled_for_test());
+    assert!(machine.settled_for_test());
     assert!(!machine.try_claim_dispatch());
 }
 

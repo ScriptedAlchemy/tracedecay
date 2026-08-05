@@ -622,7 +622,6 @@ pub(super) async fn production_project_server(
         ],
     );
     if cancellation.is_cancelled() {
-        core_candidate.cancel_startup_transcript_ingest();
         core_candidate.shutdown().await;
         return Err(project_open_cancellation_error());
     }
@@ -652,7 +651,6 @@ pub(super) async fn production_project_server(
         route_registered.store(false, Ordering::Release);
     } else {
         if cancellation.is_cancelled() {
-            resolved.cancel_startup_transcript_ingest();
             return Err(project_open_cancellation_error());
         }
         if !invocation
@@ -660,7 +658,6 @@ pub(super) async fn production_project_server(
             .register_activation(&code_search_scope, &code_index_activation)
         {
             route_registered.store(false, Ordering::Release);
-            resolved.cancel_startup_transcript_ingest();
             return Err(TraceDecayError::Config {
                 message: "code-index activation scope does not match the project route".to_owned(),
             });
@@ -792,6 +789,28 @@ pub(super) async fn production_project_server(
                     Arc::clone(&user_session_db),
                 )
                 .await;
+            let session_sync_owner = store_administration.session_sync_service();
+            session_sync_owner
+                .register_project(crate::daemon::session_sync::DaemonSessionSyncConfig {
+                    brain_id: profile_identity.brain_id().clone(),
+                    profile_id: profile_identity.profile_id().clone(),
+                    project_id: code_search_project_id.clone(),
+                    profile_root: profile_identity.profile_root().to_path_buf(),
+                    project_root: canonical_project_path.to_path_buf(),
+                    transcript_source_home: transcript_source_home.clone(),
+                    project_sessions: Arc::clone(&session_db),
+                    user_sessions: Arc::clone(&user_session_db),
+                    registry: Arc::clone(&registry_db),
+                    analytics: accounting_db.clone(),
+                    startup_import: cg.get_config().sync.session_start_sync,
+                    project_refresh: project_session_refresh_wake.clone(),
+                    user_refresh: user_session_refresh_wake.clone(),
+                })
+                .await?;
+            let session_sync_port: Arc<
+                dyn tracedecay_application::session_sync::SessionSyncServicePort,
+            > = session_sync_owner;
+            let session_sync_service = Arc::downgrade(&session_sync_port);
             let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
                 canonical_project_path.to_path_buf(),
                 code_search_project_id.clone(),
@@ -850,6 +869,7 @@ pub(super) async fn production_project_server(
                     host_admission_broker,
                     project_session_refresh_wake,
                     user_session_refresh_wake,
+                    session_sync_service,
                     database_owner_reconciler,
                     project_routes: store_administration.project_routes(),
                     writers: crate::mcp::server::McpServerWriters::daemon_owned(
@@ -890,7 +910,6 @@ pub(super) async fn production_project_server(
                 ],
             );
             if *current_key.lock().await != key {
-                full_candidate.cancel_startup_transcript_ingest();
                 full_candidate.shutdown().await;
                 return Err(TraceDecayError::Config {
                     message: "project changed branch during full capability admission".to_owned(),
@@ -904,7 +923,6 @@ pub(super) async fn production_project_server(
                     Arc::ptr_eq(current, &resolved)
                 });
             if !upgraded {
-                full_candidate.cancel_startup_transcript_ingest();
                 full_candidate.shutdown().await;
                 return Err(TraceDecayError::Config {
                     message: "project server changed during session capability upgrade".to_owned(),
@@ -1025,7 +1043,6 @@ pub(super) async fn production_project_server(
             // requests may finish while dependent owners warm, then the
             // displaced server is drained without closing the shared graph.
             resolved.revoke_project_server_responses();
-            resolved.cancel_startup_transcript_ingest();
             schedule_project_server_retirement(
                 store_administration,
                 vec![Arc::clone(&resolved)],
@@ -1084,7 +1101,6 @@ pub(super) async fn production_project_server(
                 if core_retained {
                     if let Some(failed_full_server) = failed_full_server {
                         failed_full_server.revoke_project_server_responses();
-                        failed_full_server.cancel_startup_transcript_ingest();
                         schedule_project_server_retirement(
                             store_administration,
                             vec![failed_full_server],
@@ -1120,7 +1136,6 @@ pub(super) async fn production_project_server(
                     }
                     for server in &removed {
                         server.revoke_project_server_responses();
-                        server.cancel_startup_transcript_ingest();
                     }
                     debug_assert!(
                         !removed.is_empty(),

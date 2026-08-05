@@ -800,6 +800,7 @@ impl DaemonEngine {
         self.store_administration
             .shutdown_retirement_reapers()
             .await;
+        self.store_administration.shutdown_session_sync().await;
         self.store_administration
             .shutdown_host_admission_replay()
             .await;

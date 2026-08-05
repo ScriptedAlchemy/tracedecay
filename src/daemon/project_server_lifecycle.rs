@@ -1,5 +1,5 @@
-//! Project-server teardown: ingest cancellation, detach, request draining,
-//! retirement, and per-profile host admission replay.
+//! Project-server teardown: detach, request draining, retirement, and
+//! per-profile host admission replay.
 //!
 //! Retirement waits for in-flight requests before aborting, so a rekey or a
 //! shutdown never leaves a store mid-write.
@@ -9,23 +9,6 @@
 //! `daemon` module had in scope so the moved code resolves unchanged.
 
 use super::*;
-
-pub(super) async fn cancel_project_server_startup_ingests(
-    store_administration: &StoreAdministration,
-) {
-    let servers = {
-        let registry = store_administration.project_servers().lock().await;
-        let mut seen = HashSet::new();
-        registry
-            .values()
-            .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    for server in servers {
-        server.cancel_startup_transcript_ingest();
-    }
-}
 
 pub(super) async fn shutdown_project_servers(store_administration: &StoreAdministration) {
     store_administration.join_project_server_retirements().await;

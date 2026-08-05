@@ -5,7 +5,6 @@ use super::*;
 
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
-const STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Why a detached branch reopen was kicked. The two triggers differ only in
 /// whether the reopen re-checks for drift before running.
@@ -26,25 +25,11 @@ impl BranchReopenTrigger {
     }
 }
 
-async fn join_or_abort_startup_ingest(
-    mut task: tokio::task::JoinHandle<()>,
-    deadline: Duration,
-) -> bool {
-    if tokio::time::timeout(deadline, &mut task).await.is_ok() {
-        return true;
-    }
-    task.abort();
-    let _ = task.await;
-    false
-}
-
-/// Retained startup task handles, carried by the phases that can still own
-/// one. Both are joined (or aborted) by shutdown before database authorities
-/// are released.
+/// Retained startup index-sync task, joined or aborted before the code graph
+/// authority is released.
 #[derive(Default)]
 pub(crate) struct StartupCatchUpTasksV1 {
     sync: Option<tokio::task::JoinHandle<()>>,
-    ingest: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// The startup catch-up lifecycle as one linear machine.
@@ -65,37 +50,20 @@ pub(crate) enum StartupCatchUpStateV1 {
     NotStarted,
     /// The synchronous index sync is running.
     Syncing { tasks: StartupCatchUpTasksV1 },
-    /// The index sync finished; the detached transcript ingest is in flight.
-    Ingesting { tasks: StartupCatchUpTasksV1 },
-    /// Both phases finished — including the failure paths, which settle
-    /// rather than stranding waiters.
+    /// The index sync finished, including failure paths.
     Settled { tasks: StartupCatchUpTasksV1 },
-    /// Shutdown tore the machine down. Ready, so a shutdown can never leave
-    /// a waiter blocked on a task that was just aborted.
+    /// Shutdown tore the machine down.
     Cancelled,
 }
 
 impl StartupCatchUpStateV1 {
-    /// True once the *synchronous* index-sync phase can no longer be
-    /// pending — the old `startup_catch_up_done` flag.
-    const fn sync_phase_settled(&self) -> bool {
+    const fn settled(&self) -> bool {
         !matches!(self, Self::Syncing { .. })
-    }
-
-    /// True once the detached transcript ingest can no longer be pending —
-    /// the old `transcript_ingest_done` flag.
-    const fn ingest_phase_settled(&self) -> bool {
-        matches!(
-            self,
-            Self::NotStarted | Self::Settled { .. } | Self::Cancelled
-        )
     }
 
     fn tasks_mut(&mut self) -> Option<&mut StartupCatchUpTasksV1> {
         match self {
-            Self::Syncing { tasks } | Self::Ingesting { tasks } | Self::Settled { tasks } => {
-                Some(tasks)
-            }
+            Self::Syncing { tasks } | Self::Settled { tasks } => Some(tasks),
             Self::NotStarted | Self::Cancelled => None,
         }
     }
@@ -105,12 +73,10 @@ impl StartupCatchUpStateV1 {
     }
 }
 
-/// Owns the startup catch-up state plus the ingest cancellation that the
-/// detached task honours.
+/// Owns the startup index catch-up state.
 ///
-/// Held behind an `Arc` on the server so the spawned ingest task can signal
-/// completion through the same lock the waiters read, instead of through a
-/// separate `Arc<AtomicBool>` that could disagree with the retained handle.
+/// Held behind an `Arc` on the server so the spawned sync task can signal
+/// completion through the same lock the waiters read.
 /// The lock is a `std::sync::Mutex` on purpose: every critical section is a
 /// phase swap or a handle take, and joins always happen *outside* it, so the
 /// sync readiness accessors stay callable from non-async code.
@@ -119,7 +85,6 @@ pub(crate) struct StartupCatchUpMachineV1 {
     /// Set once the first dispatch claims the machine. Kept distinct from
     /// the phase so a completed catch-up still refuses a second dispatch.
     dispatched: std::sync::atomic::AtomicBool,
-    cancellation: crate::application::observation::ObservationCancellation,
 }
 
 impl Default for StartupCatchUpMachineV1 {
@@ -127,7 +92,6 @@ impl Default for StartupCatchUpMachineV1 {
         Self {
             state: std::sync::Mutex::new(StartupCatchUpStateV1::NotStarted),
             dispatched: std::sync::atomic::AtomicBool::new(false),
-            cancellation: crate::application::observation::ObservationCancellation::default(),
         }
     }
 }
@@ -137,10 +101,6 @@ impl StartupCatchUpMachineV1 {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    pub(crate) fn cancellation(&self) -> &crate::application::observation::ObservationCancellation {
-        &self.cancellation
     }
 
     /// One-shot dispatch claim. The first caller wins and the machine enters
@@ -181,20 +141,7 @@ impl StartupCatchUpMachineV1 {
         *state = StartupCatchUpStateV1::Syncing { tasks };
     }
 
-    /// Index sync finished; the detached ingest is about to be spawned.
-    /// Called *before* the spawn so the ingest task can never settle a
-    /// machine that still claims to be syncing.
-    fn enter_ingesting(&self) {
-        let mut state = self.state();
-        if matches!(*state, StartupCatchUpStateV1::Cancelled) {
-            return;
-        }
-        let tasks = state.take_tasks();
-        *state = StartupCatchUpStateV1::Ingesting { tasks };
-    }
-
-    /// Both phases are done. Used by the ingest task on every exit path and
-    /// by the index-sync failure path, so a failure never strands waiters.
+    /// The index-sync phase is done.
     fn settle(&self) {
         let mut state = self.state();
         if matches!(*state, StartupCatchUpStateV1::Cancelled) {
@@ -213,46 +160,17 @@ impl StartupCatchUpMachineV1 {
         }
     }
 
-    fn install_ingest_task(&self, task: tokio::task::JoinHandle<()>) {
-        let mut state = self.state();
-        match state.tasks_mut() {
-            Some(tasks) => tasks.ingest = Some(task),
-            None => task.abort(),
-        }
-    }
-
     fn take_sync_task(&self) -> Option<tokio::task::JoinHandle<()>> {
         self.state().tasks_mut().and_then(|tasks| tasks.sync.take())
     }
 
-    fn take_ingest_task(&self) -> Option<tokio::task::JoinHandle<()>> {
-        self.state()
-            .tasks_mut()
-            .and_then(|tasks| tasks.ingest.take())
-    }
-
-    /// Shutdown abandoned the index-sync phase: it is no longer pending,
-    /// but the ingest teardown below still has to run.
-    fn abandon_sync_phase(&self) {
-        let mut state = self.state();
-        if matches!(*state, StartupCatchUpStateV1::Syncing { .. }) {
-            let tasks = state.take_tasks();
-            *state = StartupCatchUpStateV1::Ingesting { tasks };
-        }
-    }
-
-    /// Terminal shutdown state. Both phases read as settled so no waiter
-    /// blocks on work that was just aborted.
+    /// Terminal shutdown state.
     fn mark_cancelled(&self) {
         *self.state() = StartupCatchUpStateV1::Cancelled;
     }
 
-    fn sync_phase_settled(&self) -> bool {
-        self.state().sync_phase_settled()
-    }
-
-    fn ingest_phase_settled(&self) -> bool {
-        self.state().ingest_phase_settled()
+    fn settled(&self) -> bool {
+        self.state().settled()
     }
 }
 
@@ -266,16 +184,8 @@ impl StartupCatchUpMachineV1 {
         self.dispatched.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    pub(super) fn sync_phase_settled_for_test(&self) -> bool {
-        self.sync_phase_settled()
-    }
-
-    pub(super) fn ingest_phase_settled_for_test(&self) -> bool {
-        self.ingest_phase_settled()
-    }
-
-    pub(super) fn enter_ingesting_for_test(&self) {
-        self.enter_ingesting();
+    pub(super) fn settled_for_test(&self) -> bool {
+        self.settled()
     }
 
     pub(super) fn settle_for_test(&self) {
@@ -338,189 +248,6 @@ impl ProjectServerResponseLifecycle {
     }
 }
 
-/// Runs the project and user transcript portions of startup recovery against
-/// daemon-retained authorities. Project recovery is independent: a missing
-/// user or registry authority skips only the user sweep.
-fn log_startup_transcript_ingest_failure(
-    scope: &str,
-    failure: &crate::sessions::TranscriptCatchUpFailure,
-) {
-    tracing::warn!(
-        scope,
-        provider = failure.provider,
-        source = failure.source,
-        reason_code = failure.reason_code,
-        retryable = failure.retryable,
-        source_offset = ?failure.source_locator.map(tracedecay_domain::ObservationSourceRangeV1::start),
-        source_end_offset = ?failure.source_locator.map(tracedecay_domain::ObservationSourceRangeV1::end),
-        "startup transcript ingest incomplete"
-    );
-}
-
-/// What one startup catch-up pass actually did, per scope.
-///
-/// Both fields report observed outcomes, never intent: the user scope in
-/// particular is skipped by several paths (missing authority, an early
-/// return before the sweep, cancellation, or session storage with no profile
-/// root), and callers that wake the temporal refresh scheduler must not fire
-/// on a sweep that never ran.
-#[derive(Default)]
-pub(super) struct StartupSessionCatchUpOutcome {
-    /// The project session authority, present only when the project sweep
-    /// completed successfully.
-    pub(super) project_sessions: Option<Arc<RegisteredGlobalDb>>,
-    /// True only when the user transcript sweep actually ran to completion.
-    pub(super) user_sweep_completed: bool,
-}
-
-pub(super) async fn run_startup_session_catch_up(
-    sessions: Option<Arc<RegisteredGlobalDb>>,
-    user_sessions: Option<Arc<RegisteredGlobalDb>>,
-    registry_db: Option<Arc<RegisteredGlobalDb>>,
-    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    project_root: &Path,
-    project_id: Option<&str>,
-    cancellation: &crate::application::observation::ObservationCancellation,
-) -> StartupSessionCatchUpOutcome {
-    let Some(sessions) = sessions else {
-        tracing::warn!(
-            project_root = %project_root.display(),
-            "startup project transcript ingest skipped because authoritative session storage is unavailable"
-        );
-        return StartupSessionCatchUpOutcome::default();
-    };
-    let Some(profile_identity) = profile_identity else {
-        tracing::warn!(
-            project_root = %project_root.display(),
-            "startup transcript ingest skipped because durable profile identity is unavailable"
-        );
-        return StartupSessionCatchUpOutcome::default();
-    };
-    let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
-    // Build the authority over an owned `Arc` rather than a borrow: a
-    // lifetime-free authority type keeps the downstream auto-trait obligation
-    // first-order, which is what lets the spawned startup future prove `Send`.
-    let project_authority =
-        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&sessions));
-    let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
-        profile_identity.brain_id(),
-        profile_identity.profile_id(),
-        &project_authority,
-        project_root,
-        project_id,
-        None,
-        true,
-        cancellation,
-    )
-    .await;
-    for failure in &project_outcome.failures {
-        log_startup_transcript_ingest_failure("project", failure);
-    }
-    if cancellation.is_cancelled() {
-        return StartupSessionCatchUpOutcome::default();
-    }
-    let mut user_sweep_completed = false;
-    if let (Some(user_sessions), Some(registry_db)) = (user_sessions, registry_db) {
-        if let Some(profile_root) = user_sessions.db_path().parent() {
-            let user_authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&user_sessions));
-            let registry_authority =
-                crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(&registry_db));
-            let outcome = crate::sessions::ingest_user_global_sources_for_startup_with_db(
-                profile_identity.brain_id(),
-                profile_identity.profile_id(),
-                &user_authority,
-                &registry_authority,
-                profile_root,
-                cancellation,
-            )
-            .await;
-            for failure in &outcome.failures {
-                log_startup_transcript_ingest_failure("user", failure);
-            }
-            user_sweep_completed = true;
-        } else {
-            tracing::warn!(
-                "startup user transcript ingest skipped because session storage has no profile root"
-            );
-        }
-    } else {
-        tracing::warn!(
-            "startup user transcript ingest skipped because session or registry storage is unavailable"
-        );
-    }
-    StartupSessionCatchUpOutcome {
-        project_sessions: project_outcome.is_success().then_some(sessions),
-        user_sweep_completed,
-    }
-}
-
-async fn run_startup_session_catch_up_with_home(
-    transcript_source_home: Option<PathBuf>,
-    sessions: Option<Arc<RegisteredGlobalDb>>,
-    user_sessions: Option<Arc<RegisteredGlobalDb>>,
-    registry_db: Option<Arc<RegisteredGlobalDb>>,
-    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    project_root: PathBuf,
-    project_id: Option<String>,
-    cancellation: crate::application::observation::ObservationCancellation,
-) -> StartupSessionCatchUpOutcome {
-    // Own every capture inside the future passed to
-    // `with_transcript_source_home`: `task_local::scope` returns
-    // `impl Future + Send`, and the auto-trait leak check cannot prove Send
-    // "general enough" while the wrapped future's type borrows these locals
-    // (E0477 notes on `&Path` / `&RegisteredGlobalDb`).
-    let catch_up = async move {
-        run_startup_session_catch_up(
-            sessions,
-            user_sessions,
-            registry_db,
-            profile_identity,
-            project_root.as_path(),
-            project_id.as_deref(),
-            &cancellation,
-        )
-        .await
-    };
-    match transcript_source_home {
-        Some(home) => crate::sessions::with_transcript_source_home(home, catch_up).await,
-        None => catch_up.await,
-    }
-}
-
-async fn run_startup_session_post_ingest(
-    db: Arc<RegisteredGlobalDb>,
-    analytics_db: Option<Arc<RegisteredGlobalDb>>,
-    project_root: PathBuf,
-    cancellation: crate::application::observation::ObservationCancellation,
-) -> bool {
-    let git = crate::sessions::git_correlation::SystemGit;
-    let _ = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(&db))
-        .run_incremental_backfill(
-            &git,
-            crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
-        )
-        .await;
-    if cancellation.is_cancelled() {
-        return false;
-    }
-    if let Some(analytics_db) = analytics_db {
-        let sources = crate::analytics_bridge::hook_import_sources(Some(&project_root));
-        let _ =
-            crate::analytics_bridge::import_hook_analytics(analytics_db.as_ref(), sources).await;
-        let project_id = RegisteredGlobalDb::canonical_project_key(&project_root);
-        let now = crate::tracedecay::current_timestamp();
-        crate::application::hint_outcomes::observe_registered_hint_outcomes(
-            analytics_db.as_ref(),
-            db.as_ref(),
-            project_id.as_str(),
-            now,
-        )
-        .await;
-    }
-    true
-}
-
 /// Shared compare-and-swap cooldown gate for the lazy staleness check,
 /// background read refresh, and automation-notice check below. Each
 /// wraps one `AtomicI64` timestamp field on [`McpServer`]; `try_claim`
@@ -575,33 +302,13 @@ impl McpServer {
         }
     }
 
-    pub(crate) fn cancel_startup_transcript_ingest(&self) {
-        self.startup_catch_up.cancellation().cancel();
-    }
-
-    pub(super) async fn shutdown_startup_transcript_ingest(&self) {
-        self.cancel_startup_transcript_ingest();
-        if let Some(task) = self.startup_catch_up.take_ingest_task()
-            && !join_or_abort_startup_ingest(task, STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE).await
-        {
-            tracing::warn!(
-                deadline_secs = STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE.as_secs(),
-                "startup transcript ingest shutdown backstop aborted and joined the task"
-            );
-        }
-        self.startup_catch_up.mark_cancelled();
-    }
-
-    /// Shutdown-side teardown of the index-sync phase, in the order
-    /// [`Self::shutdown_background_tasks`] requires: abort and join the
-    /// retained handle first, then record that the phase is no longer
-    /// pending, and only afterwards tear down the ingest.
+    /// Shutdown-side teardown of the startup index-sync phase.
     pub(super) async fn shutdown_startup_catch_up_sync(&self) {
         if let Some(task) = self.startup_catch_up.take_sync_task() {
             task.abort();
             let _ = task.await;
-            self.startup_catch_up.abandon_sync_phase();
         }
+        self.startup_catch_up.mark_cancelled();
     }
 
     /// Detects mid-session branch drift, kicks the reopen onto the live
@@ -784,123 +491,18 @@ impl McpServer {
             .as_secs() as i64;
         self.last_staleness_check_at.store(now, Ordering::Release);
 
-        // Best-effort transcript ingestion sweep for hookless agents (Claude,
-        // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
-        // agents register no hook, so their transcripts are reconciled here.
-        // Detached so it never delays MCP readiness. Do not wrap the database
-        // work in a timeout: cancelling it after BEGIN could leave the shared
-        // connection inside an open transaction. Callers that need a bounded
-        // readiness wait use `wait_for_startup_catch_up` instead.
-        // The machine is moved to `Ingesting` *before* the spawn and settled
-        // from inside it (via an `Arc` clone), so tests that assert on LCM
-        // store content can wait for both phases via
-        // `wait_for_startup_catch_up`.
-        {
-            self.startup_catch_up.enter_ingesting();
-            let project_root = cg.project_root().to_path_buf();
-            let project_id = cg.store_layout().identity.project_id.clone();
-            // `session_db`/`registered_session_db` (and the user pair) are set
-            // from the same `Arc` by every construction site, so startup
-            // catch-up takes one authority per scope rather than two.
-            let sessions = self.session_db.clone();
-            let user_sessions = self.user_session_db.clone();
-            let registry_db = self.registry_db.clone();
-            let profile_identity = self.profile_identity.clone();
-            let project_session_refresh_wake = self.project_session_refresh_wake.clone();
-            let user_session_refresh_wake = self.user_session_refresh_wake.clone();
-            let machine = Arc::clone(&self.startup_catch_up);
-            let cancellation = self.startup_catch_up.cancellation().clone();
-            let analytics_db = self.accounting_db.clone();
-            let transcript_source_home = self.transcript_source_home.clone();
-            let task = tokio::spawn(async move {
-                let catch_up = run_startup_session_catch_up_with_home(
-                    transcript_source_home,
-                    sessions,
-                    user_sessions,
-                    registry_db,
-                    profile_identity,
-                    project_root.clone(),
-                    project_id,
-                    cancellation.clone(),
-                )
-                .await;
-                if let Some(db) = catch_up.project_sessions {
-                    if cancellation.is_cancelled() {
-                        machine.settle();
-                        return;
-                    }
-                    if let Some(wake) = &project_session_refresh_wake {
-                        wake.wake();
-                    }
-                    // Historical git-span correlation is only ever written by
-                    // live hook events (which never fire for stdio/daemonless
-                    // deployments) or a manual CLI backfill. Neither runs for
-                    // most projects, leaving `session_git_spans` empty so
-                    // `sessions_for` silently returns nothing. Drain that
-                    // history here — one bounded, watermarked pass per startup
-                    // — so correlation self-heals without a manual invocation.
-                    // With transcripts freshly ingested into `db`'s
-                    // session_messages, close the hint-efficacy loop: import
-                    // any new hook telemetry into the durable analytics store
-                    // and correlate emitted hints against the tool activity
-                    // that followed them. Best-effort and idempotent (own
-                    // parse cursors + hint_outcome watermark), so it never
-                    // blocks readiness and re-runs safely each startup.
-                    // Boxed with an explicit `Send` bound: proving the
-                    // post-ingest future Send inside this spawned block trips
-                    // rustc's higher-ranked leak check; at this narrower scope
-                    // the same proof discharges first-order.
-                    let post_ingest: std::pin::Pin<
-                        Box<dyn std::future::Future<Output = bool> + Send>,
-                    > = Box::pin(run_startup_session_post_ingest(
-                        db,
-                        analytics_db,
-                        project_root,
-                        cancellation.clone(),
-                    ));
-                    if !post_ingest.await {
-                        machine.settle();
-                        return;
-                    }
-                }
-                // Wake on the observed sweep, not on the authorities being
-                // present: every skip path above (missing authority, early
-                // return, cancellation, absent profile root) leaves nothing
-                // new for the temporal refresh scheduler to pick up.
-                if catch_up.user_sweep_completed
-                    && let Some(wake) = &user_session_refresh_wake
-                {
-                    wake.wake();
-                }
-                machine.settle();
-            });
-            self.startup_catch_up.install_ingest_task(task);
-        }
+        self.startup_catch_up.settle();
     }
 
-    /// Returns `true` once the *synchronous* portion of
-    /// [`Self::run_startup_catch_up_sync`] has finished (the file-tree walk
-    /// and index sync). See [`Self::transcript_ingest_done`] for the
-    /// detached ingest task.
+    /// Returns `true` once the startup file-tree walk and index sync finished.
     pub fn startup_catch_up_done(&self) -> bool {
-        self.startup_catch_up.sync_phase_settled()
+        self.startup_catch_up.settled()
     }
 
-    /// Returns `true` once the detached transcript-ingest task spawned by
-    /// [`Self::run_startup_catch_up_sync`] has completed (success or error).
-    pub fn transcript_ingest_done(&self) -> bool {
-        self.startup_catch_up.ingest_phase_settled()
-    }
-
-    /// Polls until both the synchronous catch-up sync *and* the detached
-    /// transcript-ingest task have completed, or until `timeout` elapses.
-    /// Returns `true` if both completed within the budget.
-    ///
-    /// Tests use this so neither the index walk nor the transcript ingest
-    /// races against later DB assertions.
+    /// Polls until the startup index catch-up completes or `timeout` elapses.
     pub async fn wait_for_startup_catch_up(&self, timeout: std::time::Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
-        while !self.startup_catch_up_done() || !self.transcript_ingest_done() {
+        while !self.startup_catch_up_done() {
             if tokio::time::Instant::now() >= deadline {
                 return false;
             }
@@ -1145,44 +747,5 @@ impl McpServer {
         } else {
             None
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
-
-    use super::join_or_abort_startup_ingest;
-
-    struct Dropped(Arc<AtomicBool>);
-
-    impl Drop for Dropped {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    #[tokio::test]
-    async fn startup_ingest_timeout_aborts_and_joins_instead_of_detaching() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let task_dropped = Arc::clone(&dropped);
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let _dropped = Dropped(task_dropped);
-            let _ = entered_tx.send(());
-            std::future::pending::<()>().await;
-        });
-        entered_rx.await.expect("startup ingest task entered");
-
-        assert!(
-            !join_or_abort_startup_ingest(task, Duration::from_millis(5)).await,
-            "a stuck startup ingest must use the abort backstop"
-        );
-        assert!(
-            dropped.load(Ordering::Acquire),
-            "the aborted task must be joined before shutdown continues"
-        );
     }
 }
