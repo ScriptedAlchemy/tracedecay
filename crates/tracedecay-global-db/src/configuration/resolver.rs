@@ -39,57 +39,6 @@ impl ConfigurationLayerV1 {
     }
 }
 
-/// The evidence source supplying a resolution input. Source precedence is
-/// explicit so migration adapters cannot hide environment behavior in local
-/// defaulting code. Within one canonical layer, legacy host profile values are
-/// applied first, followed by `config.json`, then parseable environment
-/// overrides; canonical control-plane values remain highest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ConfigurationResolutionInputSourceV1 {
-    LegacyHostProfile,
-    LegacyConfigJson,
-    LegacyEnvironment,
-    Canonical,
-}
-
-impl ConfigurationResolutionInputSourceV1 {
-    const fn precedence(self) -> u8 {
-        match self {
-            Self::LegacyHostProfile => 0,
-            Self::LegacyConfigJson => 1,
-            Self::LegacyEnvironment => 2,
-            Self::Canonical => 3,
-        }
-    }
-
-    const fn override_reason(self) -> &'static str {
-        match self {
-            Self::LegacyHostProfile => "higher_precedence_legacy_host_profile",
-            Self::LegacyConfigJson => "higher_precedence_legacy_config_json",
-            Self::LegacyEnvironment => "higher_precedence_legacy_environment",
-            Self::Canonical => "higher_precedence_layer",
-        }
-    }
-
-    const fn winning_reason(self) -> &'static str {
-        match self {
-            Self::LegacyHostProfile => "highest_valid_legacy_host_profile",
-            Self::LegacyConfigJson => "highest_valid_legacy_config_json",
-            Self::LegacyEnvironment => "highest_valid_legacy_environment",
-            Self::Canonical => "highest_valid_precedence",
-        }
-    }
-}
-
-/// One explicitly sourced input to deterministic configuration resolution.
-/// A source is not itself durable authority: its values still require a
-/// canonical layer and revision supplied by the caller.
-#[derive(Clone, Debug)]
-pub struct ConfigurationResolutionInputV1 {
-    pub source: ConfigurationResolutionInputSourceV1,
-    pub layer: ConfigurationLayerV1,
-}
-
 #[derive(Clone, Debug)]
 pub struct ResolvedSettingV1 {
     pub definition: SettingDefinitionV1,
@@ -115,13 +64,6 @@ pub enum ConfigurationResolutionError {
     DuplicateLayer(ConfigurationLayerIdV1),
     #[error("configuration resolution contains competing {0:?} layers")]
     CompetingLayerKind(ConfigurationLayerKindV1),
-    #[error("duplicate configuration resolution input: {layer:?} from {input_source:?}")]
-    DuplicateResolutionInput {
-        layer: ConfigurationLayerIdV1,
-        input_source: ConfigurationResolutionInputSourceV1,
-    },
-    #[error("configuration resolution input changes the revision for layer {0:?}")]
-    CompetingLayerRevision(ConfigurationLayerIdV1),
     #[error("setting {key} cannot be placed in {layer:?}")]
     InvalidLayerForSetting {
         key: SettingKey,
@@ -152,71 +94,13 @@ pub fn resolve_configuration(
         }
     }
 
-    let inputs: Vec<_> = layers
-        .iter()
-        .cloned()
-        .map(|layer| ConfigurationResolutionInputV1 {
-            source: ConfigurationResolutionInputSourceV1::Canonical,
-            layer,
-        })
-        .collect();
-    resolve_configuration_inputs(registry, &inputs)
-}
-
-/// Resolve explicitly sourced inputs. The source order is part of the pure
-/// input contract: for a shared layer, `LegacyEnvironment` wins over
-/// `LegacyConfigJson`, rather than a legacy adapter applying hidden mutation
-/// after resolution. Canonical layer precedence remains primary across
-/// distinct layer identities.
-pub fn resolve_configuration_inputs(
-    registry: &ConfigurationRegistry,
-    inputs: &[ConfigurationResolutionInputV1],
-) -> Result<ConfigurationResolutionV1, ConfigurationResolutionError> {
-    let mut seen_inputs = BTreeSet::new();
-    let mut layers_by_kind = BTreeMap::new();
-    let mut revisions_by_layer = BTreeMap::new();
-    for input in inputs {
-        input.layer.validate(registry)?;
-        if !seen_inputs.insert((input.layer.layer.clone(), input.source)) {
-            return Err(ConfigurationResolutionError::DuplicateResolutionInput {
-                layer: input.layer.layer.clone(),
-                input_source: input.source,
-            });
-        }
-        match layers_by_kind.get(&input.layer.layer.kind()) {
-            Some(existing) if existing != &input.layer.layer => {
-                return Err(ConfigurationResolutionError::CompetingLayerKind(
-                    input.layer.layer.kind(),
-                ));
-            }
-            Some(_) => {}
-            None => {
-                layers_by_kind.insert(input.layer.layer.kind(), input.layer.layer.clone());
-            }
-        }
-        match revisions_by_layer.get(&input.layer.layer) {
-            Some(existing) if existing != &input.layer.revision_id => {
-                return Err(ConfigurationResolutionError::CompetingLayerRevision(
-                    input.layer.layer.clone(),
-                ));
-            }
-            Some(_) => {}
-            None => {
-                revisions_by_layer
-                    .insert(input.layer.layer.clone(), input.layer.revision_id.clone());
-            }
-        }
-    }
-
-    let mut ordered_inputs: Vec<_> = inputs.iter().collect();
-    ordered_inputs.sort_by(|left, right| {
+    let mut ordered_layers = layers.iter().collect::<Vec<_>>();
+    ordered_layers.sort_by(|left, right| {
         left.layer
-            .layer
             .kind()
             .precedence()
-            .cmp(&right.layer.layer.kind().precedence())
-            .then_with(|| left.layer.layer.cmp(&right.layer.layer))
-            .then_with(|| left.source.precedence().cmp(&right.source.precedence()))
+            .cmp(&right.layer.kind().precedence())
+            .then_with(|| left.layer.cmp(&right.layer))
     });
 
     let default_candidate = registry_default_candidate()?;
@@ -228,8 +112,7 @@ pub fn resolve_configuration_inputs(
         let mut effective_value = definition.default_value.clone();
         let mut candidates = vec![default_candidate.clone()];
 
-        for input in &ordered_inputs {
-            let layer = &input.layer;
+        for layer in &ordered_layers {
             let Some(value) = layer.entries.get(&definition.key) else {
                 continue;
             };
@@ -242,14 +125,14 @@ pub fn resolve_configuration_inputs(
             registry.validate_value(&definition.key, value)?;
             if let Some(previous) = candidates.last_mut() {
                 previous.disposition = CandidateDispositionV1::Overridden;
-                previous.safe_reason = Some(input.source.override_reason().to_owned());
+                previous.safe_reason = Some("higher_precedence_layer".to_owned());
             }
             effective_value = value.clone();
             candidates.push(ConfigurationCandidateV1 {
                 layer: layer.layer.clone(),
                 revision_id: layer.revision_id.clone(),
                 disposition: CandidateDispositionV1::Winning,
-                safe_reason: Some(input.source.winning_reason().to_owned()),
+                safe_reason: Some("highest_valid_precedence".to_owned()),
             });
         }
 
@@ -297,7 +180,7 @@ mod tests {
     use super::*;
     use tracedecay_domain::configuration::{
         ANALYZER_SETTINGS_SETTING_KEY, AnalyzerSettingsV1, ConfigurationLayerIdV1,
-        ConfigurationValueV1, SYNC_AUTO_WATCH_SETTING_KEY, UserProfileId,
+        ConfigurationValueV1, UserProfileId,
     };
 
     fn id<T>(value: &str) -> T
@@ -387,92 +270,6 @@ mod tests {
             Err(ConfigurationResolutionError::CompetingLayerKind(
                 ConfigurationLayerKindV1::Project
             ))
-        ));
-    }
-
-    #[test]
-    fn explicit_legacy_environment_input_overrides_config_json_within_one_layer() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let layer = ConfigurationLayerIdV1::Project {
-            project_id: id("project.fixture"),
-        };
-        let config_json = ConfigurationResolutionInputV1 {
-            source: ConfigurationResolutionInputSourceV1::LegacyConfigJson,
-            layer: ConfigurationLayerV1 {
-                layer: layer.clone(),
-                revision_id: id("revision.legacy"),
-                entries: BTreeMap::from([(
-                    id(SYNC_AUTO_WATCH_SETTING_KEY),
-                    ConfigurationValueV1::Boolean(true),
-                )]),
-            },
-        };
-        let environment = ConfigurationResolutionInputV1 {
-            source: ConfigurationResolutionInputSourceV1::LegacyEnvironment,
-            layer: ConfigurationLayerV1 {
-                layer,
-                revision_id: id("revision.legacy"),
-                entries: BTreeMap::from([(
-                    id(SYNC_AUTO_WATCH_SETTING_KEY),
-                    ConfigurationValueV1::Boolean(false),
-                )]),
-            },
-        };
-
-        let resolution = resolve_configuration_inputs(&registry, &[environment, config_json])
-            .expect("source precedence is explicit, not caller-order dependent");
-        let setting = resolution
-            .settings
-            .get(&id(SYNC_AUTO_WATCH_SETTING_KEY))
-            .unwrap();
-        assert_eq!(
-            setting.effective_value,
-            ConfigurationValueV1::Boolean(false)
-        );
-        assert_eq!(setting.candidates.len(), 3);
-        assert_eq!(
-            setting.candidates[1].safe_reason.as_deref(),
-            Some("higher_precedence_legacy_environment")
-        );
-        assert_eq!(
-            setting
-                .candidates
-                .last()
-                .and_then(|candidate| candidate.safe_reason.as_deref()),
-            Some("highest_valid_legacy_environment")
-        );
-    }
-
-    #[test]
-    fn one_layer_cannot_claim_multiple_revisions_across_input_sources() {
-        let registry = ConfigurationRegistry::core().unwrap();
-        let layer = ConfigurationLayerIdV1::Project {
-            project_id: id("project.fixture"),
-        };
-        let inputs = [
-            ConfigurationResolutionInputV1 {
-                source: ConfigurationResolutionInputSourceV1::LegacyConfigJson,
-                layer: ConfigurationLayerV1 {
-                    layer: layer.clone(),
-                    revision_id: id("revision.config-json"),
-                    entries: BTreeMap::new(),
-                },
-            },
-            ConfigurationResolutionInputV1 {
-                source: ConfigurationResolutionInputSourceV1::LegacyEnvironment,
-                layer: ConfigurationLayerV1 {
-                    layer: layer.clone(),
-                    revision_id: id("revision.environment"),
-                    entries: BTreeMap::new(),
-                },
-            },
-        ];
-
-        assert!(matches!(
-            resolve_configuration_inputs(&registry, &inputs),
-            Err(ConfigurationResolutionError::CompetingLayerRevision(
-                rejected
-            )) if rejected == layer
         ));
     }
 }

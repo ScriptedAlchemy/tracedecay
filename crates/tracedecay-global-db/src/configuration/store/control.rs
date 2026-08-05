@@ -11,11 +11,11 @@ use super::mutation::{
 use super::read::{read_change_plan_from_executor, read_revision_from_executor};
 use super::write::insert_change_plan;
 use super::{
-    AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ChangePlanId, ComponentConfigurationState,
-    ConfigurationAuditEventKindV1, ConfigurationAuditPage, ConfigurationAuditQuery,
-    ConfigurationCommitDraft, ConfigurationControlStore, ConfigurationCurrentStateV1,
-    ConfigurationError, ConfigurationMutationAuthority, ConfigurationMutationReceipt,
-    ConfigurationOperationFuture, ConfigurationProtectedOperationV1,
+    ActivationDriftV1, AuthorizedActor, CONFIGURATION_AUDIT_PAGE_LIMIT, ChangePlanId,
+    ComponentConfigurationState, ConfigurationAuditEventKindV1, ConfigurationAuditPage,
+    ConfigurationAuditQuery, ConfigurationCommitDraft, ConfigurationControlStore,
+    ConfigurationCurrentStateV1, ConfigurationError, ConfigurationMutationAuthority,
+    ConfigurationMutationReceipt, ConfigurationOperationFuture, ConfigurationProtectedOperationV1,
     ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId, ConfigurationRollbackRequest,
     DirectConfigurationMutation, GlobalDbConfigurationControlStore, ProtectedChange,
     ProtectedChangePlan, RollbackModeV1, ScopeRevalidationEvidenceV1,
@@ -536,14 +536,30 @@ impl ConfigurationControlStore for GlobalDbConfigurationControlStore<'_> {
                 .map(|states| {
                     states
                         .into_iter()
-                        .map(|state| ComponentConfigurationState {
-                            component: state.component,
-                            desired_revision_id: state.desired_revision_id,
-                            observed_revision_id: state
-                                .observed_revision_id
-                                .or(state.last_working_revision_id),
-                            restart_required: state.restart_required,
-                            activation_error_code: state.activation_error_code,
+                        .map(|state| {
+                            let drift = if state.activation_error_code.is_some() {
+                                ActivationDriftV1::ActivationFailed
+                            } else if state.observed_revision_id.is_none()
+                                && state.last_working_revision_id.is_none()
+                            {
+                                ActivationDriftV1::NeverActivated
+                            } else if state.restart_required
+                                || state.observed_revision_id.as_ref()
+                                    != Some(&state.desired_revision_id)
+                            {
+                                ActivationDriftV1::PendingRestart
+                            } else {
+                                ActivationDriftV1::Current
+                            };
+                            ComponentConfigurationState {
+                                component: state.component,
+                                desired_revision_id: state.desired_revision_id,
+                                observed_revision_id: state.observed_revision_id,
+                                last_working_revision_id: state.last_working_revision_id,
+                                restart_required: state.restart_required,
+                                activation_error_code: state.activation_error_code,
+                                drift,
+                            }
                         })
                         .collect()
                 })

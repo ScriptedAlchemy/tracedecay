@@ -345,8 +345,8 @@ pub(super) fn map_store_error(error: ConfigurationStoreError) -> ConfigurationEr
         ConfigurationStoreError::PlanExpired => ConfigurationError::PlanExpired,
         ConfigurationStoreError::PlanStale => ConfigurationError::PlanStale,
         ConfigurationStoreError::IdempotencyConflict => ConfigurationError::IdempotencyConflict,
-        ConfigurationStoreError::InvalidData(message) => {
-            ConfigurationError::validation_message(message)
+        ConfigurationStoreError::InvalidData(reason) => {
+            ConfigurationError::ResetRequired { reason }
         }
         ConfigurationStoreError::Unavailable => ConfigurationError::Unavailable,
     }
