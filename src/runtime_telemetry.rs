@@ -20,6 +20,13 @@ use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 
 use crate::errors::{Result, TraceDecayError};
 
+mod store_runtime;
+
+pub use store_runtime::{
+    RuntimeRegistryAggregateSnapshot, RuntimeRegistryShardSnapshot, RuntimeRegistrySnapshot,
+    RuntimeRegistryWriterSnapshot,
+};
+
 /// Window over which `cpu_percent` is sampled.
 const CPU_SAMPLE_WINDOW: Duration = Duration::from_millis(200);
 
@@ -91,70 +98,6 @@ pub struct DatabaseSnapshot {
     pub reader_pool: Option<ReaderPoolOccupancy>,
     /// Bounded daemon store-runtime registry telemetry for all mounted shards.
     pub runtime_registry: RuntimeRegistrySnapshot,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeRegistrySnapshot {
-    pub inventory_shards: u32,
-    pub returned_shards: u32,
-    pub omitted_shards: u32,
-    pub per_shard_queue_max_operations: u32,
-    pub per_shard_queue_max_bytes: u64,
-    pub global_queue_max_bytes: u64,
-    pub wal_soft_limit_bytes: u64,
-    pub wal_hard_limit_bytes: u64,
-    pub aggregate: RuntimeRegistryAggregateSnapshot,
-    pub shards: Vec<RuntimeRegistryShardSnapshot>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeRegistryAggregateSnapshot {
-    pub ready: u32,
-    pub opening: u32,
-    pub draining: u32,
-    pub exclusive_maintenance: u32,
-    pub reopening: u32,
-    pub faulted: u32,
-    pub closed: u32,
-    pub healthy: u32,
-    pub degraded: u32,
-    pub unknown_health: u32,
-    pub pinned_profiles: u32,
-    pub eviction_eligible: u32,
-    pub writer_present: u32,
-    pub physical_reader_handles: u64,
-    pub general_reader_waiters: u64,
-    pub health_reader_waiters: u64,
-    pub writer_busy_events: u64,
-    pub queued_operations: u64,
-    pub queued_bytes: u64,
-    pub total_leases: u64,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
-    pub global_queued_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeRegistryShardSnapshot {
-    pub shard: String,
-    pub incarnation: u64,
-    pub authority_epoch: u64,
-    pub state: String,
-    pub health: String,
-    pub writer_present: bool,
-    pub physical_reader_handles: u32,
-    pub general_reader_waiters: u16,
-    pub health_reader_waiters: u16,
-    pub writer_busy_events: u64,
-    pub queued_operations: u32,
-    pub queued_bytes: u64,
-    pub total_leases: u64,
-    pub wal_bytes: u64,
-    pub memory_estimate_bytes: u64,
-    pub pinned_profile: bool,
-    pub idle_for_ms: u64,
-    pub eviction_eligible: bool,
-    pub eviction_blocker_count: u32,
 }
 
 /// Per-lane reader-pool occupancy at one instant.
@@ -236,9 +179,8 @@ pub struct DirtyMarkerSnapshot {
 ///
 /// Two responsibilities: (a) sample our own process via `sysinfo`,
 /// (b) `stat` the `SQLite` files and ask the connection for its journal
-/// mode. Both are best-effort — failures degrade to zeroes / `None`
-/// rather than failing the whole snapshot, because the value of this
-/// tool is recording *what's available* during a spike.
+/// mode. Unavailable pragmas remain optional; failures to identify or stat the
+/// store itself fail the read instead of fabricating a zero-sized database.
 pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapshot> {
     collect_with_integrity(cg, false).await
 }
@@ -247,11 +189,16 @@ pub async fn collect_with_integrity(
     cg: &crate::tracedecay::TraceDecay,
     include_integrity: bool,
 ) -> Result<RuntimeSnapshot> {
-    let process = sample_process();
+    let process = sample_process()?;
     let database = collect_database(cg, include_integrity).await?;
     let captured_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+        .map_err(|error| {
+            TraceDecayError::Io(std::io::Error::other(format!(
+                "runtime telemetry clock precedes Unix epoch: {error}"
+            )))
+        })?
+        .as_secs();
     Ok(RuntimeSnapshot {
         captured_at,
         tracedecay_version: crate::version::build_version(),
@@ -264,7 +211,10 @@ pub async fn collect_with_integrity(
 /// Render a `RuntimeSnapshot` as the JSON wire shape used by both the
 /// CLI (`--json` flag) and the MCP tool result.
 pub fn to_pretty_json(snap: &RuntimeSnapshot) -> String {
-    serde_json::to_string_pretty(snap).unwrap_or_default()
+    match serde_json::to_string_pretty(snap) {
+        Ok(json) => json,
+        Err(error) => format!("runtime telemetry serialization failed: {error}"),
+    }
 }
 
 /// Render a `RuntimeSnapshot` as a human-readable status block for
@@ -273,15 +223,14 @@ pub fn to_pretty_json(snap: &RuntimeSnapshot) -> String {
 pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
     let p = &snap.process;
     let d = &snap.database;
-    let pct_of_system_mem = if p.system_total_memory_bytes > 0 {
-        (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0
-    } else {
-        0.0
-    };
+    let pct_of_system_mem = (p.rss_bytes as f64 / p.system_total_memory_bytes as f64) * 100.0;
     let bloat_ratio = if d.source_total_bytes > 0 {
-        d.db_size_bytes as f64 / d.source_total_bytes as f64
+        format!(
+            "{:.1}×",
+            d.db_size_bytes as f64 / d.source_total_bytes as f64
+        )
     } else {
-        0.0
+        "unknown (no indexed source bytes)".to_owned()
     };
     format!(
         "tracedecay {ver} runtime snapshot ({os})\n\
@@ -303,13 +252,15 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
            quick check      {quick_check}\n\
            dirty marker     {dirty}\n\
            source indexed   {src}\n\
-           db / source      {ratio:.1}×\n\
+           db / source      {ratio}\n\
            nodes / edges    {nodes} / {edges}\n\
            readers general  {readers_general}\n\
            readers health   {readers_health}\n\
-           runtime shards    {runtime_shards} mounted ({runtime_omitted} omitted)\n\
+           runtime shards    {runtime_shards} observed ({runtime_opening} opening, {runtime_draining} draining, {runtime_omitted} detail omitted)\n\
            runtime queue     {runtime_queue}\n\
            runtime contention {runtime_contention}\n\
+           runtime interrupts {runtime_interrupts}\n\
+           runtime writer time {runtime_writer_time}\n\
            runtime wal       {runtime_wal}\n\
         ",
         ver = snap.tracedecay_version,
@@ -358,17 +309,44 @@ pub fn to_text_report(snap: &RuntimeSnapshot) -> String {
             |pool| lane_line(&pool.health)
         ),
         runtime_shards = d.runtime_registry.inventory_shards,
+        runtime_opening = d.runtime_registry.aggregate.opening,
+        runtime_draining = d.runtime_registry.aggregate.draining,
         runtime_omitted = d.runtime_registry.omitted_shards,
         runtime_queue = format!(
-            "{} ops / {}",
+            "{} shard ops / {}; global {} / {} budget",
             d.runtime_registry.aggregate.queued_operations,
-            bytes_human(d.runtime_registry.aggregate.queued_bytes)
+            bytes_human(d.runtime_registry.aggregate.queued_bytes),
+            d.runtime_registry
+                .aggregate
+                .global_queued_bytes
+                .map_or_else(|| "unknown".to_owned(), bytes_human),
+            bytes_human(d.runtime_registry.global_queue_max_bytes),
         ),
         runtime_contention = format!(
             "writer busy {}, readers waiting general {} / health {}",
             d.runtime_registry.aggregate.writer_busy_events,
             d.runtime_registry.aggregate.general_reader_waiters,
             d.runtime_registry.aggregate.health_reader_waiters,
+        ),
+        runtime_interrupts = format!(
+            "cancelled {}, deadline {}, shed {}, conflicts {}; {}/{} active writers observed ({})",
+            d.runtime_registry.aggregate.cancelled_operations,
+            d.runtime_registry.aggregate.deadline_exceeded_operations,
+            d.runtime_registry.aggregate.shed_operations,
+            d.runtime_registry.aggregate.conflicted_operations,
+            d.runtime_registry.aggregate.writer_telemetry_shards,
+            d.runtime_registry.aggregate.writer_present,
+            if d.runtime_registry.aggregate.writer_telemetry_complete {
+                "complete"
+            } else {
+                "partial"
+            },
+        ),
+        runtime_writer_time = format!(
+            "queue {} µs / transaction {} µs across {} committed batches since current writer start",
+            d.runtime_registry.aggregate.writer_queue_wait_micros,
+            d.runtime_registry.aggregate.writer_transaction_micros,
+            d.runtime_registry.aggregate.committed_batches,
         ),
         runtime_wal = bytes_human(d.runtime_registry.aggregate.wal_bytes),
     )
@@ -387,11 +365,11 @@ fn lane_line(lane: &ReaderLaneOccupancy) -> String {
 // Process sampling
 // ---------------------------------------------------------------------------
 
-fn sample_process() -> ProcessSnapshot {
+fn sample_process() -> Result<ProcessSnapshot> {
     sample_process_with_window(CPU_SAMPLE_WINDOW)
 }
 
-fn sample_process_with_window(cpu_sample_window: Duration) -> ProcessSnapshot {
+fn sample_process_with_window(cpu_sample_window: Duration) -> Result<ProcessSnapshot> {
     let pid = Pid::from_u32(std::process::id());
 
     // Refresh only *our own* process. The previous implementation passed
@@ -416,21 +394,28 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> ProcessSnapshot {
     std::thread::sleep(cpu_sample_window);
     sys.refresh_processes_specifics(sysinfo::ProcessesToUpdate::Some(&[pid]), true, refresh);
 
-    let proc = sys.process(pid);
-    let rss_bytes = proc.map_or(0, sysinfo::Process::memory);
-    let virtual_bytes = proc.map_or(0, sysinfo::Process::virtual_memory);
-    let cpu_percent = proc.map_or(0.0, sysinfo::Process::cpu_usage);
-    let uptime_secs = proc.map_or(0, sysinfo::Process::run_time);
-
-    ProcessSnapshot {
-        pid: std::process::id(),
-        rss_bytes,
-        virtual_bytes,
-        cpu_percent,
-        uptime_secs,
-        system_cpu_count: sys.cpus().len(),
-        system_total_memory_bytes: sys.total_memory(),
+    let process = sys.process(pid).ok_or_else(|| {
+        TraceDecayError::Io(std::io::Error::other(
+            "runtime telemetry could not sample the serving process",
+        ))
+    })?;
+    let system_cpu_count = sys.cpus().len();
+    let system_total_memory_bytes = sys.total_memory();
+    if system_cpu_count == 0 || system_total_memory_bytes == 0 {
+        return Err(TraceDecayError::Io(std::io::Error::other(
+            "runtime telemetry could not sample host capacity",
+        )));
     }
+
+    Ok(ProcessSnapshot {
+        pid: std::process::id(),
+        rss_bytes: process.memory(),
+        virtual_bytes: process.virtual_memory(),
+        cpu_percent: process.cpu_usage(),
+        uptime_secs: process.run_time(),
+        system_cpu_count,
+        system_total_memory_bytes,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -443,10 +428,10 @@ pub(crate) async fn collect_database(
 ) -> Result<DatabaseSnapshot> {
     let project_root = cg.project_root().to_path_buf();
     let db_path = cg.db_path().clone();
-    let canonical_db_path = db_path.canonicalize().unwrap_or_else(|_| db_path.clone());
-    let db_size_bytes = file_size(&db_path);
-    let wal_size_bytes = file_size(&with_suffix(&db_path, "-wal"));
-    let shm_size_bytes = file_size(&with_suffix(&db_path, "-shm"));
+    let canonical_db_path = db_path.canonicalize()?;
+    let db_size_bytes = file_size(&db_path)?;
+    let wal_size_bytes = file_size(&with_suffix(&db_path, "-wal"))?;
+    let shm_size_bytes = file_size(&with_suffix(&db_path, "-shm"))?;
     let journal_mode = read_journal_mode(cg).await.ok();
     let synchronous = read_pragma_i64(cg, "PRAGMA synchronous", "read_synchronous")
         .await
@@ -510,113 +495,6 @@ pub(crate) async fn collect_database(
     })
 }
 
-impl RuntimeRegistrySnapshot {
-    fn from_projection(
-        projection: crate::daemon::store_runtime::telemetry::RuntimeTelemetryProjection,
-    ) -> Self {
-        let aggregate = &projection.aggregate;
-        let shards = projection
-            .shards
-            .iter()
-            .map(RuntimeRegistryShardSnapshot::from_telemetry)
-            .collect();
-        Self {
-            inventory_shards: aggregate.inventory_shards,
-            returned_shards: aggregate.returned_shards,
-            omitted_shards: aggregate.omitted_shards,
-            per_shard_queue_max_operations: projection.per_shard_queue_budget.max_operations,
-            per_shard_queue_max_bytes: projection.per_shard_queue_budget.max_bytes,
-            global_queue_max_bytes: projection.global_queue_budget_bytes,
-            wal_soft_limit_bytes: projection.wal_budget.soft_limit_bytes,
-            wal_hard_limit_bytes: projection.wal_budget.hard_limit_bytes,
-            aggregate: RuntimeRegistryAggregateSnapshot {
-                ready: aggregate.states.ready,
-                opening: aggregate.states.opening,
-                draining: aggregate.states.draining,
-                exclusive_maintenance: aggregate.states.exclusive_maintenance,
-                reopening: aggregate.states.reopening,
-                faulted: aggregate.states.faulted,
-                closed: aggregate.states.closed,
-                healthy: aggregate.health.healthy,
-                degraded: aggregate.health.degraded,
-                unknown_health: aggregate.health.unknown,
-                pinned_profiles: aggregate.pinned_profiles,
-                eviction_eligible: aggregate.eviction_eligible,
-                writer_present: aggregate.writer_present,
-                physical_reader_handles: aggregate.physical_reader_handles,
-                general_reader_waiters: aggregate.general_reader_waiters,
-                health_reader_waiters: aggregate.health_reader_waiters,
-                writer_busy_events: aggregate.writer_busy_events,
-                queued_operations: aggregate.queued_operations,
-                queued_bytes: aggregate.queued_bytes,
-                total_leases: aggregate.total_leases,
-                wal_bytes: aggregate.wal_bytes,
-                memory_estimate_bytes: aggregate.memory_estimate_bytes,
-                global_queued_bytes: aggregate.global_queued_bytes,
-            },
-            shards,
-        }
-    }
-}
-
-impl RuntimeRegistryShardSnapshot {
-    fn from_telemetry(
-        telemetry: &crate::daemon::store_runtime::telemetry::ShardRuntimeTelemetry,
-    ) -> Self {
-        Self {
-            shard: format!("{:?}", telemetry.binding.shard_id.scope),
-            incarnation: telemetry.binding.incarnation.get(),
-            authority_epoch: telemetry.binding.authority_epoch.get(),
-            state: runtime_state_label(telemetry.state).to_string(),
-            health: runtime_health_label(telemetry.health).to_string(),
-            writer_present: telemetry.writer_present,
-            physical_reader_handles: telemetry.physical_reader_handles,
-            general_reader_waiters: telemetry.general_reader_waiters,
-            health_reader_waiters: telemetry.health_reader_waiters,
-            writer_busy_events: telemetry.writer_busy_events,
-            queued_operations: telemetry.queued_operations,
-            queued_bytes: telemetry.queued_bytes,
-            total_leases: u64::from(telemetry.leases.general_readers)
-                .saturating_add(u64::from(telemetry.leases.health_readers))
-                .saturating_add(u64::from(telemetry.leases.snapshots))
-                .saturating_add(u64::from(telemetry.leases.watchers))
-                .saturating_add(u64::from(telemetry.leases.schedulers))
-                .saturating_add(u64::from(telemetry.leases.clients)),
-            wal_bytes: telemetry.wal_bytes,
-            memory_estimate_bytes: telemetry.memory_estimate_bytes,
-            pinned_profile: telemetry.pinned_profile,
-            idle_for_ms: telemetry.idle_for_ms,
-            eviction_eligible: telemetry.eviction_eligible,
-            eviction_blocker_count: telemetry.eviction_blocker_count,
-        }
-    }
-}
-
-fn runtime_state_label(state: tracedecay_store::RuntimeMaintenanceStateV1) -> &'static str {
-    match state {
-        tracedecay_store::RuntimeMaintenanceStateV1::Closed => "closed",
-        tracedecay_store::RuntimeMaintenanceStateV1::Opening => "opening",
-        tracedecay_store::RuntimeMaintenanceStateV1::Ready => "ready",
-        tracedecay_store::RuntimeMaintenanceStateV1::Draining => "draining",
-        tracedecay_store::RuntimeMaintenanceStateV1::ExclusiveMaintenance => {
-            "exclusive_maintenance"
-        }
-        tracedecay_store::RuntimeMaintenanceStateV1::Reopening => "reopening",
-        tracedecay_store::RuntimeMaintenanceStateV1::Faulted => "faulted",
-    }
-}
-
-fn runtime_health_label(
-    health: crate::daemon::store_runtime::shard::ShardRuntimeHealth,
-) -> &'static str {
-    match health {
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Unknown => "unknown",
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Healthy => "healthy",
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Degraded => "degraded",
-        crate::daemon::store_runtime::shard::ShardRuntimeHealth::Faulted => "faulted",
-    }
-}
-
 fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
     let Ok(contents) = std::fs::read(path) else {
         return DirtyMarkerSnapshot {
@@ -655,8 +533,12 @@ fn read_dirty_marker(path: &Path) -> DirtyMarkerSnapshot {
     }
 }
 
-fn file_size(path: &Path) -> u64 {
-    std::fs::metadata(path).map_or(0, |m| m.len())
+fn file_size(path: &Path) -> Result<u64> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -748,7 +630,10 @@ async fn read_source_total_bytes(cg: &crate::tracedecay::TraceDecay) -> Result<u
         message: format!("failed to decode source-sum: {e}"),
         operation: "read_source_total_bytes".to_string(),
     })?;
-    Ok(u64::try_from(v).unwrap_or(0))
+    u64::try_from(v).map_err(|_| TraceDecayError::Database {
+        message: "source byte total was negative".to_owned(),
+        operation: "read_source_total_bytes".to_owned(),
+    })
 }
 
 async fn read_graph_counts(cg: &crate::tracedecay::TraceDecay) -> Result<(u64, u64)> {
@@ -782,7 +667,10 @@ async fn scalar_count(cg: &crate::tracedecay::TraceDecay, sql: &str) -> Result<u
         message: format!("scalar decode failed: {e}"),
         operation: "scalar_count".to_string(),
     })?;
-    Ok(u64::try_from(v).unwrap_or(0))
+    u64::try_from(v).map_err(|_| TraceDecayError::Database {
+        message: "database count was negative".to_owned(),
+        operation: "scalar_count".to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -918,7 +806,8 @@ mod tests {
             .expect("spawn small-stack thread");
         let snap = handle
             .join()
-            .expect("sample_process must not overflow a 512 KiB stack");
+            .expect("sample_process must not overflow a 512 KiB stack")
+            .expect("sample_process must observe process and host capacity");
         assert_eq!(snap.pid, std::process::id());
     }
 }
