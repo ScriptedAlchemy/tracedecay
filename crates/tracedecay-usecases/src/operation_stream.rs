@@ -12,7 +12,6 @@ use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -35,7 +34,9 @@ use tracedecay_domain::{
 };
 use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 
-pub use tracedecay_application::OperationCancelOutcome;
+pub use tracedecay_application::{
+    OperationCancelOutcome, OperationEventItem, OperationId, OperationKind,
+};
 
 use tracedecay_temporal_query::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use tracedecay_temporal_query::ports::{
@@ -69,30 +70,6 @@ fn current_micros_for_cancellation() -> UtcMicros {
     )
 }
 
-/// Stable operation identity. The originating authorized request owns the
-/// identity; paths, labels, and client-selected payloads never participate.
-#[derive(
-    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-#[serde(transparent)]
-pub struct OperationId(RequestId);
-
-impl OperationId {
-    pub fn from_request(request_id: RequestId) -> Self {
-        Self(request_id)
-    }
-
-    pub fn request_id(&self) -> &RequestId {
-        &self.0
-    }
-}
-
-impl fmt::Display for OperationId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, formatter)
-    }
-}
-
 /// Caller-owned controls used to reconstitute an operation request context.
 pub struct OperationRequestControls<'a> {
     request_id: RequestId,
@@ -119,37 +96,6 @@ impl<'a> OperationRequestControls<'a> {
             resume_token,
         }
     }
-}
-
-/// Closed operation names prevent lifecycle metadata from becoming an
-/// arbitrary payload side channel.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OperationKind {
-    GitPreview,
-    GitApply,
-    FeedbackDiagnostics,
-    FeedbackGet,
-    FeedbackExpand,
-    FeedbackList,
-    TestRun,
-}
-
-/// The only item payload published by the lifecycle stream. Progress, gaps,
-/// and terminal receipts use the canonical `StreamEventKind` variants.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum OperationEventItem {
-    Accepted {
-        operation_id: OperationId,
-        originating_request_id: RequestId,
-        operation: OperationKind,
-        content_class: DisclosureClass,
-    },
-    TestRunResult {
-        test: String,
-        passed: bool,
-    },
 }
 
 pub type OperationEvent = StreamEvent<OperationEventItem>;

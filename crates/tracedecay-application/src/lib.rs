@@ -175,7 +175,10 @@ pub use multi_root::{
     RegisteredRootLocatorV1, RegisteredRootSelectorV1, SharedProfileStoreLocatorV1,
 };
 pub use observability::*;
-pub use operation_events::{OperationCancelOutcome, OperationEventSubscription};
+pub use operation_events::{
+    OperationCancelOutcome, OperationEventItem, OperationEventSubscription, OperationId,
+    OperationKind,
+};
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,

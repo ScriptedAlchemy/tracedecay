@@ -1,5 +1,6 @@
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -8,7 +9,7 @@ use crate::error::ApplicationContractError;
 use super::{OperationReceipt, OperationTermination};
 
 /// Opaque authenticated continuation reference for a bounded stream.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct ResumeToken(String);
 
@@ -48,7 +49,7 @@ impl fmt::Display for ResumeToken {
 }
 
 /// Monotonic frontier retained by a resumable adapter.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StreamFrontier {
     pub next_sequence: u64,
@@ -58,7 +59,7 @@ pub struct StreamFrontier {
 
 /// Explicit loss signal. Consumers cannot continue as though omitted events
 /// had been delivered.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StreamGap {
     pub first_missing_sequence: u64,
@@ -80,7 +81,7 @@ impl StreamGap {
 }
 
 /// Receipt-bearing terminal stream state.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StreamTermination {
     pub termination: OperationTermination,

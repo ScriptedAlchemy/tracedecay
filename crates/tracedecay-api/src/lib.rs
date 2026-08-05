@@ -26,6 +26,7 @@ mod sse;
 pub mod work;
 pub mod workflow;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_application::{
@@ -124,7 +125,7 @@ pub struct HttpProblemEnvelope {
 }
 
 /// SSE presentation of canonical stream events.
-#[derive(Serialize)]
+#[derive(Serialize, JsonSchema)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum HttpSseEvent<T> {
     Open {

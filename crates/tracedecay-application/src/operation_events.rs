@@ -1,9 +1,11 @@
 //! Transport-neutral operation subscription and cancellation contracts.
 
+use std::fmt;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::{RequestId, StreamFrontier};
+use crate::{DisclosureClass, RequestId, StreamFrontier};
 
 /// Idempotent outcome of an explicit operation cancellation request.
 #[derive(
@@ -14,6 +16,60 @@ pub enum OperationCancelOutcome {
     Requested,
     AlreadyRequested,
     AlreadyTerminal,
+}
+
+/// Stable operation identity derived from the originating authorized request.
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
+#[serde(transparent)]
+pub struct OperationId(RequestId);
+
+impl OperationId {
+    pub fn from_request(request_id: RequestId) -> Self {
+        Self(request_id)
+    }
+
+    pub fn request_id(&self) -> &RequestId {
+        &self.0
+    }
+}
+
+impl fmt::Display for OperationId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
+/// Closed operation names prevent lifecycle metadata from becoming an
+/// arbitrary payload side channel.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    GitPreview,
+    GitApply,
+    FeedbackDiagnostics,
+    FeedbackGet,
+    FeedbackExpand,
+    FeedbackList,
+    TestRun,
+}
+
+/// The only item payload published by the lifecycle stream. Progress, gaps,
+/// and terminal receipts use the canonical stream event variants.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum OperationEventItem {
+    Accepted {
+        operation_id: OperationId,
+        originating_request_id: RequestId,
+        operation: OperationKind,
+        content_class: DisclosureClass,
+    },
+    TestRunResult {
+        test: String,
+        passed: bool,
+    },
 }
 
 /// Stable subscription identity, initial replay frontier, and owner stream.

@@ -18,8 +18,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracedecay_application::{
     ApplicationOutcome, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    OperationCancelOutcome, OperationEventSubscription, RequestContext, RequestId, ResumeToken,
-    RetryDirective, SafeDiagnostic, StreamEvent,
+    OperationCancelOutcome, OperationEventItem, OperationEventSubscription, RequestContext,
+    RequestId, ResumeToken, RetryDirective, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_tool_catalog::SchemaBodyAuthorityV1;
 
@@ -27,7 +27,7 @@ use crate::http::{adapter_problem, application_problem_response, invalid_request
 use crate::openapi::{
     OpenApiDocumentError, OpenApiRequestV1, OpenApiRouteDocumentV1, OpenApiSuccessV1,
 };
-use crate::{CanonicalInvocationResult, HttpApplicationControls, sse_response};
+use crate::{CanonicalInvocationResult, HttpApplicationControls, HttpSseEvent, sse_response};
 
 /// Default maximum number of retained events requested when opening a stream.
 pub const DEFAULT_OPERATION_EVENT_PAGE_SIZE: u16 = 256;
@@ -169,12 +169,12 @@ fn event_stream_schema() -> Result<SchemaBodyAuthorityV1, OpenApiDocumentError> 
             message: error.to_string(),
         }
     })?;
-    SchemaBodyAuthorityV1::for_type::<String>(schema_ref).map_err(|error| {
-        OpenApiDocumentError::SchemaAuthority {
+    SchemaBodyAuthorityV1::for_type::<HttpSseEvent<OperationEventItem>>(schema_ref).map_err(
+        |error| OpenApiDocumentError::SchemaAuthority {
             family: "operation_events",
             message: error.to_string(),
-        }
-    })
+        },
+    )
 }
 
 async fn operation_events<O>(

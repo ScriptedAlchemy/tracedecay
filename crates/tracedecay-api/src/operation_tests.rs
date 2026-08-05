@@ -26,7 +26,8 @@ use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, SortContractId,
 
 use super::{
     OperationCancelFuture, OperationCancelOutcome, OperationCancelRequest, OperationEventFuture,
-    OperationEventOwner, OperationEventRequest, OperationEventSubscription, operation_event_router,
+    OperationEventOwner, OperationEventRequest, OperationEventSubscription, event_stream_schema,
+    operation_event_router,
 };
 use crate::{CanonicalInvocationResult, HttpApplicationControls};
 
@@ -271,6 +272,26 @@ impl OperationEventOwner for RecordingOwner {
             .take()
             .expect("scripted cancellation reply");
         Box::pin(async move { reply })
+    }
+}
+
+#[test]
+fn operation_event_openapi_schema_describes_structured_sse_frames() {
+    let schema = event_stream_schema().expect("operation event SSE schema");
+    let body = serde_json::to_string(schema.body()).expect("schema JSON");
+
+    assert_ne!(schema.body().get("type"), Some(&json!("string")));
+    for event_shape in [
+        "accepted",
+        "test_run_result",
+        "resume_gap",
+        "completed",
+        "cancelled",
+    ] {
+        assert!(
+            body.contains(event_shape),
+            "operation SSE schema is missing `{event_shape}`"
+        );
     }
 }
 
