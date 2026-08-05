@@ -171,6 +171,50 @@ async fn registered_mount_publishes_complete_migrated_schema() {
 }
 
 #[tokio::test]
+async fn host_discovery_queue_is_durable_ordered_and_idempotent() {
+    let harness = RegisteredGlobalDbHarness::open("host-discovery-queue").await;
+    let first = std::path::PathBuf::from("/tmp/kimi/session-a/context.jsonl");
+    let second = std::path::PathBuf::from("/tmp/kimi/session-b/context.jsonl");
+
+    let last = harness
+        .registered
+        .enqueue_host_discovery_paths("kimi", vec![first.clone(), second.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(last.path, second);
+
+    let remounted = harness.remount_profile_database_for_test().await.unwrap();
+    let entries = remounted
+        .host_discovery_paths_after("kimi", 0, 8)
+        .await
+        .unwrap();
+    assert_eq!(
+        entries.iter().map(|entry| &entry.path).collect::<Vec<_>>(),
+        vec![&first, &second]
+    );
+    assert!(entries[0].sequence < entries[1].sequence);
+
+    let duplicate = harness
+        .registered
+        .enqueue_host_discovery_paths("kimi", vec![first.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(duplicate.sequence, entries[0].sequence);
+    assert_eq!(
+        harness
+            .registered
+            .host_discovery_path("kimi", entries[1].sequence)
+            .await
+            .unwrap()
+            .unwrap()
+            .path,
+        second
+    );
+}
+
+#[tokio::test]
 async fn registered_schema_validation_rejects_incomplete_authority_schema() {
     let harness = RegisteredGlobalDbHarness::open("reject-incomplete-authority-schema").await;
     harness

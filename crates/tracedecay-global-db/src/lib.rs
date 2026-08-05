@@ -11,12 +11,14 @@ use tracedecay_store::{SessionMessageRecord, SessionRecord};
 
 mod api_types;
 pub mod configuration;
+mod discovery_queue;
 mod git_index_transactions;
 pub mod observation;
 mod observation_adapter;
 mod observation_projection;
 mod registered_maintenance;
 mod support;
+pub use discovery_queue::HostDiscoveryQueueEntry;
 pub use observation_adapter::GlobalDbObservationStore;
 pub use observation_projection::{project_observation_with_engine, rebuild_projection_with_engine};
 mod observation_store;
