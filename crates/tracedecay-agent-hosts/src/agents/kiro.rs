@@ -23,8 +23,8 @@ use crate::errors::{Result, TraceDecayError};
 
 use super::{
     AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, backup_config_file, config_backup_path, load_json_file,
-    load_json_file_strict, safe_write_json_file,
+    backup_config_file, config_backup_path, load_json_file, load_json_file_strict,
+    safe_write_json_file,
 };
 
 /// Kiro agent.
@@ -493,66 +493,8 @@ fn remove_kiro_managed_skill_index(home: &Path, index_path: &Path) {
     super::remove_managed_skill_prompt_index(home, index_path, SkillInstallTarget::Kiro).ok();
 }
 
-fn install_default_agent(path: &Path, owns_agent: bool) -> Result<()> {
-    if !owns_agent {
-        eprintln!(
-            "  Skipping Kiro default-agent update because tracedecay does not own the agent file"
-        );
-        return Ok(());
-    }
-
-    let backup = backup_config_file(path)?;
-    let mut config = match load_json_file_strict(path) {
-        Ok(v) => v,
-        Err(e) => {
-            if let Some(ref b) = backup {
-                eprintln!("  Backup preserved at: {}", b.display());
-            }
-            return Err(e);
-        }
-    };
-
-    ensure_json_object(&config, path)?;
-    ensure_child_object(&mut config, "chat", path)?;
-
-    match config["chat"].get("defaultAgent") {
-        Some(v) if v.as_str() == Some(KIRO_AGENT_NAME) => {
-            eprintln!("  Kiro default agent already set to tracedecay");
-            return Ok(());
-        }
-        Some(v) if v.as_str().is_some_and(is_builtin_default_agent) => {}
-        Some(v) if is_empty_default_agent(v) => {}
-        None => {}
-        Some(v) => {
-            eprintln!(
-                "  Kiro default agent is {}, leaving user choice unchanged",
-                format_json_scalar(v)
-            );
-            return Ok(());
-        }
-    }
-
-    config["chat"]["defaultAgent"] = json!(KIRO_AGENT_NAME);
-    safe_write_json_file(path, &config, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Set Kiro default agent in {}",
-        path.display()
-    );
-    Ok(())
-}
-
 fn is_builtin_default_agent(agent: &str) -> bool {
     matches!(agent, "kiro_default" | "default")
-}
-
-fn is_empty_default_agent(value: &serde_json::Value) -> bool {
-    value.is_null() || value.as_str() == Some("")
-}
-
-fn format_json_scalar(value: &serde_json::Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), |s| format!("\"{s}\""))
 }
 
 fn ensure_json_object(config: &serde_json::Value, path: &Path) -> Result<()> {
@@ -803,51 +745,6 @@ fn uninstall_managed_agent(path: &Path) {
     if super::safe_remove_host_file(path).is_ok() {
         eprintln!(
             "\x1b[32m✔\x1b[0m Removed tracedecay Kiro agent from {}",
-            path.display()
-        );
-    }
-}
-
-fn uninstall_default_agent(path: &Path, agent_path: &Path, owned_agent: bool) {
-    if !path.exists() {
-        return;
-    }
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&contents) else {
-        return;
-    };
-    if config
-        .get("chat")
-        .and_then(|v| v.get("defaultAgent"))
-        .and_then(serde_json::Value::as_str)
-        != Some(KIRO_AGENT_NAME)
-    {
-        return;
-    }
-    if agent_path.exists() && !owned_agent {
-        eprintln!(
-            "  Kiro default agent points at a user-managed tracedecay agent, leaving unchanged"
-        );
-        return;
-    }
-
-    let Some(chat) = config.get_mut("chat").and_then(|v| v.as_object_mut()) else {
-        return;
-    };
-    chat.remove("defaultAgent");
-    if chat.is_empty() {
-        config.as_object_mut().map(|o| o.remove("chat"));
-    }
-
-    let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
-    if is_empty {
-        super::safe_remove_host_file(path).ok();
-        eprintln!("\x1b[32m✔\x1b[0m Removed {} (was empty)", path.display());
-    } else if backup_and_write_json(path, &config) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay Kiro default agent from {}",
             path.display()
         );
     }
