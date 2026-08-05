@@ -68,10 +68,17 @@ impl ProjectRouterCache {
 }
 
 #[derive(Clone)]
+struct RemoteHttpApplicationMount {
+    router: Router,
+    credentials: Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+}
+
+#[derive(Clone)]
 pub(super) struct DaemonHttpApplicationRegistry {
     routers: Arc<Mutex<ProjectRouterCache>>,
     resolver: Arc<SyncRwLock<Option<ProjectRouterResolver>>>,
     resolver_admission: Arc<Semaphore>,
+    remote: Arc<SyncRwLock<Option<RemoteHttpApplicationMount>>>,
     active: Arc<AtomicBool>,
 }
 
@@ -81,6 +88,7 @@ impl Default for DaemonHttpApplicationRegistry {
             routers: Arc::new(Mutex::new(ProjectRouterCache::default())),
             resolver: Arc::new(SyncRwLock::new(None)),
             resolver_admission: Arc::new(Semaphore::new(MAX_HTTP_APPLICATION_COLD_RESOLUTIONS)),
+            remote: Arc::new(SyncRwLock::new(None)),
             active: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -116,6 +124,26 @@ impl DaemonHttpApplicationRegistry {
         Ok(())
     }
 
+    pub(super) fn install_remote(
+        &self,
+        router: Router,
+        credentials: Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
+    ) -> Result<()> {
+        let mut slot = self.remote.write().map_err(|_| TraceDecayError::Config {
+            message: "daemon HTTP Remote Brain router lock is poisoned".to_owned(),
+        })?;
+        if slot.is_some() {
+            return Err(TraceDecayError::Config {
+                message: "daemon HTTP Remote Brain router is already installed".to_owned(),
+            });
+        }
+        *slot = Some(RemoteHttpApplicationMount {
+            router,
+            credentials,
+        });
+        Ok(())
+    }
+
     async fn resolve(&self, project_id: &str) -> Option<Router> {
         let project_id = ProjectId::new(project_id.to_owned()).ok()?;
         if let Some(router) = self.routers.lock().await.get(project_id.as_str()) {
@@ -136,13 +164,37 @@ impl DaemonHttpApplicationRegistry {
         Some(router)
     }
 
-    fn router(self) -> Router {
-        Router::new()
+    fn router(
+        self,
+        admission: LocalHttpAdmission,
+    ) -> Result<(
+        Router,
+        Option<Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>>,
+    )> {
+        let local = Router::new()
             .route(
                 "/projects/{project_id}/application/{*tail}",
                 any(dispatch_project_application),
             )
-            .with_state(self)
+            .with_state(self.clone())
+            .layer(middleware::from_fn_with_state(
+                admission,
+                require_local_http_admission,
+            ));
+        let remote = self
+            .remote
+            .read()
+            .map_err(|_| TraceDecayError::Config {
+                message: "daemon HTTP Remote Brain router lock is poisoned".to_owned(),
+            })?
+            .clone();
+        match remote {
+            Some(remote) => Ok((
+                local.nest("/remote", remote.router),
+                Some(remote.credentials),
+            )),
+            None => Ok((local, None)),
+        }
     }
 
     pub(super) fn is_active(&self) -> bool {
@@ -233,6 +285,7 @@ pub(super) struct DaemonHttpApplicationService {
     #[cfg(test)]
     origin: String,
     active: Arc<AtomicBool>,
+    remote_credentials: Option<Arc<super::remote_protocol::DaemonRemoteCredentialAuthorityV1>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<()>>>,
 }
@@ -261,11 +314,8 @@ impl DaemonHttpApplicationService {
                 message: "daemon HTTP loopback origin is not text".to_owned(),
             })?;
         let active = Arc::clone(&registry.active);
+        let (app, remote_credentials) = registry.router(admission.clone())?;
         active.store(true, Ordering::Release);
-        let app = registry.router().layer(middleware::from_fn_with_state(
-            admission.clone(),
-            require_local_http_admission,
-        ));
         let (shutdown, shutdown_requested) = oneshot::channel();
         let task_active = Arc::clone(&active);
         let task = tokio::spawn(async move {
@@ -285,6 +335,7 @@ impl DaemonHttpApplicationService {
             #[cfg(test)]
             origin: origin.to_owned(),
             active,
+            remote_credentials,
             shutdown: Some(shutdown),
             task: Some(task),
         })
@@ -301,6 +352,9 @@ impl DaemonHttpApplicationService {
 
     pub(super) async fn shutdown(mut self) -> Result<()> {
         self.active.store(false, Ordering::Release);
+        if let Some(credentials) = self.remote_credentials.take() {
+            credentials.cancel();
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -316,6 +370,9 @@ impl DaemonHttpApplicationService {
 impl Drop for DaemonHttpApplicationService {
     fn drop(&mut self) {
         self.active.store(false, Ordering::Release);
+        if let Some(credentials) = self.remote_credentials.take() {
+            credentials.cancel();
+        }
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }

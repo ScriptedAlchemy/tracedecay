@@ -497,6 +497,41 @@ fn credential_admission_looks_up_only_the_fingerprint_indexed_final_authority() 
 }
 
 #[test]
+fn credential_registration_inventory_is_bounded_and_preserves_exact_node_identity() {
+    let fixture = fixture();
+    let storage = storage(&fixture);
+    let grant_secret = [7_u8; 32];
+    let grant = enrollment_grant(&grant_secret);
+    storage
+        .store_enrollment_grant(&grant, &enrollment_admission(&grant))
+        .unwrap();
+    let (enrollment, receipt) = enrollment_record(&[9_u8; 32]);
+    insert_enrollment(&fixture, &enrollment, &receipt);
+
+    assert_eq!(
+        storage.credential_registrations(1),
+        Err(RemoteCredentialInventoryErrorV1::CapacityExceeded)
+    );
+    assert_eq!(
+        storage.credential_registrations(2).unwrap(),
+        vec![
+            RemoteCredentialRegistrationV1 {
+                class: RemoteCredentialClassV1::EnrollmentGrant,
+                fingerprint: grant.fingerprint,
+                brain_id: grant.brain_id,
+                node_id: grant.node_id,
+            },
+            RemoteCredentialRegistrationV1 {
+                class: RemoteCredentialClassV1::Enrollment,
+                fingerprint: enrollment.fingerprint,
+                brain_id: enrollment.brain_id,
+                node_id: enrollment.node_id,
+            },
+        ]
+    );
+}
+
+#[test]
 fn durable_revocation_wins_publication_reauthorization() {
     let fixture = fixture();
     let storage = storage(&fixture);

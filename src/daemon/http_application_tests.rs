@@ -13,7 +13,8 @@ use tracedecay_application::{
     OperationTermination, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
-    ActorId, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    ActorId, BrainId, ManifestDigest, ProjectId, RefId, RepositoryId, UserProfileId, UtcMicros,
+    WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -473,4 +474,29 @@ async fn daemon_http_shutdown_marks_registry_inactive() {
     service.shutdown().await.expect("shutdown HTTP service");
 
     assert!(!registry.is_active());
+}
+
+#[tokio::test]
+async fn remote_protocol_mount_authenticates_before_json_and_outside_local_admission() {
+    let registry = DaemonHttpApplicationRegistry::default();
+    let credentials = Arc::new(
+        super::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+            BrainId::new("brain.remote-http").expect("remote brain identity"),
+            UserProfileId::new("profile.remote-http").expect("remote profile identity"),
+        ),
+    );
+    let router =
+        super::remote_protocol::build_daemon_remote_protocol_router(Arc::clone(&credentials))
+            .expect("remote protocol router");
+    registry
+        .install_remote(router, credentials)
+        .expect("install Remote Brain router");
+    let service = DaemonHttpApplicationService::bind(registry, AUTH_TOKEN)
+        .await
+        .expect("bind daemon HTTP application service");
+
+    let response = request_path(&service, "POST", "/remote/query", None, None).await;
+
+    assert_eq!(status(&response), StatusCode::NOT_FOUND);
+    service.shutdown().await.expect("shutdown HTTP service");
 }

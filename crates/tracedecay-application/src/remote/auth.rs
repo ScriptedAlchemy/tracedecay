@@ -49,6 +49,15 @@ impl OpaqueRemoteCredential {
     pub(crate) fn expose_for_authentication(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Derives the stable routing fingerprint without exposing credential
+    /// bytes outside the authentication authority.
+    pub fn credential_fingerprint(
+        &self,
+    ) -> Result<RemoteCredentialFingerprintV1, RemoteAuthenticationError> {
+        RemoteCredentialFingerprintV1::from_secret(self.expose_for_authentication())
+            .map_err(|_| RemoteAuthenticationError::InvalidCredential)
+    }
 }
 
 impl fmt::Debug for OpaqueRemoteCredential {
@@ -914,8 +923,7 @@ pub fn revoke_credential(
 fn fingerprint(
     credential: &OpaqueRemoteCredential,
 ) -> Result<RemoteCredentialFingerprintV1, RemoteAuthenticationError> {
-    RemoteCredentialFingerprintV1::from_secret(credential.expose_for_authentication())
-        .map_err(|_| RemoteAuthenticationError::InvalidCredential)
+    credential.credential_fingerprint()
 }
 
 fn fingerprints_equal(

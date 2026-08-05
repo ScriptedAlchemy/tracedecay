@@ -30,8 +30,7 @@ use tracedecay_domain::{
 use tracedecay_store::StoreRuntimeBindingV1;
 
 use crate::exact_sql::{
-    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement,
-    ExactSqlValue,
+    ExactSqlError, ExactSqlHandle, ExactSqlRows, ExactSqlStatement, ExactSqlValue,
 };
 use tracedecay_application::{
     OperationBudgetUsage,
@@ -53,6 +52,7 @@ mod rows;
 mod schema;
 mod status;
 
+pub use credential_admission::{RemoteCredentialInventoryErrorV1, RemoteCredentialRegistrationV1};
 pub use crypto::{RemoteSpoolKeyV1, RemoteSpoolKeyringV1};
 use enrollment::{
     enrollment_one_row, enrollment_row_text, load_authority_state, load_enrollment,

@@ -10,9 +10,7 @@ use tracedecay_application::{
 };
 use tracedecay_domain::BrainNodeId;
 use tracedecay_domain::canonical_sha256;
-use tracedecay_rusqlite_runtime::remote::{
-    RemoteSpoolKeyringV1, RemoteSqliteStorageV1,
-};
+use tracedecay_rusqlite_runtime::remote::{RemoteSpoolKeyringV1, RemoteSqliteStorageV1};
 use tracedecay_store::{ProjectId, StoreShardIdV1};
 
 use super::{
@@ -27,6 +25,12 @@ use super::{
 
 impl DaemonSessionRuntimeRegistryV1 {
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
+        let remote_credential_authority = Arc::new(
+            crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1::new(
+                identity.brain_id().clone(),
+                identity.profile_id().clone(),
+            ),
+        );
         // The kernel's registry initialises profile- and session-scoped shards
         // through a fail-closed port, because the registered schema lives in
         // `tracedecay-global-db` (which depends on the kernel transitively).
@@ -81,6 +85,7 @@ impl DaemonSessionRuntimeRegistryV1 {
             profile_memory: Mutex::new(None),
             profile_sessions: Mutex::new(None),
             remote_nodes: Mutex::new(BTreeMap::new()),
+            remote_credential_authority,
             project_memory: Mutex::new(BTreeMap::new()),
             project_sessions: Mutex::new(BTreeMap::new()),
             registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
@@ -190,7 +195,7 @@ impl DaemonSessionRuntimeRegistryV1 {
                 let database = Arc::new(
                     Database::publish_runtime(runtime, DatabaseAccessMode::ReadWrite).await?,
                 );
-                mounted.insert(node_id, Arc::clone(&database));
+                mounted.insert(node_id.clone(), Arc::clone(&database));
                 (database, true)
             }
         };
@@ -219,7 +224,21 @@ impl DaemonSessionRuntimeRegistryV1 {
                     )
                 })?;
         }
+        self.remote_credential_authority
+            .register_storage(node_id, storage.clone())
+            .map_err(|error| {
+                session_registry_error(
+                    "register Remote Brain credential authority",
+                    error.to_string(),
+                )
+            })?;
         Ok(storage)
+    }
+
+    pub(crate) fn remote_credential_authority(
+        &self,
+    ) -> Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1> {
+        Arc::clone(&self.remote_credential_authority)
     }
 
     pub(crate) async fn mounted_session_databases(&self) -> Vec<Arc<RegisteredGlobalDb>> {

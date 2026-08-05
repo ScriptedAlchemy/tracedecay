@@ -72,6 +72,8 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_memory: Mutex<Option<Arc<Database>>>,
     profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
     remote_nodes: Mutex<BTreeMap<BrainNodeId, Arc<Database>>>,
+    remote_credential_authority:
+        Arc<crate::daemon::remote_protocol::DaemonRemoteCredentialAuthorityV1>,
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
     registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
