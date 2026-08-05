@@ -192,6 +192,50 @@ impl DaemonSessionSyncService {
                     Ok(journal) => {
                         let admission = journal.admission.clone();
                         if journal.status != SessionSyncJournalStatusV1::Complete
+                            && let Some(primary) = journal.coalesced_primary.clone()
+                        {
+                            let primary_key = journal_key(request.scope(), &primary);
+                            match self
+                                .mirror_primary_terminal(&context, &key, &primary_key)
+                                .await
+                            {
+                                Ok(Some(journal)) => return journal.outcome(),
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::warn!(
+                                        %error,
+                                        "session sync alias replay reconciliation failed"
+                                    );
+                                    return SessionSyncOutcomeV1::Unavailable {
+                                        reason_code: "session_sync_coalesced_journal_read_failed",
+                                    };
+                                }
+                            }
+                            if journal.deadline.is_elapsed_at(observed_at) {
+                                return match self
+                                    .persist_interruption(
+                                        &context,
+                                        &key,
+                                        OperationTermination::TimedOut,
+                                    )
+                                    .await
+                                {
+                                    Ok(journal) => journal.outcome(),
+                                    Err(_) => SessionSyncOutcomeV1::Unavailable {
+                                        reason_code: "session_sync_journal_write_failed",
+                                    },
+                                };
+                            }
+                            if !self.active_contains(&key) {
+                                self.coalesce_import(
+                                    Arc::clone(&context),
+                                    key,
+                                    journal.clone(),
+                                    primary_key,
+                                    request.cancellation().clone(),
+                                );
+                            }
+                        } else if journal.status != SessionSyncJournalStatusV1::Complete
                             && journal.deadline.is_elapsed_at(observed_at)
                         {
                             return match self
@@ -207,18 +251,6 @@ impl DaemonSessionSyncService {
                                     reason_code: "session_sync_journal_write_failed",
                                 },
                             };
-                        } else if journal.status != SessionSyncJournalStatusV1::Complete
-                            && let Some(primary) = journal.coalesced_primary.clone()
-                        {
-                            if !self.active_contains(&key) {
-                                self.coalesce_import(
-                                    Arc::clone(&context),
-                                    key,
-                                    journal.clone(),
-                                    journal_key(request.scope(), &primary),
-                                    request.cancellation().clone(),
-                                );
-                            }
                         } else if journal.status != SessionSyncJournalStatusV1::Complete
                             && !self.enqueue(context, key, request, admission)
                         {
@@ -580,16 +612,7 @@ impl DaemonSessionSyncService {
         key: &str,
         termination: OperationTermination,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
-        let current = context
-            .registry
-            .read_session_sync_journal(key)
-            .await
-            .map_err(store_error)?
-            .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: "session sync journal disappeared".to_owned(),
-            })?;
-        let journal: SessionSyncJournalV1 =
-            serde_json::from_str(&current).map_err(journal_decode_error)?;
+        let journal = self.refresh_source_frontiers(context, key).await?;
         self.persist_terminal(
             context,
             key,
@@ -692,7 +715,17 @@ impl DaemonSessionSyncService {
         context: &SessionSyncProjectContext,
         key: &str,
     ) -> crate::errors::Result<SessionSyncJournalV1> {
-        let source_frontiers = context.source_frontiers().await?;
+        let current = context
+            .registry
+            .read_session_sync_journal(key)
+            .await
+            .map_err(store_error)?
+            .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                message: "session sync journal disappeared".to_owned(),
+            })?;
+        let journal: SessionSyncJournalV1 =
+            serde_json::from_str(&current).map_err(journal_decode_error)?;
+        let source_frontiers = context.source_frontiers_for(&journal.source).await?;
         self.update_journal(context, key, |journal| {
             if journal.status != SessionSyncJournalStatusV1::Complete
                 && journal.source_frontiers != source_frontiers
@@ -825,7 +858,7 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                 tokio::select! {
                     results = futures_util::future::join_all(tasks.iter_mut()) => {
                         for result in results {
-                            log_session_sync_join(result);
+                            work::log_session_sync_join(result);
                         }
                         return;
                     }
@@ -835,7 +868,7 @@ impl SessionSyncServicePort for DaemonSessionSyncService {
                     task.abort();
                 }
                 for result in futures_util::future::join_all(tasks).await {
-                    log_session_sync_join(result);
+                    work::log_session_sync_join(result);
                 }
             })
             .await;
@@ -935,14 +968,6 @@ fn saturating_usize_to_u64(value: usize) -> u64 {
     match u64::try_from(value) {
         Ok(value) => value,
         Err(_) => u64::MAX,
-    }
-}
-
-fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
-    if let Err(error) = result
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "session sync worker join failed");
     }
 }
 

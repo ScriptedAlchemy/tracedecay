@@ -248,9 +248,7 @@ async fn prepare_git_evidence(
     let Some(worktree) = tracedecay_runtime_core::worktree::discover_git_worktree_root(
         std::path::Path::new(row.project_path.trim()),
     ) else {
-        return Ok(PreparedGitEvidenceOutcome::Skip(
-            BackfillSkipReason::NotAWorktree,
-        ));
+        return Err(BoundedBackfillInterruption::SourceUnavailable);
     };
     let reflog = bounded_git_paged_output(
         &worktree,
@@ -391,7 +389,10 @@ async fn bounded_git_output(
 
 #[cfg(test)]
 mod tests {
-    use super::{GIT_OUTPUT_PAGE_SIZE, append_git_output_page, bounded_page_has_more};
+    use super::{
+        BackfillOptions, BoundedBackfillInterruption, BoundedGitControl, GIT_OUTPUT_PAGE_SIZE,
+        SessionActivityRow, append_git_output_page, bounded_page_has_more, prepare_git_evidence,
+    };
 
     #[test]
     fn full_git_output_page_reports_that_another_page_remains() {
@@ -430,5 +431,32 @@ mod tests {
     fn bounded_history_page_reports_unconsumed_session_suffix() {
         assert!(bounded_page_has_more(51, 50));
         assert!(!bounded_page_has_more(50, 50));
+    }
+
+    #[tokio::test]
+    async fn missing_worktree_is_retryable_and_does_not_become_a_skip() {
+        let missing = std::env::temp_dir().join(format!(
+            "tracedecay-missing-git-history-worktree-{}",
+            std::process::id()
+        ));
+        assert!(!missing.exists());
+        let row = SessionActivityRow {
+            provider: "codex".to_owned(),
+            session_id: "session.fixture".to_owned(),
+            project_path: missing.to_string_lossy().into_owned(),
+            started_at: Some(100),
+            ended_at: Some(200),
+            message_min_ts: None,
+            message_max_ts: None,
+        };
+        let control = BoundedGitControl::new(
+            crate::observation::ObservationCancellation::default(),
+            std::time::Duration::from_secs(1),
+        );
+
+        assert!(matches!(
+            prepare_git_evidence(&row, &BackfillOptions::default(), &control).await,
+            Err(BoundedBackfillInterruption::SourceUnavailable)
+        ));
     }
 }

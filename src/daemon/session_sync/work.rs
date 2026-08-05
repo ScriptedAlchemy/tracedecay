@@ -20,6 +20,50 @@ impl DaemonSessionSyncService {
                 continue;
             }
             journal = self.refresh_source_frontiers(context, &key).await?;
+            if let Some(primary) = journal.coalesced_primary.clone() {
+                recovered_import = true;
+                let primary_key = journal_key(&scope, &primary);
+                if self
+                    .mirror_primary_terminal(context, &key, &primary_key)
+                    .await?
+                    .is_some()
+                {
+                    continue;
+                }
+                if journal.cancel_requested_at.is_some() {
+                    self.persist_terminal(
+                        context,
+                        &key,
+                        OperationTermination::Cancelled,
+                        journal.stats,
+                        journal.coverage,
+                        journal.source_frontiers,
+                        Vec::new(),
+                    )
+                    .await?;
+                    continue;
+                }
+                if journal.deadline.is_elapsed_at(now_micros()) {
+                    self.persist_terminal(
+                        context,
+                        &key,
+                        OperationTermination::TimedOut,
+                        journal.stats,
+                        journal.coverage,
+                        journal.source_frontiers,
+                        Vec::new(),
+                    )
+                    .await?;
+                    continue;
+                }
+                let cancellation = CancellationSignal::active(format!(
+                    "session-sync.recovered-alias.{}",
+                    journal.admission.operation_id.as_str()
+                ))
+                .map_err(contract_error)?;
+                self.coalesce_import(Arc::clone(context), key, journal, primary_key, cancellation);
+                continue;
+            }
             if journal.cancel_requested_at.is_some() {
                 self.persist_terminal(
                     context,
@@ -44,22 +88,6 @@ impl DaemonSessionSyncService {
                     Vec::new(),
                 )
                 .await?;
-                continue;
-            }
-            if let Some(primary) = journal.coalesced_primary.clone() {
-                recovered_import = true;
-                let cancellation = CancellationSignal::active(format!(
-                    "session-sync.recovered-alias.{}",
-                    journal.admission.operation_id.as_str()
-                ))
-                .map_err(contract_error)?;
-                self.coalesce_import(
-                    Arc::clone(context),
-                    key,
-                    journal,
-                    journal_key(&scope, &primary),
-                    cancellation,
-                );
                 continue;
             }
             let active_import =
@@ -118,6 +146,38 @@ impl DaemonSessionSyncService {
         Ok(recovered_import)
     }
 
+    async fn mirror_primary_terminal(
+        &self,
+        context: &SessionSyncProjectContext,
+        alias_key: &str,
+        primary_key: &str,
+    ) -> crate::errors::Result<Option<SessionSyncJournalV1>> {
+        let Some(encoded) = context
+            .registry
+            .read_session_sync_journal(primary_key)
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok(None);
+        };
+        let primary: SessionSyncJournalV1 =
+            serde_json::from_str(&encoded).map_err(journal_decode_error)?;
+        let Some(completion) = primary.completion else {
+            return Ok(None);
+        };
+        self.persist_terminal(
+            context,
+            alias_key,
+            completion.termination,
+            completion.stats,
+            completion.coverage,
+            completion.source_frontiers,
+            completion.failure_codes,
+        )
+        .await
+        .map(Some)
+    }
+
     fn coalesce_import(
         &self,
         context: Arc<SessionSyncProjectContext>,
@@ -139,18 +199,6 @@ impl DaemonSessionSyncService {
             let worker = async {
                 loop {
                     if service.shutdown.is_cancelled() {
-                        return;
-                    }
-                    if journal.deadline.is_elapsed_at(now_micros()) {
-                        let _ = service
-                            .persist_interruption(&context, &key, OperationTermination::TimedOut)
-                            .await;
-                        return;
-                    }
-                    if cancellation.is_cancelled() {
-                        let _ = service
-                            .persist_interruption(&context, &key, OperationTermination::Cancelled)
-                            .await;
                         return;
                     }
                     match context
@@ -180,7 +228,7 @@ impl DaemonSessionSyncService {
                                     return;
                                 }
                             };
-                            if let Some(completion) = primary.completion {
+                            if let Some(completion) = primary.completion.clone() {
                                 let _ = service
                                     .persist_terminal(
                                         &context,
@@ -191,6 +239,17 @@ impl DaemonSessionSyncService {
                                         completion.source_frontiers,
                                         completion.failure_codes,
                                     )
+                                    .await;
+                                return;
+                            }
+                            if let Some(termination) = coalesced_alias_local_interruption(
+                                &primary,
+                                &journal,
+                                cancellation.is_cancelled(),
+                                now_micros(),
+                            ) {
+                                let _ = service
+                                    .persist_interruption(&context, &key, termination)
                                     .await;
                                 return;
                             }
@@ -242,6 +301,16 @@ impl DaemonSessionSyncService {
 }
 
 impl SessionSyncProjectContext {
+    async fn source_frontiers_for(
+        &self,
+        source: &SessionSyncCommandV1,
+    ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+        match source {
+            SessionSyncCommandV1::ImportTranscripts(_) => self.source_frontiers().await,
+            SessionSyncCommandV1::SynchronizeGit(_) => self.git_history_source_frontiers().await,
+        }
+    }
+
     async fn source_frontiers(&self) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
         let mut frontiers = Vec::new();
         for (store_scope, database) in [
@@ -276,6 +345,30 @@ impl SessionSyncProjectContext {
                 ))
         });
         Ok(frontiers)
+    }
+
+    async fn git_history_source_frontiers(
+        &self,
+    ) -> crate::errors::Result<Vec<SessionSyncSourceFrontierV1>> {
+        let store = GlobalDbGitCorrelationStore::new(Arc::clone(&self.project_sessions));
+        let snapshot = store.read_snapshot().await.map_err(store_error)?;
+        let activity_timestamp = crate::sessions::git_correlation::read_meta_value(
+            &snapshot,
+            crate::sessions::git_correlation::AUTO_BACKFILL_WATERMARK_KEY,
+        )
+        .await
+        .map_err(store_error)?;
+        let source_rowid = crate::sessions::git_correlation::read_meta_value(
+            &snapshot,
+            crate::sessions::git_correlation::GIT_HISTORY_ROWID_FRONTIER_KEY,
+        )
+        .await
+        .map_err(store_error)?;
+        Ok(
+            git_history_frontier_from_meta(activity_timestamp, source_rowid)
+                .map(|frontier| vec![git_history_source_frontier(&self.project_id, frontier)])
+                .unwrap_or_default(),
+        )
     }
 
     async fn import_transcripts(
@@ -587,22 +680,10 @@ impl SessionSyncProjectContext {
                 if git_errors > 0 {
                     failure_codes.push("git_source_failed".to_owned());
                 }
-                let source_frontiers = vec![SessionSyncSourceFrontierV1 {
-                    store_scope: "git".to_owned(),
-                    source_json: serde_json::json!({
-                        "authority": "git_history_index",
-                    })
-                    .to_string(),
-                    scope_json: serde_json::json!({
-                        "project_id": self.project_id.as_str(),
-                    })
-                    .to_string(),
-                    committed_cursor_json: serde_json::json!({
-                        "activity_timestamp": outcome.frontier.activity_timestamp,
-                        "source_rowid": outcome.frontier.source_rowid,
-                    })
-                    .to_string(),
-                }];
+                let source_frontiers = vec![git_history_source_frontier(
+                    &self.project_id,
+                    outcome.frontier,
+                )];
                 SessionSyncWorkResult::Finished {
                     committed: outcome.committed,
                     stats,
@@ -628,5 +709,64 @@ impl SessionSyncProjectContext {
                 }
             }
         }
+    }
+}
+
+pub(super) fn git_history_frontier_from_meta(
+    activity_timestamp: Option<i64>,
+    source_rowid: Option<i64>,
+) -> Option<crate::sessions::git_correlation::GitHistoryIndexFrontier> {
+    activity_timestamp.map(|activity_timestamp| {
+        crate::sessions::git_correlation::GitHistoryIndexFrontier {
+            activity_timestamp,
+            source_rowid: source_rowid.unwrap_or(0),
+        }
+    })
+}
+
+pub(super) fn git_history_source_frontier(
+    project_id: &ProjectId,
+    frontier: crate::sessions::git_correlation::GitHistoryIndexFrontier,
+) -> SessionSyncSourceFrontierV1 {
+    SessionSyncSourceFrontierV1 {
+        store_scope: "git".to_owned(),
+        source_json: serde_json::json!({
+            "authority": "git_history_index",
+        })
+        .to_string(),
+        scope_json: serde_json::json!({
+            "project_id": project_id.as_str(),
+        })
+        .to_string(),
+        committed_cursor_json: serde_json::json!({
+            "activity_timestamp": frontier.activity_timestamp,
+            "source_rowid": frontier.source_rowid,
+        })
+        .to_string(),
+    }
+}
+
+pub(super) fn coalesced_alias_local_interruption(
+    primary: &SessionSyncJournalV1,
+    alias: &SessionSyncJournalV1,
+    cancellation_is_requested: bool,
+    observed_at: UtcMicros,
+) -> Option<OperationTermination> {
+    if primary.completion.is_some() {
+        None
+    } else if alias.deadline.is_elapsed_at(observed_at) {
+        Some(OperationTermination::TimedOut)
+    } else if cancellation_is_requested {
+        Some(OperationTermination::Cancelled)
+    } else {
+        None
+    }
+}
+
+pub(super) fn log_session_sync_join(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result
+        && !error.is_cancelled()
+    {
+        tracing::warn!(%error, "session sync worker join failed");
     }
 }
