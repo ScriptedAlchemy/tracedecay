@@ -530,6 +530,29 @@ impl DaemonInvocationService {
                 ))
                 .await
             }
+            DaemonInvocationPayload::HandoffApplication {
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                let Some(registered) = work_runtime else {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::Unavailable,
+                    );
+                };
+                Box::pin(execute_handoff_application(
+                    registered,
+                    feedback_runtime,
+                    request_id,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                ))
+                .await
+            }
             DaemonInvocationPayload::WorkAttempt {
                 request,
                 observed_at,
