@@ -569,7 +569,7 @@ pub(super) fn validate_application_outcome(
         ApplicationSurfaceOperation::ContextScoutBudget => evidence!(ContextScoutBudgetStateV1),
         ApplicationSurfaceOperation::ContextScoutPause
         | ApplicationSurfaceOperation::ContextScoutResume => {
-            evidence!(ConfigurationMutationReceipt)
+            effect_decodes::<ConfigurationMutationReceipt>(outcome)
         }
         ApplicationSurfaceOperation::ContextScoutCancel
         | ApplicationSurfaceOperation::ContextScoutDelivery
