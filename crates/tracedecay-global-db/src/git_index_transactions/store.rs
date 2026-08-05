@@ -11,12 +11,12 @@ use tracedecay_store::{
     GitIndexTransactionTerminalWriteV1,
 };
 
-use crate::{RegisteredGlobalDb, registered::RegisteredGlobalDbWriteTransaction};
+use crate::RegisteredGlobalDb;
 #[cfg(any(test, feature = "test-helpers"))]
-use tracedecay_runtime_core::db::engine::{Connection, Transaction, TransactionBehavior};
-use tracedecay_runtime_core::db::engine::{
-    Executor, IntoParams, QueryExecutor, ReadSnapshot, Row, Rows, params,
-};
+use tracedecay_runtime_core::db::engine::Connection;
+use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
+
+use super::database::{GitMutationDatabase, GitMutationWriteTransaction};
 
 /// Async canonical-store adapter for PR11 transaction state.
 ///
@@ -24,93 +24,20 @@ use tracedecay_runtime_core::db::engine::{
 /// opens a database or derives a path. Every mutation owns one `IMMEDIATE`
 /// transaction from that runtime through commit or rollback.
 pub struct GlobalDbGitIndexTransactionStore<'db> {
-    db: GitIndexDatabase<'db>,
-}
-
-#[derive(Clone, Copy)]
-enum GitIndexDatabase<'db> {
-    Registered(&'db RegisteredGlobalDb),
-    #[cfg(any(test, feature = "test-helpers"))]
-    Engine(&'db Connection),
-}
-
-enum GitIndexWriteTransaction<'db> {
-    Registered(RegisteredGlobalDbWriteTransaction<'db>),
-    #[cfg(any(test, feature = "test-helpers"))]
-    Engine(Transaction),
-}
-
-impl QueryExecutor for GitIndexWriteTransaction<'_> {
-    async fn query<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<Rows>
-    where
-        P: IntoParams,
-    {
-        match self {
-            Self::Registered(transaction) => transaction.query(sql, params).await,
-            #[cfg(any(test, feature = "test-helpers"))]
-            Self::Engine(transaction) => transaction.query(sql, params).await,
-        }
-    }
-}
-
-impl Executor for GitIndexWriteTransaction<'_> {
-    async fn execute<P>(
-        &self,
-        sql: &str,
-        params: P,
-    ) -> tracedecay_runtime_core::db::engine::Result<u64>
-    where
-        P: IntoParams,
-    {
-        match self {
-            Self::Registered(transaction) => transaction.execute(sql, params).await,
-            #[cfg(any(test, feature = "test-helpers"))]
-            Self::Engine(transaction) => transaction.execute(sql, params).await,
-        }
-    }
-
-    async fn execute_batch(&self, sql: &str) -> tracedecay_runtime_core::db::engine::Result<()> {
-        match self {
-            Self::Registered(transaction) => transaction.execute_batch(sql).await,
-            #[cfg(any(test, feature = "test-helpers"))]
-            Self::Engine(transaction) => transaction.execute_batch(sql).await,
-        }
-    }
-}
-
-impl GitIndexWriteTransaction<'_> {
-    async fn commit(self) -> tracedecay_runtime_core::db::engine::Result<()> {
-        match self {
-            Self::Registered(transaction) => transaction.commit().await,
-            #[cfg(any(test, feature = "test-helpers"))]
-            Self::Engine(transaction) => transaction.commit().await,
-        }
-    }
-
-    async fn rollback(self) -> tracedecay_runtime_core::db::engine::Result<()> {
-        match self {
-            Self::Registered(transaction) => transaction.rollback().await,
-            #[cfg(any(test, feature = "test-helpers"))]
-            Self::Engine(transaction) => transaction.rollback().await,
-        }
-    }
+    db: GitMutationDatabase<'db>,
 }
 
 impl<'db> GlobalDbGitIndexTransactionStore<'db> {
     pub const fn new(db: &'db RegisteredGlobalDb) -> Self {
         Self {
-            db: GitIndexDatabase::Registered(db),
+            db: GitMutationDatabase::Registered(db),
         }
     }
 
     #[cfg(any(test, feature = "test-helpers"))]
     pub const fn for_engine_test(db: &'db Connection) -> Self {
         Self {
-            db: GitIndexDatabase::Engine(db),
+            db: GitMutationDatabase::Engine(db),
         }
     }
 
@@ -491,33 +418,19 @@ impl<'db> GlobalDbGitIndexTransactionStore<'db> {
         commit_outcome(transaction, outcome).await
     }
 
-    async fn begin_write(&self) -> GitIndexTransactionStoreResult<GitIndexWriteTransaction<'_>> {
-        match self.db {
-            GitIndexDatabase::Registered(db) => db
-                .begin_write_transaction()
-                .await
-                .map(GitIndexWriteTransaction::Registered)
-                .map_err(unavailable),
-            #[cfg(any(test, feature = "test-helpers"))]
-            GitIndexDatabase::Engine(db) => db
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .await
-                .map(GitIndexWriteTransaction::Engine)
-                .map_err(unavailable),
-        }
+    async fn begin_write(&self) -> GitIndexTransactionStoreResult<GitMutationWriteTransaction<'_>> {
+        self.db.begin_write().await.map_err(unavailable)
     }
 
-    async fn read_snapshot(&self) -> GitIndexTransactionStoreResult<ReadSnapshot> {
-        match self.db {
-            GitIndexDatabase::Registered(db) => db.read_snapshot().await.map_err(unavailable),
-            #[cfg(any(test, feature = "test-helpers"))]
-            GitIndexDatabase::Engine(db) => db.read_snapshot().await.map_err(unavailable),
-        }
+    async fn read_snapshot(
+        &self,
+    ) -> GitIndexTransactionStoreResult<tracedecay_runtime_core::db::engine::ReadSnapshot> {
+        self.db.read_snapshot().await.map_err(unavailable)
     }
 }
 
 async fn commit_outcome<T>(
-    transaction: GitIndexWriteTransaction<'_>,
+    transaction: GitMutationWriteTransaction<'_>,
     outcome: GitIndexTransactionStoreResult<T>,
 ) -> GitIndexTransactionStoreResult<T> {
     match outcome {
@@ -818,7 +731,7 @@ where
 {
     let mut rows = transaction
         .query(
-            "SELECT 1 FROM git_index_repository_quarantines
+            "SELECT 1 FROM git_repository_mutation_quarantines
              WHERE repository_id = ?1 AND active = 1 LIMIT 1",
             params![repository_id.as_str()],
         )

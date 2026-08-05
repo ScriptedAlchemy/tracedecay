@@ -4,6 +4,7 @@ mod hunk;
 mod index_preview;
 mod index_transaction;
 mod native_integration;
+mod native_integration_recovery;
 #[cfg(test)]
 mod native_integration_tests;
 mod read_model;
@@ -13,6 +14,7 @@ pub use hunk::*;
 pub use index_preview::*;
 pub use index_transaction::*;
 pub use native_integration::*;
+pub use native_integration_recovery::*;
 pub use read_model::*;
 pub use repository_state::*;
 
