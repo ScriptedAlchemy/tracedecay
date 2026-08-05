@@ -24,7 +24,7 @@ const REDACTED_ASSIGNMENT: &str = "[TraceDecay redacted: credential assignment]"
 const REDACTED_PRIVATE_KEY: &str = "[TraceDecay redacted: private key]";
 const REDACTED_ENTROPY: &str = "[TraceDecay redacted: high-entropy token]";
 const REDACTED_SENSITIVE_FIELD: &str = "[TraceDecay redacted: sensitive field]";
-const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
+pub const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
 const MEMORY_FACT_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.memory-fact.receipt.v1\0";
 pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1";
 const CODE_SOURCE_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.code-source.receipt.v1\0";
@@ -441,6 +441,8 @@ pub enum SanitizedPayloadVerificationError {
     NonDurableDisposition,
     #[error("sanitized payload does not match its exact receipt reference")]
     PayloadMismatch,
+    #[error("sanitized payload receipt was not issued by the expected sanitizer")]
+    ReceiptAuthorityMismatch,
     #[error("sanitized payload cannot be canonically encoded")]
     CanonicalEncoding,
 }
@@ -782,6 +784,21 @@ pub fn serialize_verified_json_payload(
     serde_json::to_vec(payload).map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)
 }
 
+pub fn verify_memory_fact_sanitization(
+    payload: &Value,
+    receipt: &SanitizationReceiptV1,
+) -> Result<(), SanitizedPayloadVerificationError> {
+    let revision = ComponentVersion::new(MEMORY_FACT_SANITIZER_VERSION_V1)
+        .map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)?;
+    verify_sanitized_json_payload(payload, receipt, &revision)?;
+    let expected = memory_fact_receipt(payload, receipt.disposition(), receipt.sensitivity())
+        .map_err(|_| SanitizedPayloadVerificationError::CanonicalEncoding)?;
+    if receipt != &expected {
+        return Err(SanitizedPayloadVerificationError::ReceiptAuthorityMismatch);
+    }
+    Ok(())
+}
+
 /// Sanitizes one structured legacy fact payload and binds durable output to
 /// an exact content reference. Raw input is never included in errors or the
 /// receipt identifier. Quarantine deliberately carries no payload or receipt.
@@ -827,8 +844,20 @@ pub fn sanitize_memory_fact_payload(
     } else {
         SensitivityV1::Secret
     };
+    let receipt = memory_fact_receipt(&detected.payload, disposition, sensitivity)?;
+    Ok(MemoryFactSanitizationV1::Durable {
+        payload: detected.payload,
+        receipt,
+    })
+}
+
+fn memory_fact_receipt(
+    payload: &Value,
+    disposition: SanitizerDispositionV1,
+    sensitivity: SensitivityV1,
+) -> Result<SanitizationReceiptV1, DetectionError> {
     let payload_reference =
-        PayloadReferenceV1::for_payload(&detected.payload).map_err(|_| DetectionError::Receipt)?;
+        PayloadReferenceV1::for_payload(payload).map_err(|_| DetectionError::Receipt)?;
     let sanitizer_version = ComponentVersion::new(MEMORY_FACT_SANITIZER_VERSION_V1)
         .map_err(|_| DetectionError::Receipt)?;
     let receipt_id = SanitizationReceiptId::new(format!(
@@ -845,17 +874,13 @@ pub fn sanitize_memory_fact_payload(
     .map_err(|_| DetectionError::Receipt)?;
     let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
         .map_err(|_| DetectionError::Receipt)?;
-    let receipt = SanitizationReceiptV1::new(
+    SanitizationReceiptV1::new(
         receipt_ref,
         disposition,
         sensitivity,
         Some(payload_reference),
     )
-    .map_err(|_| DetectionError::Receipt)?;
-    Ok(MemoryFactSanitizationV1::Durable {
-        payload: detected.payload,
-        receipt,
-    })
+    .map_err(|_| DetectionError::Receipt)
 }
 
 fn redact_text(

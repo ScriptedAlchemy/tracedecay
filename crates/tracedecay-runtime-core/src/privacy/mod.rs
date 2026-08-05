@@ -31,11 +31,12 @@ pub(crate) fn length_prefixed_sha256_hex(parts: &[&[u8]]) -> String {
 
 pub use detect::{
     CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, DetectionConfidenceV1,
-    LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, MemoryFactSanitizationV1,
-    PrivacyDetectorV1, SanitizationActionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
-    SanitizedPayloadVerificationError, bind_sanitized_lcm_payload_text,
-    quarantine_lcm_payload_text, sanitize_code_source_bytes, sanitize_lcm_payload_text,
-    sanitize_memory_fact_payload, sanitize_provider_metadata_text, serialize_verified_json_payload,
+    LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, MEMORY_FACT_SANITIZER_VERSION_V1,
+    MemoryFactSanitizationV1, PrivacyDetectorV1, SanitizationActionV1,
+    SanitizationEvidenceAnchorV1, SanitizationFindingV1, SanitizedPayloadVerificationError,
+    bind_sanitized_lcm_payload_text, quarantine_lcm_payload_text, sanitize_code_source_bytes,
+    sanitize_lcm_payload_text, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
+    serialize_verified_json_payload, verify_memory_fact_sanitization,
     verify_sanitized_json_payload,
 };
 pub use lcm::{
