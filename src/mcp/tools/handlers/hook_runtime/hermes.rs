@@ -264,7 +264,7 @@ async fn continue_projectless_hermes_review(
         return Ok(json!({ "action": "hermes_receipt", "status": "ingested" }));
     };
     if session_db
-        .lcm_load_raw_message("hermes", &ready.transcript_watermark)
+        .lcm_raw_message_store_id("hermes", &ready.transcript_watermark)
         .await
         .map_err(|error| crate::errors::TraceDecayError::Database {
             operation: "read Hermes transcript watermark".to_owned(),
