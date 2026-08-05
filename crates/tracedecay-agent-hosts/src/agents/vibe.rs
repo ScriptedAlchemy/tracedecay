@@ -37,11 +37,6 @@ fn vibe_prompt_path(home: &Path) -> std::path::PathBuf {
 /// The TOML marker that identifies a tracedecay MCP server entry.
 const TOML_MARKER: &str = "name = \"tracedecay\"";
 
-/// Vibe-only closing paragraph appended after the shared rules text.
-const VIBE_EXTRA_PARAGRAPHS: &[&str] = &["When a tracedecay tool result contains a \
-     `tracedecay_metrics:` line, report the savings to the user (e.g. \"TraceDecay'd ~N \
-     tokens\"). Never silently omit this."];
-
 impl AgentIntegration for VibeIntegration {
     fn name(&self) -> &'static str {
         "Mistral Vibe"
