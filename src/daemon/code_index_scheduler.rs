@@ -1651,6 +1651,27 @@ impl CodeIndexWorktreeSchedulerV1 {
         Ok(self.latest_complete_with(admission))
     }
 
+    /// Admit a generation only when the current worktree stat signature still
+    /// matches the signature sealed by the last reconcile. Workspace-wide
+    /// completeness needs this stronger fence because a file can be added
+    /// inside the ordinary bounded-staleness window.
+    fn latest_complete_ready_for_exact_source_with(
+        &mut self,
+        admission: GenerationDecodeAdmissionV1,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        let latest = self.latest_complete_ready_for_query_with(admission)?;
+        if latest.is_none() {
+            return Ok(None);
+        }
+        match self.worktree_stat_signature() {
+            Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => Ok(latest),
+            _ => {
+                self.request_background_reconcile();
+                Ok(None)
+            }
+        }
+    }
+
     /// A cheap stat-level (path, mtime, size) signature of the present source
     /// candidates. It opens gix and runs stat-based status (no byte reads, no
     /// content hashing), so it can gate the far more expensive read+hash capture

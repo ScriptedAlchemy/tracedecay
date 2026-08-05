@@ -559,7 +559,13 @@ async fn multi_root_payloads_are_not_served_by_the_per_project_service() {
             MultiRootScopeSetCasRequestV1::new(
                 scope_set_id.clone(),
                 None,
-                vec![ProjectId::new("project.quarantined").expect("project")],
+                vec![
+                    tracedecay_application::RegisteredRootSelectorV1::new(
+                        ProjectId::new("project.quarantined").expect("project"),
+                        project_root.clone(),
+                    )
+                    .expect("registered root selector"),
+                ],
             )
             .expect("CAS request"),
             observed_at,
@@ -769,8 +775,16 @@ async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
     service
         .disconnect_lsp_session(&registry, reconnected_session)
         .await;
-    assert_eq!(registry.lock().await.active_sessions(), 1);
-    assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+    assert_eq!(
+        registry.lock().await.active_sessions(),
+        1,
+        "a stale credential must not disconnect the current endpoint"
+    );
+    assert_eq!(
+        service.lsp_sessions.lock().await.len(),
+        1,
+        "a stale credential must not remove the current runtime"
+    );
     let stale_transport = service
         .invoke(
             &registry,

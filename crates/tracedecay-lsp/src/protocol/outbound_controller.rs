@@ -1,14 +1,21 @@
 use std::collections::VecDeque;
 
 use super::{
-    DaemonLspProtocolSession, DaemonLspSessionTransport, DiagnosticSnapshotPort, FeedbackCyclePort,
-    FramePoll, FrameSend, Infallible, LspFrame, LspRequestFailure, LspRequestId,
-    MAX_LSP_FRAME_BYTES, MAX_PUBLICATION_BYTES, MAX_QUEUED_OUTBOUND_BYTES,
-    MAX_QUEUED_OUTBOUND_MESSAGES, PublicationAdmission, RpcFailure, SemanticProviderPort,
-    SessionLifecycle, Value, error_response, request_id,
+    ClientFrameAdmission, DaemonLspProtocolSession, DaemonLspSessionTransport,
+    DiagnosticSnapshotPort, FeedbackCyclePort, FramePoll, FrameSend, Infallible, LspFrame,
+    LspRequestFailure, LspRequestId, MAX_LSP_FRAME_BYTES, MAX_PUBLICATION_BYTES,
+    MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, PublicationAdmission, RpcFailure,
+    SemanticProviderPort, SessionLifecycle, Value, error_response, request_id,
 };
 
 const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
+const CAPABILITY_CONTROL_RESERVED_MESSAGES: usize = 3;
+const CAPABILITY_CONTROL_RESERVED_BYTES: usize = 12 * 1024;
+const MAX_CAPABILITY_CONTROL_FRAME_BYTES: usize = 4 * 1024;
+const MAX_ORDINARY_OUTBOUND_MESSAGES: usize =
+    MAX_QUEUED_OUTBOUND_MESSAGES - CAPABILITY_CONTROL_RESERVED_MESSAGES;
+const MAX_ORDINARY_OUTBOUND_BYTES: usize =
+    MAX_QUEUED_OUTBOUND_BYTES - CAPABILITY_CONTROL_RESERVED_BYTES;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct PublicationTag {
@@ -81,27 +88,14 @@ where
     type Error = Infallible;
 
     fn try_send_client_frame(&mut self, frame: &[u8]) -> Result<FrameSend, Self::Error> {
-        if matches!(
-            self.session.lifecycle(),
-            SessionLifecycle::Exited | SessionLifecycle::Expired
-        ) {
-            return Ok(FrameSend::Closed);
-        }
-        // Do not consume a frame when the typed session cannot reserve any
-        // response capacity. The bridge retains exactly one frame and retries
-        // once the daemon-to-client direction makes progress.
-        if !self
-            .session
-            .has_outbound_capacity(MIN_CLIENT_FRAME_OUTBOUND_RESERVE)
-        {
-            return Ok(FrameSend::Backpressured);
-        }
-        let dispatch = self.session.handle_payload(frame, self.now_ms);
-        Ok(if dispatch.closed {
-            FrameSend::Closed
-        } else {
-            FrameSend::Sent
-        })
+        Ok(
+            match self.session.try_handle_client_payload(frame, self.now_ms) {
+                ClientFrameAdmission::Consumed(dispatch) if dispatch.closed => FrameSend::Closed,
+                ClientFrameAdmission::Consumed(_) => FrameSend::Sent,
+                ClientFrameAdmission::Backpressured => FrameSend::Backpressured,
+                ClientFrameAdmission::Closed => FrameSend::Closed,
+            },
+        )
     }
 
     fn poll_daemon_frame(&mut self) -> Result<FramePoll, Self::Error> {
@@ -241,6 +235,33 @@ where
         payload.len() <= MAX_LSP_FRAME_BYTES && self.enqueue_frame(payload, None, server_request)
     }
 
+    /// Capability registration, cancellation, and unregistration have a
+    /// dedicated bounded reserve so ordinary responses/publications cannot
+    /// indefinitely delay a fail-closed capability transition.
+    pub(super) fn enqueue_capability_control_value(&mut self, value: Value) -> bool {
+        let server_request = value
+            .get("method")
+            .and_then(Value::as_str)
+            .and_then(|_| value.get("id"))
+            .and_then(request_id);
+        let Ok(payload) = serde_json::to_vec(&value) else {
+            return false;
+        };
+        if payload.len() > MAX_CAPABILITY_CONTROL_FRAME_BYTES
+            || self.outbound.queue.len() >= MAX_QUEUED_OUTBOUND_MESSAGES
+            || self.outbound.queued_bytes.saturating_add(payload.len()) > MAX_QUEUED_OUTBOUND_BYTES
+        {
+            return false;
+        }
+        self.outbound.queued_bytes += payload.len();
+        self.outbound.queue.push_back(QueuedFrame {
+            payload,
+            publication: None,
+            server_request,
+        });
+        true
+    }
+
     pub(super) fn enqueue_publication(&mut self, value: Value, tag: PublicationTag) -> bool {
         let Ok(payload) = serde_json::to_vec(&value) else {
             return false;
@@ -281,9 +302,9 @@ where
             };
             replacement
         } else {
-            if self.outbound.queue.len() >= MAX_QUEUED_OUTBOUND_MESSAGES
+            if self.outbound.queue.len() >= MAX_ORDINARY_OUTBOUND_MESSAGES
                 || self.outbound.queued_bytes.saturating_add(payload.len())
-                    > MAX_QUEUED_OUTBOUND_BYTES
+                    > MAX_ORDINARY_OUTBOUND_BYTES
             {
                 return false;
             }
@@ -350,8 +371,8 @@ where
             .queued_bytes
             .saturating_sub(replaced_len)
             .saturating_add(payload.len());
-        if projected_messages > MAX_QUEUED_OUTBOUND_MESSAGES
-            || projected_bytes > MAX_QUEUED_OUTBOUND_BYTES
+        if projected_messages > MAX_ORDINARY_OUTBOUND_MESSAGES
+            || projected_bytes > MAX_ORDINARY_OUTBOUND_BYTES
         {
             return Err(());
         }
@@ -386,8 +407,13 @@ where
     }
 
     pub(super) fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {
-        self.outbound.queue.len() < MAX_QUEUED_OUTBOUND_MESSAGES
-            && self.outbound.queued_bytes.saturating_add(reserve_bytes) <= MAX_QUEUED_OUTBOUND_BYTES
+        self.outbound.queue.len() < MAX_ORDINARY_OUTBOUND_MESSAGES
+            && self.outbound.queued_bytes.saturating_add(reserve_bytes)
+                <= MAX_ORDINARY_OUTBOUND_BYTES
+    }
+
+    pub(super) fn has_client_frame_outbound_capacity(&self) -> bool {
+        self.has_outbound_capacity(MIN_CLIENT_FRAME_OUTBOUND_RESERVE)
     }
 }
 

@@ -47,18 +47,18 @@ impl DaemonInvocationService {
         let observations = feedback_runtime
             .as_ref()
             .map(|runtime| runtime.source_observation_port());
-        let observation_subject = plan26_invocation_subject(&request_id, operation, delivery_route);
+        let observation_subject =
+            invocation_observation_subject(&request_id, operation, delivery_route);
         if let Err(problem) = request.validate() {
-            if plan26_observable_operation(operation)
-                && let Some((argument, rejection)) =
-                    plan26_invocation_problem_rejected_argument(problem)
+            if is_observable_operation(operation)
+                && let Some((argument, rejection)) = invocation_problem_rejected_argument(problem)
             {
-                emit_plan26_invocation_event(
+                emit_invocation_observation(
                     observations.as_ref(),
                     observation_subject.as_ref(),
                     current_micros(),
                     Plan26FeedbackSourceEventV1::SurfaceArgumentRejected {
-                        operation: plan26_feedback_operation(operation),
+                        operation: feedback_observation_operation(operation),
                         route: delivery_route,
                         argument,
                         rejection,
@@ -70,13 +70,13 @@ impl DaemonInvocationService {
             return DaemonInvocationResponse::problem(request_id, problem);
         }
         let dispatched_at = current_micros();
-        if plan26_observable_operation(operation) {
-            emit_plan26_invocation_event(
+        if is_observable_operation(operation) {
+            emit_invocation_observation(
                 observations.as_ref(),
                 observation_subject.as_ref(),
                 dispatched_at,
                 Plan26FeedbackSourceEventV1::Dispatch {
-                    operation: plan26_feedback_operation(operation),
+                    operation: feedback_observation_operation(operation),
                     outcome: Plan26FeedbackOutcomeV1::Admitted,
                     capacity: 1,
                     admitted: 1,
@@ -621,8 +621,8 @@ impl DaemonInvocationService {
                 Err(response) => response,
             },
         };
-        if plan26_observable_operation(operation) {
-            observe_plan26_invocation_response(
+        if is_observable_operation(operation) {
+            observe_invocation_response(
                 observations.as_ref(),
                 observation_subject.as_ref(),
                 operation,
