@@ -621,9 +621,8 @@ impl McpServer {
     /// — the one that noticed the drift included — serves the last complete
     /// snapshot until the swap lands.
     ///
-    /// If reopening fails the previous instance is kept — the drift guards in
-    /// [`TraceDecay::ensure_branch_writable`] and [`Self::maybe_sync_if_stale`]
-    /// still protect writes, exactly as before this hot-swap existed.
+    /// If reopening fails the previous instance is kept; write admission still
+    /// rejects a graph whose branch identity drifted.
     pub(crate) async fn reopen_if_branch_drifted(&self) -> Arc<TraceDecay> {
         self.reopen_if_branch_drifted_memoized().await.0
     }
@@ -747,13 +746,8 @@ impl McpServer {
         self.branch_reopen_completions.load(Ordering::Acquire)
     }
 
-    /// Catch-up sync helper for tests and explicit callers. Bypasses the 30 s
-    /// cooldown in [`Self::maybe_sync_if_stale`] so changes made while the
-    /// server was down — a terminal `git pull`, IDE edits before the agent
-    /// launched, files touched by another tool — can be reconciled before
-    /// assertions or source-editing work. The staleness-check stamp is updated
-    /// on the way out so the next lazy sync doesn't immediately re-walk the
-    /// tree.
+    /// Startup-only catch-up for direct servers. Daemon-owned production
+    /// convergence enters through the canonical code-index scheduler.
     ///
     /// The machine is advanced on every exit path (including errors) so
     /// [`Self::wait_for_startup_catch_up`] never hangs.
@@ -778,12 +772,6 @@ impl McpServer {
                 return;
             }
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        self.last_staleness_check_at.store(now, Ordering::Release);
-
         // Best-effort transcript ingestion sweep for hookless agents (Claude,
         // Codex, Gemini). Cursor ingests via its own end-of-turn hook; these
         // agents register no hook, so their transcripts are reconciled here.
@@ -907,170 +895,6 @@ impl McpServer {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
         true
-    }
-
-    /// Claim the lazy-sync window for edit-shaped tools and kick the sync in
-    /// the background — but only if at least 30 s have passed since the last
-    /// successful sync. The cooldown is the gate: while it holds, this returns
-    /// immediately, so dropping it into every `tools/call` handler is cheap.
-    ///
-    /// **Never blocks.** This used to run `find_stale_files` (a full project
-    /// tree walk) and then reindex the entire stale set inline, on the request
-    /// path, with no bound: one `git pull` ahead of an edit tool turned that
-    /// call into an O(store) reindex the client waited on. The claim is still
-    /// made here — so the cooldown and single-flight semantics are unchanged —
-    /// but the work is detached through the same mechanism read tools already
-    /// use ([`Self::spawn_read_refresh_task`]), and the caller serves
-    /// immediately on the current snapshot. The *next* call observes the
-    /// freshly synced index.
-    ///
-    /// Concurrent callers are serialized via
-    /// [`Self::last_staleness_check_at`]: the first caller stamps `now`
-    /// into the field with `compare_exchange`; later callers within the
-    /// same window see the stamp and bail. If the actual sync work
-    /// fails, the stamp still advances — failure to walk the tree
-    /// should not cause every subsequent tool call to retry.
-    pub async fn maybe_sync_if_stale(&self) {
-        let cg = self.cg_snapshot().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64;
-        let previous = self.last_staleness_check_at.load(Ordering::Acquire);
-        let last_sync = cg.last_sync_timestamp().await;
-        if previous != 0 && now.saturating_sub(last_sync) < 30 {
-            return;
-        }
-
-        if !CooldownGate.try_claim(&self.last_staleness_check_at, now, 30) {
-            return;
-        }
-
-        // Branch-drift guard (#2): if the working tree switched branches since
-        // this snapshot opened, the cached DB belongs to the old branch. Skip
-        // the lazy sync — `find_stale_files` would diff the new branch's files
-        // against the old branch's DB, and `ensure_branch_writable` would
-        // reject the write anyway. `tools/call` reopens onto the live branch
-        // via [`Self::reopen_if_branch_drifted`] *before* invoking this, so
-        // the guard only fires on a checkout racing the current call.
-        //
-        // R4: deliberately resolves its own branch rather than taking the
-        // request memo. The `CooldownGate` claim above rate-limits this path
-        // to once per 30s, so it is not a per-request cost, and re-reading
-        // HEAD here keeps the racing-checkout guard genuine.
-        if cg.branch_drifted() {
-            return;
-        }
-
-        // Reserve the single-flight slot shared with the read-refresh lane so a
-        // lazy sync and a read refresh never stack on the same store. If a
-        // refresh is already running, the cooldown claim above has done its job
-        // and this call simply serves the current snapshot.
-        if self
-            .background_refresh_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        // The detached task refreshes `file_token_map` from the synced graph on
-        // every success — including the case where nothing was stale, because a
-        // sibling MCP peer may have synced the DB between our cooldown windows.
-        self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
-    }
-
-    /// D4: sync-on-read entry point for read (non-edit) tools. NEVER blocks.
-    ///
-    /// If read-refresh is enabled and the read cooldown has elapsed since the
-    /// last background spawn, this `compare_exchange`s
-    /// [`background_refresh_running`](Self::background_refresh_running) to
-    /// `true` and spawns a detached refresh, then returns immediately so the
-    /// caller serves the current answer with zero added latency. The *next*
-    /// read observes the freshly synced index.
-    ///
-    /// Single-flighted three ways: the `read_cooldown_secs` stamp, the
-    /// `background_refresh_running` flag, and the underlying cross-process
-    /// sync lock. At most one refresh runs at a time.
-    ///
-    /// R4: this runs before any cooldown claim, so it is on the hot path of
-    /// every read tool call. It takes the caller's request-scoped branch memo
-    /// — the same resolution `reopen_if_branch_drifted` already made for this
-    /// request — instead of re-opening the repository.
-    pub(crate) fn maybe_spawn_read_refresh(
-        &self,
-        cg: &Arc<TraceDecay>,
-        live_branch: &crate::branch::BranchMemo,
-    ) {
-        if !self.sync_config.read_refresh {
-            return;
-        }
-        // A checkout racing this call would diff the new branch against the
-        // old branch's DB; `tools/call` reopens onto the live branch before
-        // dispatch, so this only fires on an in-flight race. Skip it — the
-        // next call runs on the reopened snapshot.
-        if cg.branch_drifted_with(live_branch) {
-            return;
-        }
-
-        let now = crate::tracedecay::current_timestamp();
-        let cooldown = self.sync_config.read_cooldown_secs as i64;
-        let previous = self.last_background_refresh_at.load(Ordering::Acquire);
-        if previous != 0 && now.saturating_sub(previous) < cooldown {
-            return;
-        }
-        // Reserve the cooldown slot. If another read call won the race, bail.
-        if !CooldownGate.try_claim(&self.last_background_refresh_at, now, cooldown) {
-            return;
-        }
-        // Reserve the single-flight slot. If a refresh is already running
-        // (e.g. a slow prior spawn that outlived its cooldown), don't stack.
-        if self
-            .background_refresh_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        self.spawn_read_refresh_task(cg, self.sync_config.full_sync_escalation_files);
-    }
-
-    /// Spawns the detached D4 refresh task. The task owns cheap `Arc` clones
-    /// of the background-refresh flag, the completion stamp, and the shared
-    /// file-token map, so no `Arc<Self>` receiver is needed. Prefers diff-
-    /// scoping off `last_synced_commit`; falls back to the full tree walk
-    /// when no base commit is stamped or the diff escalates past the limit.
-    ///
-    /// The caller MUST have already set `background_refresh_running` to
-    /// `true`; this task clears it on completion.
-    pub(crate) fn spawn_read_refresh_task(&self, cg: &Arc<TraceDecay>, escalation: usize) {
-        let running = Arc::clone(&self.background_refresh_running);
-        let done_at = Arc::clone(&self.last_background_refresh_done_at);
-        let token_map = Arc::clone(&self.file_token_map);
-        let refresh = Arc::clone(&self.background_refresh_writer);
-        let request = BackgroundRefreshRequest {
-            graph: Arc::clone(cg),
-            project_root: cg.project_root().to_path_buf(),
-            full_sync_escalation_files: escalation,
-        };
-        tokio::spawn(async move {
-            match refresh(request).await {
-                Ok(Some(fresh)) => {
-                    if let Ok(mut guard) = token_map.lock() {
-                        *guard = fresh;
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "background read refresh could not reopen project"
-                    );
-                }
-            }
-            done_at.store(crate::tracedecay::current_timestamp(), Ordering::Release);
-            running.store(false, Ordering::Release);
-        });
     }
 
     /// Returns a compact one-line notice when automation runs have staged

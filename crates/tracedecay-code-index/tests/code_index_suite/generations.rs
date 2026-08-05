@@ -40,6 +40,7 @@ fn snapshot(files: Vec<SanitizedCodeFileV1>) -> SanitizedCodeSnapshotV1 {
         worktree: None,
         reference: None,
         source_revision: None,
+        source_tree: None,
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.incremental")],
         content_identity: content_digest('f'),

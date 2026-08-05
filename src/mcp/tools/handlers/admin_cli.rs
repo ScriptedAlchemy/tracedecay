@@ -375,7 +375,7 @@ async fn dispatch_admin_cli(
             history,
         } => gain_query(global_db, project_arg.as_deref(), since, history).await,
     };
-    Ok(json_result(&value))
+    json_result(&value)
 }
 
 async fn registry_empty(global_db: &RegisteredGlobalDb) -> Result<Value> {

@@ -564,6 +564,7 @@ pub(crate) mod test_support {
     #[derive(Clone, Default)]
     pub(crate) struct MemoryHostAdmission {
         store: MemoryObservationStore,
+        cancel_on_cursor_read: Arc<Mutex<Option<ObservationCancellation>>>,
     }
 
     impl MemoryHostAdmission {
@@ -588,6 +589,13 @@ pub(crate) mod test_support {
                 .iter()
                 .filter(|stored| !state.projected_sequences.contains(&stored.sequence()))
                 .count()
+        }
+
+        pub(crate) fn cancel_on_next_cursor_read(&self, cancellation: ObservationCancellation) {
+            *self
+                .cancel_on_cursor_read
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = Some(cancellation);
         }
 
         fn application(
@@ -650,6 +658,14 @@ pub(crate) mod test_support {
             scope: &'a ObservationScopeV1,
         ) -> AdmissionFuture<'a, Option<ObservationSourceCursorV1>> {
             Box::pin(async move {
+                if let Some(cancellation) = self
+                    .cancel_on_cursor_read
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
+                {
+                    cancellation.cancel();
+                }
                 self.store
                     .read_source_cursor(source, scope)
                     .await

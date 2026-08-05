@@ -5,12 +5,17 @@ use std::path::{Path, PathBuf};
 use crate::branch_meta::BranchMeta;
 
 mod admin;
+mod snapshots;
 
 pub use admin::{
     BranchAdminAction, BranchAdminOutcome, BranchAdminReport, PreparedBranchAdminMutation,
     prepare_branch_admin_mutation, remove_tracked_branch_store_checked,
 };
 pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_admin_recovery};
+pub use snapshots::{
+    BranchSnapshot, LocalBranchReadControlV1, LocalBranchRevisionV1, LocalBranchSnapshotErrorV1,
+    LocalBranchSnapshotsV1, local_branch_revision_controlled, local_branch_snapshots_controlled,
+};
 
 /// Installs the root-owned pending branch-admin recovery gate into the kernel
 /// lock primitives.

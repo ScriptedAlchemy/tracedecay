@@ -89,6 +89,8 @@ pub enum TranscriptIngestError {
     },
     #[error("{provider} frame state is invalid")]
     InvalidFrameState { provider: &'static str },
+    #[error("{provider} blocking source scan did not join successfully")]
+    BlockingScanTaskFailed { provider: &'static str },
     #[error("{provider} transcript has no injective source identity: {path}")]
     InvalidSourceIdentity {
         provider: &'static str,

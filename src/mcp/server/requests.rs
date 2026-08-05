@@ -5,31 +5,13 @@ use super::*;
 use crate::mcp::ToolResult;
 use tracedecay_sessions::WorkflowIndexReadPort;
 
-struct PreparedToolCall {
-    tool_name: String,
-    arguments: Value,
-    analytics_arguments: Value,
-    analytics_session_id: Option<String>,
-}
+mod tool_call_lifecycle;
 
-struct DispatchedToolCall {
-    cg: Arc<TraceDecay>,
-    selected_owner: Option<crate::global_db::ProjectRegistryContext>,
-    selected_scope: Option<tracedecay_application::ResolvedScope>,
-    outcome: Result<ToolResult>,
-    elapsed_us: Option<u64>,
-}
-
-struct RoutedToolCall {
-    arguments: Value,
-    selected_project: Option<crate::mcp::project_route::ResolvedProjectRoute>,
-}
-
-struct ToolTokenAccounting {
-    raw_file_tokens: u64,
-    response_tokens: u64,
-    net_saved_tokens: u64,
-}
+pub(super) use tool_call_lifecycle::{
+    ApplicationCancellationRegistration, DispatchedToolCall, PreparedToolCall,
+    PreparedToolCallError, RoutedToolCall, ToolTokenAccounting, mcp_now_micros,
+};
+pub(crate) use tool_call_lifecycle::{DispatchExecutionSettlement, RetainedToolDispatchTasks};
 
 pub(super) fn invocation_target_for_route(
     route: Option<&crate::mcp::project_route::ResolvedProjectRoute>,
@@ -67,36 +49,6 @@ pub(super) fn recover_lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGu
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-struct ApplicationCancellationRegistration<'a> {
-    registry: &'a std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
-    request_id: Option<String>,
-}
-
-impl Drop for ApplicationCancellationRegistration<'_> {
-    fn drop(&mut self) {
-        if let Some(request_id) = self.request_id.as_deref() {
-            recover_lock(self.registry).remove(request_id);
-        }
-    }
-}
-
-/// Application-surface plumbing prepared once per dispatch: the typed request
-/// id, deadline, cancellation signal, daemon invocation client, and the RAII
-/// cancellation registration that must outlive the dispatch await.
-struct ApplicationSurfaceDispatch<'a> {
-    request_id: Option<tracedecay_application::RequestId>,
-    deadline: Option<tracedecay_application::Deadline>,
-    cancellation: Option<tracedecay_application::CancellationSignal>,
-    invocation_executor: Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
-    _registration: ApplicationCancellationRegistration<'a>,
-}
-
-/// Retained name for this module's call sites; the saturating clamp is the one
-/// shared definition so MCP cannot stamp "now" differently from the daemon.
-pub(super) fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
-    tracedecay_application::clock::now_micros()
 }
 
 fn is_source_edit_tool(tool_name: &str) -> bool {
@@ -664,13 +616,20 @@ impl McpServer {
     pub(crate) async fn read_resource_status(&self, id: Value) -> JsonRpcResponse {
         let cg = self.reopen_if_branch_drifted().await;
         match cg.get_stats().await {
-            Ok(stats) => {
-                let mut output = serde_json::to_value(&stats).unwrap_or(json!({}));
-                output["branch_diagnostics"] =
-                    serde_json::to_value(cg.branch_diagnostics()).unwrap_or(json!({}));
-                let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-                Self::resource_contents(id, "tracedecay://status", "application/json", &text)
-            }
+            Ok(stats) => match (|| -> Result<String> {
+                let mut output = serde_json::to_value(&stats)?;
+                output["branch_diagnostics"] = serde_json::to_value(cg.branch_diagnostics())?;
+                Ok(serde_json::to_string_pretty(&output)?)
+            })() {
+                Ok(text) => {
+                    Self::resource_contents(id, "tracedecay://status", "application/json", &text)
+                }
+                Err(error) => JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("failed to serialize graph stats: {error}"),
+                ),
+            },
             Err(e) => JsonRpcResponse::error(
                 id,
                 ErrorCode::InternalError,
@@ -791,38 +750,119 @@ impl McpServer {
             "branch_count": branches.len(),
             "branches": branches,
         });
-        let text = serde_json::to_string_pretty(&output).unwrap_or_default();
-        Self::resource_contents(id, "tracedecay://branches", "application/json", &text)
+        match serde_json::to_string_pretty(&output) {
+            Ok(text) => {
+                Self::resource_contents(id, "tracedecay://branches", "application/json", &text)
+            }
+            Err(error) => JsonRpcResponse::error(
+                id,
+                ErrorCode::InternalError,
+                format!("failed to serialize branch inventory: {error}"),
+            ),
+        }
     }
 
     #[allow(clippy::result_large_err)]
-    fn prepare_tool_call(
+    fn prepare_tool_call<'a>(
+        &'a self,
         id: &Value,
         params: Option<&Value>,
-    ) -> std::result::Result<PreparedToolCall, JsonRpcResponse> {
+        memory_request_scope: &str,
+        pre_cancelled: bool,
+    ) -> std::result::Result<PreparedToolCall<'a>, PreparedToolCallError> {
         let Some(params) = params else {
-            return Err(JsonRpcResponse::error(
-                id.clone(),
-                ErrorCode::InvalidParams,
-                "missing params for tools/call".to_string(),
-            ));
+            return Err(PreparedToolCallError {
+                response: JsonRpcResponse::error(
+                    id.clone(),
+                    ErrorCode::InvalidParams,
+                    "missing params for tools/call".to_string(),
+                ),
+                terminal: super::request_receipts::ToolCallTerminal::Failed,
+            });
         };
 
         let Some(tool_name) = params.get("name").and_then(|v| v.as_str()) else {
-            return Err(JsonRpcResponse::error(
-                id.clone(),
-                ErrorCode::InvalidParams,
-                "missing 'name' in tools/call params".to_string(),
-            ));
+            return Err(PreparedToolCallError {
+                response: JsonRpcResponse::error(
+                    id.clone(),
+                    ErrorCode::InvalidParams,
+                    "missing 'name' in tools/call params".to_string(),
+                ),
+                terminal: super::request_receipts::ToolCallTerminal::Failed,
+            });
         };
+
+        let application_request_id = application_surface_request_id(id, memory_request_scope)
+            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
+        let cancellation_identity = application_request_id.as_ref().map_or_else(
+            || format!("cancellation.mcp.unidentified.{tool_name}"),
+            |request_id| format!("cancellation.{}", request_id.as_str()),
+        );
+        let cancellation = tracedecay_application::CancellationSignal::active(
+            cancellation_identity,
+        )
+        .map_err(|error| {
+            let error = TraceDecayError::Config {
+                message: format!("could not create MCP cancellation signal: {error}"),
+            };
+            PreparedToolCallError {
+                response: tool_error_response(id.clone(), tool_name, &error),
+                terminal: super::request_receipts::ToolCallTerminal::for_error(&error),
+            }
+        })?;
+        if pre_cancelled {
+            cancellation.cancel(mcp_now_micros());
+        }
+        if let Some(request_id) = application_request_id.as_ref() {
+            recover_lock(&self.application_surface_cancellations)
+                .insert(request_id.as_str().to_owned(), cancellation.clone());
+        }
+        let registration = ApplicationCancellationRegistration {
+            registry: &self.application_surface_cancellations,
+            request_id: application_request_id
+                .as_ref()
+                .map(|request_id| request_id.as_str().to_owned()),
+        };
+        let application_surface =
+            crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
+        let source_edit = is_source_edit_tool(tool_name);
+        let controlled_read = is_controlled_read_tool(tool_name);
+        let carried_deadline = dispatch_deadline_horizon_micros(
+            application_surface.is_some() || source_edit,
+            controlled_read || source_edit,
+        )
+        .and_then(|horizon| {
+            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+                mcp_now_micros().0.saturating_add(horizon),
+            ))
+            .ok()
+        });
+        let dispatch_control = crate::mcp::tools::handlers::McpToolDispatchControl::new(
+            tool_name,
+            carried_deadline,
+            cancellation,
+        )
+        .map_err(|error| PreparedToolCallError {
+            response: tool_error_response(id.clone(), tool_name, &error),
+            terminal: super::request_receipts::ToolCallTerminal::for_error(&error),
+        })?;
+        dispatch_control
+            .check(crate::mcp::tools::handlers::McpToolDispatchStage::SchemaValidation)
+            .map_err(|error| PreparedToolCallError {
+                response: tool_error_response(id.clone(), tool_name, &error),
+                terminal: super::request_receipts::ToolCallTerminal::for_error(&error),
+            })?;
 
         let mut arguments = params.get("arguments").cloned().unwrap_or(json!({}));
         if crate::mcp::project_route::protect_tool_structural_ids(&mut arguments).is_err() {
-            return Err(JsonRpcResponse::error(
-                id.clone(),
-                ErrorCode::InvalidParams,
-                "invalid structural identifier".to_string(),
-            ));
+            return Err(PreparedToolCallError {
+                response: JsonRpcResponse::error(
+                    id.clone(),
+                    ErrorCode::InvalidParams,
+                    "invalid structural identifier".to_string(),
+                ),
+                terminal: super::request_receipts::ToolCallTerminal::Failed,
+            });
         }
 
         Ok(PreparedToolCall {
@@ -830,6 +870,9 @@ impl McpServer {
             analytics_arguments: arguments.clone(),
             analytics_session_id: mcp_analytics_session_id(&arguments),
             arguments,
+            dispatch_control,
+            application_request_id,
+            _cancellation_registration: registration,
         })
     }
 
@@ -839,40 +882,48 @@ impl McpServer {
         tool_name: &str,
         arguments: Value,
         route_cache: &HookProjectRouteCache,
-        memory_request_scope: &str,
+        application_request_id: Option<&tracedecay_application::RequestId>,
+        dispatch_control: &crate::mcp::tools::handlers::McpToolDispatchControl,
     ) -> Result<RoutedToolCall> {
-        let (mut handler_arguments, routed_project) =
-            route_cache.route_tool_arguments(tool_name, arguments)?;
-        if crate::analytics::is_skill_view_tool(tool_name)
-            && let Some(request_id) = json_rpc_request_id_string(id)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.insert("__mcp_request_id".to_string(), json!(request_id));
-        }
-        if tool_supports_live_cancellation(tool_name)
-            && let Some(map) = handler_arguments.as_object_mut()
-        {
-            map.remove("__mcp_request_id");
-            if let Some(request_id) = application_surface_request_id(id, memory_request_scope) {
-                map.insert("__mcp_request_id".to_owned(), json!(request_id));
-            }
-        }
-        let selected_project = match routed_project {
-            Some(project) => Some(project),
-            None => {
-                crate::mcp::tools::handlers::selected_registered_project_reader(
-                    tool_name.to_owned(),
-                    handler_arguments.clone(),
-                    self.registry_db.as_deref(),
-                    self.retained_project_graph_resolver.clone(),
-                )
-                .await?
-            }
-        };
-        Ok(RoutedToolCall {
-            arguments: handler_arguments,
-            selected_project,
-        })
+        dispatch_control
+            .run(
+                crate::mcp::tools::handlers::McpToolDispatchStage::ProjectSelection,
+                async {
+                    let (mut handler_arguments, routed_project) =
+                        route_cache.route_tool_arguments(tool_name, arguments)?;
+                    if crate::analytics::is_skill_view_tool(tool_name)
+                        && let Some(request_id) = json_rpc_request_id_string(id)
+                        && let Some(map) = handler_arguments.as_object_mut()
+                    {
+                        map.insert("__mcp_request_id".to_string(), json!(request_id));
+                    }
+                    if tool_supports_live_cancellation(tool_name)
+                        && let Some(map) = handler_arguments.as_object_mut()
+                    {
+                        map.remove("__mcp_request_id");
+                        if let Some(request_id) = application_request_id {
+                            map.insert("__mcp_request_id".to_owned(), json!(request_id.as_str()));
+                        }
+                    }
+                    let selected_project = match routed_project {
+                        Some(project) => Some(project),
+                        None => {
+                            crate::mcp::tools::handlers::selected_registered_project_reader(
+                                tool_name.to_owned(),
+                                handler_arguments.clone(),
+                                self.registry_db.as_deref(),
+                                self.retained_project_graph_resolver.clone(),
+                            )
+                            .await?
+                        }
+                    };
+                    Ok(RoutedToolCall {
+                        arguments: handler_arguments,
+                        selected_project,
+                    })
+                },
+            )
+            .await
     }
 
     async fn execute_tool_dispatch(
@@ -941,6 +992,7 @@ impl McpServer {
                 application_cancellation,
                 code_index_publication_identity: self.code_index_publication_identity.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
+                code_index_branch_diff_executor: self.code_index_branch_diff_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),
                 source_edit_reconciliation_executor: self
                     .source_edit_reconciliation_executor
@@ -1014,20 +1066,27 @@ impl McpServer {
         id: &Value,
         tool_name: &str,
         arguments: Value,
+        dispatch_control: crate::mcp::tools::handlers::McpToolDispatchControl,
+        application_request_id: Option<tracedecay_application::RequestId>,
         timings_enabled: bool,
         route_cache: &HookProjectRouteCache,
         implicit_project_path: Option<&Path>,
-        memory_request_scope: &str,
-        pre_cancelled: bool,
         publish_activity: bool,
     ) -> DispatchedToolCall {
-        // Branch-drift hot-swap: if the working tree switched branches since
-        // the served instance opened, reopen onto the live branch's DB so
-        // this call reads the right index. Cheap no-op check when no drift.
-        let (active_cg, live_branch) = self.reopen_if_branch_drifted_memoized().await;
         let handler_start = timings_enabled.then(std::time::Instant::now);
+        // The routed daemon owns graph reopening and generation publication.
+        // tools/call serves the mounted sealed snapshot and never opens a
+        // branch database or starts convergence from the request path.
+        let active_cg = self.cg_snapshot().await;
         let routed = match self
-            .route_tool_arguments(id, tool_name, arguments, route_cache, memory_request_scope)
+            .route_tool_arguments(
+                id,
+                tool_name,
+                arguments,
+                route_cache,
+                application_request_id.as_ref(),
+                &dispatch_control,
+            )
             .await
         {
             Ok(routed) => routed,
@@ -1038,6 +1097,8 @@ impl McpServer {
                     selected_scope: None,
                     outcome: Err(error),
                     elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    worker_settlement:
+                        super::request_receipts::ToolCallWorkerSettlement::NotStarted,
                 };
             }
         };
@@ -1057,17 +1118,49 @@ impl McpServer {
         let application_invocation_target =
             invocation_target_for_route(routed.selected_project.as_ref());
 
-        self.begin_tool_dispatch(
-            tool_name,
-            &cg,
-            &live_branch,
-            project_reader_preselected,
-            publish_activity,
-        )
-        .await;
+        if let Err(error) = dispatch_control
+            .run(
+                crate::mcp::tools::handlers::McpToolDispatchStage::Handler,
+                async {
+                    self.begin_tool_dispatch(tool_name, &cg, publish_activity)
+                        .await;
+                    Ok(())
+                },
+            )
+            .await
+        {
+            return DispatchedToolCall {
+                cg,
+                selected_owner,
+                selected_scope,
+                outcome: Err(error),
+                elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                worker_settlement: super::request_receipts::ToolCallWorkerSettlement::NotStarted,
+            };
+        }
 
         let server_stats = if tool_name == "tracedecay_status" {
-            Some(self.server_stats_json().await)
+            match dispatch_control
+                .run(
+                    crate::mcp::tools::handlers::McpToolDispatchStage::Handler,
+                    async { Ok(self.server_stats_json().await) },
+                )
+                .await
+            {
+                Ok(stats) => Some(stats),
+                Err(error) => {
+                    return DispatchedToolCall {
+                        cg,
+                        selected_owner,
+                        selected_scope,
+                        outcome: Err(error),
+                        elapsed_us: handler_start
+                            .map(|started| started.elapsed().as_micros() as u64),
+                        worker_settlement:
+                            super::request_receipts::ToolCallWorkerSettlement::NotStarted,
+                    };
+                }
+            }
         } else {
             None
         };
@@ -1075,72 +1168,100 @@ impl McpServer {
         // `timings_enabled` was initialized from the server's pinned resolved
         // snapshot (or an explicit transport override). Do not synchronously
         // re-read legacy configuration for every tool call.
-        let ApplicationSurfaceDispatch {
-            request_id: application_request_id,
-            deadline: application_deadline,
-            cancellation: application_cancellation,
-            invocation_executor: application_invocation_executor,
-            _registration,
-        } = self
-            .prepare_application_surface_dispatch(
-                &cg,
-                id,
-                tool_name,
-                memory_request_scope,
-                pre_cancelled,
+        let application_invocation_executor = match dispatch_control
+            .run(
+                crate::mcp::tools::handlers::McpToolDispatchStage::ApplicationRoute,
+                async {
+                    Ok(self
+                        .application_surface_invocation_executor(&cg, tool_name)
+                        .await)
+                },
+            )
+            .await
+        {
+            Ok(executor) => executor,
+            Err(error) => {
+                return DispatchedToolCall {
+                    cg,
+                    selected_owner,
+                    selected_scope,
+                    outcome: Err(error),
+                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    worker_settlement:
+                        super::request_receipts::ToolCallWorkerSettlement::NotStarted,
+                };
+            }
+        };
+        let settlement = Arc::new(DispatchExecutionSettlement::new());
+        let execution_server = match self.retained_dispatch_server.upgrade() {
+            Some(server) => server,
+            None => {
+                return DispatchedToolCall {
+                    cg,
+                    selected_owner,
+                    selected_scope,
+                    outcome: Err(TraceDecayError::project_route(
+                        "tool_dispatch_shutdown",
+                        true,
+                        "MCP retained dispatch owner is unavailable",
+                    )),
+                    elapsed_us: handler_start.map(|started| started.elapsed().as_micros() as u64),
+                    worker_settlement:
+                        super::request_receipts::ToolCallWorkerSettlement::NotStarted,
+                };
+            }
+        };
+        let execution_cg = Arc::clone(&cg);
+        let execution_tool_name = tool_name.to_owned();
+        let execution_implicit_project_path = implicit_project_path.map(Path::to_path_buf);
+        let execution_dispatch_control = dispatch_control.clone();
+        let execution = async move {
+            execution_server
+                .execute_tool_dispatch(
+                    execution_cg.as_ref(),
+                    &execution_tool_name,
+                    routed.arguments,
+                    project_reader_preselected,
+                    server_stats,
+                    execution_implicit_project_path.as_deref(),
+                    application_invocation_executor.as_deref(),
+                    application_invocation_target,
+                    application_request_id,
+                    Some(execution_dispatch_control.deadline()),
+                    Some(execution_dispatch_control.cancellation()),
+                )
+                .await
+        };
+        let outcome = dispatch_control
+            .run_retained(
+                crate::mcp::tools::handlers::McpToolDispatchStage::Handler,
+                &self.retained_tool_dispatch_tasks,
+                Arc::clone(&settlement),
+                execution,
             )
             .await;
-        let outcome = self
-            .execute_tool_dispatch(
-                &cg,
-                tool_name,
-                routed.arguments,
-                project_reader_preselected,
-                server_stats,
-                implicit_project_path,
-                application_invocation_executor,
-                application_invocation_target,
-                application_request_id.clone(),
-                application_deadline,
-                application_cancellation,
-            )
-            .await;
+        let worker_settlement = settlement.snapshot();
         DispatchedToolCall {
             cg,
             selected_owner,
             selected_scope,
             outcome,
             elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
+            worker_settlement,
         }
     }
 
-    /// Applies the pre-dispatch freshness policy and records the call in the
-    /// server counters and the activity lane.
-    async fn begin_tool_dispatch(
+    /// Records the admitted call in the server counters and activity lane.
+    ///
+    /// Request dispatch serves the current sealed generation. Source-change
+    /// ingress is the canonical code-index scheduler's responsibility; a read
+    /// or edit call must not open a second legacy convergence path.
+    pub(super) async fn begin_tool_dispatch(
         &self,
         tool_name: &str,
         cg: &Arc<TraceDecay>,
-        live_branch: &crate::branch::BranchMemo,
-        project_reader_preselected: bool,
         publish_activity: bool,
     ) {
-        // Notification-free freshness is useful before tools that edit source
-        // files in the index. Read-only graph queries should not block behind
-        // a full project walk; on very large indexes (especially when
-        // node_modules was intentionally included) that turns diagnostics and
-        // search into sync operations.
-        if !project_reader_preselected && needs_lazy_sync_before_dispatch(tool_name) {
-            self.maybe_sync_if_stale().await;
-        } else if !project_reader_preselected {
-            // D4: sync-on-read (never blocking). Read tools serve the current
-            // answer IMMEDIATELY and, when the read-refresh cooldown has
-            // elapsed, kick a single-flighted background refresh so the *next*
-            // read sees fresh data. This heals read-only sessions that never
-            // touch an edit tool without ever making a query wait behind a
-            // project walk.
-            self.maybe_spawn_read_refresh(cg, live_branch);
-        }
-
         self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
         tracing::trace!(tool_name, "dispatching MCP tool call");
         *recover_lock(&self.tool_call_counts)
@@ -1151,61 +1272,16 @@ impl McpServer {
         }
     }
 
-    /// Prepare the application-surface plumbing for a single dispatch. Returns
-    /// the typed request id, deadline, cancellation, and daemon invocation
-    /// executor, plus the RAII registration guard that must outlive the dispatch.
-    async fn prepare_application_surface_dispatch<'a>(
-        &'a self,
+    async fn application_surface_invocation_executor(
+        &self,
         cg: &TraceDecay,
-        id: &Value,
         tool_name: &str,
-        memory_request_scope: &str,
-        pre_cancelled: bool,
-    ) -> ApplicationSurfaceDispatch<'a> {
+    ) -> Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>> {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-        let source_edit = is_source_edit_tool(tool_name);
-        let controlled_read = is_controlled_read_tool(tool_name);
-        let request_id = tool_supports_live_cancellation(tool_name)
-            .then(|| application_surface_request_id(id, memory_request_scope))
-            .flatten()
-            .and_then(|request_id| tracedecay_application::RequestId::new(request_id).ok());
-        let cancellation = request_id.as_ref().and_then(|request_id| {
-            // The signal is built before the lock is taken: nothing fallible
-            // runs inside the critical section, so an unwind can never leave
-            // the registry half-updated.
-            let cancellation = tracedecay_application::CancellationSignal::active(format!(
-                "cancellation.{}",
-                request_id.as_str()
-            ))
-            .ok()?;
-            if pre_cancelled {
-                cancellation.cancel(mcp_now_micros());
-            }
-            recover_lock(&self.application_surface_cancellations)
-                .insert(request_id.as_str().to_owned(), cancellation.clone());
-            Some(cancellation)
-        });
-        let registration = ApplicationCancellationRegistration {
-            registry: &self.application_surface_cancellations,
-            request_id: request_id
-                .as_ref()
-                .map(|request_id| request_id.as_str().to_owned()),
-        };
-        let deadline = dispatch_deadline_horizon_micros(
-            application_surface.is_some() || source_edit,
-            controlled_read || source_edit,
-        )
-        .and_then(|horizon| {
-            let now = mcp_now_micros().0;
-            tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
-                now.saturating_add(horizon),
-            ))
-            .ok()
-        });
-        let invocation_executor = if application_surface.is_some() {
-            match self.application_invocation_executor.as_deref() {
-                Some(executor) => Some(executor),
+        if application_surface.is_some() {
+            match self.application_invocation_executor.as_ref() {
+                Some(executor) => Some(Arc::clone(executor)),
                 None => self
                     .application_surface_client
                     .get_or_try_init(|| async {
@@ -1216,20 +1292,17 @@ impl McpServer {
                             false,
                         )?;
                         crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                            .map(Arc::new)
                     })
                     .await
                     .ok()
-                    .map(|client| client as &dyn crate::daemon_client::DaemonInvocationExecutor),
+                    .map(|client| {
+                        Arc::clone(client)
+                            as Arc<dyn crate::daemon_client::DaemonInvocationExecutor>
+                    }),
             }
         } else {
             None
-        };
-        ApplicationSurfaceDispatch {
-            request_id,
-            deadline,
-            cancellation,
-            invocation_executor,
-            _registration: registration,
         }
     }
 
@@ -1456,13 +1529,9 @@ impl McpServer {
     }
 
     async fn append_per_file_staleness_notice(&self, cg: &TraceDecay, result: &mut ToolResult) {
-        // Per-file staleness banner (#428 design): files this response
-        // referenced that are still pending after the in-line sync
-        // attempt get a focused banner naming them with edit ages,
-        // telling the agent to Read THOSE files directly while
-        // treating the rest of the response as authoritative.
-        // Replaces the previous all-or-nothing "STALE INDEX"
-        // warning that made agents distrust the entire answer.
+        // Per-file staleness remains visible without mutating the graph on the
+        // request path. Canonical scheduler ingress owns convergence; the
+        // current response is explicitly scoped to its sealed generation.
         if result.touched_files.is_empty() {
             return;
         }
@@ -1472,18 +1541,10 @@ impl McpServer {
             return;
         }
 
-        let still_stale = match cg.sync_if_stale(&stale_files).await {
-            Ok(false) => false,        // sync completed; files now fresh
-            Ok(true) | Err(_) => true, // still stale (lock contention / sync error)
-        };
-        if !still_stale {
-            return;
-        }
-
         let banner = format_per_file_staleness_banner(cg.project_root(), &stale_files);
         // Machine-readable marker. Same shape as before
         // so existing scrapers keep working.
-        let stale_json = serde_json::to_string(&stale_files).unwrap_or_else(|_| "[]".to_string());
+        let stale_json = json!(stale_files).to_string();
         let marker = format!("\ntracedecay_graph_stale: {stale_json}");
         debug_assert!(
             result.value.is_object(),
@@ -1527,42 +1588,29 @@ impl McpServer {
         // so a per-file fallback fires the warning forever on quiet
         // repos (#86).
         //
-        // D7 staleness-warning UX: with auto-sync on (the normal
-        // case), a stale index self-heals — the D4 background refresh
-        // above was already kicked for this read. So instead of the
-        // old "Run `tracedecay sync`" nag, we emit an informational
-        // "refresh in progress" note (or nothing at all if a refresh
-        // just completed). The manual-sync instruction is reserved
-        // for the cases where auto-repair genuinely can't help:
+        // With canonical edit watching enabled, describe the sealed
+        // generation without claiming an unobserved request-path refresh.
+        // The manual-sync instruction is reserved for cases where automatic
+        // edit tracking cannot help:
         //   - serving a read-only fallback/ancestor store, or
-        //   - the user disabled both auto_watch and read_refresh.
+        //   - the user disabled auto_watch.
         let last_time = cg.last_sync_timestamp().await;
         let now = crate::tracedecay::current_timestamp();
         let age_secs = now - last_time;
         if last_time > 0 && age_secs > 3600 {
-            let refreshed_recently = {
-                let done = self.last_background_refresh_done_at.load(Ordering::Acquire);
-                done > 0 && now.saturating_sub(done) < self.sync_config.read_cooldown_secs as i64
-            };
             let banner = staleness_banner(StalenessBannerInputs {
                 age_secs,
-                // Auto-sync is "on" when either the daemon watcher
-                // or sync-on-read can repair this.
-                auto_sync_on: self.sync_config.auto_watch || self.sync_config.read_refresh,
-                // A read-only fallback store can never be written,
-                // so no background refresh can heal it.
+                auto_sync_on: self.sync_config.auto_watch,
+                // A read-only fallback store can never be updated.
                 fallback_store: cg.fallback_warning().is_some(),
-                refresh_running: self.background_refresh_running.load(Ordering::Acquire),
-                refreshed_recently,
             });
 
-            if let Some(banner) = banner
-                && let Some(content) = result
-                    .value
-                    .get_mut("content")
-                    .and_then(|c| c.as_array_mut())
+            if let Some(content) = result
+                .value
+                .get_mut("content")
+                .and_then(|c| c.as_array_mut())
             {
-                content.insert(0, json!({"type": "text", "text": &banner}));
+                content.insert(0, json!({"type": "text", "text": banner}));
             }
         }
 
@@ -1589,18 +1637,24 @@ impl McpServer {
         analytics_arguments: Value,
         analytics_session_id: Option<String>,
         dispatch: DispatchedToolCall,
-    ) -> JsonRpcResponse {
+    ) -> (JsonRpcResponse, super::request_receipts::ToolCallOutcome) {
         let DispatchedToolCall {
             cg,
             selected_owner,
             selected_scope,
             outcome,
             elapsed_us,
+            worker_settlement,
         } = dispatch;
         let request_id = id.clone();
 
         match outcome {
             Ok(mut result) => {
+                let terminal = if tool_result_has_semantic_error(&result) {
+                    super::request_receipts::ToolCallTerminal::Failed
+                } else {
+                    super::request_receipts::ToolCallTerminal::Completed
+                };
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 let accounting_project_root = accounting_project_root(
                     cg.project_root(),
@@ -1635,7 +1689,10 @@ impl McpServer {
                     )
                     .await;
                 }
-                JsonRpcResponse::success(id, result.value)
+                (
+                    JsonRpcResponse::success(id, result.value),
+                    super::request_receipts::ToolCallOutcome::new(terminal, worker_settlement),
+                )
             }
             Err(error) => {
                 self.record_mcp_tool_error_analytics(McpToolErrorAnalyticsRequest {
@@ -1647,7 +1704,11 @@ impl McpServer {
                     duration_us: elapsed_us,
                     error: &error,
                 });
-                tool_error_response(id, &tool_name, &error)
+                let terminal = super::request_receipts::ToolCallTerminal::for_error(&error);
+                (
+                    tool_error_response(id, &tool_name, &error),
+                    super::request_receipts::ToolCallOutcome::new(terminal, worker_settlement),
+                )
             }
         }
     }
@@ -1719,20 +1780,25 @@ impl McpServer {
         id: Value,
         tool_name: &str,
         dispatch: DispatchedToolCall,
-    ) -> JsonRpcResponse {
+    ) -> (
+        JsonRpcResponse,
+        super::request_receipts::ToolCallWorkerSettlement,
+    ) {
         let DispatchedToolCall {
             outcome,
             elapsed_us,
+            worker_settlement,
             ..
         } = dispatch;
-        match outcome {
+        let response = match outcome {
             Ok(mut result) => {
                 Self::attach_tool_timing(&mut result, elapsed_us);
                 mark_semantic_tool_error(&mut result);
                 JsonRpcResponse::success(id, result.value)
             }
             Err(error) => tool_error_response(id, tool_name, &error),
-        }
+        };
+        (response, worker_settlement)
     }
 
     pub(super) fn project_server_revoked_response(
@@ -1770,178 +1836,131 @@ impl McpServer {
         memory_request_scope: &str,
         pre_cancelled: bool,
     ) -> JsonRpcResponse {
+        let mut receipt = super::request_receipts::ToolCallReceipt::new();
+        let admission_started = std::time::Instant::now();
         let PreparedToolCall {
             tool_name,
             arguments,
             analytics_arguments,
             analytics_session_id,
-        } = match Self::prepare_tool_call(&id, params) {
+            dispatch_control,
+            application_request_id,
+            _cancellation_registration,
+        } = match self.prepare_tool_call(&id, params, memory_request_scope, pre_cancelled) {
             Ok(call) => call,
-            Err(response) => return response,
+            Err(error) => {
+                receipt.set_route_admission(admission_started.elapsed());
+                return receipt.finish(
+                    error.response,
+                    super::request_receipts::ToolCallOutcome::before_execution(error.terminal),
+                );
+            }
         };
+        receipt.set_route_admission(admission_started.elapsed());
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
-            return response;
+            return receipt.finish(
+                response,
+                super::request_receipts::ToolCallOutcome::before_execution(
+                    super::request_receipts::ToolCallTerminal::Unavailable,
+                ),
+            );
         }
 
         let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
+        let handler_started = std::time::Instant::now();
         let dispatch = self
             .dispatch_tool_call(
                 &id,
                 &tool_name,
                 arguments,
+                dispatch_control.clone(),
+                application_request_id,
                 timings_enabled,
                 route_cache,
                 implicit_project_path,
-                memory_request_scope,
-                pre_cancelled,
                 !fast_unavailable,
             )
             .await;
+        receipt.set_handler(handler_started.elapsed());
+        let dispatch_worker_settlement = dispatch.worker_settlement;
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
-            return response;
+            return receipt.finish(
+                response,
+                super::request_receipts::ToolCallOutcome::new(
+                    super::request_receipts::ToolCallTerminal::Unavailable,
+                    dispatch_worker_settlement,
+                ),
+            );
         }
+        let materialization_started = std::time::Instant::now();
         if fast_unavailable {
-            return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
+            let (response, outcome) = match dispatch_control
+                .run_value(
+                    crate::mcp::tools::handlers::McpToolDispatchStage::Serialization,
+                    async { Self::finish_unavailable_tool_call(id.clone(), &tool_name, dispatch) },
+                )
+                .await
+            {
+                Ok((response, worker_settlement)) => (
+                    response,
+                    super::request_receipts::ToolCallOutcome::new(
+                        super::request_receipts::ToolCallTerminal::Unavailable,
+                        worker_settlement,
+                    ),
+                ),
+                Err(error) => {
+                    let terminal = super::request_receipts::ToolCallTerminal::for_error(&error);
+                    (
+                        tool_error_response(id, &tool_name, &error),
+                        super::request_receipts::ToolCallOutcome::new(
+                            terminal,
+                            dispatch_worker_settlement,
+                        ),
+                    )
+                }
+            };
+            receipt.set_result_materialization(materialization_started.elapsed());
+            return receipt.finish(response, outcome);
         }
-        let response = self
-            .complete_tool_call(
-                id.clone(),
-                tool_name.clone(),
-                analytics_arguments,
-                analytics_session_id,
-                dispatch,
+        let (response, outcome) = match dispatch_control
+            .run_value(
+                crate::mcp::tools::handlers::McpToolDispatchStage::Serialization,
+                self.complete_tool_call(
+                    id.clone(),
+                    tool_name.clone(),
+                    analytics_arguments,
+                    analytics_session_id,
+                    dispatch,
+                ),
             )
-            .await;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let terminal = super::request_receipts::ToolCallTerminal::for_error(&error);
+                (
+                    tool_error_response(id.clone(), &tool_name, &error),
+                    super::request_receipts::ToolCallOutcome::new(
+                        terminal,
+                        dispatch_worker_settlement,
+                    ),
+                )
+            }
+        };
+        receipt.set_result_materialization(materialization_started.elapsed());
         if let Some(response) = self.project_server_revoked_response(&id, &tool_name) {
-            return response;
+            return receipt.finish(
+                response,
+                super::request_receipts::ToolCallOutcome::new(
+                    super::request_receipts::ToolCallTerminal::Unavailable,
+                    dispatch_worker_settlement,
+                ),
+            );
         }
-        response
+        receipt.finish(response, outcome)
     }
 }
 
 #[cfg(test)]
-mod git_read_control_tests {
-    use super::*;
-
-    #[test]
-    fn controlled_operations_receive_live_registration_and_bounded_deadlines() {
-        assert!(tool_supports_live_cancellation("tracedecay_search"));
-        assert!(tool_supports_live_cancellation(
-            "tracedecay_run_affected_tests"
-        ));
-        assert!(!tool_supports_live_cancellation("tracedecay_outline"));
-        for tool_name in [
-            "tracedecay_git_status",
-            "tracedecay_git_diff",
-            "tracedecay_git_history",
-            "tracedecay_git_blame",
-            "tracedecay_git_hunks",
-        ] {
-            assert!(tool_supports_live_cancellation(tool_name));
-            let application_surface =
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
-            assert!(
-                application_surface.is_some(),
-                "Git reads must enter the catalog-owned application surface",
-            );
-            let controlled_read = is_controlled_read_tool(tool_name);
-            assert!(controlled_read);
-            assert_eq!(
-                dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read),
-                Some(30_000_000)
-            );
-        }
-        for tool_name in [
-            "tracedecay_str_replace",
-            "tracedecay_multi_str_replace",
-            "tracedecay_insert_at",
-            "tracedecay_ast_grep_rewrite",
-            "tracedecay_replace_symbol",
-            "tracedecay_insert_at_symbol",
-            "tracedecay_move_symbol",
-            "tracedecay_api_migration_apply",
-            "tracedecay_source_edit_reconcile",
-        ] {
-            assert!(is_source_edit_tool(tool_name));
-            assert!(tool_supports_live_cancellation(tool_name));
-            assert_eq!(
-                dispatch_deadline_horizon_micros(true, true),
-                Some(30_000_000)
-            );
-        }
-
-        let request_id = "request.git-read-controls".to_owned();
-        let signal = tracedecay_application::CancellationSignal::active(
-            "cancellation.request.git-read-controls",
-        )
-        .expect("signal");
-        let registry = std::sync::Mutex::new(HashMap::from([(request_id.clone(), signal.clone())]));
-        {
-            let _registration = ApplicationCancellationRegistration {
-                registry: &registry,
-                request_id: Some(request_id.clone()),
-            };
-            signal.cancel(tracedecay_domain::UtcMicros(1));
-            assert!(registry.lock().expect("registry").contains_key(&request_id));
-        }
-        assert!(!registry.lock().expect("registry").contains_key(&request_id));
-    }
-
-    /// These tools walk git trees but are not application-surface operations
-    /// and are not source edits, so the horizon predicate used to return `None`
-    /// for them: they dispatched with no deadline at all while the cheaper
-    /// `tracedecay_git_status` was bounded at thirty seconds.
-    #[test]
-    fn git_reading_tools_receive_a_bounded_deadline() {
-        for tool_name in [
-            "tracedecay_admin_branch_add",
-            "tracedecay_affected",
-            "tracedecay_diff_context",
-            "tracedecay_changelog",
-            "tracedecay_commit_context",
-            "tracedecay_pr_context",
-            "tracedecay_branch_search",
-            "tracedecay_branch_diff",
-            "tracedecay_branch_list",
-        ] {
-            assert!(
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
-                    .is_none(),
-                "{tool_name} is not an application-surface operation, so only the \
-                 git-dispatch predicate can bound it",
-            );
-            assert!(!is_source_edit_tool(tool_name));
-            assert!(
-                is_controlled_read_tool(tool_name),
-                "{tool_name} walks a git tree and must be a controlled read",
-            );
-            assert_eq!(
-                dispatch_deadline_horizon_micros(
-                    false,
-                    is_controlled_read_tool(tool_name) || is_source_edit_tool(tool_name),
-                ),
-                Some(30_000_000),
-                "{tool_name} must dispatch with a bounded horizon",
-            );
-        }
-    }
-
-    /// The horizon predicate reads the canonical binding table, so it must not
-    /// sweep in reads from other dispatch families.
-    #[test]
-    fn non_git_reads_stay_outside_the_controlled_read_horizon() {
-        for tool_name in [
-            "tracedecay_outline",
-            "tracedecay_body",
-            "tracedecay_dead_code",
-            "tracedecay_health",
-            "tracedecay_context",
-        ] {
-            assert!(
-                !is_controlled_read_tool(tool_name),
-                "{tool_name} is not a git-walking read",
-            );
-        }
-        assert!(is_controlled_read_tool("tracedecay_search"));
-    }
-}
+#[path = "requests/git_read_control_tests.rs"]
+mod git_read_control_tests;

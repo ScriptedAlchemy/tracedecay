@@ -1,4 +1,4 @@
-use super::{format_per_file_staleness_banner, humanize_age, needs_lazy_sync_before_dispatch};
+use super::{format_per_file_staleness_banner, humanize_age};
 use std::fs;
 use tempfile::tempdir;
 
@@ -41,34 +41,4 @@ fn banner_handles_missing_file_gracefully() {
     // Missing files still get listed (e.g. file deleted between
     // sync and tool response). Age falls back to 0s.
     assert!(banner.contains("does/not/exist.rs"));
-}
-
-#[test]
-fn read_only_tools_skip_lazy_sync_before_dispatch() {
-    for tool in [
-        "tracedecay_active_project",
-        "tracedecay_context",
-        "tracedecay_files",
-        "tracedecay_runtime",
-        "tracedecay_search",
-        "tracedecay_status",
-        "tracedecay_storage_status",
-    ] {
-        assert!(
-            !needs_lazy_sync_before_dispatch(tool),
-            "{tool} should stay available when lazy sync is stuck"
-        );
-    }
-
-    for tool in [
-        "tracedecay_insert_at",
-        "tracedecay_multi_str_replace",
-        "tracedecay_replace_symbol",
-        "tracedecay_str_replace",
-    ] {
-        assert!(
-            needs_lazy_sync_before_dispatch(tool),
-            "{tool} should still get the normal lazy freshness check"
-        );
-    }
 }

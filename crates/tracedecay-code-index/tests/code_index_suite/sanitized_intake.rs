@@ -38,6 +38,7 @@ fn snapshot(mut files: Vec<SanitizedCodeFileV1>) -> SanitizedCodeSnapshotV1 {
         worktree: Some(id::<WorktreeId>("worktree.fixture")),
         reference: Some(id::<RefId>("refs/heads/main")),
         source_revision: Some(id::<CommitId>("commit.fixture")),
+        source_tree: Some(id("tree.fixture")),
         sanitizer_revision: id::<SanitizerRevision>("sanitizer.v1"),
         sanitization_receipts: vec![id::<SanitizationReceiptId>("receipt.fixture")],
         content_identity: content_digest('b'),

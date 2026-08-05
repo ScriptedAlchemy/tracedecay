@@ -149,6 +149,10 @@ impl ExtractionCancellation for ExtractionControlBridge<'_> {
 pub enum CodeIndexPublicationStoreErrorV1 {
     #[error("the active generation changed before atomic publication")]
     CompareAndSwap,
+    #[error("the publication authority exceeded a bounded capacity: {0}")]
+    Capacity(String),
+    #[error("the publication authority contains corrupt durable state: {0}")]
+    Corrupt(String),
     #[error("the publication authority is unavailable: {0}")]
     Unavailable(String),
 }

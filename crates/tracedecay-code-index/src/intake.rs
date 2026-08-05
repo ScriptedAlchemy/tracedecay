@@ -343,6 +343,9 @@ mod tests {
             worktree: Some(WorktreeId::new("worktree.fixture").expect("valid worktree id")),
             reference: Some(RefId::new("refs/heads/main").expect("valid ref id")),
             source_revision: Some(CommitId::new("commit.fixture").expect("valid commit id")),
+            source_tree: Some(
+                tracedecay_domain::TreeId::new("tree.fixture").expect("valid tree id"),
+            ),
             sanitizer_revision: SanitizerRevision::new("sanitizer.v1").expect("valid revision"),
             sanitization_receipts: vec![receipt("one")],
             content_identity: digest('b'),

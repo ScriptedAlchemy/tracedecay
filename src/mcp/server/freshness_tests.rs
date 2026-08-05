@@ -6,7 +6,6 @@ use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -171,44 +170,20 @@ fn format_index_age_phrase_preserves_shape() {
 }
 
 #[test]
-fn banner_says_refresh_in_progress_when_auto_sync_on() {
+fn banner_describes_sealed_generation_when_auto_sync_on() {
     let banner = staleness_banner(StalenessBannerInputs {
         age_secs: 2 * 3600,
         auto_sync_on: true,
         fallback_store: false,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("refresh in progress"), "{banner}");
+    });
+    assert!(
+        banner.contains("automatic edit tracking is enabled"),
+        "{banner}"
+    );
+    assert!(banner.contains("sealed generation"), "{banner}");
+    assert!(!banner.contains("refresh"), "{banner}");
     assert!(!banner.contains("tracedecay sync"), "{banner}");
     assert!(!banner.starts_with("WARNING"), "{banner}");
-}
-
-#[test]
-fn banner_says_scheduled_when_auto_sync_on_and_idle() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
-    assert!(banner.contains("refresh scheduled"), "{banner}");
-    assert!(!banner.contains("tracedecay sync"), "{banner}");
-}
-
-#[test]
-fn banner_suppressed_shortly_after_refresh() {
-    let banner = staleness_banner(StalenessBannerInputs {
-        age_secs: 2 * 3600,
-        auto_sync_on: true,
-        fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: true,
-    });
-    assert!(banner.is_none(), "expected no banner, got {banner:?}");
 }
 
 #[test]
@@ -217,10 +192,7 @@ fn banner_instructs_manual_sync_only_on_fallback_store() {
         age_secs: 2 * 3600,
         auto_sync_on: true,
         fallback_store: true,
-        refresh_running: true,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
+    });
     assert!(banner.starts_with("WARNING"), "{banner}");
     assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
 }
@@ -231,10 +203,7 @@ fn banner_instructs_manual_sync_when_auto_sync_disabled() {
         age_secs: 2 * 3600,
         auto_sync_on: false,
         fallback_store: false,
-        refresh_running: false,
-        refreshed_recently: false,
-    })
-    .expect("banner expected");
+    });
     assert!(banner.contains("Run `tracedecay sync`"), "{banner}");
 }
 
@@ -388,65 +357,5 @@ async fn ledger_writes_settled_is_bounded_when_a_write_wedges() {
     assert!(
         !bounded,
         "a wedged ledger write must be reported as un-settled"
-    );
-}
-
-// ---- D4: sync-on-read never blocks + single-flight (tests a, d) ---
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_refresh_is_non_blocking_and_single_flighted() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
-    let root = dir.path().to_path_buf();
-    let mut config = crate::config::load_config(&root).expect("load config");
-    config.sync.session_start_sync = false;
-    crate::config::save_config(&root, &config).expect("save config");
-    let server = McpServer::new(cg, None).await;
-    // Reset the read cooldown so the next spawn is eligible regardless of
-    // any startup timing.
-    server
-        .last_background_refresh_at
-        .store(0, Ordering::Release);
-    server
-        .background_refresh_running
-        .store(false, Ordering::Release);
-
-    // Make the tree stale: a new committed source file, as the
-    // diff-scoped refresh contract tracks git history.
-    std::fs::write(root.join("src/b.rs"), "pub fn b() {}\n").unwrap();
-    git(&root, &["add", "."]);
-    git(&root, &["commit", "-q", "-m", "add b"]);
-
-    let cg_snapshot = server.cg_snapshot().await;
-
-    // First read-refresh: returns immediately (we never await the sync).
-    // Assert it does not block by bounding the call duration well under a
-    // real sync (~hundreds of ms); the spawn does the work off-thread.
-    let start = std::time::Instant::now();
-    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_millis(100),
-        "maybe_spawn_read_refresh must not block on the sync (took {elapsed:?})"
-    );
-    // The refresh should have been claimed (running flag set) — proving a
-    // task was spawned rather than run inline.
-    // (It may already have finished on a very fast machine; in that case
-    // the cooldown stamp still advanced, which we assert below.)
-    assert_ne!(
-        server.last_background_refresh_at.load(Ordering::Acquire),
-        0,
-        "cooldown stamp must advance when a refresh is kicked"
-    );
-
-    // Second immediate read-refresh: single-flighted. Because the cooldown
-    // stamp just advanced (and/or a refresh is running), no second task is
-    // spawned. We verify by confirming the stamp does not change to a new
-    // value on a back-to-back call within the cooldown window.
-    let stamp_after_first = server.last_background_refresh_at.load(Ordering::Acquire);
-    server.maybe_spawn_read_refresh(&cg_snapshot, &cg_snapshot.branch_memo());
-    let stamp_after_second = server.last_background_refresh_at.load(Ordering::Acquire);
-    assert_eq!(
-        stamp_after_first, stamp_after_second,
-        "second read within cooldown must not re-kick (single-flight)"
     );
 }

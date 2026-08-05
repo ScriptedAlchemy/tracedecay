@@ -1,4 +1,4 @@
-//! Per-file and overall index-staleness banner logic (D7).
+//! Per-file and overall index-staleness banner logic.
 
 use crate::path_tree::format_compact_annotated_path_list;
 
@@ -17,23 +17,8 @@ pub(crate) fn humanize_age(secs: i64) -> String {
     }
 }
 
-pub(crate) fn needs_lazy_sync_before_dispatch(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_ast_grep_rewrite"
-            | "tracedecay_insert_at"
-            | "tracedecay_insert_at_symbol"
-            | "tracedecay_move_symbol"
-            | "tracedecay_api_migration_plan"
-            | "tracedecay_api_migration_apply"
-            | "tracedecay_multi_str_replace"
-            | "tracedecay_replace_symbol"
-            | "tracedecay_str_replace"
-    )
-}
-
 /// Build the per-file staleness banner inserted at the top of any tool
-/// response that referenced files the in-line sync couldn't refresh.
+/// response that referenced files newer than the sealed graph generation.
 ///
 /// The shape mimics codegraph's #428 banner: name each pending file with
 /// its edit age (how long since the on-disk mtime), and direct the agent
@@ -44,10 +29,7 @@ pub(crate) fn format_per_file_staleness_banner(
     project_root: &std::path::Path,
     stale_files: &[String],
 ) -> String {
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
+    let now_secs = crate::tracedecay::current_timestamp();
 
     let mut lines = Vec::with_capacity(stale_files.len() + 2);
     lines.push(format!(
@@ -83,22 +65,18 @@ fn file_mtime_secs(project_root: &std::path::Path, relative_path: &str) -> Optio
     Some(secs)
 }
 
-/// Inputs to the D7 overall-staleness banner decision, factored out so the
+/// Inputs to the overall-staleness banner decision, factored out so the
 /// branch logic is unit-testable without a live server.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StalenessBannerInputs {
     pub(crate) age_secs: i64,
-    /// `SyncConfig.auto_watch || SyncConfig.read_refresh`.
+    /// Whether canonical edit-event watching is enabled.
     pub(crate) auto_sync_on: bool,
     /// Serving a read-only fallback/ancestor store (`fallback_warning().is_some()`).
     pub(crate) fallback_store: bool,
-    /// A background refresh is currently in flight.
-    pub(crate) refresh_running: bool,
-    /// A background refresh completed within `read_cooldown_secs`.
-    pub(crate) refreshed_recently: bool,
 }
 
-/// Format the index-age phrase used by the overall-staleness banner (D7),
+/// Format the index-age phrase used by the overall-staleness banner,
 /// preserving the pre-existing `"Xd Yh"` / `"Xh Ym"` shape. `age_secs` is
 /// assumed `> 3600` (the banner's guard); shorter ages still format sensibly.
 pub(crate) fn format_index_age_phrase(age_secs: i64) -> String {
@@ -111,36 +89,25 @@ pub(crate) fn format_index_age_phrase(age_secs: i64) -> String {
     }
 }
 
-/// Decide the D7 overall-staleness banner. Returns `None` when no banner
-/// should be emitted. The age guard (`> 3600s`) is applied by the caller.
+/// Decide the overall-staleness banner. The age guard (`> 3600s`) is applied
+/// by the caller.
 ///
 /// Rules:
-/// - Auto-sync on and not a fallback store: emit an informational "refresh in
-///   progress / scheduled" note (or nothing if a refresh just completed);
-///   NEVER instruct `tracedecay sync`.
+/// - Canonical edit watching on and not a fallback store: explain the sealed
+///   generation without claiming an unobserved refresh was scheduled.
 /// - Auto-repair impossible (fallback store, or auto-sync fully disabled):
 ///   fall back to the manual `tracedecay sync` instruction.
-pub(crate) fn staleness_banner(inputs: StalenessBannerInputs) -> Option<String> {
+pub(crate) fn staleness_banner(inputs: StalenessBannerInputs) -> String {
     let age_phrase = format_index_age_phrase(inputs.age_secs);
-    let stale_mins = inputs.age_secs / 60;
     if inputs.auto_sync_on && !inputs.fallback_store {
-        if inputs.refresh_running {
-            Some(format!(
-                "Note: index refresh in progress (was {stale_mins}m stale); \
-                 very recent edits may not appear yet."
-            ))
-        } else if inputs.refreshed_recently {
-            None
-        } else {
-            Some(format!(
-                "Note: index refresh scheduled (was {stale_mins}m stale); \
-                 very recent edits may not appear yet."
-            ))
-        }
+        format!(
+            "Note: index last synced {age_phrase} ago; automatic edit tracking is enabled, \
+             but very recent edits may not appear in this sealed generation."
+        )
     } else {
-        Some(format!(
+        format!(
             "WARNING: Index last synced {age_phrase} ago. \
              Run `tracedecay sync` to update."
-        ))
+        )
     }
 }
