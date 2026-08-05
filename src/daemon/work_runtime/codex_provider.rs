@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::{
@@ -10,17 +11,29 @@ use tracedecay_domain::{
     WorkProviderBackendV1, WorkProviderRouteId, WorkProviderRouteV1,
 };
 
+use crate::config::work_executable_binding::{
+    WorkExecutableBindingError, WorkExecutableBindingResolver,
+};
 use crate::sessions::codex_app_server::{
     CodexAppServerCancellation, CodexAppServerSummaryConfig, run_work_with_codex_app_server,
 };
 
-pub(crate) const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
+use super::native_cli::{
+    NativeCliCancellation, NativeCliKind, NativeCliLaunchPlan, NativeCliWorkRun,
+};
+
+const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
 const CODEX_ROUTE_ID: &str = "route.work.codex-app-server.v1";
+const CLAUDE_PROVIDER_ID: &str = "provider.work.claude-code-cli";
+const CLAUDE_ROUTE_ID: &str = "route.work.claude-code-cli.v1";
+const CODEX_CLI_PROVIDER_ID: &str = "provider.work.codex-cli";
+const CODEX_CLI_ROUTE_ID: &str = "route.work.codex-cli.v1";
 const CODEX_THREAD_SOURCE: &str = "tracedecay_work";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct NativeWorkProviderConfigV1 {
     codex_app_server: CodexAppServerSummaryConfig,
+    executable_bindings: Arc<dyn WorkExecutableBindingResolver + Send + Sync>,
     configuration_digest: ManifestDigest,
     project_root: PathBuf,
 }
@@ -28,11 +41,13 @@ pub(crate) struct NativeWorkProviderConfigV1 {
 impl NativeWorkProviderConfigV1 {
     pub(crate) fn from_registered(
         codex_app_server: CodexAppServerSummaryConfig,
+        executable_bindings: Arc<dyn WorkExecutableBindingResolver + Send + Sync>,
         configuration_digest: ManifestDigest,
         project_root: PathBuf,
     ) -> Self {
         Self {
             codex_app_server,
+            executable_bindings,
             configuration_digest,
             project_root,
         }
@@ -68,9 +83,12 @@ where
         route(CODEX_PROVIDER_ID, CODEX_ROUTE_ID)
     }
 
-    #[cfg(all(test, unix))]
-    pub(crate) fn is_ready(&self) -> bool {
-        executable_is_resolvable(&self.config.codex_app_server.codex_bin)
+    pub(crate) fn claude_code_route() -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
+        route(CLAUDE_PROVIDER_ID, CLAUDE_ROUTE_ID)
+    }
+
+    pub(crate) fn codex_cli_route() -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
+        route(CODEX_CLI_PROVIDER_ID, CODEX_CLI_ROUTE_ID)
     }
 
     fn validate_execution(
@@ -141,7 +159,9 @@ where
         &self,
         requested: &WorkProviderRouteV1,
     ) -> Result<bool, WorkProviderExecutionError> {
-        Ok(requested == &Self::codex_app_server_route()?)
+        Ok(requested == &Self::codex_app_server_route()?
+            || requested == &Self::claude_code_route()?
+            || requested == &Self::codex_cli_route()?)
     }
 
     fn prepare(&self, attempt: &WorkAttemptV1) -> Result<Self::Run, WorkProviderExecutionError> {
@@ -151,22 +171,84 @@ where
         let prompt = self.prompt(&projection, attempt);
         let timeout =
             remaining_timeout(execution.deadline(), self.config.codex_app_server.timeout)?;
-        if execution.backend() != WorkProviderBackendV1::CodexAppServer {
-            return Err(WorkProviderExecutionError::Unavailable(
-                "requested Work provider backend is not registered".to_owned(),
+        let snapshot = execution.execution_snapshot();
+        let expected_route = match execution.backend() {
+            WorkProviderBackendV1::ClaudeCodeCli => Self::claude_code_route()?,
+            WorkProviderBackendV1::CodexAppServer => Self::codex_app_server_route()?,
+            WorkProviderBackendV1::CodexCli => Self::codex_cli_route()?,
+        };
+        require_exact_route(execution.route(), &expected_route)?;
+        let resolved = self
+            .config
+            .executable_bindings
+            .resolve(
+                snapshot.executable(),
+                execution.backend(),
+                snapshot.protocol(),
+            )
+            .map_err(map_executable_binding_error)?;
+        if resolved.configuration_revision_id() != snapshot.configuration_revision_id()
+            || resolved.configuration_snapshot_id() != snapshot.configuration_snapshot_id()
+            || resolved.executable() != snapshot.executable()
+            || resolved.backend() != execution.backend()
+            || resolved.protocol() != snapshot.protocol()
+            || resolved.verified_byte_length() == 0
+        {
+            return Err(WorkProviderExecutionError::Rejected(
+                "Work executable binding does not match the admitted execution snapshot".to_owned(),
             ));
         }
-        require_exact_route(execution.route(), &Self::codex_app_server_route()?)?;
-        require_executable(&self.config.codex_app_server.codex_bin, "Codex app-server")?;
-        let mut config = self.config.codex_app_server.clone();
-        config.model = Some(execution.model().to_owned());
-        Ok(NativeWorkRunV1(CodexAppServerWorkRunV1 {
-            prompt,
-            config,
-            cwd: self.config.project_root.clone(),
-            timeout,
-            cancellation: CodexAppServerCancellation::default(),
-        }))
+        match execution.backend() {
+            WorkProviderBackendV1::CodexAppServer => {
+                let mut config = self.config.codex_app_server.clone();
+                config.codex_bin = resolved.canonical_path().to_string_lossy().into_owned();
+                config.model = Some(execution.model().to_owned());
+                Ok(NativeWorkRunV1::CodexAppServer(CodexAppServerWorkRunV1 {
+                    prompt,
+                    config,
+                    cwd: self.config.project_root.clone(),
+                    timeout,
+                    cancellation: CodexAppServerCancellation::default(),
+                }))
+            }
+            WorkProviderBackendV1::ClaudeCodeCli | WorkProviderBackendV1::CodexCli => {
+                if !snapshot.environment_allowlist().is_empty()
+                    || !snapshot.credential_references().is_empty()
+                    || snapshot.egress() != tracedecay_domain::WorkEgressPolicy::Deny
+                    || (execution.backend() == WorkProviderBackendV1::ClaudeCodeCli
+                        && snapshot.approval() != tracedecay_domain::WorkApprovalPolicy::Never)
+                {
+                    return Err(WorkProviderExecutionError::Unavailable(
+                        "Work provider policy requires an authority this adapter does not mount"
+                            .to_owned(),
+                    ));
+                }
+                let kind = match execution.backend() {
+                    WorkProviderBackendV1::ClaudeCodeCli => NativeCliKind::ClaudeCode,
+                    WorkProviderBackendV1::CodexCli => NativeCliKind::Codex,
+                    WorkProviderBackendV1::CodexAppServer => {
+                        return Err(WorkProviderExecutionError::Rejected(
+                            "Work provider backend changed during preparation".to_owned(),
+                        ));
+                    }
+                };
+                Ok(NativeWorkRunV1::Cli(NativeCliWorkRun {
+                    plan: NativeCliLaunchPlan {
+                        executable: resolved.canonical_path().to_path_buf(),
+                        kind,
+                        model: execution.model().to_owned(),
+                        prompt,
+                        cwd: self.config.project_root.clone(),
+                        timeout,
+                        budget: execution.budget(),
+                        approval: snapshot.approval(),
+                        filesystem: snapshot.filesystem(),
+                        environment: std::collections::BTreeMap::new(),
+                    },
+                    cancellation: NativeCliCancellation::default(),
+                }))
+            }
+        }
     }
 }
 
@@ -184,15 +266,24 @@ fn route(provider: &str, route: &str) -> Result<WorkProviderRouteV1, WorkProvide
     })
 }
 
-pub(crate) struct NativeWorkRunV1(CodexAppServerWorkRunV1);
+pub(crate) enum NativeWorkRunV1 {
+    CodexAppServer(CodexAppServerWorkRunV1),
+    Cli(NativeCliWorkRun),
+}
 
 impl WorkProviderRun for NativeWorkRunV1 {
     fn execute(&self) -> WorkProviderSettlementV1 {
-        self.0.execute()
+        match self {
+            Self::CodexAppServer(run) => run.execute(),
+            Self::Cli(run) => run.execute(),
+        }
     }
 
     fn cancel(&self) {
-        self.0.cancel();
+        match self {
+            Self::CodexAppServer(run) => run.cancel(),
+            Self::Cli(run) => run.cancel(),
+        }
     }
 }
 
@@ -244,13 +335,18 @@ fn require_exact_route(
     Ok(())
 }
 
-fn require_executable(executable: &str, provider: &str) -> Result<(), WorkProviderExecutionError> {
-    if !executable_is_resolvable(executable) {
-        return Err(WorkProviderExecutionError::Unavailable(format!(
-            "{provider} executable is unavailable"
-        )));
+fn map_executable_binding_error(error: WorkExecutableBindingError) -> WorkProviderExecutionError {
+    match error {
+        WorkExecutableBindingError::Stale { .. }
+        | WorkExecutableBindingError::DigestMismatch { .. } => {
+            WorkProviderExecutionError::Rejected(error.to_string())
+        }
+        WorkExecutableBindingError::Absent { .. }
+        | WorkExecutableBindingError::Unsupported { .. }
+        | WorkExecutableBindingError::Unavailable { .. } => {
+            WorkProviderExecutionError::Unavailable(error.to_string())
+        }
     }
-    Ok(())
 }
 
 fn remaining_timeout(
@@ -275,14 +371,4 @@ fn map_work_storage_error(error: WorkStorageError) -> WorkProviderExecutionError
     WorkProviderExecutionError::Unavailable(format!(
         "canonical Work projection is unavailable: {error}"
     ))
-}
-
-fn executable_is_resolvable(executable: &str) -> bool {
-    let path = Path::new(executable);
-    if path.components().count() > 1 {
-        return path.is_file();
-    }
-    std::env::var_os("PATH").is_some_and(|paths| {
-        std::env::split_paths(&paths).any(|directory| directory.join(executable).is_file())
-    })
 }
