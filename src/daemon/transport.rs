@@ -4,7 +4,9 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 #[cfg(unix)]
-use std::path::PathBuf;
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::str::FromStr;
 use std::task::{Context, Poll};
@@ -314,6 +316,36 @@ pub enum BrokerListener {
 #[cfg(unix)]
 const DAEMON_SOCKET_MODE: u32 = 0o600;
 
+/// Refuse to publish a socket in a directory other users can traverse.
+#[cfg(unix)]
+fn ensure_private_socket_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let metadata = std::fs::metadata(parent).map_err(|error| {
+        config_error(format!(
+            "failed to inspect daemon socket directory '{}': {error}",
+            parent.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(config_error(format!(
+            "daemon socket parent '{}' is not a directory",
+            parent.display()
+        )));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(config_error(format!(
+            "refusing to publish daemon socket '{}' outside a private directory: '{}' has mode {mode:04o}; restrict it to 0700",
+            path.display(),
+            parent.display(),
+        )));
+    }
+    Ok(())
+}
+
 /// Binds the daemon's Unix socket and narrows it to its owner before the
 /// listener is handed back.
 ///
@@ -324,9 +356,7 @@ const DAEMON_SOCKET_MODE: u32 = 0o600;
 /// caller can publish or accept on a socket that is not already owner-only, and
 /// a socket that cannot be narrowed is torn down instead of served.
 #[cfg(unix)]
-fn bind_owner_only_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener> {
-    use std::os::unix::fs::PermissionsExt;
-
+fn bind_owner_only_unix_listener(path: &Path) -> Result<tokio::net::UnixListener> {
     // Binding the real path (rather than staging elsewhere and renaming) keeps
     // `EADDRINUSE` as the kernel-level guarantee that only one daemon owns the
     // endpoint.
@@ -349,6 +379,7 @@ impl BrokerListener {
         match endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => {
+                ensure_private_socket_parent(path)?;
                 let listener = bind_owner_only_unix_listener(path)?;
                 Ok((Self::Unix(listener), endpoint.clone()))
             }
@@ -410,6 +441,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempfile::TempDir::new().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = dir.path().join("daemon.sock");
         let (_listener, _endpoint) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone()))
             .await
@@ -417,6 +449,24 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, DAEMON_SOCKET_MODE, "daemon socket must be owner-only");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_rejects_non_private_parent_before_binding() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.path().join("daemon.sock");
+
+        let Err(error) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone())).await else {
+            panic!("public socket parent must be rejected");
+        };
+
+        assert!(matches!(&error, TraceDecayError::Config { .. }), "{error}");
+        assert!(error.to_string().contains("private directory"), "{error}");
+        assert!(!path.exists(), "socket must not be bound before rejection");
     }
 
     #[tokio::test]
