@@ -738,7 +738,9 @@ mod tests {
     use crate::admission::{HostAdmission, test_support::MemoryHostAdmission};
     use crate::observation::ObservationCancellation;
     use crate::runtime::host_scan::{HOST_SCAN_WINDOW, HostScanBudget};
-    use crate::runtime::source::{HostProviderCoverage, TranscriptDiscoveryBounds};
+    use crate::runtime::source::{
+        HostProviderCoverage, TranscriptDiscoveryBounds, TranscriptIngestError,
+    };
 
     use super::{KimiSource, capture_kimi_observations};
 

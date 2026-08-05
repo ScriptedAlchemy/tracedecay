@@ -1,3 +1,5 @@
+use std::fs;
+
 use rusqlite::Connection;
 use serde_json::json;
 use tracedecay_domain::ObservationScopeV1;
