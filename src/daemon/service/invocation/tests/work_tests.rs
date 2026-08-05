@@ -3,6 +3,54 @@
 
 use super::*;
 
+fn workflow_execution_snapshot(
+    configuration_digest: ManifestDigest,
+    deadline: UtcMicros,
+    model: &str,
+) -> tracedecay_domain::WorkExecutionSnapshot {
+    tracedecay_domain::WorkExecutionSnapshot::new(tracedecay_domain::WorkExecutionSnapshotInput {
+        configuration_revision_id: tracedecay_domain::configuration::ConfigurationRevisionId::new(
+            "configuration-revision.workflow.invocation",
+        )
+        .expect("configuration revision"),
+        configuration_snapshot_id: tracedecay_domain::configuration::ConfigurationSnapshotId::new(
+            "configuration-snapshot.workflow.invocation",
+        )
+        .expect("configuration snapshot"),
+        effective_behavior_digest: configuration_digest,
+        resolution_provenance_digest: digest('7'),
+        route: tracedecay_domain::WorkProviderRouteV1::new(
+            tracedecay_domain::ProviderId::new(crate::daemon::work_runtime::CODEX_PROVIDER_ID)
+                .expect("provider id"),
+            tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
+                .expect("route id"),
+        )
+        .expect("provider route"),
+        backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
+        protocol: tracedecay_domain::WorkProviderProtocol::CodexAppServerJsonRpc,
+        model: model.to_owned(),
+        executable: tracedecay_domain::WorkExecutableReference::new(
+            "executable.codex.app-server".to_owned(),
+            digest('6'),
+        )
+        .expect("executable"),
+        sandbox: tracedecay_domain::WorkSandboxPolicy::Required,
+        approval: tracedecay_domain::WorkApprovalPolicy::Never,
+        filesystem: tracedecay_domain::WorkFilesystemPolicy::WorkspaceWrite,
+        egress: tracedecay_domain::WorkEgressPolicy::Deny,
+        environment_allowlist: std::collections::BTreeSet::new(),
+        credential_references: std::collections::BTreeSet::new(),
+        limits: tracedecay_domain::WorkExecutionLimits::new(
+            128_000, 8_192, 16_384, 16_384, 65_536, 1,
+        )
+        .expect("execution limits"),
+        deadline,
+        fallback: tracedecay_domain::WorkFallbackTopology::Disabled,
+        topology_policy_digest: digest('5'),
+    })
+    .expect("execution snapshot")
+}
+
 #[cfg(unix)]
 fn workflow_provider_fixture_path(project: &std::path::Path) -> std::path::PathBuf {
     project.join("codex-workflow-fixture")
@@ -399,12 +447,12 @@ for line in sys.stdin:
     // digest is the digest the capability grant was issued under, so the
     // definition below must pin this exact grant digest.
     let pinned_policy_digest = grant_digest.clone();
-    let capabilities = tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1
+    let capabilities = tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
         .iter()
         .chain(tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1.iter())
         .map(|(_, capability, _)| CapabilityId::new(*capability).expect("capability"))
         .collect();
-    let use_cases = tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1
+    let use_cases = tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
         .iter()
         .chain(tracedecay_application::WORK_APPLICATION_OPERATION_IDS_V1.iter())
         .map(|(_, _, use_case)| UseCaseId::new(*use_case).expect("use case"))
@@ -484,15 +532,15 @@ for line in sys.stdin:
         ))
         .expect("digest")
     };
-    let definition = tracedecay_domain::WorkflowDefinitionV1::new(
+    let definition = tracedecay_domain::WorkflowDefinition::new(
         tracedecay_domain::WorkflowDefinitionId::new("workflow.definition.invocation")
             .expect("definition id"),
         1,
         project_id,
-        vec![tracedecay_domain::WorkflowStepV1 {
+        vec![tracedecay_domain::WorkflowStep {
             step_id: tracedecay_domain::WorkflowStepId::new("fan-out").expect("step id"),
             operation: tracedecay_domain::WorkflowOperationRef::new(
-                tracedecay_application::WORKFLOW_CANONICAL_WORK_OPERATION_V1,
+                tracedecay_application::WORKFLOW_CANONICAL_WORK_OPERATION,
             )
             .expect("operation"),
             predecessors: BTreeSet::default(),
@@ -500,7 +548,7 @@ for line in sys.stdin:
             outputs: vec![
                 tracedecay_domain::WorkflowOutputName::new("created-work").expect("output name"),
             ],
-            fan_out: Some(tracedecay_domain::WorkflowFanOutV1 { max_width: 2 }),
+            fan_out: Some(tracedecay_domain::WorkflowFanOut { max_width: 2 }),
         }],
         pinned_policy_digest,
         // `prepare_workflow_fan_out` requires the provider configuration digest
@@ -513,8 +561,8 @@ for line in sys.stdin:
 
     let registered = invoke!(
         "request.workflow.register",
-        WorkflowApplicationInvocationV1::RegisterDefinition(
-            tracedecay_application::WorkflowDefinitionRegisterRequestV1 {
+        WorkflowApplicationInvocation::RegisterDefinition(
+            tracedecay_application::WorkflowDefinitionRegisterRequest {
                 definition: definition.clone(),
             },
         )
@@ -522,16 +570,14 @@ for line in sys.stdin:
     assert!(matches!(
         registered,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcomeV1::RegisterDefinition(ApplicationOutcome::Effect(
-                _
-            )),
+            outcome: WorkflowApplicationOutcome::RegisterDefinition(ApplicationOutcome::Effect(_)),
             ..
         }
     ));
     let activated = invoke!(
         "request.workflow.activate",
-        WorkflowApplicationInvocationV1::ActivateDefinition(
-            tracedecay_application::WorkflowDefinitionActivateRequestV1 {
+        WorkflowApplicationInvocation::ActivateDefinition(
+            tracedecay_application::WorkflowDefinitionActivateRequest {
                 definition_id: definition.definition_id().clone(),
                 expected_active_version: None,
                 replacement_version: 1,
@@ -541,18 +587,16 @@ for line in sys.stdin:
     assert!(matches!(
         activated,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcomeV1::ActivateDefinition(ApplicationOutcome::Effect(
-                _
-            )),
+            outcome: WorkflowApplicationOutcome::ActivateDefinition(ApplicationOutcome::Effect(_)),
             ..
         }
     ));
 
-    let fan_out = tracedecay_application::WorkflowFanOutRequestV1 {
+    let fan_out = tracedecay_application::WorkflowFanOutRequest {
         definition,
         run_id: tracedecay_domain::RunId::new("run.workflow.invocation").expect("run id"),
         step_id: tracedecay_domain::WorkflowStepId::new("fan-out").expect("step id"),
-        fence: tracedecay_application::WorkflowExecutionFenceV1 {
+        fence: tracedecay_application::WorkflowExecutionFence {
             attempt_id: tracedecay_domain::AttemptId::new("attempt.workflow.invocation")
                 .expect("attempt id"),
             lease: tracedecay_domain::WorkLeaseFenceV1::new(
@@ -564,54 +608,53 @@ for line in sys.stdin:
         admitted_at: now,
         cancellation: CancellationContext::active("cancel.workflow.fan-out").expect("cancellation"),
         max_parallel: 1,
-        failure_policy: tracedecay_application::WorkflowFailurePolicyV1::Collect,
-        provider: tracedecay_application::WorkflowProviderAdmissionV1 {
-            route: tracedecay_domain::WorkProviderRouteV1::new(
-                tracedecay_domain::ProviderId::new(crate::daemon::work_runtime::CODEX_PROVIDER_ID)
-                    .expect("provider id"),
-                tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
-                    .expect("route id"),
-            )
-            .expect("provider route"),
-            backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
-            model: "gpt-workflow-fixture".to_owned(),
-            // The Work runtime rejects any child envelope whose configuration
-            // digest differs from the one the runtime was registered with.
-            configuration_digest: configuration_digest.clone(),
+        failure_policy: tracedecay_application::WorkflowFailurePolicy::Collect,
+        provider: tracedecay_application::WorkflowProviderAdmission {
+            execution_snapshot: workflow_execution_snapshot(
+                configuration_digest.clone(),
+                UtcMicros(now.0 + 20_000_000),
+                "gpt-workflow-fixture",
+            ),
+            topology_digest: digest('8'),
+            provider_registry_digest: digest('9'),
+            worktree_placement: tracedecay_domain::configuration::safe_work_topology_policy_v1()
+                .placement,
             reference: None,
             commit: tracedecay_domain::CommitId::new("0123456789abcdef0123456789abcdef01234567")
                 .expect("commit"),
-            deadline: UtcMicros(now.0 + 20_000_000),
             cancellation_generation: 1,
-            budget: tracedecay_domain::WorkExecutionBudgetV1::new(16_384, 16_384, 65_536)
-                .expect("execution budget"),
             effect_state: tracedecay_domain::WorkEffectStateV1::Observational,
         },
-        inputs: vec![tracedecay_application::WorkflowFanOutInputV1 {
+        inputs: vec![tracedecay_application::WorkflowFanOutInput {
             identity: "alpha".to_owned(),
             input_digest: digest('1'),
         }],
     };
     let first = invoke!(
         "request.workflow.execute",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(fan_out.clone()))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(fan_out.clone()))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
-        outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(first)),
+        outcome: WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(first)),
         ..
     } = first
     else {
         panic!("fan-out must return a Workflow effect: {first:?}");
     };
     let first = first.payload.expect("fan-out truth");
-    let tracedecay_application::WorkflowExecutionTruthV1::Completed {
-        checkpoint: ref first_checkpoint,
-    } = first
-    else {
-        panic!("canonical workflow child must complete: {first:?}");
-    };
-    assert_eq!(first_checkpoint.children.len(), 1);
-    let child_attempt = &first_checkpoint.children[0].attempt_identity;
+    assert_eq!(
+        first.status(),
+        tracedecay_domain::WorkflowRunStatus::Completed
+    );
+    let first_step = first
+        .step(&tracedecay_domain::WorkflowStepId::new("fan-out").expect("step id"))
+        .expect("completed workflow step");
+    let output = first_step
+        .outputs()
+        .get(&tracedecay_domain::WorkflowOutputName::new("created-work").expect("output name"))
+        .expect("journaled workflow output");
+    assert_eq!(output.artifacts().len(), 1);
+    let child_attempt = output.artifacts()[0].attempt_identity();
     let stored_attempt = database
         .work_storage()
         .expect("Work storage")
@@ -659,10 +702,10 @@ for line in sys.stdin:
     .expect("retry lease fence");
     let replay = invoke!(
         "request.workflow.execute-replay",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(retried_fan_out))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(retried_fan_out))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
-        outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(replay)),
+        outcome: WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(replay)),
         ..
     } = replay
     else {
@@ -688,7 +731,7 @@ for line in sys.stdin:
     crate::daemon::workflow_runtime::crash_after_next_workflow_settlement_for_test();
     let crashed_after_settlement = invoke!(
         "request.workflow.execute-crash-after-settlement",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(settled_fan_out.clone()))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(settled_fan_out.clone()))
     );
     assert!(matches!(
         crashed_after_settlement,
@@ -715,23 +758,27 @@ for line in sys.stdin:
     .expect("settled retry lease fence");
     let reconciled = invoke!(
         "request.workflow.execute-reconcile-settlement",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(settled_fan_out))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(settled_fan_out))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
-        outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(reconciled)),
+        outcome: WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(reconciled)),
         ..
     } = reconciled
     else {
         panic!("settled child reconciliation must complete: {reconciled:?}");
     };
     let reconciled = reconciled.payload.expect("reconciled workflow truth");
-    let tracedecay_application::WorkflowExecutionTruthV1::Completed { checkpoint } = reconciled
-    else {
-        panic!("reconciled settlement must be completed: {reconciled:?}");
-    };
     assert_eq!(
-        checkpoint.children[0].attempt_identity,
-        settled_plan.children[0].attempt_identity
+        reconciled.status(),
+        tracedecay_domain::WorkflowRunStatus::Completed
+    );
+    assert_eq!(
+        reconciled
+            .step(&tracedecay_domain::WorkflowStepId::new("fan-out").expect("reconciled step id"),)
+            .and_then(|step| step.outputs().values().next())
+            .and_then(|output| output.artifacts().first())
+            .map(tracedecay_domain::WorkflowOutputArtifact::attempt_identity),
+        Some(&settled_plan.children[0].attempt_identity)
     );
 
     interrupted_fan_out.run_id =
@@ -752,7 +799,7 @@ for line in sys.stdin:
     std::fs::remove_file(&fixture).expect("remove provider before durable intent retry");
     let interrupted = invoke!(
         "request.workflow.execute-interrupted",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(interrupted_fan_out.clone()))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(interrupted_fan_out.clone()))
     );
     assert!(matches!(
         interrupted,
@@ -782,22 +829,27 @@ for line in sys.stdin:
     let mut cancelled_fan_out = interrupted_fan_out.clone();
     let resumed = invoke!(
         "request.workflow.execute-interrupted-retry",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(interrupted_fan_out))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(interrupted_fan_out))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
-        outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(resumed)),
+        outcome: WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(resumed)),
         ..
     } = resumed
     else {
         panic!("durable child intent retry must complete: {resumed:?}");
     };
     let resumed = resumed.payload.expect("resumed workflow truth");
-    let tracedecay_application::WorkflowExecutionTruthV1::Completed { checkpoint } = resumed else {
-        panic!("resumed workflow child must complete: {resumed:?}");
-    };
     assert_eq!(
-        checkpoint.children[0].attempt_identity,
-        interrupted_plan.children[0].attempt_identity
+        resumed.status(),
+        tracedecay_domain::WorkflowRunStatus::Completed
+    );
+    assert_eq!(
+        resumed
+            .step(&cancelled_fan_out.step_id)
+            .and_then(|step| step.outputs().values().next())
+            .and_then(|output| output.artifacts().first())
+            .map(tracedecay_domain::WorkflowOutputArtifact::attempt_identity),
+        Some(&interrupted_plan.children[0].attempt_identity)
     );
 
     let mut failed_fan_out = cancelled_fan_out.clone();
@@ -820,20 +872,20 @@ for line in sys.stdin:
         .expect("cancelled plan");
     let cancelled = invoke!(
         "request.workflow.execute-cancelled",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(cancelled_fan_out.clone()))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(cancelled_fan_out.clone()))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
-        outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(cancelled)),
+        outcome: WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(cancelled)),
         ..
     } = cancelled
     else {
         panic!("pre-cancelled workflow must return canonical truth: {cancelled:?}");
     };
     let cancelled_truth = cancelled.payload.expect("pre-cancelled workflow truth");
-    assert!(matches!(
-        &cancelled_truth,
-        tracedecay_application::WorkflowExecutionTruthV1::Cancelled { .. }
-    ));
+    assert_eq!(
+        cancelled_truth.status(),
+        tracedecay_domain::WorkflowRunStatus::Cancelled
+    );
     assert!(
         database
             .work_storage()
@@ -854,11 +906,11 @@ for line in sys.stdin:
     .expect("cancelled retry lease fence");
     let cancelled_replay = invoke!(
         "request.workflow.execute-cancelled-replay",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(cancelled_fan_out))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(cancelled_fan_out))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
         outcome:
-            WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(cancelled_replay)),
+            WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(cancelled_replay)),
         ..
     } = cancelled_replay
     else {
@@ -882,10 +934,10 @@ for line in sys.stdin:
     )
     .expect("failed lease fence");
     failed_fan_out.inputs[0].identity = "provider-failure".to_owned();
-    failed_fan_out.failure_policy = tracedecay_application::WorkflowFailurePolicyV1::FailFast;
+    failed_fan_out.failure_policy = tracedecay_application::WorkflowFailurePolicy::FailFast;
     failed_fan_out
         .inputs
-        .push(tracedecay_application::WorkflowFanOutInputV1 {
+        .push(tracedecay_application::WorkflowFanOutInput {
             identity: "provider-failure-pending".to_owned(),
             input_digest: digest('2'),
         });
@@ -910,20 +962,20 @@ for line in sys.stdin:
     );
     let failed = invoke!(
         "request.workflow.execute-provider-failure",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(failed_fan_out.clone()))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(failed_fan_out.clone()))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
-        outcome: WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(failed)),
+        outcome: WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(failed)),
         ..
     } = failed
     else {
         panic!("provider failure must return canonical workflow truth: {failed:?}");
     };
     let failed_truth = failed.payload.expect("provider failure workflow truth");
-    assert!(matches!(
-        &failed_truth,
-        tracedecay_application::WorkflowExecutionTruthV1::Failed { .. }
-    ));
+    assert_eq!(
+        failed_truth.status(),
+        tracedecay_domain::WorkflowRunStatus::Failed
+    );
     let failed_attempt = database
         .work_storage()
         .expect("Work storage")
@@ -954,11 +1006,11 @@ for line in sys.stdin:
     .expect("failed retry lease fence");
     let failed_replay = invoke!(
         "request.workflow.execute-provider-failure-replay",
-        WorkflowApplicationInvocationV1::ExecuteFanOut(Box::new(failed_fan_out))
+        WorkflowApplicationInvocation::ExecuteFanOut(Box::new(failed_fan_out))
     );
     let DaemonInvocationOutcome::WorkflowApplication {
         outcome:
-            WorkflowApplicationOutcomeV1::ExecuteFanOut(ApplicationOutcome::Effect(failed_replay)),
+            WorkflowApplicationOutcome::ExecuteFanOut(ApplicationOutcome::Effect(failed_replay)),
         ..
     } = failed_replay
     else {
@@ -970,7 +1022,7 @@ for line in sys.stdin:
         "terminal replay must preserve partial-checkpoint failure truth"
     );
 
-    let handoff_scope = tracedecay_application::TaskHandoffScopeV1::new(
+    let handoff_scope = tracedecay_application::TaskHandoffScope::new(
         scope.project_id,
         scope.repository_id,
         scope.worktree_id,
@@ -988,8 +1040,8 @@ for line in sys.stdin:
     let secret = "workflow-handoff-secret-0123456789abcdef".to_owned();
     let issued = invoke!(
         "request.workflow.handoff-issue",
-        WorkflowApplicationInvocationV1::HandoffIssue(
-            tracedecay_application::TaskHandoffIssueRequestV1 {
+        WorkflowApplicationInvocation::HandoffIssue(
+            tracedecay_application::TaskHandoffIssueRequest {
                 issuer: actor.clone(),
                 scope: handoff_scope.clone(),
                 secret: secret.clone(),
@@ -1001,14 +1053,14 @@ for line in sys.stdin:
     assert!(matches!(
         issued,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcomeV1::HandoffIssue(ApplicationOutcome::Effect(_)),
+            outcome: WorkflowApplicationOutcome::HandoffIssue(ApplicationOutcome::Effect(_)),
             ..
         }
     ));
     let redeemed = invoke!(
         "request.workflow.handoff-redeem",
-        WorkflowApplicationInvocationV1::HandoffRedeem(
-            tracedecay_application::TaskHandoffRedeemRequestV1 {
+        WorkflowApplicationInvocation::HandoffRedeem(
+            tracedecay_application::TaskHandoffRedeemRequest {
                 secret,
                 expected_scope: handoff_scope.clone(),
                 redeemer: actor,
@@ -1019,7 +1071,7 @@ for line in sys.stdin:
     assert!(matches!(
         redeemed,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcomeV1::HandoffRedeem(
+            outcome: WorkflowApplicationOutcome::HandoffRedeem(
                 ApplicationOutcome::Effect(ref effect)
             ),
             ..

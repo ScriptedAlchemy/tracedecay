@@ -44,7 +44,7 @@ use tracedecay_application::{
     PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
     PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
     ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffRedeemedV1, TaskHandoffToken,
+    RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffRedeemed, TaskHandoffToken,
     TemporalState, WorkExecutionError, WorkProjectionApplicationError, WorkflowCoordinationError,
     WorkflowFanOutRuntimeError, callable_code_operations,
 };
@@ -161,7 +161,7 @@ pub(crate) use crate::daemon_contract::{
     DaemonInvocationOutcome, DaemonInvocationPayload, DaemonInvocationProblem,
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonLspSessionAccess,
     WorkApplicationInvocationV1, WorkApplicationOutcomeV1, WorkAttemptInvocationV1,
-    WorkflowApplicationInvocationV1, WorkflowApplicationOutcomeV1,
+    WorkflowApplicationInvocation, WorkflowApplicationOutcome,
 };
 // Wire-shape fixtures build application commands the dispatch path no longer
 // names directly now that request construction lives with the contract.

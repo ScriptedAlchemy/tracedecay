@@ -2,15 +2,18 @@ use std::collections::BTreeSet;
 
 use serde_json::json;
 use tracedecay_domain::{
-    ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId,
-    ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId, WorkArtifactRefV1,
-    WorkAttemptIdentityV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
-    WorkAuthority, WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1,
-    WorkCancellationRequestId, WorkCancellationRequestV1, WorkCancellationStateV1,
-    WorkEffectStateV1, WorkEvent, WorkEventKind, WorkExecutionBudgetV1, WorkExecutionEnvelopeV1,
-    WorkFenceEpochV1, WorkLeaseFenceV1, WorkLeaseId, WorkProjection, WorkProjectionCoverageV1,
-    WorkProjectionSequenceV1, WorkProjectionSnapshotV1, WorkProviderBackendV1, WorkProviderRouteId,
-    WorkProviderRouteV1, WorkRecoveryStateV1, WorkRestartReasonV1, WorkTerminalEvidenceV1,
+    ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId, ManifestDigest,
+    ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId,
+    UtcMicros, WorkApprovalPolicy, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
+    WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1, WorkAuthority,
+    WorkCancellationAcknowledgementV1, WorkCancellationEscalationV1, WorkCancellationRequestId,
+    WorkCancellationRequestV1, WorkCancellationStateV1, WorkEffectStateV1, WorkEgressPolicy,
+    WorkEvent, WorkEventKind, WorkExecutableReference, WorkExecutionEnvelopeV1,
+    WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput, WorkFallbackTopology,
+    WorkFenceEpochV1, WorkFilesystemPolicy, WorkLeaseFenceV1, WorkLeaseId, WorkProjection,
+    WorkProjectionCoverageV1, WorkProjectionSequenceV1, WorkProjectionSnapshotV1,
+    WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId, WorkProviderRouteV1,
+    WorkRecoveryStateV1, WorkRestartReasonV1, WorkSandboxPolicy, WorkTerminalEvidenceV1,
     WorkVersion, WorkflowOperationRef, WorktreeId,
 };
 
@@ -64,6 +67,35 @@ fn requested_route() -> WorkProviderRouteV1 {
     )
 }
 
+fn execution_snapshot() -> WorkExecutionSnapshot {
+    WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+        configuration_revision_id: id::<ConfigurationRevisionId>("configuration-revision.work.1"),
+        configuration_snapshot_id: id::<ConfigurationSnapshotId>("configuration-snapshot.work.1"),
+        effective_behavior_digest: digest('c'),
+        resolution_provenance_digest: digest('d'),
+        route: requested_route(),
+        backend: WorkProviderBackendV1::CodexAppServer,
+        protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
+        model: "gpt-test".to_owned(),
+        executable: WorkExecutableReference::new(
+            "executable.codex.app-server".to_owned(),
+            digest('e'),
+        )
+        .unwrap(),
+        sandbox: WorkSandboxPolicy::Required,
+        approval: WorkApprovalPolicy::Never,
+        filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+        egress: WorkEgressPolicy::Deny,
+        environment_allowlist: BTreeSet::new(),
+        credential_references: BTreeSet::new(),
+        limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+        deadline: UtcMicros(1_000_000),
+        fallback: WorkFallbackTopology::Disabled,
+        topology_policy_digest: digest('f'),
+    })
+    .unwrap()
+}
+
 fn execution(
     attempt_identity: WorkAttemptIdentityV1,
     projection_binding: WorkAttemptProjectionBindingV1,
@@ -72,19 +104,14 @@ fn execution(
         attempt_identity,
         projection_binding,
         id::<WorkflowOperationRef>("operation.work.execute-provider"),
-        requested_route(),
-        WorkProviderBackendV1::CodexAppServer,
-        "gpt-test".to_owned(),
-        digest('c'),
+        execution_snapshot(),
         id::<ProjectId>("project.work.runtime"),
         id::<RepositoryId>("repository.work.runtime"),
         id::<WorktreeId>("worktree.work.runtime"),
         "/tmp/work-runtime".to_owned(),
         Some(id::<RefId>("refs/heads/work-runtime")),
         id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-        UtcMicros(1_000_000),
         1,
-        WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
         WorkEffectStateV1::Observational,
     )
     .unwrap()

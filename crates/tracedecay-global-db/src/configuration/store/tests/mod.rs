@@ -1,20 +1,16 @@
 //! Direct configuration-store behavior tests.
 
-use super::migration_store::complete_snapshot_for_current_registry;
 use super::read::validate_snapshot_registry_completeness;
 use super::revision::insert_revision;
 use super::{
-    CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME, ConfigurationAuditEvent,
-    ConfigurationAuditEventKindV1, ConfigurationCommitV1, ConfigurationMigrationQuarantineEntryV1,
-    ConfigurationMigrationReceiptV1, ConfigurationMutationAuthority,
-    ConfigurationMutationReceiptV1, ConfigurationProtectedOperationV1,
-    ConfigurationProtectedPlanRecordV1, ConfigurationResolutionV1, ConfigurationRevisionId,
+    ConfigurationAuditEvent, ConfigurationAuditEventKindV1, ConfigurationCommitV1,
+    ConfigurationMutationAuthority, ConfigurationMutationReceiptV1,
+    ConfigurationProtectedOperationV1, ConfigurationProtectedPlanRecordV1, ConfigurationRevisionId,
     ConfigurationRevisionRecordV1, ConfigurationSnapshotV1, ConfigurationSqlStore,
     ConfigurationValueV1, Connection, GlobalDbConfigurationControlStore, ManifestDigest,
     TestConnection, TransactionBehavior, WriteOnlyCredentialMutation, ensure_configuration_schema,
 };
 use crate::configuration::contracts::ScopeRevalidationEvidenceV1;
-use crate::configuration::migration::LegacyConfigurationSourceKindV1;
 use crate::configuration::registry::ConfigurationRegistry;
 use crate::configuration::resolver::resolve_configuration;
 use crate::tests::harness::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
@@ -47,7 +43,7 @@ fn digest(byte: char) -> ManifestDigest {
 }
 
 #[test]
-fn forward_repair_materializes_defaults_added_after_a_stored_revision() {
+fn incomplete_snapshot_requires_reset_instead_of_default_repair() {
     let registry = ConfigurationRegistry::core().unwrap();
     let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
     let missing_key = SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap();
@@ -57,128 +53,6 @@ fn forward_repair_materializes_defaults_added_after_a_stored_revision() {
     provenance.remove(&missing_key);
     let incomplete = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
     assert!(validate_snapshot_registry_completeness(&incomplete).is_err());
-
-    let repaired = complete_snapshot_for_current_registry(&incomplete).unwrap();
-
-    validate_snapshot_registry_completeness(&repaired).unwrap();
-    assert_eq!(
-        repaired.effective_values.get(&missing_key),
-        Some(&registry.definition(&missing_key).unwrap().default_value),
-    );
-}
-
-#[test]
-fn forward_repair_disables_pre_digest_semantics_without_changing_install_intent() {
-    let registry = ConfigurationRegistry::core().unwrap();
-    let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-    let semantic_key =
-        SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
-    let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
-    let legacy = serde_json::json!({
-        "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
-        "auto_download": true,
-        "active_profile": {
-            "profile_id": "profile.semantic.legacy.v1",
-            "artifact_digest": "a".repeat(64),
-            "artifact_path": legacy_artifact_path
-        },
-        "rollback_profile": null,
-        "resources": tracedecay_semantic::SemanticResourceCeilings::default()
-    });
-    let mut effective_values = current.effective_values;
-    let provenance = current.provenance;
-    effective_values.insert(
-        semantic_key.clone(),
-        ConfigurationValueV1::Text(serde_json::to_string(&legacy).unwrap()),
-    );
-    let legacy_snapshot = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
-    let ConfigurationValueV1::Text(legacy_text) =
-        legacy_snapshot.effective_values.get(&semantic_key).unwrap()
-    else {
-        panic!("semantic setting must remain typed text");
-    };
-    assert!(
-        serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(legacy_text)
-            .is_err(),
-        "fixture must reproduce the pre-accepted-profile-digest snapshot"
-    );
-
-    let repaired = complete_snapshot_for_current_registry(&legacy_snapshot).unwrap();
-
-    let ConfigurationValueV1::Text(repaired_text) =
-        repaired.effective_values.get(&semantic_key).unwrap()
-    else {
-        panic!("semantic setting must remain typed text");
-    };
-    let semantic =
-        serde_json::from_str::<crate::configuration::semantic::SemanticConfig>(repaired_text)
-            .unwrap();
-    semantic.validate().unwrap();
-    assert_eq!(
-        semantic.selected_model.as_deref(),
-        Some(tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID)
-    );
-    assert!(semantic.auto_download);
-    assert_eq!(
-        semantic.resources,
-        tracedecay_semantic::SemanticResourceCeilings::default()
-    );
-    assert!(semantic.active_profile.is_none());
-    assert!(semantic.rollback_profile.is_none());
-}
-
-#[test]
-fn forward_repair_rejects_unrecognized_semantic_configuration() {
-    let registry = ConfigurationRegistry::core().unwrap();
-    let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
-    let semantic_key =
-        SettingKey::new(tracedecay_domain::configuration::SEMANTIC_RUNTIME_SETTING_KEY).unwrap();
-    let legacy_artifact_path = std::env::temp_dir().join("tracedecay-semantic-legacy");
-    let mut effective_values = current.effective_values;
-    effective_values.insert(
-        semantic_key,
-        ConfigurationValueV1::Text(
-            serde_json::json!({
-                "selected_model": tracedecay_semantic::DEFAULT_FASTEMBED_MODEL_ID,
-                "active_profile": {
-                    "profile_id": "profile.semantic.legacy.v1",
-                    "artifact_digest": "a".repeat(64),
-                    "artifact_path": legacy_artifact_path
-                },
-                "rollback_profile": null,
-                "resources": tracedecay_semantic::SemanticResourceCeilings::default(),
-                "x": true
-            })
-            .to_string(),
-        ),
-    );
-    let malformed = ConfigurationSnapshotV1::new(effective_values, current.provenance).unwrap();
-
-    assert!(complete_snapshot_for_current_registry(&malformed).is_err());
-}
-
-fn migration_fixture() -> (
-    ConfigurationMigrationReceiptV1,
-    ConfigurationResolutionV1,
-    Vec<ConfigurationMigrationQuarantineEntryV1>,
-) {
-    let resolution = resolve_configuration(&ConfigurationRegistry::core().unwrap(), &[]).unwrap();
-    let receipt = ConfigurationMigrationReceiptV1 {
-        receipt_name: CONFIGURATION_CONTROL_PLANE_MIGRATION_RECEIPT_NAME,
-        source_snapshot_digest: digest('a'),
-        initial_revision_id: ConfigurationRevisionId::new("configuration.revision.initial")
-            .unwrap(),
-        initial_snapshot_id: resolution.snapshot.snapshot_id.clone(),
-        created_at: UtcMicros(1),
-    };
-    let quarantine = vec![ConfigurationMigrationQuarantineEntryV1 {
-        source_kind: LegacyConfigurationSourceKindV1::ConfigJson,
-        source_key_digest: digest('b'),
-        reason: super::super::migration::ConfigurationMigrationQuarantineReasonV1::UnknownKey,
-        redacted_value_digest: digest('c'),
-        quarantined_at: UtcMicros(1),
-    }];
-    (receipt, resolution, quarantine)
 }
 
 async fn count(connection: &Connection, table: &str) -> i64 {
@@ -206,7 +80,7 @@ fn root_revision() -> ConfigurationRevisionRecordV1 {
         parent_revision_id: None,
         snapshot,
         actor_id: id("actor.configuration.fixture"),
-        operation_kind: "migration".to_owned(),
+        operation_kind: "canonical_initialization".to_owned(),
         created_at: UtcMicros(1),
     }
 }

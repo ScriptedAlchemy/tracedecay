@@ -626,14 +626,18 @@ fn rebuild_attempt(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
     use tracedecay_domain::{
-        ActorId, AttemptId, CommitId, ManifestDigest, ProjectId, ProjectionGenerationId,
-        ProposalId, ProviderId, RefId, RepositoryId, RunId, TaskId, UtcMicros, WorkArtifactId,
-        WorkCancellationRequestId, WorkEffectStateV1, WorkExecutionBudgetV1, WorkFenceEpochV1,
-        WorkLeaseId, WorkProjectionSequenceV1, WorkProviderBackendV1, WorkProviderRouteId,
-        WorkVersion, WorkflowOperationRef, WorktreeId,
+        ActorId, AttemptId, CommitId, ConfigurationRevisionId, ConfigurationSnapshotId,
+        ManifestDigest, ProjectId, ProjectionGenerationId, ProposalId, ProviderId, RefId,
+        RepositoryId, RunId, TaskId, UtcMicros, WorkApprovalPolicy, WorkArtifactId,
+        WorkCancellationRequestId, WorkEffectStateV1, WorkEgressPolicy, WorkExecutableReference,
+        WorkExecutionLimits, WorkExecutionSnapshot, WorkExecutionSnapshotInput,
+        WorkFallbackTopology, WorkFenceEpochV1, WorkFilesystemPolicy, WorkLeaseId,
+        WorkProjectionSequenceV1, WorkProviderBackendV1, WorkProviderProtocol, WorkProviderRouteId,
+        WorkSandboxPolicy, WorkVersion, WorkflowOperationRef, WorktreeId,
     };
 
     use super::*;
@@ -686,6 +690,39 @@ mod tests {
         .unwrap()
     }
 
+    fn execution_snapshot(route: WorkProviderRouteV1) -> WorkExecutionSnapshot {
+        WorkExecutionSnapshot::new(WorkExecutionSnapshotInput {
+            configuration_revision_id: id::<ConfigurationRevisionId>(
+                "configuration-revision.work.execution",
+            ),
+            configuration_snapshot_id: id::<ConfigurationSnapshotId>(
+                "configuration-snapshot.work.execution",
+            ),
+            effective_behavior_digest: digest('c'),
+            resolution_provenance_digest: digest('d'),
+            route,
+            backend: WorkProviderBackendV1::CodexAppServer,
+            protocol: WorkProviderProtocol::CodexAppServerJsonRpc,
+            model: "gpt-test".to_owned(),
+            executable: WorkExecutableReference::new(
+                "executable.codex.app-server".to_owned(),
+                digest('e'),
+            )
+            .unwrap(),
+            sandbox: WorkSandboxPolicy::Required,
+            approval: WorkApprovalPolicy::Never,
+            filesystem: WorkFilesystemPolicy::WorkspaceWrite,
+            egress: WorkEgressPolicy::Deny,
+            environment_allowlist: BTreeSet::new(),
+            credential_references: BTreeSet::new(),
+            limits: WorkExecutionLimits::new(128_000, 8_192, 16_384, 16_384, 65_536, 1).unwrap(),
+            deadline: UtcMicros(1_000_000),
+            fallback: WorkFallbackTopology::Disabled,
+            topology_policy_digest: digest('f'),
+        })
+        .unwrap()
+    }
+
     fn execution_envelope(
         identity: WorkAttemptIdentityV1,
         projection_binding: WorkAttemptProjectionBindingV1,
@@ -695,19 +732,14 @@ mod tests {
             identity,
             projection_binding,
             id::<WorkflowOperationRef>("operation.work.execute-provider"),
-            route,
-            WorkProviderBackendV1::CodexAppServer,
-            "gpt-test".to_owned(),
-            digest('c'),
+            execution_snapshot(route),
             id::<ProjectId>("project.work.execution"),
             id::<RepositoryId>("repository.work.execution"),
             id::<WorktreeId>("worktree.work.execution"),
             "/tmp/work-execution".to_owned(),
             Some(id::<RefId>("refs/heads/work-execution")),
             id::<CommitId>("0123456789abcdef0123456789abcdef01234567"),
-            UtcMicros(1_000_000),
             1,
-            WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).unwrap(),
             WorkEffectStateV1::Observational,
         )
         .unwrap()

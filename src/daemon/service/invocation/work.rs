@@ -201,14 +201,14 @@ pub(super) async fn execute_workflow_application(
     registered: RegisteredWorkRuntime,
     project_root: &Path,
     request_id: String,
-    request: WorkflowApplicationInvocationV1,
+    request: WorkflowApplicationInvocation,
     observed_at: UtcMicros,
     deadline: Deadline,
     cancellation: CancellationContext,
 ) -> DaemonInvocationResponse {
     let operation_key = request.operation_key();
     let Some((_, capability, use_case)) =
-        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS_V1
+        tracedecay_application::WORKFLOW_APPLICATION_OPERATION_IDS
             .iter()
             .find(|(operation, _, _)| *operation == operation_key)
     else {
@@ -249,7 +249,7 @@ pub(super) async fn execute_workflow_application(
     };
 
     match request {
-        WorkflowApplicationInvocationV1::RegisterDefinition(request) => complete_workflow_effect(
+        WorkflowApplicationInvocation::RegisterDefinition(request) => complete_workflow_effect(
             &registered,
             request_id,
             &context,
@@ -263,9 +263,93 @@ pub(super) async fn execute_workflow_application(
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
-            WorkflowApplicationOutcomeV1::RegisterDefinition,
+            WorkflowApplicationOutcome::RegisterDefinition,
         ),
-        WorkflowApplicationInvocationV1::ActivateDefinition(request) => complete_workflow_effect(
+        WorkflowApplicationInvocation::ValidateDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .validate(request.definition)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::ValidateDefinition,
+        ),
+        WorkflowApplicationInvocation::GetDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .get(&request.definition_id, request.definition_version)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::GetDefinition,
+        ),
+        WorkflowApplicationInvocation::ListDefinitions(_) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .list()
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::ListDefinitions,
+        ),
+        WorkflowApplicationInvocation::DefinitionHistory(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .history(&request.definition_id)
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::DefinitionHistory,
+        ),
+        WorkflowApplicationInvocation::DiffDefinition(request) => complete_workflow_read(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .diff(
+                    &request.definition_id,
+                    request.from_version,
+                    request.to_version,
+                )
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::DiffDefinition,
+        ),
+        WorkflowApplicationInvocation::ActivateDefinition(request) => complete_workflow_effect(
             &registered,
             request_id,
             &context,
@@ -283,11 +367,30 @@ pub(super) async fn execute_workflow_application(
                 .map_err(workflow_coordination_problem),
             observed_at,
             deadline,
-            WorkflowApplicationOutcomeV1::ActivateDefinition,
+            WorkflowApplicationOutcome::ActivateDefinition,
         ),
-        WorkflowApplicationInvocationV1::ExecuteFanOut(request) => {
+        WorkflowApplicationInvocation::RetireDefinition(request) => complete_workflow_effect(
+            &registered,
+            request_id,
+            &context,
+            canonical_request_id,
+            operation_key,
+            use_case,
+            input_digest,
+            services
+                .definitions()
+                .retire(
+                    &request.definition_id,
+                    Some(request.expected_active_version),
+                )
+                .map_err(workflow_coordination_problem),
+            observed_at,
+            deadline,
+            WorkflowApplicationOutcome::RetireDefinition,
+        ),
+        WorkflowApplicationInvocation::ExecuteFanOut(request) => {
             let request = *request;
-            if request.provider.deadline > deadline.expires_at {
+            if request.provider.execution_snapshot.deadline() > deadline.expires_at {
                 return DaemonInvocationResponse::problem(
                     request_id,
                     DaemonInvocationProblem::InvalidRequest,
@@ -313,10 +416,10 @@ pub(super) async fn execute_workflow_application(
                 result,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::ExecuteFanOut,
+                WorkflowApplicationOutcome::ExecuteFanOut,
             )
         }
-        WorkflowApplicationInvocationV1::HandoffIssue(request) => {
+        WorkflowApplicationInvocation::HandoffIssue(request) => {
             let result = TaskHandoffToken::new(request.secret)
                 .map_err(task_handoff_problem)
                 .and_then(|token| {
@@ -342,10 +445,10 @@ pub(super) async fn execute_workflow_application(
                 result,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::HandoffIssue,
+                WorkflowApplicationOutcome::HandoffIssue,
             )
         }
-        WorkflowApplicationInvocationV1::HandoffRedeem(request) => {
+        WorkflowApplicationInvocation::HandoffRedeem(request) => {
             let scope = request.expected_scope;
             let result = TaskHandoffToken::new(request.secret)
                 .map_err(task_handoff_problem)
@@ -355,7 +458,7 @@ pub(super) async fn execute_workflow_application(
                         .redeem(&token, &scope, &request.redeemer, request.consumed_at)
                         .map_err(task_handoff_problem)
                 })
-                .map(|()| TaskHandoffRedeemedV1 { scope });
+                .map(|()| TaskHandoffRedeemed { scope });
             complete_workflow_effect(
                 &registered,
                 request_id,
@@ -367,10 +470,59 @@ pub(super) async fn execute_workflow_application(
                 result,
                 observed_at,
                 deadline,
-                WorkflowApplicationOutcomeV1::HandoffRedeem,
+                WorkflowApplicationOutcome::HandoffRedeem,
             )
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn complete_workflow_read<T>(
+    registered: &RegisteredWorkRuntime,
+    request_id: String,
+    context: &RequestContext,
+    canonical_request_id: RequestId,
+    operation_key: &str,
+    use_case: UseCaseId,
+    input_digest: ManifestDigest,
+    result: Result<T, DaemonInvocationProblem>,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcome,
+) -> DaemonInvocationResponse
+where
+    T: Serialize,
+{
+    let result = match result {
+        Ok(result) => result,
+        Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+    };
+    let outcome = match work_evidence_packet(
+        registered,
+        context,
+        canonical_request_id,
+        operation_key,
+        use_case,
+        input_digest,
+        result,
+        observed_at,
+        deadline,
+    ) {
+        Ok(evidence) => wrap(ApplicationOutcome::Evidence(evidence)),
+        Err(_) => {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+    };
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::WorkflowApplication {
+            scope: context.scope().clone(),
+            outcome,
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -385,7 +537,7 @@ fn complete_workflow_effect<T>(
     result: Result<T, DaemonInvocationProblem>,
     observed_at: UtcMicros,
     deadline: Deadline,
-    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcomeV1,
+    wrap: fn(ApplicationOutcome<T>) -> WorkflowApplicationOutcome,
 ) -> DaemonInvocationResponse
 where
     T: Serialize,
@@ -431,6 +583,7 @@ fn workflow_coordination_problem(error: WorkflowCoordinationError) -> DaemonInvo
         WorkflowCoordinationError::InvalidDefinition
         | WorkflowCoordinationError::ImmutableDefinitionConflict
         | WorkflowCoordinationError::UnsupportedOperation
+        | WorkflowCoordinationError::CatalogDigestMismatch
         | WorkflowCoordinationError::StaleActivation => DaemonInvocationProblem::InvalidRequest,
     }
 }
@@ -455,6 +608,7 @@ fn workflow_runtime_problem(error: WorkflowFanOutRuntimeError) -> DaemonInvocati
     match error {
         WorkflowFanOutRuntimeError::AuthorityUnavailable(_)
         | WorkflowFanOutRuntimeError::ChildUnavailable(_) => DaemonInvocationProblem::Unavailable,
+        WorkflowFanOutRuntimeError::ResetRequired => DaemonInvocationProblem::ResetRequired,
         WorkflowFanOutRuntimeError::StaleFence => DaemonInvocationProblem::NotFoundOrNotAuthorized,
         _ => DaemonInvocationProblem::InvalidRequest,
     }

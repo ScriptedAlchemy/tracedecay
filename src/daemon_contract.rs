@@ -27,14 +27,17 @@ use tracedecay_application::{
     MultiRootScopeSetCasResultV1, MultiRootScopeSetReadRequestV1, Omission, OperationReceipt,
     PageRequest, PageState, PreviewId, PreviewResult, ReconciliationState,
     ReplanDependenciesCommand, RequestId, ResolvedScope, RetrieverContribution,
-    ReviewProposalRequestV1, TaskHandoffGrantV1, TaskHandoffIssueRequestV1,
-    TaskHandoffRedeemRequestV1, TaskHandoffRedeemedV1, TemporalState,
-    WorkAttemptAcquireLeaseRequestV1, WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1,
-    WorkAttemptPublishArtifactRequestV1, WorkAttemptPublishProgressRequestV1,
-    WorkAttemptRecoverRequestV1, WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1,
-    WorkAttemptStartRequestV1, WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1,
-    WorkProjectionSnapshotRequestV1, WorkflowActivationV1, WorkflowDefinitionActivateRequestV1,
-    WorkflowDefinitionRegisterRequestV1, WorkflowExecutionTruthV1, WorkflowFanOutRequestV1,
+    ReviewProposalRequestV1, TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
+    TaskHandoffRedeemed, TemporalState, WorkAttemptAcquireLeaseRequestV1,
+    WorkAttemptCancelRequestV1, WorkAttemptFinishRequestV1, WorkAttemptPublishArtifactRequestV1,
+    WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
+    WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
+    WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
+    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff,
+    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
+    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
+    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation, WorkflowFanOutRequest, WorkflowRetirement,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -294,19 +297,31 @@ impl WorkApplicationInvocationV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "request", rename_all = "snake_case")]
-pub(crate) enum WorkflowApplicationInvocationV1 {
-    RegisterDefinition(WorkflowDefinitionRegisterRequestV1),
-    ActivateDefinition(WorkflowDefinitionActivateRequestV1),
-    ExecuteFanOut(Box<WorkflowFanOutRequestV1>),
-    HandoffIssue(TaskHandoffIssueRequestV1),
-    HandoffRedeem(TaskHandoffRedeemRequestV1),
+pub(crate) enum WorkflowApplicationInvocation {
+    RegisterDefinition(WorkflowDefinitionRegisterRequest),
+    ValidateDefinition(WorkflowDefinitionValidateRequest),
+    GetDefinition(WorkflowDefinitionGetRequest),
+    ListDefinitions(WorkflowDefinitionListRequest),
+    DefinitionHistory(WorkflowDefinitionHistoryRequest),
+    DiffDefinition(WorkflowDefinitionDiffRequest),
+    ActivateDefinition(WorkflowDefinitionActivateRequest),
+    RetireDefinition(WorkflowDefinitionRetireRequest),
+    ExecuteFanOut(Box<WorkflowFanOutRequest>),
+    HandoffIssue(TaskHandoffIssueRequest),
+    HandoffRedeem(TaskHandoffRedeemRequest),
 }
 
-impl WorkflowApplicationInvocationV1 {
+impl WorkflowApplicationInvocation {
     pub(crate) const fn operation_key(&self) -> &'static str {
         match self {
             Self::RegisterDefinition(_) => "register_definition",
+            Self::ValidateDefinition(_) => "validate_definition",
+            Self::GetDefinition(_) => "get_definition",
+            Self::ListDefinitions(_) => "list_definitions",
+            Self::DefinitionHistory(_) => "definition_history",
+            Self::DiffDefinition(_) => "diff_definition",
             Self::ActivateDefinition(_) => "activate_definition",
+            Self::RetireDefinition(_) => "retire_definition",
             Self::ExecuteFanOut(_) => "execute_fan_out",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
@@ -480,7 +495,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     WorkflowApplication {
-        request: WorkflowApplicationInvocationV1,
+        request: WorkflowApplicationInvocation,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1037,7 +1052,7 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn workflow_application(
         request_id: impl Into<String>,
-        request: WorkflowApplicationInvocationV1,
+        request: WorkflowApplicationInvocation,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -1866,6 +1881,7 @@ pub(crate) enum DaemonInvocationProblem {
     InvalidRequest,
     UnsupportedRevision,
     NotFoundOrNotAuthorized,
+    ResetRequired,
     Unavailable,
 }
 
@@ -2193,7 +2209,7 @@ pub(crate) enum DaemonInvocationOutcome {
     },
     WorkflowApplication {
         scope: ResolvedScope,
-        outcome: WorkflowApplicationOutcomeV1,
+        outcome: WorkflowApplicationOutcome,
     },
     WorkAttempt {
         scope: ResolvedScope,
@@ -2255,12 +2271,18 @@ pub(crate) enum WorkApplicationOutcomeV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "outcome", rename_all = "snake_case")]
-pub(crate) enum WorkflowApplicationOutcomeV1 {
-    RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinitionV1>),
-    ActivateDefinition(ApplicationOutcome<WorkflowActivationV1>),
-    ExecuteFanOut(ApplicationOutcome<WorkflowExecutionTruthV1>),
-    HandoffIssue(ApplicationOutcome<TaskHandoffGrantV1>),
-    HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemedV1>),
+pub(crate) enum WorkflowApplicationOutcome {
+    RegisterDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ValidateDefinition(ApplicationOutcome<WorkflowDefinitionValidation>),
+    GetDefinition(ApplicationOutcome<tracedecay_domain::WorkflowDefinition>),
+    ListDefinitions(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
+    DefinitionHistory(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
+    DiffDefinition(ApplicationOutcome<WorkflowDefinitionDiff>),
+    ActivateDefinition(ApplicationOutcome<WorkflowActivation>),
+    RetireDefinition(ApplicationOutcome<WorkflowRetirement>),
+    ExecuteFanOut(ApplicationOutcome<tracedecay_domain::WorkflowRunProjection>),
+    HandoffIssue(ApplicationOutcome<TaskHandoffGrant>),
+    HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemed>),
 }
 
 impl DaemonInvocationResponse {

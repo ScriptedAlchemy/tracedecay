@@ -4,18 +4,19 @@
 //! supplies the canonical Work and automation authorities through the ports
 //! defined here; this module does not create a second scheduler or Work store.
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Display};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
-    WorkProviderRouteV1, WorkflowDefinitionId, WorkflowDefinitionV1, WorkflowStepId, WorktreeId,
+    WorkProviderRouteV1, WorkflowDefinition, WorkflowDefinitionId, WorkflowStepId, WorktreeId,
     canonical_sha256,
 };
 use tracedecay_tool_catalog::OperationId;
 
-pub const WORKFLOW_CANONICAL_WORK_OPERATION_V1: &str = "operation.work.attempt_start";
+pub const WORKFLOW_CANONICAL_WORK_OPERATION: &str = "operation.work.attempt_start";
 
 /// Upper inclusive bound for calibrated placement scores (micros of unit interval).
 pub const MAX_CALIBRATED_SCORE_MICROS: u32 = 1_000_000;
@@ -33,50 +34,128 @@ pub enum WorkflowDefinitionAuthorityError {
 pub trait WorkflowDefinitionAuthorityPort: Send + Sync {
     fn insert(
         &self,
-        definition: &WorkflowDefinitionV1,
+        definition: &WorkflowDefinition,
     ) -> Result<(), WorkflowDefinitionAuthorityError>;
 
     fn load(
         &self,
         definition_id: &WorkflowDefinitionId,
         definition_version: u64,
-    ) -> Result<Option<WorkflowDefinitionV1>, WorkflowDefinitionAuthorityError>;
+    ) -> Result<Option<WorkflowDefinition>, WorkflowDefinitionAuthorityError>;
 
     fn active_version(
         &self,
         definition_id: &WorkflowDefinitionId,
     ) -> Result<Option<u64>, WorkflowDefinitionAuthorityError>;
 
+    fn list(
+        &self,
+        definition_id: Option<&WorkflowDefinitionId>,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowDefinitionAuthorityError>;
+
     fn compare_and_swap_activation(
         &self,
         definition_id: &WorkflowDefinitionId,
         expected_version: Option<u64>,
-        replacement_version: u64,
+        replacement_version: Option<u64>,
     ) -> Result<(), WorkflowDefinitionAuthorityError>;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowActivationV1 {
+pub struct WorkflowActivation {
     pub definition_id: WorkflowDefinitionId,
     pub active_version: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowRetirement {
+    pub definition_id: WorkflowDefinitionId,
+    pub active_version: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionValidation {
+    pub definition: WorkflowDefinition,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionDiff {
+    pub definition_id: WorkflowDefinitionId,
+    pub from_version: u64,
+    pub to_version: u64,
+    pub changed_steps: BTreeSet<WorkflowStepId>,
+    pub policy_changed: bool,
+    pub configuration_changed: bool,
+    pub catalog_changed: bool,
 }
 
 /// Wire request for [`WorkflowDefinitionService::register`].
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionRegisterRequestV1 {
-    pub definition: WorkflowDefinitionV1,
+pub struct WorkflowDefinitionRegisterRequest {
+    pub definition: WorkflowDefinition,
+}
+
+/// Wire request for [`WorkflowDefinitionService::validate`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionValidateRequest {
+    pub definition: WorkflowDefinition,
+}
+
+/// Wire request for [`WorkflowDefinitionService::get`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionGetRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub definition_version: u64,
+}
+
+/// Wire request for [`WorkflowDefinitionService::list`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionListRequest {}
+
+/// Wire request for [`WorkflowDefinitionService::history`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionHistoryRequest {
+    pub definition_id: WorkflowDefinitionId,
+}
+
+/// Wire request for [`WorkflowDefinitionService::diff`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionDiffRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub from_version: u64,
+    #[schemars(range(min = 1))]
+    pub to_version: u64,
 }
 
 /// Wire request for [`WorkflowDefinitionService::activate`].
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowDefinitionActivateRequestV1 {
+pub struct WorkflowDefinitionActivateRequest {
     pub definition_id: WorkflowDefinitionId,
     pub expected_active_version: Option<u64>,
     #[schemars(range(min = 1))]
     pub replacement_version: u64,
+}
+
+/// Wire request for [`WorkflowDefinitionService::retire`].
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowDefinitionRetireRequest {
+    pub definition_id: WorkflowDefinitionId,
+    #[schemars(range(min = 1))]
+    pub expected_active_version: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +164,7 @@ pub enum WorkflowCoordinationError {
     ImmutableDefinitionConflict,
     DefinitionNotFound,
     UnsupportedOperation,
+    CatalogDigestMismatch,
     StaleActivation,
     AuthorityUnavailable(String),
 }
@@ -99,6 +179,9 @@ impl Display for WorkflowCoordinationError {
             Self::DefinitionNotFound => formatter.write_str("workflow definition was not found"),
             Self::UnsupportedOperation => {
                 formatter.write_str("workflow definition references an unavailable operation")
+            }
+            Self::CatalogDigestMismatch => {
+                formatter.write_str("workflow definition catalog digest is stale")
             }
             Self::StaleActivation => {
                 formatter.write_str("workflow activation changed concurrently")
@@ -129,8 +212,8 @@ where
 
     pub fn register(
         &self,
-        definition: WorkflowDefinitionV1,
-    ) -> Result<WorkflowDefinitionV1, WorkflowCoordinationError> {
+        definition: WorkflowDefinition,
+    ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
         definition
             .validate()
             .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
@@ -152,12 +235,85 @@ where
         }
     }
 
+    pub fn validate(
+        &self,
+        definition: WorkflowDefinition,
+    ) -> Result<WorkflowDefinitionValidation, WorkflowCoordinationError> {
+        definition
+            .validate()
+            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        Ok(WorkflowDefinitionValidation { definition })
+    }
+
+    pub fn get(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        definition_version: u64,
+    ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
+        if definition_version == 0 {
+            return Err(WorkflowCoordinationError::InvalidDefinition);
+        }
+        self.authority
+            .load(definition_id, definition_version)
+            .map_err(coordination_authority_error)?
+            .ok_or(WorkflowCoordinationError::DefinitionNotFound)
+    }
+
+    pub fn list(&self) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
+        self.authority
+            .list(None)
+            .map_err(coordination_authority_error)
+    }
+
+    pub fn history(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowCoordinationError> {
+        self.authority
+            .list(Some(definition_id))
+            .map_err(coordination_authority_error)
+    }
+
+    pub fn diff(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        from_version: u64,
+        to_version: u64,
+    ) -> Result<WorkflowDefinitionDiff, WorkflowCoordinationError> {
+        let from = self.get(definition_id, from_version)?;
+        let to = self.get(definition_id, to_version)?;
+        let step_ids = from
+            .steps()
+            .iter()
+            .chain(to.steps())
+            .map(|step| step.step_id.clone())
+            .collect::<BTreeSet<_>>();
+        let changed_steps = step_ids
+            .into_iter()
+            .filter(|step_id| {
+                let from_step = from.steps().iter().find(|step| &step.step_id == step_id);
+                let to_step = to.steps().iter().find(|step| &step.step_id == step_id);
+                from_step != to_step
+            })
+            .collect();
+        Ok(WorkflowDefinitionDiff {
+            definition_id: definition_id.clone(),
+            from_version,
+            to_version,
+            changed_steps,
+            policy_changed: from.pinned_policy_digest() != to.pinned_policy_digest(),
+            configuration_changed: from.pinned_configuration_digest()
+                != to.pinned_configuration_digest(),
+            catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
+        })
+    }
+
     pub fn activate(
         &self,
         definition_id: &WorkflowDefinitionId,
         expected_active_version: Option<u64>,
         replacement_version: u64,
-    ) -> Result<WorkflowActivationV1, WorkflowCoordinationError> {
+    ) -> Result<WorkflowActivation, WorkflowCoordinationError> {
         if replacement_version == 0 {
             return Err(WorkflowCoordinationError::InvalidDefinition);
         }
@@ -171,8 +327,16 @@ where
                 "canonical operation catalog is unavailable".to_owned(),
             )
         })?;
+        let catalog_digest = crate::work_executable_catalog_digest().map_err(|_| {
+            WorkflowCoordinationError::AuthorityUnavailable(
+                "canonical operation catalog digest is unavailable".to_owned(),
+            )
+        })?;
+        if definition.pinned_catalog_digest() != &catalog_digest {
+            return Err(WorkflowCoordinationError::CatalogDigestMismatch);
+        }
         if definition.steps().iter().any(|step| {
-            step.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION_V1
+            step.operation.as_str() != WORKFLOW_CANONICAL_WORK_OPERATION
                 || OperationId::new(step.operation.as_str())
                     .ok()
                     .and_then(|operation| catalog.get(&operation))
@@ -193,12 +357,33 @@ where
             .compare_and_swap_activation(
                 definition_id,
                 expected_active_version,
-                replacement_version,
+                Some(replacement_version),
             )
             .map_err(coordination_authority_error)?;
-        Ok(WorkflowActivationV1 {
+        Ok(WorkflowActivation {
             definition_id: definition_id.clone(),
             active_version: replacement_version,
+        })
+    }
+
+    pub fn retire(
+        &self,
+        definition_id: &WorkflowDefinitionId,
+        expected_active_version: Option<u64>,
+    ) -> Result<WorkflowRetirement, WorkflowCoordinationError> {
+        let current = self
+            .authority
+            .active_version(definition_id)
+            .map_err(coordination_authority_error)?;
+        if current != expected_active_version || current.is_none() {
+            return Err(WorkflowCoordinationError::StaleActivation);
+        }
+        self.authority
+            .compare_and_swap_activation(definition_id, expected_active_version, None)
+            .map_err(coordination_authority_error)?;
+        Ok(WorkflowRetirement {
+            definition_id: definition_id.clone(),
+            active_version: None,
         })
     }
 }
@@ -219,7 +404,7 @@ fn coordination_authority_error(
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPlacementRequestV1 {
+pub struct WorkflowPlacementRequest {
     pub definition_id: WorkflowDefinitionId,
     #[schemars(range(min = 1))]
     pub definition_version: u64,
@@ -232,7 +417,7 @@ pub struct WorkflowPlacementRequestV1 {
     pub minimum_calibrated_score_micros: u32,
 }
 
-impl WorkflowPlacementRequestV1 {
+impl WorkflowPlacementRequest {
     pub fn validate(&self) -> Result<(), WorkflowPlacementError> {
         if self.definition_version == 0
             || self.minimum_calibrated_score_micros > MAX_CALIBRATED_SCORE_MICROS
@@ -245,7 +430,7 @@ impl WorkflowPlacementRequestV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct WorkflowPlacementCandidateV1 {
+pub struct WorkflowPlacementCandidate {
     pub route: WorkProviderRouteV1,
     pub priority: u32,
     pub expertise_digest: ManifestDigest,
@@ -254,8 +439,8 @@ pub struct WorkflowPlacementCandidateV1 {
     pub calibrated_score_micros: u32,
 }
 
-impl WorkflowPlacementCandidateV1 {
-    fn evidence_matches(&self, request: &WorkflowPlacementRequestV1) -> bool {
+impl WorkflowPlacementCandidate {
+    fn evidence_matches(&self, request: &WorkflowPlacementRequest) -> bool {
         self.expertise_digest == request.required_expertise_digest
             && self.calibration_profile_digest == request.calibration_profile_digest
             && self.calibrated_score_micros <= MAX_CALIBRATED_SCORE_MICROS
@@ -273,8 +458,8 @@ pub enum WorkflowPlacementError {
 pub trait WorkflowPlacementPort: Send + Sync {
     fn candidates(
         &self,
-        request: &WorkflowPlacementRequestV1,
-    ) -> Result<Vec<WorkflowPlacementCandidateV1>, WorkflowPlacementError>;
+        request: &WorkflowPlacementRequest,
+    ) -> Result<Vec<WorkflowPlacementCandidate>, WorkflowPlacementError>;
 }
 
 pub struct WorkflowPlacementService<P> {
@@ -291,7 +476,7 @@ where
 
     pub fn place(
         &self,
-        request: &WorkflowPlacementRequestV1,
+        request: &WorkflowPlacementRequest,
     ) -> Result<WorkProviderRouteV1, WorkflowPlacementError> {
         request.validate()?;
         let mut candidates = self.placement.candidates(request)?;
@@ -348,7 +533,7 @@ impl fmt::Debug for TaskHandoffToken {
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffScopeV1 {
+pub struct TaskHandoffScope {
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: WorktreeId,
@@ -363,7 +548,7 @@ pub struct TaskHandoffScopeV1 {
     to_actor_id: ActorId,
 }
 
-impl TaskHandoffScopeV1 {
+impl TaskHandoffScope {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_id: ProjectId,
@@ -447,7 +632,7 @@ impl TaskHandoffScopeV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for TaskHandoffScopeV1 {
+impl<'de> Deserialize<'de> for TaskHandoffScope {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -488,16 +673,16 @@ impl<'de> Deserialize<'de> for TaskHandoffScopeV1 {
 
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffGrantV1 {
-    scope: TaskHandoffScopeV1,
+pub struct TaskHandoffGrant {
+    scope: TaskHandoffScope,
     token_digest: ManifestDigest,
     issued_at: UtcMicros,
     expires_at: UtcMicros,
 }
 
-impl TaskHandoffGrantV1 {
+impl TaskHandoffGrant {
     pub fn new(
-        scope: TaskHandoffScopeV1,
+        scope: TaskHandoffScope,
         token_digest: ManifestDigest,
         issued_at: UtcMicros,
         expires_at: UtcMicros,
@@ -526,7 +711,7 @@ impl TaskHandoffGrantV1 {
         Ok(())
     }
 
-    pub fn scope(&self) -> &TaskHandoffScopeV1 {
+    pub fn scope(&self) -> &TaskHandoffScope {
         &self.scope
     }
 
@@ -543,7 +728,7 @@ impl TaskHandoffGrantV1 {
     }
 }
 
-impl<'de> Deserialize<'de> for TaskHandoffGrantV1 {
+impl<'de> Deserialize<'de> for TaskHandoffGrant {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -551,7 +736,7 @@ impl<'de> Deserialize<'de> for TaskHandoffGrantV1 {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            scope: TaskHandoffScopeV1,
+            scope: TaskHandoffScope,
             token_digest: ManifestDigest,
             issued_at: UtcMicros,
             expires_at: UtcMicros,
@@ -584,18 +769,18 @@ pub enum TaskHandoffConsumeOutcome {
 /// its digest, never the secret itself.
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffIssueRequestV1 {
+pub struct TaskHandoffIssueRequest {
     pub issuer: ActorId,
-    pub scope: TaskHandoffScopeV1,
+    pub scope: TaskHandoffScope,
     pub secret: String,
     pub issued_at: UtcMicros,
     pub expires_at: UtcMicros,
 }
 
-impl fmt::Debug for TaskHandoffIssueRequestV1 {
+impl fmt::Debug for TaskHandoffIssueRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("TaskHandoffIssueRequestV1")
+            .debug_struct("TaskHandoffIssueRequest")
             .field("issuer", &self.issuer)
             .field("scope", &self.scope)
             .field("secret", &"[REDACTED]")
@@ -608,17 +793,17 @@ impl fmt::Debug for TaskHandoffIssueRequestV1 {
 /// Wire request for [`TaskHandoffService::redeem`].
 #[derive(Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffRedeemRequestV1 {
+pub struct TaskHandoffRedeemRequest {
     pub secret: String,
-    pub expected_scope: TaskHandoffScopeV1,
+    pub expected_scope: TaskHandoffScope,
     pub redeemer: ActorId,
     pub consumed_at: UtcMicros,
 }
 
-impl fmt::Debug for TaskHandoffRedeemRequestV1 {
+impl fmt::Debug for TaskHandoffRedeemRequest {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("TaskHandoffRedeemRequestV1")
+            .debug_struct("TaskHandoffRedeemRequest")
             .field("secret", &"[REDACTED]")
             .field("expected_scope", &self.expected_scope)
             .field("redeemer", &self.redeemer)
@@ -631,8 +816,8 @@ impl fmt::Debug for TaskHandoffRedeemRequestV1 {
 /// once and only once, for the caller that actually consumed it.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct TaskHandoffRedeemedV1 {
-    pub scope: TaskHandoffScopeV1,
+pub struct TaskHandoffRedeemed {
+    pub scope: TaskHandoffScope,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -642,12 +827,12 @@ pub enum TaskHandoffAuthorityError {
 }
 
 pub trait TaskHandoffAuthorityPort: Send + Sync {
-    fn issue(&self, grant: &TaskHandoffGrantV1) -> Result<(), TaskHandoffAuthorityError>;
+    fn issue(&self, grant: &TaskHandoffGrant) -> Result<(), TaskHandoffAuthorityError>;
 
     fn consume(
         &self,
         token_digest: &ManifestDigest,
-        expected_scope: &TaskHandoffScopeV1,
+        expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<TaskHandoffConsumeOutcome, TaskHandoffAuthorityError>;
 }
@@ -702,15 +887,15 @@ where
     pub fn issue(
         &self,
         issuer: &ActorId,
-        scope: TaskHandoffScopeV1,
+        scope: TaskHandoffScope,
         token: &TaskHandoffToken,
         expires_at: UtcMicros,
         issued_at: UtcMicros,
-    ) -> Result<TaskHandoffGrantV1, TaskHandoffError> {
+    ) -> Result<TaskHandoffGrant, TaskHandoffError> {
         if issuer != scope.from_actor_id() {
             return Err(TaskHandoffError::Unauthorized);
         }
-        let grant = TaskHandoffGrantV1::new(scope, token.digest()?, issued_at, expires_at)?;
+        let grant = TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at)?;
         self.authority
             .issue(&grant)
             .map_err(handoff_authority_error)?;
@@ -720,7 +905,7 @@ where
     pub fn redeem(
         &self,
         token: &TaskHandoffToken,
-        expected_scope: &TaskHandoffScopeV1,
+        expected_scope: &TaskHandoffScope,
         redeemer: &ActorId,
         consumed_at: UtcMicros,
     ) -> Result<(), TaskHandoffError> {

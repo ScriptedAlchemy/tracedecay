@@ -83,6 +83,48 @@ impl RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredGlobalDb {
+    /// Applies an explicitly confirmed, configuration-scoped reset before the
+    /// registered database facade is published.
+    ///
+    /// The confirmation must come from the exact typed reset refusal observed
+    /// for this store. Locator, binding, file identity, and write authority are
+    /// revalidated before any schema object is dropped.
+    pub async fn reset_configuration_and_attach(
+        runtime: StoreRuntimeHandle,
+        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
+        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
+        authority: DatabaseAuthority,
+        confirmation: super::configuration::ConfigurationResetConfirmation,
+    ) -> tracedecay_runtime_core::errors::Result<Self> {
+        let write_connection =
+            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
+        let transaction = write_connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .await
+            .map_err(|error| registered_error("begin confirmed configuration reset", error))?;
+        if let Err(error) =
+            super::configuration::reset_configuration_schema(&transaction, &confirmation).await
+        {
+            let rollback = transaction.rollback().await;
+            return match rollback {
+                Ok(()) => Err(configuration_schema_error(
+                    "reset registered configuration schema",
+                    error,
+                )),
+                Err(rollback_error) => Err(registered_error(
+                    "rollback rejected configuration reset",
+                    format!("{error}; rollback failed: {rollback_error}"),
+                )),
+            };
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| registered_error("commit confirmed configuration reset", error))?;
+        super::ensure_registered_schema(&write_connection).await?;
+        Self::finish_attach(runtime, write_connection, authority).await
+    }
+
     /// Creates the registered schema at its final shape (or verifies an
     /// existing store already carries it) before validating and exposing the
     /// registered global database facade. No path is reopened, and no store is
@@ -870,6 +912,20 @@ fn registered_error(operation: &str, error: impl std::fmt::Display) -> TraceDeca
     }
 }
 
+fn configuration_schema_error(
+    operation: &str,
+    error: super::configuration::ConfigurationSchemaError,
+) -> TraceDecayError {
+    match error {
+        super::configuration::ConfigurationSchemaError::ResetRequired { reason } => {
+            TraceDecayError::reset_required("configuration", reason)
+        }
+        super::configuration::ConfigurationSchemaError::Storage(error) => {
+            registered_error(operation, error)
+        }
+    }
+}
+
 fn sqlite_identity_error_message(
     error: tracedecay_runtime_core::db::SqliteFileIdentityError,
 ) -> &'static str {
@@ -1038,6 +1094,100 @@ mod tests {
         assert!(validate_opened_file_identity(None, 7).is_err());
         assert!(validate_opened_file_identity(Some(6), 7).is_err());
         assert!(validate_opened_file_identity(Some(7), 7).is_ok());
+    }
+
+    #[tokio::test]
+    async fn typed_configuration_reset_reopens_the_exact_registered_runtime() {
+        crate::register_test_schema_installer();
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("project/sessions.db");
+        fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+        let authority = DatabaseAuthority::acquire_test(
+            &database_path,
+            "configuration reset registered runtime",
+        )
+        .unwrap();
+        let (database, _) = tracedecay_runtime_core::db::Database::publish_registered_test_runtime(
+            &database_path,
+            &authority,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeMode::Initialize,
+            tracedecay_runtime_core::db::TestDatabaseRuntimeScope::ProjectSessions {
+                project_id: tracedecay_domain::ProjectId::new(
+                    "project.configuration-reset".to_owned(),
+                )
+                .unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+        {
+            let writer = database
+                .writer_connection("seed incompatible configuration shape")
+                .await
+                .unwrap();
+            crate::ensure_registered_schema(writer.engine_connection())
+                .await
+                .unwrap();
+            writer
+                .engine_connection()
+                .execute_batch(
+                    "CREATE TABLE configuration_legacy_shadow (value TEXT NOT NULL);
+                     INSERT INTO configuration_legacy_shadow VALUES ('must-not-be-read');
+                     CREATE TABLE unrelated_operator_state (value TEXT NOT NULL);
+                     INSERT INTO unrelated_operator_state VALUES ('preserve-me');",
+                )
+                .await
+                .unwrap();
+        }
+        let runtime = database.retained_runtime().clone();
+        let expected_binding = runtime.binding().clone();
+        let expected_locator = runtime.locator().verified().clone();
+        let authority = runtime
+            .database_authority("attach configuration reset runtime")
+            .unwrap();
+        let error = match RegisteredGlobalDb::migrate_and_attach(
+            runtime.clone(),
+            expected_binding.clone(),
+            expected_locator.clone(),
+            authority.clone(),
+        )
+        .await
+        {
+            Ok(_) => panic!("incompatible configuration must not be published"),
+            Err(error) => error,
+        };
+        let confirmation = crate::configuration::ConfigurationResetConfirmation::try_from(&error)
+            .expect("typed refusal produces reset confirmation");
+
+        let registered = RegisteredGlobalDb::reset_configuration_and_attach(
+            runtime,
+            expected_binding,
+            expected_locator,
+            authority,
+            confirmation,
+        )
+        .await
+        .expect("confirmed scoped reset reopens the exact runtime");
+
+        let snapshot = registered.read_snapshot().await.unwrap();
+        let mut rows = snapshot
+            .query("SELECT value FROM unrelated_operator_state", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "preserve-me"
+        );
+        assert!(
+            crate::configuration::ensure_configuration_schema(&snapshot)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

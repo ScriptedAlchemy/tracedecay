@@ -1,8 +1,4 @@
-//! Typed configuration registry for the PR11 control plane.
-//!
-//! The legacy `config.json` model remains read-only migration input. This
-//! registry is the only definition source for settings admitted into the new
-//! revisioned control plane; adapters may not add their own defaults.
+//! Typed configuration registry for the final control plane.
 
 use std::collections::BTreeMap;
 
@@ -24,8 +20,8 @@ use tracedecay_domain::configuration::{
     SYNC_SESSION_START_STALE_THRESHOLD_SECS_SETTING_KEY, SYNC_SESSION_START_SYNC_SETTING_KEY,
     SYNC_WATCH_DEBOUNCE_MS_SETTING_KEY, SYNC_WATCH_MAX_DELAY_MS_SETTING_KEY,
     SYNC_WATCH_MAX_PROJECTS_SETTING_KEY, SettingDefinitionV1, SettingKey, SettingScopeV1,
-    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, WORK_TOPOLOGY_POLICY_SETTING_KEY,
-    safe_work_topology_policy_v1,
+    SettingSensitivityV1, TELEMETRY_TIMINGS_SETTING_KEY, WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    WORK_TOPOLOGY_POLICY_SETTING_KEY, safe_work_topology_policy_v1,
 };
 use tracedecay_domain::feedback::PROXIMITY_RISK_THRESHOLD_SETTING_KEY_V1;
 
@@ -34,10 +30,6 @@ use super::semantic::SemanticConfig;
 /// Canonical Plan 20 default for configured-tier proximity warnings.
 pub const DEFAULT_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 7_000;
 pub const MAX_PROXIMITY_RISK_THRESHOLD_BASIS_POINTS_V1: u64 = 10_000;
-
-/// Read-only cutover contract used by the legacy transition bridge.
-#[path = "legacy_decoder.rs"]
-pub(crate) mod legacy_decoder;
 
 /// Registry schema revision. Increment only when setting-definition semantics
 /// change, not when a setting value changes.
@@ -80,7 +72,7 @@ pub struct ConfigurationRegistry {
 impl ConfigurationRegistry {
     /// Build the PR11 core registry. In addition to authority, policy,
     /// collection, analyzer, and topology definitions, this includes every
-    /// non-authority scalar currently represented by legacy `config.json`.
+    /// project-scoped runtime scalar.
     pub fn core() -> Result<Self, ConfigurationRegistryError> {
         let mut registry = Self {
             definitions: BTreeMap::new(),
@@ -138,6 +130,16 @@ impl ConfigurationRegistry {
             deprecation: DeprecationStateV1::Active,
         })?;
         registry.register(SettingDefinitionV1 {
+            key: setting_key(WORK_EXECUTABLE_BINDINGS_SETTING_KEY)?,
+            schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
+            value_kind: ConfigurationValueKindV1::WorkExecutableBindings,
+            default_value: ConfigurationValueV1::WorkExecutableBindings(Vec::new()),
+            sensitivity: SettingSensitivityV1::Sensitive,
+            scope: SettingScopeV1::Project,
+            restart_requirement: RestartRequirementV1::DaemonRestart,
+            deprecation: DeprecationStateV1::Active,
+        })?;
+        registry.register(SettingDefinitionV1 {
             key: setting_key(CONTEXT_SCOUT_SETTINGS_SETTING_KEY)?,
             schema_revision: CONFIGURATION_REGISTRY_SCHEMA_REVISION,
             value_kind: ConfigurationValueKindV1::ContextScoutSettings,
@@ -182,7 +184,7 @@ impl ConfigurationRegistry {
             restart_requirement: RestartRequirementV1::AnalyzerRestart,
             deprecation: DeprecationStateV1::Active,
         })?;
-        register_legacy_project_settings(&mut registry)?;
+        register_project_settings(&mut registry)?;
         let expected = CONFIGURATION_SETTING_KEYS_V1
             .iter()
             .map(|key| setting_key(key))
@@ -297,16 +299,8 @@ impl ConfigurationRegistry {
 /// Mirrors root `config::MIN_AUTO_TRACK_PR_POLL_SECS`.
 pub const MIN_AUTO_TRACK_PR_POLL_SECS: u64 = 60;
 
-/// The pre-cutover scalar defaults the legacy project settings are seeded from.
-///
-/// These are root `TraceDecayConfig::default()` / `SyncConfig::default()` /
-/// `TelemetryConfig::default()` values for exactly the keys the transition
-/// bridge registers. Root owns the `config.json` file schema (and its
-/// serde/env decoding) and is staying at the top of the stack, so the structs
-/// themselves cannot come down here; only the scalar defaults they contribute
-/// do. Keep this in step with `src/config.rs` until the legacy scalar surface
-/// is retired.
-struct LegacyProjectDefaults {
+/// Canonical defaults for the project-scoped runtime settings.
+struct ProjectDefaults {
     exclude: Vec<String>,
     include: Vec<String>,
     max_file_size: u64,
@@ -315,11 +309,11 @@ struct LegacyProjectDefaults {
     git_ignore: bool,
     diagnostics_prewarm: bool,
     telemetry_timings: bool,
-    sync: LegacySyncDefaults,
+    sync: SyncDefaults,
 }
 
 #[derive(Clone, Copy)]
-struct LegacySyncDefaults {
+struct SyncDefaults {
     auto_watch: bool,
     watch_debounce_ms: u64,
     watch_max_delay_ms: u64,
@@ -338,7 +332,7 @@ struct LegacySyncDefaults {
     auto_track_pr_poll_secs: u64,
 }
 
-impl Default for LegacySyncDefaults {
+impl Default for SyncDefaults {
     fn default() -> Self {
         Self {
             auto_watch: true,
@@ -361,7 +355,7 @@ impl Default for LegacySyncDefaults {
     }
 }
 
-impl Default for LegacyProjectDefaults {
+impl Default for ProjectDefaults {
     fn default() -> Self {
         let mut exclude: Vec<String> = vec![
             ".git/**".to_string(),
@@ -382,60 +376,57 @@ impl Default for LegacyProjectDefaults {
             git_ignore: true,
             diagnostics_prewarm: false,
             telemetry_timings: true,
-            sync: LegacySyncDefaults::default(),
+            sync: SyncDefaults::default(),
         }
     }
 }
 
-/// Register the legacy scalar surface with the registry rather than allowing
-/// a decoder or runtime adapter to invent defaults. The transition bridge
-/// intentionally obtains the values from `TraceDecayConfig::default()` so the
-/// pre-cutover default behavior remains the one source of truth.
-fn register_legacy_project_settings(
+/// Register every project scalar in the sole typed registry.
+fn register_project_settings(
     registry: &mut ConfigurationRegistry,
 ) -> Result<(), ConfigurationRegistryError> {
-    let legacy = LegacyProjectDefaults::default();
-    let sync = legacy.sync;
+    let defaults = ProjectDefaults::default();
+    let sync = defaults.sync;
     let settings = vec![
         (
             INDEX_EXCLUDE_SETTING_KEY,
-            ConfigurationValueV1::StringList(legacy.exclude),
+            ConfigurationValueV1::StringList(defaults.exclude),
             SettingSensitivityV1::Sensitive,
             RestartRequirementV1::DaemonRestart,
         ),
         (
             INDEX_INCLUDE_SETTING_KEY,
-            ConfigurationValueV1::StringList(legacy.include),
+            ConfigurationValueV1::StringList(defaults.include),
             SettingSensitivityV1::Sensitive,
             RestartRequirementV1::DaemonRestart,
         ),
         (
             INDEX_MAX_FILE_SIZE_SETTING_KEY,
-            ConfigurationValueV1::Unsigned(legacy.max_file_size),
+            ConfigurationValueV1::Unsigned(defaults.max_file_size),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),
         (
             INDEX_EXTRACT_DOCSTRINGS_SETTING_KEY,
-            ConfigurationValueV1::Boolean(legacy.extract_docstrings),
+            ConfigurationValueV1::Boolean(defaults.extract_docstrings),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),
         (
             INDEX_TRACK_CALL_SITES_SETTING_KEY,
-            ConfigurationValueV1::Boolean(legacy.track_call_sites),
+            ConfigurationValueV1::Boolean(defaults.track_call_sites),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),
         (
             INDEX_GIT_IGNORE_SETTING_KEY,
-            ConfigurationValueV1::Boolean(legacy.git_ignore),
+            ConfigurationValueV1::Boolean(defaults.git_ignore),
             SettingSensitivityV1::Public,
             RestartRequirementV1::DaemonRestart,
         ),
         (
             DIAGNOSTICS_PREWARM_SETTING_KEY,
-            ConfigurationValueV1::Boolean(legacy.diagnostics_prewarm),
+            ConfigurationValueV1::Boolean(defaults.diagnostics_prewarm),
             SettingSensitivityV1::Public,
             RestartRequirementV1::None,
         ),
@@ -540,7 +531,7 @@ fn register_legacy_project_settings(
         ),
         (
             TELEMETRY_TIMINGS_SETTING_KEY,
-            ConfigurationValueV1::Boolean(legacy.telemetry_timings),
+            ConfigurationValueV1::Boolean(defaults.telemetry_timings),
             SettingSensitivityV1::Public,
             RestartRequirementV1::None,
         ),

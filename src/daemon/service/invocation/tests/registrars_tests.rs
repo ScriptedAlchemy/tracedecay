@@ -527,16 +527,59 @@ async fn expiring_registries_reaps_running_work_executions() {
         .expect("projection binding"),
         tracedecay_domain::WorkflowOperationRef::new("operation.work.attempt_start")
             .expect("operation"),
-        tracedecay_domain::WorkProviderRouteV1::new(
-            tracedecay_domain::ProviderId::new(crate::daemon::work_runtime::CODEX_PROVIDER_ID)
-                .expect("provider id"),
-            tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
-                .expect("route id"),
+        tracedecay_domain::WorkExecutionSnapshot::new(
+            tracedecay_domain::WorkExecutionSnapshotInput {
+                configuration_revision_id:
+                    tracedecay_domain::configuration::ConfigurationRevisionId::new(
+                        "configuration-revision.work.expire",
+                    )
+                    .expect("configuration revision"),
+                configuration_snapshot_id:
+                    tracedecay_domain::configuration::ConfigurationSnapshotId::new(
+                        "configuration-snapshot.work.expire",
+                    )
+                    .expect("configuration snapshot"),
+                effective_behavior_digest: configuration_digest,
+                resolution_provenance_digest: ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "d".repeat(64)
+                ))
+                .expect("provenance digest"),
+                route: tracedecay_domain::WorkProviderRouteV1::new(
+                    tracedecay_domain::ProviderId::new(
+                        crate::daemon::work_runtime::CODEX_PROVIDER_ID,
+                    )
+                    .expect("provider id"),
+                    tracedecay_domain::WorkProviderRouteId::new("route.work.codex-app-server.v1")
+                        .expect("route id"),
+                )
+                .expect("provider route"),
+                backend: tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
+                protocol: tracedecay_domain::WorkProviderProtocol::CodexAppServerJsonRpc,
+                model: "codex-work-expire".to_owned(),
+                executable: tracedecay_domain::WorkExecutableReference::new(
+                    "executable.codex.app-server".to_owned(),
+                    ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
+                        .expect("executable digest"),
+                )
+                .expect("executable"),
+                sandbox: tracedecay_domain::WorkSandboxPolicy::Required,
+                approval: tracedecay_domain::WorkApprovalPolicy::Never,
+                filesystem: tracedecay_domain::WorkFilesystemPolicy::WorkspaceWrite,
+                egress: tracedecay_domain::WorkEgressPolicy::Deny,
+                environment_allowlist: std::collections::BTreeSet::new(),
+                credential_references: std::collections::BTreeSet::new(),
+                limits: tracedecay_domain::WorkExecutionLimits::new(
+                    128_000, 8_192, 16_384, 16_384, 65_536, 1,
+                )
+                .expect("execution limits"),
+                deadline: UtcMicros(i64::MAX),
+                fallback: tracedecay_domain::WorkFallbackTopology::Disabled,
+                topology_policy_digest: ManifestDigest::new(format!("sha256:{}", "f".repeat(64)))
+                    .expect("topology digest"),
+            },
         )
-        .expect("provider route"),
-        tracedecay_domain::WorkProviderBackendV1::CodexAppServer,
-        "codex-work-expire".to_owned(),
-        configuration_digest,
+        .expect("execution snapshot"),
         authority.project_id().clone(),
         authority.repository_id().clone(),
         authority.worktree_id().clone(),
@@ -544,9 +587,7 @@ async fn expiring_registries_reaps_running_work_executions() {
         None,
         tracedecay_domain::CommitId::new("0123456789abcdef0123456789abcdef01234567")
             .expect("commit"),
-        UtcMicros(i64::MAX),
         1,
-        tracedecay_domain::WorkExecutionBudgetV1::new(16_384, 16_384, 65_536).expect("budget"),
         tracedecay_domain::WorkEffectStateV1::Observational,
     )
     .expect("execution envelope");

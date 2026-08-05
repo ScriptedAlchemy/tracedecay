@@ -168,7 +168,9 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
             DaemonInvocationProblem::InvalidRequest
             | DaemonInvocationProblem::UnsupportedRevision => Plan26FeedbackOutcomeV1::Rejected,
             DaemonInvocationProblem::NotFoundOrNotAuthorized => Plan26FeedbackOutcomeV1::Denied,
-            DaemonInvocationProblem::Unavailable => Plan26FeedbackOutcomeV1::Unavailable,
+            DaemonInvocationProblem::ResetRequired | DaemonInvocationProblem::Unavailable => {
+                Plan26FeedbackOutcomeV1::Unavailable
+            }
         },
     }
 }
@@ -204,9 +206,9 @@ pub(super) const fn plan26_invocation_problem_rejected_argument(
             Plan26RejectedArgumentV1::Lifecycle,
             Plan26ArgumentRejectionClassV1::Unsupported,
         )),
-        DaemonInvocationProblem::NotFoundOrNotAuthorized | DaemonInvocationProblem::Unavailable => {
-            None
-        }
+        DaemonInvocationProblem::NotFoundOrNotAuthorized
+        | DaemonInvocationProblem::ResetRequired
+        | DaemonInvocationProblem::Unavailable => None,
     }
 }
 
