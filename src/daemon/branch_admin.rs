@@ -677,6 +677,48 @@ impl StoreAdministration {
             .await
     }
 
+    pub(super) async fn reset_project_configuration(
+        &self,
+        project_root: &Path,
+        request: tracedecay_application::ConfigurationResetRequestV1,
+    ) -> Result<tracedecay_application::ConfigurationResetOutcomeV1> {
+        let registry_database = self.registered_profile_database().await?;
+        let layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &crate::tracedecay::TraceDecayOpenOptions::default(),
+            registry_database.as_ref(),
+        )
+        .await?;
+        let project_id = layout
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "configuration reset requires an authoritative project identity"
+                    .to_owned(),
+            })
+            .and_then(|project_id| {
+                tracedecay_store::ProjectId::new(project_id.to_owned()).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "invalid authoritative project identity for configuration reset: {error}"
+                        ),
+                    }
+                })
+            })?;
+        let enrollment_roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+            project_root,
+            &layout,
+            &project_id,
+            registry_database.as_ref(),
+        )
+        .await?;
+        self.session_runtime_registry()
+            .await?
+            .reset_project_configuration(project_id, enrollment_roots, request)
+            .await
+    }
+
     #[cfg(test)]
     pub(super) fn with_project_servers(
         project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,

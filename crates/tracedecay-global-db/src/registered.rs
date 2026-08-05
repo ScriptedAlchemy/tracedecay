@@ -83,6 +83,29 @@ impl RegisteredWorkflowApplicationServicesV1 {
 }
 
 impl RegisteredGlobalDb {
+    /// Inspects an unpublished registered runtime and returns confirmation only
+    /// when its configuration authority issued a typed reset refusal.
+    pub async fn configuration_reset_confirmation(
+        runtime: &StoreRuntimeHandle,
+        expected_binding: &tracedecay_store::StoreRuntimeBindingV1,
+        expected_locator: &tracedecay_store::VerifiedStoreLocatorV1,
+        authority: &DatabaseAuthority,
+    ) -> tracedecay_runtime_core::errors::Result<super::configuration::ConfigurationResetConfirmation>
+    {
+        let write_connection =
+            registered_connection(runtime, expected_binding, expected_locator, authority)?;
+        match super::configuration::configuration_reset_confirmation(&write_connection).await {
+            Ok(Some(confirmation)) => Ok(confirmation),
+            Ok(None) => Err(tracedecay_runtime_core::errors::TraceDecayError::Config {
+                message: "configuration reset is not required for this store".to_owned(),
+            }),
+            Err(error) => Err(configuration_schema_error(
+                "inspect registered configuration schema",
+                error,
+            )),
+        }
+    }
+
     /// Applies an explicitly confirmed, configuration-scoped reset before the
     /// registered database facade is published.
     ///

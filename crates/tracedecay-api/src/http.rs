@@ -151,6 +151,7 @@ pub enum HttpApplicationOperation {
     ConfigurationRollbackPreview,
     ConfigurationRollbackApply,
     ConfigurationAudit,
+    ConfigurationReset,
     ContextScoutStatus,
     ContextScoutRecent,
     ContextScoutExplain,
@@ -176,7 +177,7 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 67] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -232,6 +233,7 @@ impl HttpApplicationOperation {
         Self::ConfigurationRollbackPreview,
         Self::ConfigurationRollbackApply,
         Self::ConfigurationAudit,
+        Self::ConfigurationReset,
         Self::ContextScoutStatus,
         Self::ContextScoutRecent,
         Self::ContextScoutExplain,
@@ -316,6 +318,7 @@ impl HttpApplicationOperation {
             Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
             Self::ConfigurationRollbackApply => "configuration_rollback_apply",
             Self::ConfigurationAudit => "configuration_audit",
+            Self::ConfigurationReset => "configuration_reset",
             Self::ContextScoutStatus => "context_scout_status",
             Self::ContextScoutRecent => "context_scout_recent",
             Self::ContextScoutExplain => "context_scout_explain",
@@ -386,7 +389,8 @@ impl HttpApplicationOperation {
             | Self::ConfigurationProtectedApply
             | Self::ConfigurationRollbackPreview
             | Self::ConfigurationRollbackApply
-            | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
+            | Self::ConfigurationAudit
+            | Self::ConfigurationReset => HttpApplicationOwnerKind::Configuration,
             Self::ContextScoutStatus
             | Self::ContextScoutRecent
             | Self::ContextScoutExplain

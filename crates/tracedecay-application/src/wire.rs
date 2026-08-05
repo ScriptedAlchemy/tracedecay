@@ -77,6 +77,7 @@ pub enum ApplicationWireOperation {
     ConfigurationRollbackPreview,
     ConfigurationRollbackApply,
     ConfigurationAudit,
+    ConfigurationReset,
     ContextScoutStatus,
     ContextScoutRecent,
     ContextScoutExplain,
@@ -91,7 +92,7 @@ pub enum ApplicationWireOperation {
 }
 
 impl ApplicationWireOperation {
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 67] = [
         Self::GitStatus,
         Self::GitDiff,
         Self::GitHistory,
@@ -147,6 +148,7 @@ impl ApplicationWireOperation {
         Self::ConfigurationRollbackPreview,
         Self::ConfigurationRollbackApply,
         Self::ConfigurationAudit,
+        Self::ConfigurationReset,
         Self::ContextScoutStatus,
         Self::ContextScoutRecent,
         Self::ContextScoutExplain,
@@ -231,6 +233,7 @@ impl ApplicationWireOperation {
             Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
             Self::ConfigurationRollbackApply => "configuration_rollback_apply",
             Self::ConfigurationAudit => "configuration_audit",
+            Self::ConfigurationReset => "configuration_reset",
             Self::ContextScoutStatus => "context_scout_status",
             Self::ContextScoutRecent => "context_scout_recent",
             Self::ContextScoutExplain => "context_scout_explain",
@@ -301,7 +304,8 @@ impl ApplicationWireOperation {
             | Self::ConfigurationProtectedApply
             | Self::ConfigurationRollbackPreview
             | Self::ConfigurationRollbackApply
-            | Self::ConfigurationAudit => ApplicationOwnerKind::Configuration,
+            | Self::ConfigurationAudit
+            | Self::ConfigurationReset => ApplicationOwnerKind::Configuration,
             Self::ContextScoutStatus
             | Self::ContextScoutRecent
             | Self::ContextScoutExplain
