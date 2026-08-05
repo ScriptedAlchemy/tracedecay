@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::*;
 
@@ -109,7 +109,7 @@ pub enum WorkGraphChangeV1 {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkProductGraphV1 {
     version: WorkGraphVersionV1,
@@ -121,29 +121,54 @@ pub struct WorkProductGraphV1 {
     evidence: Vec<TaskEvidenceLinkV1>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UncheckedWorkProductGraphV1 {
+    version: WorkGraphVersionV1,
+    initiatives: Vec<WorkInitiativeV1>,
+    plans: Vec<WorkPlanV1>,
+    milestones: Vec<WorkMilestoneV1>,
+    items: Vec<WorkItemV1>,
+    proposal_decisions: Vec<WorkProposalDecisionV1>,
+    evidence: Vec<TaskEvidenceLinkV1>,
+}
+
+impl<'de> Deserialize<'de> for WorkProductGraphV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let unchecked = UncheckedWorkProductGraphV1::deserialize(deserializer)?;
+        Self::from_parts(
+            unchecked.version,
+            unchecked.initiatives,
+            unchecked.plans,
+            unchecked.milestones,
+            unchecked.items,
+            unchecked.proposal_decisions,
+            unchecked.evidence,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 impl WorkProductGraphV1 {
     pub fn new(
         version: WorkGraphVersionV1,
-        mut initiatives: Vec<WorkInitiativeV1>,
-        mut plans: Vec<WorkPlanV1>,
-        mut milestones: Vec<WorkMilestoneV1>,
-        mut items: Vec<WorkItemV1>,
+        initiatives: Vec<WorkInitiativeV1>,
+        plans: Vec<WorkPlanV1>,
+        milestones: Vec<WorkMilestoneV1>,
+        items: Vec<WorkItemV1>,
     ) -> Result<Self, WorkProductContractError> {
-        initiatives.sort_by(|left, right| left.id.cmp(&right.id));
-        plans.sort_by(|left, right| left.id.cmp(&right.id));
-        milestones.sort_by(|left, right| left.id.cmp(&right.id));
-        items.sort_by(|left, right| left.input.task_id.cmp(&right.input.task_id));
-        let graph = Self {
+        Self::from_parts(
             version,
             initiatives,
             plans,
             milestones,
             items,
-            proposal_decisions: Vec::new(),
-            evidence: Vec::new(),
-        };
-        graph.validate()?;
-        Ok(graph)
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     pub const fn version(&self) -> WorkGraphVersionV1 {
@@ -365,7 +390,11 @@ impl WorkProductGraphV1 {
                     .filter(|criterion| criterion.evidence_required())
                     .map(|criterion| criterion.criterion_id().clone())
                     .collect::<BTreeSet<_>>();
-                if evidence_by_criterion.keys().collect::<BTreeSet<_>>()
+                if !matches!(
+                    item.current_provider_outcome()
+                        .map(WorkProviderOutcomeV1::terminal),
+                    Some(WorkProviderTerminalV1::Completed)
+                ) || evidence_by_criterion.keys().collect::<BTreeSet<_>>()
                     != required.iter().collect::<BTreeSet<_>>()
                     || evidence_by_criterion
                         .values()
@@ -394,7 +423,7 @@ impl WorkProductGraphV1 {
                     .as_ref()
                     .map(WorkProviderAdmissionV1::identity)
                     != Some(&identity)
-                    || !item.provider_outcomes.is_empty()
+                    || item.current_provider_outcome().is_some()
                 {
                     return Err(WorkProductContractError::InvalidProviderTransition);
                 }
@@ -419,10 +448,10 @@ impl WorkProductGraphV1 {
                         .as_ref()
                         .map(WorkProviderAdmissionV1::identity)
                         != Some(&prior_identity)
-                    || !matches!(
+                    || !(matches!(
                         item.provider_admission,
                         Some(WorkProviderAdmissionV1::Cancelled { .. })
-                    ) && item.provider_outcomes.is_empty()
+                    ) || item.current_provider_outcome().is_some())
                 {
                     return Err(WorkProductContractError::InvalidProviderTransition);
                 }
@@ -461,7 +490,7 @@ impl WorkProductGraphV1 {
                         item.provider_admission,
                         Some(WorkProviderAdmissionV1::Admitted { .. })
                     )
-                    || !item.provider_outcomes.is_empty()
+                    || item.current_provider_outcome().is_some()
                 {
                     return Err(WorkProductContractError::InvalidProviderTransition);
                 }
@@ -512,7 +541,7 @@ impl WorkProductGraphV1 {
         Ok(())
     }
 
-    fn validate(&self) -> Result<(), WorkProductContractError> {
+    pub fn validate(&self) -> Result<(), WorkProductContractError> {
         if self.items.len() > MAX_WORK_PRODUCT_ITEMS {
             return Err(WorkProductContractError::GraphTooLarge);
         }
@@ -520,6 +549,10 @@ impl WorkProductGraphV1 {
         ensure_unique(self.plans.iter().map(|value| value.id()))?;
         ensure_unique(self.milestones.iter().map(|value| value.id()))?;
         ensure_unique(self.items.iter().map(WorkItemV1::task_id))?;
+        ensure_unique(self.evidence.iter().map(TaskEvidenceLinkV1::link_id))?;
+        for item in &self.items {
+            validate_item_state(item)?;
+        }
 
         let initiatives = self
             .initiatives
@@ -575,8 +608,109 @@ impl WorkProductGraphV1 {
         }) {
             return Err(WorkProductContractError::UnknownTask);
         }
+        if self
+            .evidence
+            .iter()
+            .any(|link| !tasks.contains(link.task_id()))
+        {
+            return Err(WorkProductContractError::EvidenceTaskMismatch);
+        }
+        if self.items.iter().any(|item| {
+            item.evidence_links.iter().any(|link_id| {
+                !self
+                    .evidence
+                    .iter()
+                    .any(|link| link.link_id() == link_id && link.task_id() == item.task_id())
+            })
+        }) || self.evidence.iter().any(|link| {
+            self.item(link.task_id())
+                .is_none_or(|item| !item.evidence_links.contains(link.link_id()))
+        }) {
+            return Err(WorkProductContractError::EvidenceTaskMismatch);
+        }
         validate_acyclic(&self.items)
     }
+
+    fn from_parts(
+        version: WorkGraphVersionV1,
+        mut initiatives: Vec<WorkInitiativeV1>,
+        mut plans: Vec<WorkPlanV1>,
+        mut milestones: Vec<WorkMilestoneV1>,
+        mut items: Vec<WorkItemV1>,
+        mut proposal_decisions: Vec<WorkProposalDecisionV1>,
+        mut evidence: Vec<TaskEvidenceLinkV1>,
+    ) -> Result<Self, WorkProductContractError> {
+        initiatives.sort_by(|left, right| left.id.cmp(&right.id));
+        plans.sort_by(|left, right| left.id.cmp(&right.id));
+        milestones.sort_by(|left, right| left.id.cmp(&right.id));
+        items.sort_by(|left, right| left.input.task_id.cmp(&right.input.task_id));
+        proposal_decisions.sort_by(|left, right| {
+            left.proposal
+                .proposal_id
+                .cmp(&right.proposal.proposal_id)
+                .then_with(|| left.decided_at.cmp(&right.decided_at))
+        });
+        evidence.sort_by(|left, right| left.link_id.cmp(&right.link_id));
+        let graph = Self {
+            version,
+            initiatives,
+            plans,
+            milestones,
+            items,
+            proposal_decisions,
+            evidence,
+        };
+        graph.validate()?;
+        Ok(graph)
+    }
+}
+
+fn validate_item_state(item: &WorkItemV1) -> Result<(), WorkProductContractError> {
+    WorkItemV1::new(item.input.clone())?;
+    if item.accepted_proposal.is_some() != item.accepted_route.is_some()
+        || item
+            .provider_admission
+            .as_ref()
+            .is_some_and(|admission| admission.identity().task_id() != item.task_id())
+        || item
+            .provider_outcomes
+            .iter()
+            .any(|outcome| outcome.identity().task_id() != item.task_id())
+        || item
+            .provider_outcomes
+            .iter()
+            .map(WorkProviderOutcomeV1::identity)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != item.provider_outcomes.len()
+        || item
+            .handoffs
+            .iter()
+            .any(|handoff| handoff.task_id() != item.task_id())
+    {
+        return Err(WorkProductContractError::InvalidProviderTransition);
+    }
+    let required = item
+        .acceptance_criteria()
+        .iter()
+        .filter(|criterion| criterion.evidence_required())
+        .map(WorkAcceptanceCriterionV1::criterion_id)
+        .collect::<BTreeSet<_>>();
+    let acceptance_is_valid = item.accepted_at.is_some()
+        && matches!(
+            item.current_provider_outcome()
+                .map(WorkProviderOutcomeV1::terminal),
+            Some(WorkProviderTerminalV1::Completed)
+        )
+        && item.accepted_criteria.keys().collect::<BTreeSet<_>>() == required
+        && item
+            .accepted_criteria
+            .values()
+            .all(|link_id| item.evidence_links.contains(link_id));
+    if (!item.accepted_criteria.is_empty() || item.accepted_at.is_some()) && !acceptance_is_valid {
+        return Err(WorkProductContractError::AcceptanceUnsatisfied);
+    }
+    Ok(())
 }
 
 fn validate_acyclic(items: &[WorkItemV1]) -> Result<(), WorkProductContractError> {

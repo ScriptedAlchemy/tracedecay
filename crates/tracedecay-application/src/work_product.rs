@@ -187,6 +187,7 @@ impl WorkTopologyCasRequestV1 {
         input_digest: ManifestDigest,
         replacement: WorkProductGraphV1,
     ) -> Result<Self, WorkProductApplicationError> {
+        replacement.validate()?;
         let valid_replacement = match expected_version {
             Some(expected) => expected
                 .next()
@@ -241,6 +242,7 @@ impl WorkProductMutationReceiptV1 {
         replayed: bool,
         command_id: WorkCommandId,
     ) -> Result<Self, WorkProductContractError> {
+        graph.validate()?;
         let projections = WorkProductProjectionBundleV1::from_graph(&graph)?;
         Ok(Self {
             graph,
@@ -492,6 +494,7 @@ where
         if command.graph.version() != WorkGraphVersionV1::initial() {
             return Err(WorkProductApplicationError::InvalidRequest);
         }
+        command.graph.validate()?;
         let authority =
             work_authority(context).map_err(|_| WorkProductApplicationError::NotAuthorized)?;
         let input_digest = input_digest(&(
@@ -682,7 +685,10 @@ fn current_graph(
     read: WorkTopologyReadV1,
 ) -> Result<WorkProductGraphV1, WorkProductApplicationError> {
     match read {
-        WorkTopologyReadV1::Current(graph) => Ok(graph),
+        WorkTopologyReadV1::Current(graph) => {
+            graph.validate()?;
+            Ok(graph)
+        }
         WorkTopologyReadV1::Stale { .. } | WorkTopologyReadV1::Partial { .. } => {
             Err(WorkProductApplicationError::TopologyUnavailable)
         }
