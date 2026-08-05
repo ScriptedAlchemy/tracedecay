@@ -948,6 +948,7 @@ impl McpServer {
                     .cloned(),
                 code_index_search_authority: self.code_index_search_authority.clone(),
                 retained_project_graph_resolver: self.retained_project_graph_resolver.clone(),
+                session_sync_service: self.session_sync_service.as_deref(),
                 preselected_project_reader,
                 session_authorities: crate::mcp::tools::SessionAuthorities::new(
                     self.session_db.as_ref(),
@@ -1829,6 +1830,7 @@ mod git_read_control_tests {
         assert!(tool_supports_live_cancellation(
             "tracedecay_run_affected_tests"
         ));
+        assert!(tool_supports_live_cancellation("tracedecay_admin_cli"));
         assert!(!tool_supports_live_cancellation("tracedecay_outline"));
         for tool_name in [
             "tracedecay_git_status",

@@ -37,6 +37,7 @@ pub mod result;
 pub mod retained_surfaces;
 pub mod retrieval;
 pub mod sdk_catalog;
+pub mod session_sync;
 pub mod settings_preview;
 pub mod source_edit;
 pub mod storage;
