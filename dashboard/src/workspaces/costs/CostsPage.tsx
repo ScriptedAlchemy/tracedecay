@@ -1,9 +1,9 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { ReadFailure } from '../../ui/LegacyStates.tsx';
-import { LegacyBoundary } from '../../ui/ReadSection.tsx';
+import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
 import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
-import { useLegacy } from '../../data/query/useLegacy.ts';
+import { useEnvelope } from '../../data/query/useEnvelope.ts';
 import {
   SavingsOverviewPayloadV1Schema,
 } from '../../contracts/generated.ts';
@@ -45,8 +45,8 @@ export function CostsPage() {
           priced turn ledger, cache savings, and the canonical cost observations
         </span>
       </div>
-      {/* Two independent reads. The legacy savings overview and the canonical
-        * Plan 26 projection answer with different stores behind them, so a
+      {/* Two independent reads. The savings overview and the canonical Plan 26
+        * projection answer with different stores behind them, so a
         * failure in one must not blank the other — which is exactly what
         * happened while the whole page sat inside a single boundary. */}
       <SavingsLedger />
@@ -56,15 +56,23 @@ export function CostsPage() {
 }
 
 function SavingsLedger() {
-  const overview = useLegacy(
+  const overview = useEnvelope(
     ['savings', 'overview'],
     `${BASE}/overview`,
     SavingsOverviewPayloadV1Schema,
   );
 
   return (
-    <LegacyBoundary title="Costs" pending={overview.isPending} result={overview.data}>
-      {(data) => {
+    <ReadSection
+      title="Costs"
+      chrome="centered"
+      state={envelopeReadState(overview.isPending, overview.data, {
+        loading: 'reading savings ledger',
+        transport: 'savings ledger could not be read',
+      })}
+    >
+      {(envelope) => {
+        const data = envelope.payload;
         const ledger = data.savings.available ? data.savings.ledger : undefined;
         const lifetime = data.savings.lifetime_counters;
         const spread = summarizeProjectSpread(lifetime?.projects ?? []);
@@ -294,7 +302,7 @@ function SavingsLedger() {
           </>
         );
       }}
-    </LegacyBoundary>
+    </ReadSection>
   );
 }
 
