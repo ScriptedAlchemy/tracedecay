@@ -221,15 +221,14 @@ fn canonical_host_component_set_with_tracedecay_bin(
         Ok(host) => host,
         Err(_) => return Ok(None),
     };
-    // An unsupported host has an empty default set and stays on its
-    // compatibility migration path. An explicitly requested component is a
-    // different question and must be refused with its typed reason below.
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay::agents::host_bundle_registry::default_components(host),
         |component| vec![component],
     );
     if requested.is_empty() {
-        return Ok(None);
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: unsupported_host_component_set_message(agent),
+        });
     }
     tracedecay::agents::host_bundle_registry::verified_embedded_host_component_set_with_tracedecay_bin(
         host,
@@ -768,16 +767,19 @@ fn apply_default_canonical_component_set(
     agent_id: &str,
     operation: HostBundleCliOperation,
     home: &Path,
-) -> tracedecay::errors::Result<bool> {
+) -> tracedecay::errors::Result<()> {
     let now_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| tracedecay::errors::TraceDecayError::Config {
             message: "system clock is before the Unix epoch".to_string(),
         })?
         .as_secs();
-    let Some(component_set) = canonical_host_component_set(agent_id, None, now_unix)? else {
-        return Ok(false);
-    };
+    let component_set =
+        canonical_host_component_set(agent_id, None, now_unix)?.ok_or_else(|| {
+            tracedecay::errors::TraceDecayError::Config {
+                message: unsupported_host_component_set_message(agent_id),
+            }
+        })?;
     let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
         .map_err(|error| tracedecay::errors::TraceDecayError::Config {
             message: format!("could not resolve host lifecycle root: {error}"),
@@ -795,7 +797,7 @@ fn apply_default_canonical_component_set(
         home,
         &lifecycle_root,
     )?;
-    Ok(true)
+    Ok(())
 }
 
 /// `update-plugin` uses the component transaction only when that transaction
@@ -811,9 +813,11 @@ fn apply_project_local_component_set(
     operation: HostBundleCliOperation,
     project_path: &Path,
     home: &Path,
-) -> tracedecay::errors::Result<bool> {
+) -> tracedecay::errors::Result<()> {
     if project_local_registration_path(agent_id, home, project_path).is_none() {
-        return Ok(false);
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("agent {agent_id:?} has no atomic project-local lifecycle route"),
+        });
     }
     let host = host_kind_for_agent(agent_id)?;
     let now_unix = SystemTime::now()
@@ -884,7 +888,7 @@ fn apply_project_local_component_set(
         receipt.component_receipts.len(),
         hex::encode(receipt.operation_id)
     );
-    Ok(true)
+    Ok(())
 }
 
 pub(crate) async fn handle_project_local_lifecycle_command(
@@ -900,12 +904,7 @@ pub(crate) async fn handle_project_local_lifecycle_command(
         std::env::current_dir().map_err(|error| tracedecay::errors::TraceDecayError::Config {
             message: format!("could not determine current project directory: {error}"),
         })?;
-    if !apply_project_local_component_set(&agent_id, operation, &project_path, &home)? {
-        return Err(tracedecay::errors::TraceDecayError::Config {
-            message: format!("agent {agent_id:?} has no atomic project-local lifecycle route"),
-        });
-    }
-    Ok(())
+    apply_project_local_component_set(&agent_id, operation, &project_path, &home)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2844,25 +2843,6 @@ fn codex_daemon_interval_task(interval_secs: u64) -> AutomationTaskPatch {
     }
 }
 
-fn print_legacy_install_guidance(agent_id: &str) {
-    if agent_id != "hermes" {
-        return;
-    }
-    eprintln!();
-    eprintln!("Setup complete. Next steps:");
-    eprintln!("  1. cd into your project and run: tracedecay init");
-    eprintln!("  2. Start Hermes — tracedecay plugin tools are now available");
-}
-
-fn print_legacy_uninstall_guidance(agent_id: &str) {
-    if agent_id != "hermes" {
-        return;
-    }
-    eprintln!();
-    eprintln!("Uninstall complete. Tracedecay has been removed from Hermes.");
-    eprintln!("Restart Hermes for changes to take effect.");
-}
-
 pub(crate) async fn handle_install_command(
     agent: Option<String>,
     local: bool,
@@ -2888,29 +2868,16 @@ pub(crate) async fn handle_install_command(
             std::env::current_dir().map_err(|e| tracedecay::errors::TraceDecayError::Config {
                 message: format!("could not determine current project directory: {e}"),
             })?;
-        let ctx = tracedecay::agents::InstallContext {
-            home: home.clone(),
-            tracedecay_bin: tracedecay_bin.clone(),
-            tool_permissions: tracedecay::agents::expected_tool_perms(),
-            project_root: None,
-            dashboard: !no_dashboard,
-        };
         let mut installed_names: Vec<String> = Vec::new();
 
         if let Some(id) = agent {
             let ag = tracedecay::agents::get_integration(&id)?;
-            // Agents with an atomic project-local lifecycle route install
-            // through the receipt-backed component-set transaction; the rest
-            // keep the direct integration path (which itself rejects agents
-            // without project-local support).
-            if !apply_project_local_component_set(
+            apply_project_local_component_set(
                 &id,
                 HostBundleCliOperation::Install,
                 &project_path,
                 &home,
-            )? {
-                ag.install_local(&ctx, &project_path)?;
-            }
+            )?;
             ag.post_install(Some(&project_path)).await;
             if let Some(options) = automation.filter(|_| id == "codex") {
                 let scoped_project_path = validate_codex_automation_project_path()?;
@@ -2922,14 +2889,12 @@ pub(crate) async fn handle_install_command(
             for id in &to_install {
                 let ag = tracedecay::agents::get_integration(id)?;
                 if ag.supports_local_install() {
-                    if !apply_project_local_component_set(
+                    apply_project_local_component_set(
                         id,
                         HostBundleCliOperation::Install,
                         &project_path,
                         &home,
-                    )? {
-                        ag.install_local(&ctx, &project_path)?;
-                    }
+                    )?;
                     ag.post_install(Some(&project_path)).await;
                     installed_names.push(ag.name().to_string());
                 } else {
@@ -2983,10 +2948,7 @@ pub(crate) async fn handle_install_command(
                 message: deferred.remediation,
             });
         }
-        if !apply_default_canonical_component_set(&id, HostBundleCliOperation::Install, &home)? {
-            ag.install(&ctx)?;
-            print_legacy_install_guidance(&id);
-        }
+        apply_default_canonical_component_set(&id, HostBundleCliOperation::Install, &home)?;
         ag.post_install(project_path.as_deref()).await;
         refreshed_ids.insert(id.clone());
         if let Some(options) = automation.filter(|_| id == "codex") {
@@ -3008,18 +2970,7 @@ pub(crate) async fn handle_install_command(
 
         for id in &to_uninstall {
             let ag = tracedecay::agents::get_integration(id)?;
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: tracedecay_bin.clone(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                project_root: None,
-                dashboard: !no_dashboard,
-            };
-            if !apply_default_canonical_component_set(id, HostBundleCliOperation::Uninstall, &home)?
-            {
-                ag.uninstall(&ctx)?;
-                print_legacy_uninstall_guidance(id);
-            }
+            apply_default_canonical_component_set(id, HostBundleCliOperation::Uninstall, &home)?;
             removed_names.push(ag.name().to_string());
             user_cfg.installed_agents.retain(|a| a != id);
         }
@@ -3039,10 +2990,7 @@ pub(crate) async fn handle_install_command(
                     message: deferred.remediation,
                 });
             }
-            if !apply_default_canonical_component_set(id, HostBundleCliOperation::Install, &home)? {
-                ag.install(&ctx)?;
-                print_legacy_install_guidance(id);
-            }
+            apply_default_canonical_component_set(id, HostBundleCliOperation::Install, &home)?;
             ag.post_install(project_path.as_deref()).await;
             refreshed_ids.insert(id.clone());
             installed_names.push(ag.name().to_string());
@@ -3171,9 +3119,8 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
     let project_path = std::env::current_dir().ok();
 
     for id in &user_cfg.installed_agents {
-        if update_uses_component_transaction(id)
-            && apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)?
-        {
+        if update_uses_component_transaction(id) {
+            apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)?;
             continue;
         }
         let integration = tracedecay::agents::get_integration(id)?;
@@ -3319,17 +3266,9 @@ fn preflight_agent_integration(
         })?
         .as_secs();
     let Some(component_set) = canonical_host_component_set(agent_id, None, now_unix)? else {
-        let state =
-            integration.host_component_registration(HostBundleComponentV1::Core, health_context);
-        if state == HostBundleRegistrationStateV1::Corrupt {
-            return Err(tracedecay::errors::TraceDecayError::Config {
-                message: "registration config is corrupt".to_string(),
-            });
-        }
-        return Ok(format!(
-            "compatibility refresh ready; registration {}",
-            registration_state_label(state)
-        ));
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: unsupported_host_component_set_message(agent_id),
+        });
     };
 
     let mut registration_states = Vec::new();
@@ -3456,25 +3395,16 @@ async fn reinstall_agent_integrations_with_lease(
             }
         }
         match apply_default_canonical_component_set(id, HostBundleCliOperation::Repair, home) {
-            Ok(true) => {
+            Ok(()) => {
                 ag.post_install(project_path.as_deref()).await;
                 results.push((id.clone(), Ok(AgentReinstallOutcome::Installed)));
                 continue;
             }
-            Ok(false) => {}
             Err(error) => {
                 results.push((id.clone(), Err(error)));
                 continue;
             }
         }
-        let result = match ag.install(&ctx) {
-            Ok(()) => {
-                ag.post_install(project_path.as_deref()).await;
-                Ok(AgentReinstallOutcome::Installed)
-            }
-            Err(e) => Err(e),
-        };
-        results.push((id.clone(), result));
     }
     results
 }
@@ -3490,18 +3420,7 @@ pub(crate) async fn handle_uninstall_command(
     let mut user_cfg = tracedecay::user_config::UserConfig::load();
 
     if let Some(id) = agent {
-        if !apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)? {
-            let ag = tracedecay::agents::get_integration(&id)?;
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: String::new(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                project_root: None,
-                dashboard: true,
-            };
-            ag.uninstall(&ctx)?;
-            print_legacy_uninstall_guidance(&id);
-        }
+        apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
         user_cfg.installed_agents.retain(|a| a != &id);
         user_cfg
             .save()
@@ -3510,20 +3429,7 @@ pub(crate) async fn handle_uninstall_command(
             })?;
     } else {
         for id in user_cfg.installed_agents.clone() {
-            if apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?
-            {
-                continue;
-            }
-            let ag = tracedecay::agents::get_integration(&id)?;
-            let ctx = tracedecay::agents::InstallContext {
-                home: home.clone(),
-                tracedecay_bin: String::new(),
-                tool_permissions: tracedecay::agents::expected_tool_perms(),
-                project_root: None,
-                dashboard: true,
-            };
-            ag.uninstall(&ctx)?;
-            print_legacy_uninstall_guidance(&id);
+            apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
         }
         user_cfg.installed_agents.clear();
         user_cfg

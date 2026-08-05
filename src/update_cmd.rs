@@ -4,7 +4,7 @@
 //! reinstall that keeps config-managed integrations in sync.
 //!
 //! The post-update pass refreshes every already-configured agent integration
-//! (re-running `install` + `post_install` for each tracked agent), so a
+//! through its canonical lifecycle transaction and post-install action, so a
 //! separate `tracedecay reinstall` is not needed after an upgrade. Pass
 //! `--no-reinstall` to skip that agent-integration refresh.
 //!
@@ -79,11 +79,6 @@ fn refresh_generated_plugins_at(
             );
             continue;
         }
-        let hermes_was_installed = ag.id() == "hermes" && ag.has_tracedecay(home);
-        // Generated-plugin refresh never rewrites Hermes profile config, so it
-        // must not be blocked by an unresolved historical session migration.
-        // Migration remains mandatory on install/uninstall paths that can
-        // remove a legacy project pin.
         let ctx = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
@@ -91,16 +86,7 @@ fn refresh_generated_plugins_at(
             project_root: None,
             dashboard: true,
         };
-        let outcome = match ag.update_plugin(&ctx) {
-            Ok(tracedecay::agents::UpdatePluginOutcome::NotInstalled) if hermes_was_installed => {
-                ag.install(&ctx).map(|()| {
-                    tracedecay::agents::UpdatePluginOutcome::Refreshed(vec![
-                        home.join(".hermes/plugins/tracedecay"),
-                    ])
-                })
-            }
-            outcome => outcome,
-        };
+        let outcome = ag.update_plugin(&ctx);
         match outcome {
             Ok(tracedecay::agents::UpdatePluginOutcome::Refreshed(paths)) => {
                 refreshed_any = true;
