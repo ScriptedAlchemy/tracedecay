@@ -350,7 +350,35 @@ pub(super) async fn compare_and_swap_progress(
                 AND reflog_byte_length = ?26
                 AND source_generation = ?27
                 AND source_head_referent IS ?28
-                AND source_head_oid = ?29",
+                AND source_head_oid = ?29
+                AND (
+                    (scan_mode = 'reflog_capture'
+                        AND ?2 IN ('reflog_capture', 'reflog_verify'))
+                    OR
+                    (scan_mode = 'reflog_verify'
+                        AND ?2 IN ('reflog_verify', 'graph')
+                        AND capture_target_offset IS ?5
+                        AND reflog_digest = ?4
+                        AND consulted_ref_seal_json = ?15
+                        AND cursor_head_state = ?8
+                        AND cursor_head_branch IS ?9
+                        AND cursor_oid = ?10
+                        AND segment_end = ?11
+                        AND segment_tip_oid = ?12
+                        AND segment_cursor = ?13
+                        AND emitted_count = ?14)
+                    OR
+                    (scan_mode = 'graph'
+                        AND ?2 = 'graph'
+                        AND capture_target_offset IS ?5
+                        AND reflog_digest = ?4
+                        AND consulted_ref_seal_json = ?15
+                        AND cursor_head_state = ?8
+                        AND cursor_head_branch IS ?9
+                        AND cursor_oid = ?10
+                        AND segment_end = ?11
+                        AND segment_tip_oid = ?12)
+                )",
             params![
                 next.generation,
                 next.scan_mode.as_str(),
@@ -857,5 +885,4 @@ fn invalid_stored_value(column: &str, value: &str) -> GitCorrelationError {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-#[path = "progress/tests.rs"]
 mod tests;

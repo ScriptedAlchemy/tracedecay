@@ -98,6 +98,10 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
             .await
             .unwrap()
     );
+    let mut drifted = captured.clone();
+    drifted.generation = 2;
+    drifted.segment_cursor = 1;
+    assert!(!compare_and_swap_progress(&conn, 1, &drifted).await.unwrap());
 
     let mut verified = captured;
     verified.generation = 2;
@@ -106,6 +110,23 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
     verified.verify_digest.clone_from(&verified.reflog_digest);
     assert!(
         compare_and_swap_progress(&conn, 1, &verified)
+            .await
+            .unwrap()
+    );
+
+    let mut regressed = verified.clone();
+    regressed.generation = 3;
+    regressed.scan_mode = GitHistoryScanMode::ReflogVerify;
+    assert!(
+        !compare_and_swap_progress(&conn, 2, &regressed)
+            .await
+            .unwrap()
+    );
+    let mut rewritten = verified.clone();
+    rewritten.generation = 3;
+    rewritten.cursor_oid = "bbbbbbbb".to_string();
+    assert!(
+        !compare_and_swap_progress(&conn, 2, &rewritten)
             .await
             .unwrap()
     );
