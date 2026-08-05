@@ -54,10 +54,106 @@ pub(super) fn retained_claim(
     use crate::agents::context_scout_v2::{
         ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1,
         ContextScoutDeliveryWindowV1, ContextScoutDurableClaimV1, ContextScoutDurableQueueEntryV1,
-        ContextScoutEvidenceBindingV1, ContextScoutEvidenceGenerationV1, ContextScoutLeaseV1,
-        ContextScoutModelRunOutcomeV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
+        ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+        ContextScoutEvidenceSourceReceiptV1, ContextScoutLeaseV1, ContextScoutModelRunOutcomeV1,
+        ContextScoutRedactionReceiptV1, ContextScoutRouteV1, ContextScoutSuggestionEnvelopeV1,
         ContextScoutWorkV1,
     };
+    use tracedecay_application::{
+        AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass,
+        EvidenceCoverage, EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope,
+        RetrieverContributionState, TemporalState,
+    };
+    use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+    use tracedecay_domain::{
+        CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId,
+        TemporalModeV1,
+    };
+
+    fn typed_id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        T::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).unwrap()
+    }
+
+    fn digest(character: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
+    }
+
+    fn evidence(id: u8) -> ContextScoutEvidenceEnvelopeV1 {
+        let scope = ResolvedScope::new(
+            typed_id("project.scout.hook-fixture"),
+            typed_id("repository.scout.hook-fixture"),
+            typed_id("worktree.scout.hook-fixture"),
+            Some(typed_id::<RefId>("refs/heads/main")),
+        )
+        .unwrap();
+        let generation =
+            typed_id::<CodeGenerationId>(&format!("generation.scout.hook-fixture.{id}"));
+        ContextScoutEvidenceEnvelopeV1::claim(
+            FeedbackScopeV1 {
+                project_id: scope.project_id.clone(),
+                repository_id: scope.repository_id.clone(),
+                worktree_id: scope.worktree_id.clone(),
+                branch_ref: "refs/heads/main".to_owned(),
+                head_commit_id: typed_id("commit.scout.hook-fixture"),
+            },
+            scope.clone(),
+            FeedbackContentIdentityV1::SavedContent {
+                generation_digest: digest('c'),
+                file_digest: digest('d'),
+            },
+            generation.clone(),
+            AuthorityReceipt {
+                grant_id: typed_id("grant.scout.hook-fixture"),
+                grant_revision: 1,
+                grant_digest: digest('a'),
+                authorized_scope_digest: scope.scope_digest.clone(),
+                disclosure: DisclosureClass::Evidence,
+                policy: PolicyDecisionRef::new(
+                    "policy.scout.hook-fixture",
+                    1,
+                    digest('b'),
+                    ComponentVersion::new("policy.scout.hook-fixture.v1").unwrap(),
+                )
+                .unwrap(),
+                revalidated_at: UtcMicros(1),
+            },
+            ContextScoutRedactionReceiptV1::MetadataOnly {
+                disclosure: DisclosureClass::Evidence,
+            },
+            vec![ContextScoutEvidenceSourceReceiptV1 {
+                source: ContextScoutEvidenceSourceKindV1::Code,
+                contribution_state: RetrieverContributionState::Completed,
+                temporal: TemporalState {
+                    requested_mode: TemporalModeV1::Current,
+                    requested_at: UtcMicros(1),
+                    resolved_at: UtcMicros(2),
+                    source_generation: Some(generation),
+                    watermark_digest: Some(digest('e')),
+                    freshness: FreshnessState::Current,
+                },
+                coverage: EvidenceCoverage {
+                    requested_domains: vec![EvidenceDomain::Diagnostic],
+                    visited: Some(1),
+                    eligible: Some(1),
+                    returned: 1,
+                    completeness: CoverageCompleteness::Complete,
+                    domains: vec![CoverageDomainState {
+                        domain: EvidenceDomain::Diagnostic,
+                        completeness: CoverageCompleteness::Complete,
+                    }],
+                },
+                anchors: vec![typed_id::<RetrievalAnchorId>(&format!(
+                    "anchor.scout.hook-fixture.{id}"
+                ))],
+            }],
+            UtcMicros(2),
+        )
+        .unwrap()
+    }
 
     let address = ContextScoutAddressV1 {
         profile_id: [1; 16],
@@ -81,11 +177,7 @@ pub(super) fn retained_claim(
             category: ContextScoutCategoryV1::Diagnostic,
             relevance_score: 1,
             suggestion_text: "bounded".to_owned(),
-            evidence: vec![ContextScoutEvidenceBindingV1 {
-                anchor_id: [9; 16],
-                content_identity: [10; 32],
-                generation: ContextScoutEvidenceGenerationV1::SavedContent,
-            }],
+            evidence: evidence(id),
             expires_at: UtcMicros(2_000),
         },
     };

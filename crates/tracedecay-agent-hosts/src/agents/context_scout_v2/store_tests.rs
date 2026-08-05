@@ -53,11 +53,7 @@ fn entry(project_id: [u8; 16], generation: u64) -> ContextScoutDurableQueueEntry
                 category: ContextScoutCategoryV1::Retrieval,
                 relevance_score: 10,
                 suggestion_text: "Use the saved diagnostic anchor.".to_owned(),
-                evidence: vec![ContextScoutEvidenceBindingV1 {
-                    anchor_id: [19; 16],
-                    content_identity: [20; 32],
-                    generation: ContextScoutEvidenceGenerationV1::SavedContent,
-                }],
+                evidence: super::evidence::fixture_context_scout_evidence(),
                 expires_at: UtcMicros(1_000),
             },
         },
@@ -310,8 +306,18 @@ async fn exact_project_scope_and_durable_generation_are_enforced() {
     );
 
     let mut dirty = entry(project_id, 1);
-    dirty.envelope.candidate.evidence[0].generation =
-        ContextScoutEvidenceGenerationV1::DirtyOverlay;
+    dirty.envelope.candidate.evidence.content =
+        tracedecay_domain::feedback::FeedbackContentIdentityV1::EphemeralOverlay {
+            session_id: tracedecay_domain::SessionId::new("session.overlay").unwrap(),
+            owner_client_id: tracedecay_domain::HostInstanceId::new("client.overlay").unwrap(),
+            agent_id: None,
+            document_version: 1,
+            overlay_digest: tracedecay_domain::ManifestDigest::new(format!(
+                "sha256:{}",
+                "f".repeat(64)
+            ))
+            .unwrap(),
+        };
     assert_eq!(
         store.enqueue(dirty).await,
         ContextScoutDurableStoreOutcomeV1::Unavailable

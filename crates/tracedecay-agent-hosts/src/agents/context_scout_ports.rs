@@ -10,28 +10,31 @@ use serde::{Deserialize, Serialize};
 use tracedecay_application::feedback::{
     FeedbackCompletedPublicationReadPort, FeedbackCompletedPublicationV1,
 };
-use tracedecay_application::{RequestAdmission, RequestContext, ResolvedScope};
+use tracedecay_application::{
+    CoverageCompleteness, CoverageDomainState, EvidenceCoverage, EvidenceDomain, FreshnessState,
+    RequestAdmission, RequestContext, ResolvedScope, RetrieverContributionState, TemporalState,
+};
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationRevisionId, ConfigurationValueV1,
     ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
     ContextScoutConfiguredModelPathV1, SettingKey,
 };
 use tracedecay_domain::feedback::{
-    FeedbackContentIdentityV1, FeedbackFindingLifecycleV1, FeedbackScopeV1,
-    ProviderEvaluationStateV1,
+    FeedbackContentIdentityV1, FeedbackDiagnosticProducerV1, FeedbackFindingLifecycleV1,
+    FeedbackScopeV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{
-    AgentInstanceId, ManifestDigest, MessageId, ProjectId, ProviderId, SessionId, ThreadId, TurnId,
-    UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
+    AgentInstanceId, ManifestDigest, MessageId, ProjectId, ProviderId, SessionId, TemporalModeV1,
+    ThreadId, TurnId, UserProfileId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_hooks::{HookEventEnvelopeV2, HookScopeBindingV1};
 
 use super::context_scout_v2::{
     ContextScoutAddressV1, ContextScoutCandidateV1, ContextScoutCategoryV1, ContextScoutControlV1,
-    ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceBindingV1,
-    ContextScoutEvidenceGenerationV1, ContextScoutLimitsV1, ContextScoutModelBackendV1,
-    ContextScoutRuntimeModeV1, ContextScoutSelectionInputV1, ContextScoutServiceStateV1,
-    select_context_scout_delivery_window,
+    ContextScoutDeliverySelectionInputV1, ContextScoutEvidenceEnvelopeV1,
+    ContextScoutEvidenceSourceKindV1, ContextScoutEvidenceSourceReceiptV1, ContextScoutLimitsV1,
+    ContextScoutModelBackendV1, ContextScoutRedactionReceiptV1, ContextScoutRuntimeModeV1,
+    ContextScoutSelectionInputV1, ContextScoutServiceStateV1, select_context_scout_delivery_window,
 };
 use crate::db::Database;
 use crate::db::engine::params;
@@ -796,8 +799,9 @@ fn publication_matches_pin(
 }
 
 /// Converts only anchored, bounded, durable findings from the authorized
-/// committed publication. Fixed-size values are content/evidence locators;
-/// canonical identity remains in `latest_publication`.
+/// committed publication. Canonical anchors, scope, generation, authority,
+/// redaction, and coverage are copied into one reference-only claim; no
+/// evidence body or generic finding text is cached by Scout.
 pub fn context_scout_candidates_from_publication(
     publication: &FeedbackCompletedPublicationV1,
     control: ContextScoutControlV1,
@@ -806,13 +810,10 @@ pub fn context_scout_candidates_from_publication(
     if publication.validate().is_err() {
         return Vec::new();
     }
-    let FeedbackContentIdentityV1::SavedContent {
-        generation_digest, ..
-    } = &publication.input.request.content
-    else {
+    let FeedbackContentIdentityV1::SavedContent { .. } = &publication.input.request.content else {
         return Vec::new();
     };
-    let Some(content_identity) = digest_bytes(generation_digest) else {
+    let Some(code_generation_id) = publication.runtime.generation_id.clone() else {
         return Vec::new();
     };
     publication
@@ -820,17 +821,26 @@ pub fn context_scout_candidates_from_publication(
         .findings
         .iter()
         .filter_map(|finding| {
-            if finding.lifecycle != FeedbackFindingLifecycleV1::Active
-                || finding.provider_state != ProviderEvaluationStateV1::SupportedCompletedComplete
-            {
+            if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
                 return None;
             }
             let anchor = finding.retrieval_anchor_id.as_ref()?;
-            finding.safe_bounded_preview.as_ref()?;
-            let text = format!(
-                "Inspect anchored finding {} before changing code.",
-                finding.finding_id.as_str()
-            );
+            let projection = finding.diagnostic_projection.as_ref()?;
+            let (source, category) = match projection.producer {
+                FeedbackDiagnosticProducerV1::GitHubReview => (
+                    ContextScoutEvidenceSourceKindV1::Git,
+                    ContextScoutCategoryV1::Verification,
+                ),
+                FeedbackDiagnosticProducerV1::CiLocalization => (
+                    ContextScoutEvidenceSourceKindV1::Code,
+                    ContextScoutCategoryV1::Diagnostic,
+                ),
+                FeedbackDiagnosticProducerV1::Proximity => (
+                    ContextScoutEvidenceSourceKindV1::Code,
+                    ContextScoutCategoryV1::Coordination,
+                ),
+            };
+            let text = projection.safe_bounded_message.clone();
             if text.len() > control.limits.max_text_bytes {
                 return None;
             }
@@ -842,22 +852,96 @@ pub fn context_scout_candidates_from_publication(
             ))
             .ok()
             .and_then(|digest| digest_bytes(&digest))?;
-            let anchor_digest =
-                canonical_sha256(&("tracedecay.context-scout.anchor-locator.v1", anchor))
-                    .ok()
-                    .and_then(|digest| digest_bytes(&digest))?;
-            let mut anchor_id = [0_u8; 16];
-            anchor_id.copy_from_slice(&anchor_digest[..16]);
+            let (contribution_state, completeness) = match finding.provider_state {
+                ProviderEvaluationStateV1::SupportedCompletedComplete => (
+                    RetrieverContributionState::Completed,
+                    CoverageCompleteness::Complete,
+                ),
+                ProviderEvaluationStateV1::Partial | ProviderEvaluationStateV1::Indexing => (
+                    RetrieverContributionState::Partial,
+                    CoverageCompleteness::Partial,
+                ),
+                ProviderEvaluationStateV1::Stale => (
+                    RetrieverContributionState::Stale,
+                    CoverageCompleteness::Unknown,
+                ),
+                ProviderEvaluationStateV1::Cancelled => (
+                    RetrieverContributionState::Cancelled,
+                    CoverageCompleteness::Unknown,
+                ),
+                ProviderEvaluationStateV1::TimedOut => (
+                    RetrieverContributionState::TimedOut,
+                    CoverageCompleteness::Unknown,
+                ),
+                ProviderEvaluationStateV1::Unsupported => (
+                    RetrieverContributionState::Unsupported,
+                    CoverageCompleteness::Unknown,
+                ),
+                ProviderEvaluationStateV1::Absent
+                | ProviderEvaluationStateV1::Failed
+                | ProviderEvaluationStateV1::Unavailable => (
+                    RetrieverContributionState::Unavailable,
+                    CoverageCompleteness::Unknown,
+                ),
+            };
+            if !matches!(
+                contribution_state,
+                RetrieverContributionState::Completed
+                    | RetrieverContributionState::Partial
+                    | RetrieverContributionState::Stale
+            ) {
+                return None;
+            }
+            let coverage = EvidenceCoverage {
+                requested_domains: vec![EvidenceDomain::Diagnostic],
+                visited: (completeness == CoverageCompleteness::Complete).then_some(1),
+                eligible: (completeness == CoverageCompleteness::Complete).then_some(1),
+                returned: 1,
+                completeness,
+                domains: vec![CoverageDomainState {
+                    domain: EvidenceDomain::Diagnostic,
+                    completeness,
+                }],
+            };
+            let evidence = ContextScoutEvidenceEnvelopeV1::claim(
+                publication.result.scope.clone(),
+                publication.authorized_scope.clone(),
+                publication.input.request.content.clone(),
+                code_generation_id.clone(),
+                publication.authority.clone(),
+                ContextScoutRedactionReceiptV1::MetadataOnly {
+                    disclosure: publication.authority.disclosure,
+                },
+                vec![ContextScoutEvidenceSourceReceiptV1 {
+                    source,
+                    contribution_state,
+                    temporal: TemporalState {
+                        requested_mode: TemporalModeV1::Current,
+                        requested_at: publication.input.observed_at,
+                        resolved_at: observed_at,
+                        source_generation: Some(code_generation_id.clone()),
+                        watermark_digest: Some(
+                            publication.runtime.authoritative.runtime_watermark.clone(),
+                        ),
+                        freshness: match contribution_state {
+                            RetrieverContributionState::Stale => FreshnessState::Stale,
+                            RetrieverContributionState::Completed
+                            | RetrieverContributionState::Partial => FreshnessState::Current,
+                            _ => FreshnessState::Unknown,
+                        },
+                    },
+                    coverage,
+                    anchors: vec![anchor.clone()],
+                }],
+                observed_at,
+            )
+            .ok()?;
             Some(ContextScoutCandidateV1 {
                 dedupe_key: dedupe,
-                category: ContextScoutCategoryV1::Retrieval,
+                category,
                 relevance_score: u16::MAX,
                 suggestion_text: text,
-                evidence: vec![ContextScoutEvidenceBindingV1 {
-                    anchor_id,
-                    content_identity,
-                    generation: ContextScoutEvidenceGenerationV1::SavedContent,
-                }],
+                evidence,
                 expires_at: UtcMicros(observed_at.0.saturating_add(CANDIDATE_TTL_MICROS_V1)),
             })
         })
