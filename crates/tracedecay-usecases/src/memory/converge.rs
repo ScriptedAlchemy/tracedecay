@@ -1,6 +1,6 @@
 //! Canonical derived-memory convergence policy.
 //!
-//! [`MemoryApplication::dashboard_repair_v1`] runs one store-bounded repair
+//! [`MemoryApplication::rebuild_derived_memory`] runs one store-bounded rebuild
 //! batch and reports whether more work remains behind the batch cap. This
 //! module preserves that bound: [`MemoryApplication::converge_derived_memory`]
 //! performs exactly one pass and returns a typed pending state when the store
@@ -55,7 +55,7 @@ impl<A: FactCompatibilityStore> DerivedMemoryRepairPort for MemoryApplication<A>
         action: &str,
     ) -> Result<DerivedMemoryRepairStatsV1, Self::Error> {
         let context = MemoryOperationContext::generated(&self.owner, action, None)?;
-        let stats = self.dashboard_repair_v1(context).await?;
+        let stats = self.rebuild_derived_memory(context).await?;
         Ok(DerivedMemoryRepairStatsV1::new(
             stats.missing_vectors_repaired(),
             stats.banks_rebuilt(),

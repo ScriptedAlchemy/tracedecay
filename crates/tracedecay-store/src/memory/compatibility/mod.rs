@@ -28,7 +28,7 @@ pub use curation::{
     CompatibilityFactRemoveCommandV1, CompatibilityFactRemoveOutcomeV1,
     CompatibilityFactRepairVectorV1, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1,
-    CompatibilityLegacyEntityTargetV1, CompatibilityMemoryRepairCommandV1,
+    CompatibilityLegacyEntityTargetV1,
 };
 pub use dashboard::{
     CompatibilityDashboardEntityV1, CompatibilityDashboardFactDetailQueryV1,
@@ -42,12 +42,11 @@ pub use dashboard::{
     CompatibilityDashboardVectorPointsQueryV1,
 };
 pub use proposal::{
-    CompatibilityFactProposalImportReceiptV1, CompatibilityFactProposalImportV1,
-    CompatibilityFactProposalLegacyRecordV1, CompatibilityFactProposalPageV1,
-    CompatibilityFactProposalPromotionDispositionV1, CompatibilityFactProposalPromotionResultV1,
-    CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalRevisionV1, CompatibilityFactProposalStateV1,
-    FactProposalPromotionStateV1, PromoteFactProposal, PromoteFactProposalOutcome,
+    CompatibilityFactProposalPageV1, CompatibilityFactProposalPromotionDispositionV1,
+    CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
+    CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
+    CompatibilityFactProposalStateV1, FactProposalPromotionStateV1, PromoteFactProposal,
+    PromoteFactProposalOutcome,
 };
 pub use search::{
     CompatibilityFactContradictionPageV1, CompatibilityFactContradictionQueryV1,

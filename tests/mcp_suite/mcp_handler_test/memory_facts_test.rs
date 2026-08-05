@@ -1388,7 +1388,7 @@ async fn memory_status_reports_repair_state_without_repairing() {
     )
     .unwrap();
     let repair = memory
-        .dashboard_repair_v1(
+        .rebuild_derived_memory(
             tracedecay::application::memory::MemoryOperationContext::generated(
                 &owner,
                 "explicit-status-test-repair",

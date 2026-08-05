@@ -10,8 +10,7 @@ use serde_json::json;
 use tracedecay_domain::{ActorId, FactId, FactOwnerV1, UtcMicros};
 use tracedecay_store::{
     CompatibilityFactRepairVectorV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1, FactCompatibilityResult,
-    FactStoreError, FactStoreResult,
+    CompatibilityMemoryRepairStatsV1, FactCompatibilityResult, FactStoreError, FactStoreResult,
 };
 
 use super::crud::{
@@ -95,24 +94,27 @@ pub(super) async fn compatibility_repair_vector_for_fact_tx(
 }
 
 pub(super) fn compatibility_repair_request_digest(
-    request: &CompatibilityMemoryRepairCommandV1,
+    owner: &FactOwnerV1,
+    actor: Option<&ActorId>,
 ) -> FactStoreResult<String> {
     compatibility_digest(json!({
-        "owner": request.owner(),
-        "actor": request.actor().map(ActorId::as_str),
+        "owner": owner,
+        "actor": actor.map(ActorId::as_str),
     }))
 }
 
 pub(super) async fn repair_compatibility_memory_tx(
     db: &Database,
     transaction: &Transaction<'_>,
-    request: &CompatibilityMemoryRepairCommandV1,
+    owner: &FactOwnerV1,
+    operation_id: &tracedecay_domain::ProvenanceId,
+    actor: Option<&ActorId>,
 ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
-    let request_digest = compatibility_repair_request_digest(request)?;
+    let request_digest = compatibility_repair_request_digest(owner, actor)?;
     if let Some(receipt) = compatibility_lookup_operation_receipt_tx(
         transaction,
-        request.owner(),
-        request.operation_id(),
+        owner,
+        operation_id,
         "repair",
         &request_digest,
     )
@@ -133,21 +135,20 @@ pub(super) async fn repair_compatibility_memory_tx(
     let missing_vectors_repaired = compatibility_repair_missing_vectors_tx(
         db,
         transaction,
-        request.owner(),
+        owner,
         COMPATIBILITY_REPAIR_VECTOR_BATCH,
     )
     .await?;
-    compatibility_mark_absent_banks_dirty_tx(db, transaction, request.owner(), now).await?;
-    let banks_rebuilt =
-        compatibility_rebuild_dirty_banks_tx(db, transaction, request.owner()).await?;
+    compatibility_mark_absent_banks_dirty_tx(db, transaction, owner, now).await?;
+    let banks_rebuilt = compatibility_rebuild_dirty_banks_tx(db, transaction, owner).await?;
     let receipt = json!({
         "missing_vectors_repaired": missing_vectors_repaired,
         "banks_rebuilt": banks_rebuilt,
     });
     compatibility_record_operation_receipt_tx(
         transaction,
-        request.owner(),
-        request.operation_id(),
+        owner,
+        operation_id,
         "repair",
         &request_digest,
         None,

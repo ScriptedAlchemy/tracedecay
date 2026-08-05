@@ -521,8 +521,8 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
     /// This is a pure read: it reports the live backlog (missing vectors,
     /// projection and feedback repair state) and never triggers a repair pass
     /// as a side effect. Repair remains owned by the daemon's bounded memory-
-    /// repair scheduler and the explicit [`Self::dashboard_repair_v1`] entry
-    /// point; a status read must not race or duplicate that work. The legacy
+    /// same-schema derived rebuild entry point; a status read must not race or
+    /// duplicate that work. The legacy
     /// `MemoryStatus`/`V1MemoryStatusWithRepairV1` field shapes are
     /// unchanged, but `repair` counters are always zero here: they describe
     /// repairs performed by the reporting request, and a pure read performs

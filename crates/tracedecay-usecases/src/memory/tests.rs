@@ -391,9 +391,11 @@ impl FactCompatibilityStore for FakeAuthority {
         Err(compatibility_fixture_error())
     }
 
-    async fn repair_compatibility_memory(
+    async fn rebuild_derived_memory(
         &self,
-        _request: CompatibilityMemoryRepairCommandV1,
+        _owner: FactOwnerV1,
+        _operation_id: ProvenanceId,
+        _actor: Option<ActorId>,
     ) -> Result<CompatibilityMemoryRepairStatsV1, FactCompatibilityStoreError> {
         self.compatibility_calls.lock().unwrap().push("repair");
         Ok(CompatibilityMemoryRepairStatsV1::default())
@@ -513,17 +515,6 @@ impl FactCompatibilityStore for FakeAuthority {
             .lock()
             .unwrap()
             .push("proposal-reject");
-        Err(compatibility_fixture_error())
-    }
-
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        _request: CompatibilityFactProposalImportV1,
-    ) -> Result<CompatibilityFactProposalImportReceiptV1, FactCompatibilityStoreError> {
-        self.compatibility_calls
-            .lock()
-            .unwrap()
-            .push("proposal-import");
         Err(compatibility_fixture_error())
     }
 

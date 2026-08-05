@@ -22,9 +22,7 @@ mod tests;
 pub use anchors::{
     EvidenceAnchorResolutionError, EvidenceAnchorResolver, ResolvedEvidenceAnchorV1,
 };
-pub use compatibility::{
-    automation_fact_proposal_add_command, legacy_proposal_add_command, with_automation_run_id,
-};
+pub use compatibility::{automation_fact_proposal_add_command, with_automation_run_id};
 pub use context::MemoryOperationContext;
 pub use error::{
     MemoryApplicationError, MemoryCompatibilityScope, RUNTIME_MEMORY_COMPATIBILITY_SOURCE_STORE,
@@ -51,19 +49,18 @@ use tracedecay_store::{
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFeedbackRepairProgressV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactCommitOutcome,
-    FactCompatibilityStore, FactCompatibilityStoreError, FactCurrentQuery, FactLineageQuery,
-    FactProposalStore, FactProposalStoreError, FactStore, FactStoreError, FactWriteBatch,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CurrentFactsQuery,
+    FactAsOfQuery, FactCommitOutcome, FactCompatibilityStore, FactCompatibilityStoreError,
+    FactCurrentQuery, FactLineageQuery, FactProposalStore, FactProposalStoreError, FactStore,
+    FactStoreError, FactWriteBatch, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Maps a [`MemoryApplicationError`] onto the root/dashboard-facing

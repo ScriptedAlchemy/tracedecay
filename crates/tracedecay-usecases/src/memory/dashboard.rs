@@ -12,8 +12,7 @@ use tracedecay_store::{
     CompatibilityFactLinkV1, CompatibilityFactMergeCommandV1, CompatibilityFactMergeEntitiesV1,
     CompatibilityFactMergeOutcomeV1, CompatibilityFactNormalizeTagsV1,
     CompatibilityFactRepairVectorV1, CompatibilityLegacyEntityTargetV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, FactCompatibilityStore,
+    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, FactCompatibilityStore,
 };
 
 use tracedecay_runtime_core::memory::hygiene::detect_secret_like;
@@ -389,18 +388,16 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         .await
     }
 
-    /// One authority repair step only. Any incomplete feedback-history repair is
-    /// surfaced through `memory_status_v1`/feedback history while the daemon resumes it.
-    pub async fn dashboard_repair_v1(
+    pub async fn rebuild_derived_memory(
         &self,
         context: MemoryOperationContext,
     ) -> Result<CompatibilityMemoryRepairStatsV1, MemoryApplicationError> {
         self.authority
-            .repair_compatibility_memory(CompatibilityMemoryRepairCommandV1::new(
+            .rebuild_derived_memory(
                 self.owner.clone(),
                 context.operation_id().clone(),
                 context.actor().cloned(),
-            )?)
+            )
             .await
             .map_err(Into::into)
     }

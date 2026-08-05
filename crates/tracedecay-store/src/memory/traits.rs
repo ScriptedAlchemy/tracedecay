@@ -16,20 +16,18 @@ use super::{
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
     CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCompatibilityResult, FactCurrentQuery, FactCurrentResponseV1,
-    FactLineageQuery, FactLineageResponseV1, FactProposalStoreError, FactStoreResult,
-    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
-    RetrievalAnchorQuery, StoredFactV1,
+    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CurrentFactsQuery,
+    FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCompatibilityResult,
+    FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1,
+    FactProposalStoreError, FactStoreResult, FactWriteBatch, LegacyFactQuery, PromoteFactProposal,
+    PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
 };
 
 /// Authoritative persistence boundary for append-only facts and evidence.
@@ -199,12 +197,13 @@ pub trait FactCompatibilityStore: FactProposalStore {
         request: CompatibilityFactMergeCommandV1,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>> + Send;
 
-    /// Repairs the finite V1 compatibility projection and returns measured
-    /// results plus the exact feedback-history batch outcome from that same
-    /// atomic command.
-    fn repair_compatibility_memory(
+    /// Rebuilds same-schema derived vectors, banks, and projections for one
+    /// canonical owner. This never imports or upgrades persisted facts.
+    fn rebuild_derived_memory(
         &self,
-        request: CompatibilityMemoryRepairCommandV1,
+        owner: FactOwnerV1,
+        operation_id: ProvenanceId,
+        actor: Option<ActorId>,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>> + Send;
 
     /// Bounded dashboard summary. Implementations return safe typed projections,
@@ -274,11 +273,6 @@ pub trait FactCompatibilityStore: FactProposalStore {
         reviewer: ActorId,
         reason: String,
     ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalRecordV1>> + Send;
-
-    fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> impl Future<Output = FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>> + Send;
 
     fn promote_compatibility_fact_proposal(
         &self,

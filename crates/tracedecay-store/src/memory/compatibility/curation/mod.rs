@@ -14,10 +14,7 @@ pub use fact_commands::{
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactUpdateCommandV1,
     CompatibilityFactUpdateOutcomeV1, CompatibilityFactUpdatePatchV1,
 };
-pub use merge::{
-    CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1,
-    CompatibilityMemoryRepairCommandV1,
-};
+pub use merge::{CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1};
 pub use operations::{
     CompatibilityFactAddAliasV1, CompatibilityFactCurationBatchV1,
     CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,

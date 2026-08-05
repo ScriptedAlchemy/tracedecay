@@ -18,20 +18,19 @@ use tracedecay_store::{
     CompatibilityFactFeedbackOutcomeV1, CompatibilityFactHistoryQueryV1,
     CompatibilityFactHistoryV1, CompatibilityFactInspectionV1, CompatibilityFactListQueryV1,
     CompatibilityFactMergeCommandV1, CompatibilityFactMergeOutcomeV1, CompatibilityFactPageV1,
-    CompatibilityFactProjectionV1, CompatibilityFactProposalImportReceiptV1,
-    CompatibilityFactProposalImportV1, CompatibilityFactProposalPageV1,
+    CompatibilityFactProjectionV1, CompatibilityFactProposalPageV1,
     CompatibilityFactProposalPromotionResultV1, CompatibilityFactProposalPromotionV1,
     CompatibilityFactProposalRecordV1, CompatibilityFactProposalRevisionV1,
     CompatibilityFactProposalStateV1, CompatibilityFactRemoveCommandV1,
     CompatibilityFactRemoveOutcomeV1, CompatibilityFactRetrievalCommandV1,
     CompatibilityFactSearchPageV1, CompatibilityFactSearchQuery, CompatibilityFactTargetV1,
     CompatibilityFactUpdateCommandV1, CompatibilityFactUpdateOutcomeV1,
-    CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
-    CompatibilityMemoryStatusV1, CurrentFactsQuery, FactAsOfQuery, FactAsOfResponseV1,
-    FactCommitOutcome, FactCompatibilityResult, FactCompatibilityStore, FactCurrentQuery,
-    FactCurrentResponseV1, FactLineageQuery, FactLineageResponseV1, FactProposalStore,
-    FactProposalStoreError, FactStore, FactStoreResult, FactWriteBatch, LegacyFactQuery,
-    PromoteFactProposal, PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
+    CompatibilityMemoryRepairStatsV1, CompatibilityMemoryStatusV1, CurrentFactsQuery,
+    FactAsOfQuery, FactAsOfResponseV1, FactCommitOutcome, FactCompatibilityResult,
+    FactCompatibilityStore, FactCurrentQuery, FactCurrentResponseV1, FactLineageQuery,
+    FactLineageResponseV1, FactProposalStore, FactProposalStoreError, FactStore, FactStoreResult,
+    FactWriteBatch, LegacyFactQuery, PromoteFactProposal, PromoteFactProposalOutcome,
+    RetrievalAnchorQuery, StoredFactV1,
 };
 
 use crud::{
@@ -56,8 +55,8 @@ use primitives::{QUERY_OPERATION, authority_storage_error, storage_error};
 use projection::resolve_legacy_fact_tx;
 use proposals::{
     count_pending_compatibility_fact_proposals_tx, get_compatibility_fact_proposal_tx,
-    import_legacy_compatibility_fact_proposals_tx, list_compatibility_fact_proposals_tx,
-    reject_compatibility_fact_proposal_tx, submit_compatibility_fact_proposal_tx,
+    list_compatibility_fact_proposals_tx, reject_compatibility_fact_proposal_tx,
+    submit_compatibility_fact_proposal_tx,
 };
 use repair::{compatibility_feedback_history_repair_progress_tx, repair_compatibility_memory_tx};
 use search::{
@@ -561,15 +560,24 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
         .await
     }
 
-    async fn repair_compatibility_memory(
+    async fn rebuild_derived_memory(
         &self,
-        request: CompatibilityMemoryRepairCommandV1,
+        owner: FactOwnerV1,
+        operation_id: ProvenanceId,
+        actor: Option<ActorId>,
     ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1> {
         let db = self.db.clone();
         self.compatibility_write(move |transaction| {
-            Box::pin(
-                async move { repair_compatibility_memory_tx(&db, transaction, &request).await },
-            )
+            Box::pin(async move {
+                repair_compatibility_memory_tx(
+                    &db,
+                    transaction,
+                    &owner,
+                    &operation_id,
+                    actor.as_ref(),
+                )
+                .await
+            })
         })
         .await
     }
@@ -720,18 +728,6 @@ impl FactCompatibilityStore for DatabaseFactStore<'_> {
                     &reason,
                 )
                 .await
-            })
-        })
-        .await
-    }
-
-    async fn import_legacy_compatibility_fact_proposals(
-        &self,
-        request: CompatibilityFactProposalImportV1,
-    ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1> {
-        self.compatibility_write(move |transaction| {
-            Box::pin(async move {
-                import_legacy_compatibility_fact_proposals_tx(transaction, &request).await
             })
         })
         .await
@@ -925,8 +921,10 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
         fn merge_compatibility_facts(
             request: CompatibilityFactMergeCommandV1,
         ) -> FactCompatibilityResult<CompatibilityFactMergeOutcomeV1>;
-        fn repair_compatibility_memory(
-            request: CompatibilityMemoryRepairCommandV1,
+        fn rebuild_derived_memory(
+            owner: FactOwnerV1,
+            operation_id: ProvenanceId,
+            actor: Option<ActorId>,
         ) -> FactCompatibilityResult<CompatibilityMemoryRepairStatsV1>;
         fn dashboard_compatibility_memory_overview(
             query: CompatibilityDashboardMemoryOverviewQueryV1,
@@ -968,9 +966,6 @@ impl FactCompatibilityStore for ProjectFactStore<'_> {
             reviewer: ActorId,
             reason: String,
         ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;
-        fn import_legacy_compatibility_fact_proposals(
-            request: CompatibilityFactProposalImportV1,
-        ) -> FactCompatibilityResult<CompatibilityFactProposalImportReceiptV1>;
         fn promote_compatibility_fact_proposal(
             request: CompatibilityFactProposalPromotionV1,
         ) -> FactCompatibilityResult<CompatibilityFactProposalRecordV1>;

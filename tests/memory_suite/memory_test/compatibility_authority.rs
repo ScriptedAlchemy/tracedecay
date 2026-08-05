@@ -129,7 +129,7 @@ async fn compatibility_repair_rebuilds_only_requested_owner_banks() {
         1
     );
     let repair_a = memory_a
-        .dashboard_repair_v1(
+        .rebuild_derived_memory(
             MemoryOperationContext::generated(&owner_a, "owner-a-explicit-repair", None).unwrap(),
         )
         .await
@@ -191,7 +191,7 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
 
     assert_eq!(
         memory_a
-            .dashboard_repair_v1(
+            .rebuild_derived_memory(
                 MemoryOperationContext::generated(&owner_a, "prepare-owner-a-banks", None).unwrap(),
             )
             .await
@@ -201,7 +201,7 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     );
     assert_eq!(
         memory_b
-            .dashboard_repair_v1(
+            .rebuild_derived_memory(
                 MemoryOperationContext::generated(&owner_b, "prepare-owner-b-banks", None).unwrap(),
             )
             .await
@@ -234,7 +234,7 @@ async fn compatibility_rebuild_keeps_ready_peer_owner_banks_unchanged() {
     );
     assert_eq!(
         memory_a
-            .dashboard_repair_v1(
+            .rebuild_derived_memory(
                 MemoryOperationContext::generated(&owner_a, "rebuild-owner-a-banks", None).unwrap(),
             )
             .await
@@ -408,7 +408,7 @@ async fn compatibility_repair_skips_malformed_unavailable_vectors() {
     );
 
     let repair = memory
-        .dashboard_repair_v1(
+        .rebuild_derived_memory(
             MemoryOperationContext::generated(&owner, "malformed-vector-repair", None).unwrap(),
         )
         .await
@@ -484,7 +484,7 @@ async fn compatibility_repair_scans_past_a_full_batch_of_unavailable_vectors() {
         "only the eligible candidate is repairable"
     );
     let repair = memory
-        .dashboard_repair_v1(
+        .rebuild_derived_memory(
             MemoryOperationContext::generated(&owner, "full-unavailable-batch-repair", None)
                 .unwrap(),
         )
