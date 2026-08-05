@@ -226,7 +226,8 @@ pub(super) async fn admit_rows_with_admission_and_cancellation(
                     .await
                     .map_err(host_admission_error)?
                 {
-                    CaptureObservationOutcome::Persisted { outcome, .. } => {
+                    CaptureObservationOutcome::Persisted { outcome, .. }
+                    | CaptureObservationOutcome::AcceptedForReplay { outcome, .. } => {
                         if matches!(*outcome, ObservationPersistOutcome::Committed(_)) {
                             stats.messages_upserted = stats.messages_upserted.saturating_add(1);
                         }

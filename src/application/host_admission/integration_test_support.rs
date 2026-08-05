@@ -338,8 +338,9 @@ impl HostAdmissionTestRuntimeV1 {
         .map_err(external_source_read_failed)?;
         let request = external_source_runtime_read_request(
             database.runtime().binding(),
-            ExternalSourceReadOperationV1::State {
+            ExternalSourceReadOperationV1::CommitReceipt {
                 binding: binding_identity,
+                idempotency_key,
             },
         )?;
         let probe = ExternalSourceRuntimeReadProbe::from_control(request.control());
@@ -359,14 +360,10 @@ impl HostAdmissionTestRuntimeV1 {
         match outcome.value() {
             Some(tracedecay_store::RuntimeReadResultV1::Repository {
                 result:
-                    RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::State(Some(
-                        state,
-                    ))),
-            }) => Ok(state.receipt_by_idempotency_key(&idempotency_key).cloned()),
-            Some(tracedecay_store::RuntimeReadResultV1::Repository {
-                result:
-                    RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::State(None)),
-            }) => Ok(None),
+                    RepositoryReadResultV1::ExternalSource(ExternalSourceReadResultV1::CommitReceipt(
+                        receipt,
+                    )),
+            }) => Ok(receipt.as_ref().map(|receipt| receipt.as_ref().clone())),
             _ => Err(external_source_read_failed(
                 "external source read returned an unexpected result",
             )),
