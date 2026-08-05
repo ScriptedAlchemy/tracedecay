@@ -910,9 +910,8 @@ Unmeasured speculative optimizations and placeholder benchmarks do not ship.
   [13](13-research-provenance-and-context-anchors.md),
   [17](17-official-public-api-and-sdks.md),
   [19](19-system-defragmentation-convergence-and-extensibility.md),
-  [34](34-workspace-refactoring-and-api-migration.md), and every component
-  section whose independently released public API protocol crosses the
-  fresh-store boundary.
+  and every component section whose independently released public API protocol
+  crosses the fresh-store boundary.
 - Measured performance: [Plan 33](33-end-to-end-performance-optimization.md) and
   [Plan 38](38-storage-retention-size-and-efficiency.md)'s compaction and
   size-telemetry budgets, plus
