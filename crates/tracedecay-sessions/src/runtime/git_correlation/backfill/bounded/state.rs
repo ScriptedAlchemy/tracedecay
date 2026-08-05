@@ -214,8 +214,8 @@ pub(super) async fn advance_graph<S: GitCorrelationSessionStore>(
     let path = project_path.to_owned();
     let scan_source = source.clone();
     let native_control = control.clone();
-    let window_start = progress.window_start;
-    let window_end = progress.window_end;
+    let window_start = segment.start_ts;
+    let window_end = segment.end_ts;
     let chunk = tokio::task::spawn_blocking(move || {
         native::scan_graph_chunk(
             &path,
@@ -268,11 +268,7 @@ async fn apply_segment<S: GitCorrelationSessionStore>(
     stats: &mut BackfillStats,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
-    let worktree_path = native::decode_path(&progress.worktree)?;
-    let worktree = worktree_path
-        .to_str()
-        .map(normalize_worktree)
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    let worktree = normalize_worktree(progress.project_path.trim());
     let transaction = session_store
         .open_write_transaction()
         .await
@@ -381,11 +377,7 @@ async fn apply_graph_chunk<S: GitCorrelationSessionStore>(
     stats: &mut BackfillStats,
     committed: &mut bool,
 ) -> Result<StreamGitEvidenceOutcome, BoundedBackfillInterruption> {
-    let worktree_path = native::decode_path(&progress.worktree)?;
-    let worktree = worktree_path
-        .to_str()
-        .map(normalize_worktree)
-        .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
+    let worktree = normalize_worktree(progress.project_path.trim());
     let transaction = session_store
         .open_write_transaction()
         .await
