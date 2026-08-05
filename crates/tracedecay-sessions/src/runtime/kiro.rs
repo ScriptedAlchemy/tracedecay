@@ -337,13 +337,16 @@ pub async fn capture_kiro_snapshot_observations(
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome> {
     capture_snapshot_observations(
         facade,
+        PROVIDER,
         scope,
         cancellation,
         max_new_bytes,
-        source.discover_transcript_paths(
-            project_root,
-            TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
-        ),
+        || {
+            source.discover_transcript_paths(
+                project_root,
+                TranscriptDiscoveryBounds::from_discovered_units(MAX_TRANSCRIPTS_PER_PASS),
+            )
+        },
         |path| source.snapshot_input_bytes(path),
         |path| {
             let Some(parsed) =

@@ -325,7 +325,7 @@ pub(crate) async fn capture_opencode_observations(
         Instant::now() + HOST_SCAN_WINDOW,
         cancellation.clone(),
     );
-    let mut runner = SnapshotAdmissionRunner::new(max_new_bytes);
+    let mut runner = SnapshotAdmissionRunner::new(PROVIDER, max_new_bytes);
     let current_generation = snapshot.generation.generation_id();
     let (mut generation_frontier, mut rewrite_frontier) = prepare_generation_rewrite(
         facade,

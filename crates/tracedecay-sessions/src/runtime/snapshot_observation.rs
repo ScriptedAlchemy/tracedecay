@@ -171,33 +171,40 @@ pub fn snapshot_cursor_after(
 /// Every snapshot provider drives the same loop: bound discovery, defer when
 /// discovery truncated, then charge each discovered path against the sweep
 /// budget before loading and admitting its records. Providers supply only what
-/// actually differs — the discovery report, how a path's input bytes are
+/// actually differs — how paths are discovered, how a path's input bytes are
 /// charged, and how a path becomes `(generation, records)`.
 ///
 /// This deliberately re-reads complete snapshots and derives a new source
 /// generation from their content; it neither consults nor advances legacy parse
 /// offsets. `max_new_bytes` is one logical source-byte budget for the complete
 /// sweep.
-pub async fn capture_snapshot_observations<R, B, L>(
+pub async fn capture_snapshot_observations<R, D, B, L>(
     facade: &dyn HostAdmission,
+    provider: &'static str,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
     max_new_bytes: Option<u64>,
-    discovery: FileDiscoveryReport,
+    discover: D,
     input_bytes_fn: B,
     load_fn: L,
 ) -> TranscriptIngestResult<SnapshotCaptureOutcome>
 where
     R: SnapshotAdmissionRecord,
+    D: FnOnce() -> FileDiscoveryReport,
     B: Fn(&Path) -> TranscriptIngestResult<u64>,
     L: Fn(&Path) -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<R>)>>,
 {
-    let mut runner = SnapshotAdmissionRunner::new(max_new_bytes);
+    ensure_snapshot_admission_active(provider, cancellation)?;
+    let discovery = discover();
+    ensure_snapshot_admission_active(provider, cancellation)?;
+    let mut runner = SnapshotAdmissionRunner::new(provider, max_new_bytes);
     if discovery.is_truncated() {
         runner.defer();
     }
     for path in discovery.paths {
+        ensure_snapshot_admission_active(provider, cancellation)?;
         let input_bytes = input_bytes_fn(&path)?;
+        ensure_snapshot_admission_active(provider, cancellation)?;
         runner
             .admit_batch(facade, input_bytes, &scope, cancellation, || load_fn(&path))
             .await?;
@@ -207,14 +214,16 @@ where
 
 /// Owns byte accounting and durable admission state for one snapshot-provider sweep.
 pub struct SnapshotAdmissionRunner {
+    provider: &'static str,
     budget: IngestByteBudget,
     stats: TranscriptIngestStats,
     sessions: BTreeSet<String>,
 }
 
 impl SnapshotAdmissionRunner {
-    pub fn new(max_new_bytes: Option<u64>) -> Self {
+    pub fn new(provider: &'static str, max_new_bytes: Option<u64>) -> Self {
         Self {
+            provider,
             budget: match max_new_bytes {
                 Some(limit) => IngestByteBudget::bounded_allowing_empty(limit),
                 None => IngestByteBudget::unbounded(),
@@ -240,10 +249,14 @@ impl SnapshotAdmissionRunner {
         R: SnapshotAdmissionRecord,
         F: FnOnce() -> TranscriptIngestResult<Option<(ObservationSourceGenerationV1, Vec<R>)>>,
     {
+        ensure_snapshot_admission_active(self.provider, cancellation)?;
         if !self.budget.try_consume(input_bytes) {
             return Ok(());
         }
-        let Some((generation, records)) = load()? else {
+        ensure_snapshot_admission_active(self.provider, cancellation)?;
+        let loaded = load()?;
+        ensure_snapshot_admission_active(self.provider, cancellation)?;
+        let Some((generation, records)) = loaded else {
             return Ok(());
         };
 
@@ -251,8 +264,10 @@ impl SnapshotAdmissionRunner {
         let mut pending = Vec::new();
         for record in records {
             let provider = record.provider();
+            ensure_snapshot_admission_active(provider, cancellation)?;
             let source_identity = snapshot_source_identity(provider, record.session_id())?;
             let range = ObservationSourceRangeV1::new(record.order(), record.order() + 1)?;
+            ensure_snapshot_admission_active(provider, cancellation)?;
             let expected_cursor = session_cursor(
                 facade,
                 &mut cursors,
@@ -262,10 +277,7 @@ impl SnapshotAdmissionRunner {
                 scope,
             )
             .await?;
-            if cancellation.is_cancelled() {
-                self.budget.defer_unadmitted(input_bytes);
-                return Ok(());
-            }
+            ensure_snapshot_admission_active(provider, cancellation)?;
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }
@@ -274,6 +286,7 @@ impl SnapshotAdmissionRunner {
 
         for (record, source_identity, range) in pending {
             let provider = record.provider();
+            ensure_snapshot_admission_active(provider, cancellation)?;
             let expected_cursor = session_cursor(
                 facade,
                 &mut cursors,
@@ -283,18 +296,22 @@ impl SnapshotAdmissionRunner {
                 scope,
             )
             .await?;
+            ensure_snapshot_admission_active(provider, cancellation)?;
             if snapshot_cursor_covers_range(expected_cursor.as_ref(), generation, range) {
                 continue;
             }
+            ensure_snapshot_admission_active(provider, cancellation)?;
             let request = record.capture_request(
                 scope.clone(),
                 generation,
                 expected_cursor.clone(),
                 cancellation.clone(),
             )?;
+            ensure_snapshot_admission_active(provider, cancellation)?;
             let outcome = match facade.capture_observation(request).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
+                    ensure_snapshot_admission_active(provider, cancellation)?;
                     if snapshot_range_was_committed(
                         facade,
                         &source_identity,
@@ -326,6 +343,7 @@ impl SnapshotAdmissionRunner {
                     self.sessions.insert(record.session_id().to_owned());
                 }
                 CaptureObservationOutcome::Rejected { receipt, .. } => {
+                    ensure_snapshot_admission_active(provider, cancellation)?;
                     advance_snapshot_coverage(
                         facade,
                         provider,
@@ -342,6 +360,7 @@ impl SnapshotAdmissionRunner {
                     cursors.remove(record.session_id());
                 }
                 CaptureObservationOutcome::Quarantined { receipt, .. } => {
+                    ensure_snapshot_admission_active(provider, cancellation)?;
                     advance_snapshot_coverage(
                         facade,
                         provider,
@@ -370,6 +389,21 @@ impl SnapshotAdmissionRunner {
             deferred_by_byte_cap: self.budget.deferred(),
         }
     }
+}
+
+fn ensure_snapshot_admission_active(
+    provider: &'static str,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<()> {
+    if cancellation.is_cancelled() {
+        return Err(TranscriptIngestError::NonDurableRecord {
+            provider,
+            offset: 0,
+            end_offset: 0,
+            reason: "admission_cancelled",
+        });
+    }
+    Ok(())
 }
 
 /// Reads a session's durable cursor once per sweep, reusing the committed cursor
@@ -963,7 +997,7 @@ mod tests {
 
     #[test]
     fn snapshot_budget_is_aggregate_and_reports_deferral() {
-        let mut runner = SnapshotAdmissionRunner::new(Some(5));
+        let mut runner = SnapshotAdmissionRunner::new("test", Some(5));
         assert!(runner.budget.try_consume(3));
         assert!(!runner.budget.try_consume(3));
         assert!(runner.budget.try_consume(2));
@@ -995,7 +1029,7 @@ mod tests {
 
     #[test]
     fn unbounded_snapshot_budget_still_reports_consumed_bytes() {
-        let mut runner = SnapshotAdmissionRunner::new(None);
+        let mut runner = SnapshotAdmissionRunner::new("test", None);
         assert!(runner.budget.try_consume(7));
         assert!(runner.budget.try_consume(11));
         let outcome = runner.finish();
