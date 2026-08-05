@@ -406,7 +406,7 @@ pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
 /// picked up by a later pass; a fully-drained store scans nothing.
 ///
 /// Analytics timestamps are not consulted here (the manual
-/// `tracedecay sessions git-backfill` remains the exhaustive, watermark-free,
+/// `tracedecay sessions git-sync` remains the exhaustive, watermark-free,
 /// analytics-aware path); auto-backfill relies on session and reflog
 /// timestamps alone, which is enough to populate branch/worktree spans.
 pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(

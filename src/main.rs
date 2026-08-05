@@ -1348,7 +1348,10 @@ impl CommandStartupPolicy {
             | Commands::Doctor { .. }
             | Commands::Analytics { .. }
             | Commands::Sessions {
-                action: SessionsAction::Unfinished { .. },
+                action:
+                    SessionsAction::Import { .. }
+                    | SessionsAction::GitSync { .. }
+                    | SessionsAction::Unfinished { .. },
             }
             | Commands::Migrate { .. }
             | Commands::Projects { .. }

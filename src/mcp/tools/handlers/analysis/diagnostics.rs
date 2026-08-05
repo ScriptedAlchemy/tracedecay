@@ -117,7 +117,7 @@ async fn session_correlation_health_json(
                 "backfill_watermark": health.backfill_watermark,
                 "index_empty": empty,
                 "notice": if empty {
-                    "correlation index empty — `tracedecay_sessions_for` will return nothing until it is populated; it auto-backfills on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
+                    "correlation index empty — `tracedecay_sessions_for` will return nothing until it is populated; bounded convergence runs on daemon startup, or run `tracedecay sessions git-sync` to schedule it now"
                 } else {
                     "correlation index populated"
                 },
@@ -130,7 +130,7 @@ async fn session_correlation_health_json(
             "last_span_write": Value::Null,
             "backfill_watermark": Value::Null,
             "index_empty": true,
-            "notice": "correlation index not yet created — `tracedecay_sessions_for` will return nothing until it is populated; it auto-backfills on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now",
+            "notice": "correlation index not yet created — `tracedecay_sessions_for` will return nothing until it is populated; bounded convergence runs on daemon startup, or run `tracedecay sessions git-sync` to schedule it now",
         }),
     }
 }

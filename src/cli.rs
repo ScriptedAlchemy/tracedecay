@@ -903,11 +903,8 @@ pub(crate) struct SessionRefreshOperationArgs {
 
 #[derive(Subcommand)]
 pub enum SessionsAction {
-    /// Ingest all supported transcript providers into the project session DB
-    Ingest {
-        /// Deprecated compatibility option; ingest always sweeps all supported providers
-        #[arg(long)]
-        provider: Option<String>,
+    /// Schedule bounded import of current and historical native host transcripts
+    Import {
         /// Registered project id whose session store should receive ingested messages
         #[arg(long)]
         project_id: Option<String>,
@@ -922,13 +919,12 @@ pub enum SessionsAction {
         #[command(subcommand)]
         action: SessionsRefreshAction,
     },
-    /// Backfill the session↔git correlation index from historical session,
-    /// analytics, and reflog signals
-    GitBackfill {
-        /// Registered project id whose session store should be backfilled
+    /// Synchronize session↔git correlation from session, analytics, and reflog signals
+    GitSync {
+        /// Registered project id whose session store should be synchronized
         #[arg(long)]
         project_id: Option<String>,
-        /// Registered project root path or alias whose session store should be backfilled
+        /// Registered project root path or alias whose session store should be synchronized
         #[arg(long, conflicts_with = "project_id")]
         project_path: Option<String>,
         /// Lower bound on session activity and commit times (ISO-8601 or unix

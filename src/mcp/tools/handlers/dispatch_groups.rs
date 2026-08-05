@@ -264,6 +264,10 @@ pub(super) async fn dispatch_admin_tools(
                 options.accounting_db,
                 options.profile_root,
                 options.session_authorities,
+                options.session_sync_service,
+                options.application_request_id.clone(),
+                options.application_deadline.clone(),
+                options.application_cancellation.clone(),
             )
             .await
         }

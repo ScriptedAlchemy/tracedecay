@@ -281,8 +281,8 @@ fn session_ingest_warning(ingest: &SessionIngestHealth, project_root: &Path) -> 
         "session transcript ingest looks stalled: a transcript has {} \
          un-ingested bytes ({} total across {} transcript(s)), exceeding \
          the automatic catch-up warning threshold — session recall is missing \
-         those turns. Run `tracedecay sessions ingest --project-path {}` \
-         to drain the backlog manually.",
+         those turns. Run `tracedecay sessions import --project-path {}` \
+         to schedule bounded convergence.",
         ingest.max_transcript_pending_bytes,
         ingest.pending_bytes,
         ingest.pending_transcripts,
