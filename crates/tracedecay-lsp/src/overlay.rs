@@ -63,7 +63,7 @@ pub struct OverlayChange {
 ///
 /// `ephemeral` is intentionally explicit so adapters cannot accidentally
 /// treat an unsaved view as a reusable clean-generation input.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OverlaySnapshot {
     pub uri: String,
     pub language_id: String,
@@ -584,7 +584,9 @@ impl OverlayDiagnosticDebouncer {
 mod tests {
     use super::*;
     use crate::diagnostics::{LspPosition, LspRange};
-    use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask};
+    use crate::gateway::{
+        AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner, LspRuntimeTask,
+    };
     use crate::provider::{
         DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
         DiagnosticSnapshotPort, GenerationDiagnostics,

@@ -401,7 +401,7 @@ pub struct UnresolvedRef {
 }
 
 /// Result of extracting code entities from a file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ExtractionResult {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,

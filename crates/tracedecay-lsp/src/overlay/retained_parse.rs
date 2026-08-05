@@ -53,7 +53,7 @@ impl From<&ParseError> for OverlayParseUnavailable {
 ///
 /// The result is shared only with snapshots from this session-owned store. It
 /// is never a persistence input or a clean-generation authority.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OverlayExtractionState {
     Ready {
         result: Arc<ExtractionResult>,
