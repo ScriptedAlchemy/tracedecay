@@ -187,11 +187,55 @@ pub struct SessionSyncStatsV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "outcome")]
+pub enum SessionSyncCoverageV1 {
+    Complete,
+    Partial {
+        deferred_units: u64,
+    },
+    Backpressured {
+        admitted_units: u64,
+        rejected_units: u64,
+    },
+}
+
+impl SessionSyncCoverageV1 {
+    pub const fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    pub const fn remaining_work(&self) -> u64 {
+        match self {
+            Self::Complete => 0,
+            Self::Partial { deferred_units } => *deferred_units,
+            Self::Backpressured { rejected_units, .. } => *rejected_units,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSyncSourceCoverageV1 {
+    pub store_scope: String,
+    pub coverage: SessionSyncCoverageV1,
+}
+
+/// Exact canonical observation cursor committed by one source/store authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSyncSourceFrontierV1 {
+    pub store_scope: String,
+    pub source_json: String,
+    pub scope_json: String,
+    pub committed_cursor_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSyncCompletionReceiptV1 {
     pub admission: SessionSyncAdmissionReceiptV1,
     pub completed_at: UtcMicros,
     pub termination: OperationTermination,
     pub stats: SessionSyncStatsV1,
+    pub coverage: Vec<SessionSyncSourceCoverageV1>,
+    pub source_frontiers: Vec<SessionSyncSourceFrontierV1>,
     pub failure_codes: Vec<String>,
 }
 
@@ -245,7 +289,9 @@ pub struct SessionSyncJournalV1 {
     pub source: SessionSyncCommandV1,
     pub deadline: Deadline,
     pub status: SessionSyncJournalStatusV1,
-    pub frontier: SessionSyncStatsV1,
+    pub stats: SessionSyncStatsV1,
+    pub coverage: Vec<SessionSyncSourceCoverageV1>,
+    pub source_frontiers: Vec<SessionSyncSourceFrontierV1>,
     pub cancel_requested_at: Option<UtcMicros>,
     pub completion: Option<SessionSyncCompletionReceiptV1>,
     pub updated_at: UtcMicros,
@@ -263,7 +309,9 @@ impl SessionSyncJournalV1 {
             source: request.command(),
             deadline: request.deadline().clone(),
             status: SessionSyncJournalStatusV1::Queued,
-            frontier: SessionSyncStatsV1::default(),
+            stats: SessionSyncStatsV1::default(),
+            coverage: Vec::new(),
+            source_frontiers: Vec::new(),
             cancel_requested_at: request.cancellation().cancelled_at(),
             completion: None,
             updated_at: accepted_at,
@@ -300,8 +348,9 @@ pub trait SessionSyncServicePort: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionSyncCommandV1, SessionSyncJournalStatusV1, SessionSyncJournalV1,
-        SessionSyncOutcomeV1, SessionSyncRequestV1, SessionSyncScopeV1, SessionTranscriptImportV1,
+        SessionSyncCommandV1, SessionSyncCoverageV1, SessionSyncJournalStatusV1,
+        SessionSyncJournalV1, SessionSyncOutcomeV1, SessionSyncRequestV1, SessionSyncScopeV1,
+        SessionSyncSourceCoverageV1, SessionSyncSourceFrontierV1, SessionTranscriptImportV1,
     };
     use crate::{CancellationSignal, Deadline, IdempotencyKey, RequestId};
     use tracedecay_domain::{ProjectId, UserProfileId, UtcMicros};
@@ -358,15 +407,33 @@ mod tests {
         );
         let mut journal = SessionSyncJournalV1::queued(&request, UtcMicros(10));
         journal.status = SessionSyncJournalStatusV1::Running;
-        journal.frontier.sessions_imported = 3;
-        journal.frontier.messages_imported = 8;
+        journal.stats.sessions_imported = 3;
+        journal.stats.messages_imported = 8;
+        journal.coverage = vec![SessionSyncSourceCoverageV1 {
+            store_scope: "project".to_owned(),
+            coverage: SessionSyncCoverageV1::Partial { deferred_units: 2 },
+        }];
+        journal.source_frontiers = vec![SessionSyncSourceFrontierV1 {
+            store_scope: "project".to_owned(),
+            source_json: r#"{"provider":"codex"}"#.to_owned(),
+            scope_json: r#"{"project_id":"project.fixture"}"#.to_owned(),
+            committed_cursor_json: r#"{"byte_offset":72}"#.to_owned(),
+        }];
         journal.cancel_requested_at = Some(UtcMicros(50));
         let encoded = serde_json::to_string(&journal).unwrap();
         let restored: SessionSyncJournalV1 = serde_json::from_str(&encoded).unwrap();
 
         assert_eq!(restored.source, request.command());
-        assert_eq!(restored.frontier.sessions_imported, 3);
-        assert_eq!(restored.frontier.messages_imported, 8);
+        assert_eq!(restored.stats.sessions_imported, 3);
+        assert_eq!(restored.stats.messages_imported, 8);
+        assert_eq!(
+            restored.coverage[0].coverage,
+            SessionSyncCoverageV1::Partial { deferred_units: 2 }
+        );
+        assert_eq!(
+            restored.source_frontiers[0].committed_cursor_json,
+            r#"{"byte_offset":72}"#
+        );
         assert_eq!(restored.status, SessionSyncJournalStatusV1::Running);
         assert_eq!(restored.cancel_requested_at, Some(UtcMicros(50)));
         assert!(matches!(

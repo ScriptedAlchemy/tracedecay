@@ -736,6 +736,8 @@ fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
             "idempotency_key": receipt.admission.idempotency_key,
             "termination": receipt.termination,
             "stats": receipt.stats,
+            "coverage": receipt.coverage,
+            "source_frontiers": receipt.source_frontiers,
             "failure_codes": receipt.failure_codes,
             "completed_at": receipt.completed_at,
         }),

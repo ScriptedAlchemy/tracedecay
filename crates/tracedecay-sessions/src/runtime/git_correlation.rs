@@ -1889,9 +1889,11 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
 mod backfill;
 mod store;
 pub use backfill::{
-    BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
+    BackfillOptions, BackfillSkipReason, BackfillStats, BoundedBackfillInterruption,
+    BoundedBackfillOutcome, BoundedGitControl, BranchTimelineEntry,
     DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
-    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
+    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, run_bounded_backfill,
+    window_branch_segments,
 };
 pub use backfill::{run_backfill, run_incremental_backfill};
 pub use store::AnalyticsSessionTimestamp;

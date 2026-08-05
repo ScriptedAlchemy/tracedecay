@@ -1256,6 +1256,21 @@ async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_iden
 #[tokio::test]
 async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal").await;
+    harness
+        .registered
+        .writer_connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+             VALUES (?1, ?2, ?3)",
+            tracedecay_runtime_core::db::engine::params![
+                r#"{"provider":"codex"}"#,
+                r#"{"project_id":"project.fixture"}"#,
+                r#"{"byte_offset":72}"#,
+            ],
+        )
+        .await
+        .unwrap();
     assert!(
         harness
             .registered
@@ -1298,6 +1313,17 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
         vec![(
             "session-sync.v1.fixture".to_owned(),
             r#"{"status":"running"}"#.to_owned()
+        )]
+    );
+    assert_eq!(
+        remounted
+            .list_session_sync_source_frontiers()
+            .await
+            .unwrap(),
+        vec![(
+            r#"{"provider":"codex"}"#.to_owned(),
+            r#"{"project_id":"project.fixture"}"#.to_owned(),
+            r#"{"byte_offset":72}"#.to_owned(),
         )]
     );
 }
