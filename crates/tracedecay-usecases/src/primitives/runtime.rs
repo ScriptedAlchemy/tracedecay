@@ -1,4 +1,4 @@
-//! Owned, daemon-reachable dispatch for the closed PR12 primitive set.
+//! Owned, daemon-reachable dispatch for the closed application primitive set.
 //!
 //! This module composes existing application ports. It never calls an MCP,
 //! CLI, HTTP, or handler registry and it opens no store or policy authority.
@@ -127,7 +127,7 @@ impl Pr12OperationalPrimitiveRequest {
     fn validate(&self) -> Result<(), ApplicationContractError> {
         if !self.parameters.is_object() {
             return Err(ApplicationContractError::Inconsistent {
-                field: "PR12 operational parameter object",
+                field: "application operational parameter object",
             });
         }
         validate_no_scope_selector(&self.parameters)?;
@@ -712,7 +712,7 @@ fn transport_context(
     let expires_at = UtcMicros(deadline.expires_at.0.min(access.grant_expires_at.0));
     if observed_at.0 <= 0 || expires_at.0 <= observed_at.0 {
         return Err(ApplicationContractError::InvalidRange {
-            field: "PR12 primitive transport deadline",
+            field: "application primitive transport deadline",
         });
     }
     let grant = CapabilityGrantSnapshot::new(
@@ -737,7 +737,7 @@ fn transport_context(
     )
 }
 
-/// Concrete project-open factory for the complete owned PR12 primitive
+/// Concrete project-open factory for the complete owned application primitive
 /// runtime.
 ///
 /// Exact constructor signature:
@@ -771,7 +771,7 @@ pub fn open_pr12_primitive_project_runtime(
     validate_admitted_root_uri(&admitted_root_uri)?;
     if access.scope != scope {
         return Err(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted project authority",
+            field: "application primitive admitted project authority",
         });
     }
     let symbol_graph: Arc<dyn SymbolGraphPrimitivePort + Send + Sync> = Arc::new(
@@ -816,12 +816,12 @@ pub fn open_pr12_primitive_project_runtime(
 fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), ApplicationContractError> {
     if admitted_root_uri.len() > MAX_ADMITTED_ROOT_URI_BYTES {
         return Err(ApplicationContractError::InvalidRange {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         });
     }
     let uri =
         Url::parse(admitted_root_uri).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         })?;
     if uri.scheme() != "file"
         || !admitted_root_uri
@@ -833,7 +833,7 @@ fn validate_admitted_root_uri(admitted_root_uri: &str) -> Result<(), Application
         || uri.fragment().is_some()
     {
         return Err(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         });
     }
     Ok(())
@@ -2055,14 +2055,14 @@ fn validate_no_scope_selector(value: &Value) -> Result<(), ApplicationContractEr
     let object = value
         .as_object()
         .ok_or(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive parameter object",
+            field: "application primitive parameter object",
         })?;
     if object.contains_key("project_id")
         || object.contains_key("project_path")
         || object.contains_key("project_selector")
     {
         return Err(ApplicationContractError::Inconsistent {
-            field: "PR12 primitive request scope",
+            field: "application primitive request scope",
         });
     }
     Ok(())
@@ -2074,14 +2074,14 @@ fn validate_bounds(
 ) -> Result<(), ApplicationContractError> {
     let parameter_bytes =
         serde_json::to_vec(value).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive parameter serialization",
+            field: "application primitive parameter serialization",
         })?;
     if parameter_bytes.len() > MAX_OPERATION_PARAMETERS_BYTES
         || maximum_output_bytes == 0
         || maximum_output_bytes > MAX_OPERATION_OUTPUT_BYTES
     {
         return Err(ApplicationContractError::InvalidRange {
-            field: "PR12 primitive bounds",
+            field: "application primitive bounds",
         });
     }
     Ok(())

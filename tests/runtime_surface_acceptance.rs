@@ -111,7 +111,7 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
         &project,
     );
     copy_dir(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pr12_managed_run_overlay"),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_run_overlay"),
         &project,
     );
     git(&project, &["init", "--quiet"]);
@@ -394,7 +394,7 @@ fn initialize_project(home: &Path, project: &Path) {
         project,
     );
     copy_dir(
-        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pr12_managed_run_overlay"),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/managed_run_overlay"),
         project,
     );
     let output = common::tracedecay_command_with_home(home)

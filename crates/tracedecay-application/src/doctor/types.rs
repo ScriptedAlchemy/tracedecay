@@ -28,7 +28,7 @@ use crate::identity::application_identifier;
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorFindingFamilyV1 {
-    /// PR13 advisory/scout findings (GitHub review, CI localization,
+    /// advisory/scout findings (GitHub review, CI localization,
     /// proximity, context scout) — `crate::advisory` / domain feedback.
     Advisory,
     /// Desired-versus-effective configuration and compatibility drift

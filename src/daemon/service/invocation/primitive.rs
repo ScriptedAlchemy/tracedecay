@@ -1,4 +1,4 @@
-//! PR12 primitive, callable-code, and context-scout daemon invocation handlers.
+//! application primitive, callable-code, and context-scout daemon invocation handlers.
 
 use super::*;
 
@@ -877,7 +877,7 @@ impl DaemonContextScoutRuntimeRegistrar {
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonPrimitiveRuntimeRegistrationError {
-    #[error("a PR12 primitive runtime is already mounted for this project")]
+    #[error("a application primitive runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,

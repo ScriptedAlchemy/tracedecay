@@ -984,7 +984,7 @@ impl DaemonLspOwnerRegistrar {
 
 #[derive(Debug, Error)]
 pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
-    #[error("a PR13 advisory runtime is already mounted for this project")]
+    #[error("a advisory runtime is already mounted for this project")]
     AlreadyRegistered,
     #[error("the daemon project runtime registry is closed")]
     RegistryClosed,

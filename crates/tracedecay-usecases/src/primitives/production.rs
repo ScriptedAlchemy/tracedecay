@@ -1,4 +1,4 @@
-//! Production PR12 primitive owners over `TraceDecay` graph/query authorities.
+//! Production application primitive owners over `TraceDecay` graph/query authorities.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
@@ -2105,7 +2105,7 @@ fn operational_problem(
 }
 
 /// Owned authorities and admitted project state required to open the complete
-/// PR12 primitive runtime.
+/// application primitive runtime.
 pub struct Pr12ProductionPrimitiveOpenRequestV1 {
     database: Database,
     graph: Arc<TraceDecay>,
@@ -2150,7 +2150,7 @@ impl Pr12ProductionPrimitiveOpenRequestV1 {
     }
 }
 
-/// Opens the complete owned PR12 primitive runtime from production authorities.
+/// Opens the complete owned application primitive runtime from production authorities.
 pub async fn open_pr12_production_primitive_runtime(
     request: Pr12ProductionPrimitiveOpenRequestV1,
 ) -> Result<Pr12PrimitiveProjectRuntime, ApplicationContractError> {
@@ -2172,18 +2172,18 @@ pub async fn open_pr12_production_primitive_runtime(
         .ensure_active_session_cursor_key_result()
         .await
         .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive session cursor key",
+            field: "application primitive session cursor key",
         })?;
     let read = session_db.as_ref().read_snapshot().await.map_err(|_| {
         ApplicationContractError::Inconsistent {
-            field: "PR12 primitive session cursor snapshot",
+            field: "application primitive session cursor snapshot",
         }
     })?;
     let authenticator = Arc::new(
         GlobalDbCursorKeyProvider::from_registered_key_ref(&read, key.clone())
             .await
             .map_err(|_| ApplicationContractError::Inconsistent {
-                field: "PR12 primitive session cursor authenticator",
+                field: "application primitive session cursor authenticator",
             })?,
     );
     // The watermark is part of every symbol-graph cursor's snapshot identity.
@@ -2194,7 +2194,7 @@ pub async fn open_pr12_production_primitive_runtime(
         .get_stats()
         .await
         .map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive symbol-graph cursor watermark",
+            field: "application primitive symbol-graph cursor watermark",
         })?
         .node_count
         .max(1);
@@ -2291,7 +2291,7 @@ pub fn admitted_root_uri_for_project(
 ) -> Result<String, ApplicationContractError> {
     let uri =
         Url::from_file_path(project_root).map_err(|()| ApplicationContractError::Inconsistent {
-            field: "PR12 primitive admitted root URI",
+            field: "application primitive admitted root URI",
         })?;
     Ok(uri.to_string())
 }
@@ -2314,7 +2314,7 @@ pub fn locator_digest_for_project(
         repository_locator.to_string_lossy().as_ref(),
     ))
     .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "PR12 primitive project locator digest",
+        field: "application primitive project locator digest",
     })
 }
 

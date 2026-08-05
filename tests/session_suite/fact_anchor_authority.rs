@@ -110,7 +110,7 @@ fn anchor(entity_id: &str, scope: ObservationScopeV1, ingested_at: i64) -> Retri
             resolved_scope_id: ScopeResolutionId::new("scope.pr7.authority").unwrap(),
             privacy_domain_id: PrivacyDomainId::new("privacy.pr7.authority").unwrap(),
             access_policy_digest: AccessPolicyDigest::new(DIGEST_A).unwrap(),
-            capability_id: CapabilityId::new("capability.pr7.authority").unwrap(),
+            capability_id: CapabilityId::new("capability.fact-anchor-authority").unwrap(),
             canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(DIGEST_B).unwrap(),
         },
         payload_access: PayloadAccessState::Eligible,
@@ -272,7 +272,7 @@ fn canonical(path: &Path) -> PathBuf {
 async fn revoked_write_authority_fails_closed_without_partial_fact_commit() {
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
-    let db_path = profile_root.join("projects/pr7-authority/memory.db");
+    let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
     let lease =
         acquire_exclusive_for_profile(&profile_root, "pr7 revoked authority fixture").unwrap();
     let scope =
@@ -406,7 +406,7 @@ fn ephemeral_safe_fixture_base() -> PathBuf {
         .and_then(Path::parent) // .../target/<profile>
         .expect("test binary sits under a cargo target profile directory")
         .to_path_buf();
-    let base = profile_dir.join("tracedecay-pr7-authority");
+    let base = profile_dir.join("tracedecay-fact-anchor-authority");
     std::fs::create_dir_all(&base).expect("failed to create hermetic fixture base directory");
     base
 }
@@ -752,7 +752,7 @@ async fn concurrent_clients_commit_one_fact_and_one_anchor_with_typed_loser_outc
 async fn daemon_only_writer_rejects_foreign_authority_and_shares_one_writer_token() {
     let tmp = TempDir::new().unwrap();
     let profile_root = canonical(tmp.path());
-    let db_path = profile_root.join("projects/pr7-authority/memory.db");
+    let db_path = profile_root.join("projects/fact-anchor-authority/memory.db");
     let lease = acquire_exclusive_for_profile(&profile_root, "pr7 single writer fixture").unwrap();
     let scope =
         enter_maintenance_database_scope(&lease, &profile_root, "pr7 single writer fixture")

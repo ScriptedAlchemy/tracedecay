@@ -1,4 +1,4 @@
-//! One-shot composition root for PR13 advisory providers.
+//! One-shot composition root for advisory providers.
 //!
 //! Provider records retain their own provenance and coverage. This owner
 //! projects canonical anchored findings into the existing Plan 09 cycle and
@@ -80,7 +80,7 @@ pub struct Pr13AdvisoryRuntimeOpenV1 {
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum Pr13AdvisoryRuntimeOpenErrorV1 {
-    #[error("PR13 advisory scope does not match the shared PR12 runtime")]
+    #[error("advisory scope does not match the shared feedback runtime")]
     ScopeMismatch,
     #[error("PR13 GitHub runtime is unavailable")]
     GitHubRuntimeUnavailable,

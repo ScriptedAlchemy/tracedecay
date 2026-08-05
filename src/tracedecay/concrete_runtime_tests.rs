@@ -122,19 +122,20 @@ async fn source_reads_reuse_the_cross_session_cache() {
 
 fn application_context(suffix: &str) -> (ResolvedScope, RequestContext, ApplicationOperation) {
     let scope = ResolvedScope::new(
-        ProjectId::new("project.pr12").expect("project"),
-        RepositoryId::new("repository.pr12").expect("repository"),
-        WorktreeId::new("worktree.pr12").expect("worktree"),
-        Some(RefId::new("refs/heads/pr12").expect("reference")),
+        ProjectId::new("project.retrieval-primitives").expect("project"),
+        RepositoryId::new("repository.retrieval-primitives").expect("repository"),
+        WorktreeId::new("worktree.retrieval-primitives").expect("worktree"),
+        Some(RefId::new("refs/heads/retrieval-primitives").expect("reference")),
     )
     .expect("scope");
-    let capability = CapabilityId::new(format!("capability.pr12.{suffix}")).expect("capability");
-    let use_case = UseCaseId::new(format!("use-case.pr12.{suffix}")).expect("use case");
+    let capability =
+        CapabilityId::new(format!("capability.retrieval.{suffix}")).expect("capability");
+    let use_case = UseCaseId::new(format!("use-case.retrieval.{suffix}")).expect("use case");
     let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new(format!("grant.pr12.{suffix}")).expect("grant id"),
+        CapabilityGrantId::new(format!("grant.retrieval.{suffix}")).expect("grant id"),
         1,
         ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("grant digest"),
-        ActorId::new("actor.pr12.issuer").expect("issuer"),
+        ActorId::new("actor.retrieval.issuer").expect("issuer"),
         UtcMicros(1),
         UtcMicros(10_000),
         scope.clone(),
@@ -144,19 +145,19 @@ fn application_context(suffix: &str) -> (ResolvedScope, RequestContext, Applicat
     )
     .expect("grant");
     let context = RequestContext::new(
-        ActorId::new("actor.pr12.requester").expect("actor"),
+        ActorId::new("actor.retrieval.requester").expect("actor"),
         scope.clone(),
         grant,
-        RequestId::new(format!("request.pr12.{suffix}")).expect("request id"),
+        RequestId::new(format!("request.retrieval.{suffix}")).expect("request id"),
         Deadline::new(UtcMicros(10_000)).expect("deadline"),
-        CancellationContext::active(format!("cancel.pr12.{suffix}")).expect("cancellation"),
+        CancellationContext::active(format!("cancel.retrieval.{suffix}")).expect("cancellation"),
     )
     .expect("request context");
     let operation = ApplicationOperation::new(
         capability,
         use_case,
         ResultContractRef::new(
-            SchemaId::new(format!("schema.pr12.{suffix}")).expect("schema"),
+            SchemaId::new(format!("schema.retrieval.{suffix}")).expect("schema"),
             1,
         )
         .expect("result contract"),
