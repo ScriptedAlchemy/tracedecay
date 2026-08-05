@@ -1799,11 +1799,11 @@ fn dispatch_message_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::admission::test_support::PanicHostAdmission;
+    use crate::admission::test_support::MemoryHostAdmission;
     use serde_json::json;
 
     #[tokio::test]
-    async fn cancelled_startup_sweep_defers_before_admitting_cursor_jsonl() {
+    async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
         let project = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let project_id = ProjectId::new("project.cursor-cancelled-startup").unwrap();
@@ -1822,24 +1822,40 @@ mod tests {
         )
         .unwrap();
         let source = CursorSweepSource::with_home(home.path());
+        let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
-        let outcome = admit_cursor_sweep_observations_with_admission(
+        let error = admit_cursor_sweep_observations_with_admission(
             &source,
             project.path(),
-            &PanicHostAdmission,
+            &admission,
             None,
-            ObservationScopeV1::Project { project_id },
+            ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            },
             &cancellation,
         )
         .await
-        .unwrap();
+        .expect_err("pre-cancelled Cursor sweep must stop before persistence");
 
-        assert_eq!(outcome.sessions_upserted, 0);
-        assert_eq!(outcome.messages_upserted, 0);
-        assert_eq!(outcome.bytes_consumed, 0);
-        assert!(outcome.source_deferred);
+        assert!(matches!(
+            error,
+            TranscriptIngestError::Cancelled { provider: "cursor" }
+        ));
+        assert!(admission.observations().is_empty());
+
+        let replay = admit_cursor_sweep_observations_with_admission(
+            &source,
+            project.path(),
+            &admission,
+            None,
+            ObservationScopeV1::Project { project_id },
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("uncancelled Cursor retry must admit the untouched source");
+        assert_eq!(replay.messages_upserted, 1);
     }
 
     #[test]
