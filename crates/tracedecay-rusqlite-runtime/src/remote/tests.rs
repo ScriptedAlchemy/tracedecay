@@ -262,6 +262,25 @@ fn runtime_attachment_requires_registered_remote_binding() {
 }
 
 #[test]
+fn runtime_attachment_rejects_any_non_final_persisted_shape() {
+    let fixture = fixture();
+    fixture
+        .handle
+        .execute_batch("DROP TABLE remote_enrollments".to_owned())
+        .unwrap();
+    assert!(matches!(
+        RemoteSqliteStorageV1::from_registered(
+            fixture.handle.clone(),
+            fixture.binding.clone(),
+            Arc::new(TestKeyring(Arc::new(
+                RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
+            ))),
+        ),
+        Err(RemoteSqliteStorageErrorV1::ResetRequired)
+    ));
+}
+
+#[test]
 fn spool_key_rejects_zero_revision_and_wrong_size() {
     assert!(matches!(
         RemoteSpoolKeyV1::from_secret_bytes(0, vec![7; 32]),
@@ -360,5 +379,31 @@ fn capture_rejects_sequence_gaps_and_corrupt_ciphertext() {
     assert_eq!(
         storage.load_replay_frame(&receipt.event_id),
         Err(RemoteCapturePersistenceErrorV1::Corruption)
+    );
+}
+
+#[test]
+fn capture_enforces_the_registered_spool_event_bound() {
+    let fixture = fixture();
+    let storage = RemoteSqliteStorageV1::from_registered_with_limits(
+        fixture.handle.clone(),
+        fixture.binding.clone(),
+        Arc::new(TestKeyring(Arc::new(
+            RemoteSpoolKeyV1::from_secret_bytes(7, vec![7; 32]).unwrap(),
+        ))),
+        RemoteSpoolLimitsV1::new(1, 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    let first = admitted();
+    let receipt = storage.capture_pending(&first).unwrap();
+    let mut second = admitted();
+    second.sequence = RemoteCaptureSequenceV1 {
+        sequence: 2,
+        previous_event_id: Some(receipt.event_id),
+    };
+
+    assert_eq!(
+        storage.capture_pending(&second),
+        Err(RemoteCapturePersistenceErrorV1::Overflow)
     );
 }

@@ -333,6 +333,7 @@ async fn remote_node_initialization_installs_only_the_final_registered_schema() 
             "remote_enrollment_grants",
             "remote_enrollments",
             "remote_spool_frames",
+            "remote_store_contract",
         ]
     );
 }

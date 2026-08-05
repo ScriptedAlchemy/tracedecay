@@ -64,6 +64,8 @@ pub enum RemoteSqliteStorageErrorV1 {
     InvalidKeyLength,
     #[error("remote Brain store binding does not match the registered runtime")]
     BindingMismatch,
+    #[error("remote Brain store does not have the exact final persisted shape and requires reset")]
+    ResetRequired,
     #[error("remote Brain storage is corrupt")]
     Corruption,
     #[error("remote Brain storage is unavailable")]
@@ -72,11 +74,42 @@ pub enum RemoteSqliteStorageErrorV1 {
     Sql(#[from] ExactSqlError),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RemoteSpoolLimitsV1 {
+    pub maximum_events: u64,
+    pub maximum_ciphertext_bytes: u64,
+}
+
+impl RemoteSpoolLimitsV1 {
+    pub fn new(
+        maximum_events: u64,
+        maximum_ciphertext_bytes: u64,
+    ) -> Result<Self, RemoteSqliteStorageErrorV1> {
+        if maximum_events == 0 || maximum_ciphertext_bytes == 0 {
+            return Err(RemoteSqliteStorageErrorV1::ResetRequired);
+        }
+        Ok(Self {
+            maximum_events,
+            maximum_ciphertext_bytes,
+        })
+    }
+}
+
+impl Default for RemoteSpoolLimitsV1 {
+    fn default() -> Self {
+        Self {
+            maximum_events: 4_096,
+            maximum_ciphertext_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RemoteSqliteStorageV1 {
     handle: ExactSqlHandle,
     binding: StoreRuntimeBindingV1,
     keyring: Arc<dyn RemoteSpoolKeyringV1>,
+    limits: RemoteSpoolLimitsV1,
 }
 
 impl RemoteSqliteStorageV1 {
@@ -84,6 +117,15 @@ impl RemoteSqliteStorageV1 {
         handle: ExactSqlHandle,
         binding: StoreRuntimeBindingV1,
         keyring: Arc<dyn RemoteSpoolKeyringV1>,
+    ) -> Result<Self, RemoteSqliteStorageErrorV1> {
+        Self::from_registered_with_limits(handle, binding, keyring, RemoteSpoolLimitsV1::default())
+    }
+
+    pub fn from_registered_with_limits(
+        handle: ExactSqlHandle,
+        binding: StoreRuntimeBindingV1,
+        keyring: Arc<dyn RemoteSpoolKeyringV1>,
+        limits: RemoteSpoolLimitsV1,
     ) -> Result<Self, RemoteSqliteStorageErrorV1> {
         if handle.binding() != &binding
             || !matches!(
@@ -93,10 +135,12 @@ impl RemoteSqliteStorageV1 {
         {
             return Err(RemoteSqliteStorageErrorV1::BindingMismatch);
         }
+        validate_final_schema(&handle)?;
         Ok(Self {
             handle,
             binding,
             keyring,
+            limits,
         })
     }
 
@@ -498,6 +542,26 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
         }
         validate_previous_frame(&transaction, command)?;
         let encrypted = self.encrypt_frame(&event_id, command)?;
+        let usage = transaction
+            .query(statement(
+                "SELECT COUNT(*), COALESCE(SUM(length(ciphertext)), 0)
+                 FROM remote_spool_frames
+                 WHERE state != 'garbage_collection_eligible'",
+                Vec::new(),
+            )?)
+            .map_err(map_persistence_error)?;
+        let usage = persistence_one_row(usage)?;
+        let event_count = row_u64(&usage, 0)?;
+        let ciphertext_bytes = row_u64(&usage, 1)?;
+        let new_ciphertext_bytes = u64::try_from(encrypted.ciphertext.len())
+            .map_err(|_| RemoteCapturePersistenceErrorV1::Overflow)?;
+        if event_count >= self.limits.maximum_events
+            || ciphertext_bytes
+                .checked_add(new_ciphertext_bytes)
+                .is_none_or(|bytes| bytes > self.limits.maximum_ciphertext_bytes)
+        {
+            return Err(RemoteCapturePersistenceErrorV1::Overflow);
+        }
         transaction
             .execute(statement(
                 "INSERT INTO remote_spool_frames (
@@ -526,6 +590,46 @@ impl RemoteCapturePortV1 for RemoteSqliteStorageV1 {
             sequence: command.sequence.sequence,
             disposition: RemoteCaptureDispositionV1::CapturedPending,
         })
+    }
+}
+
+fn validate_final_schema(handle: &ExactSqlHandle) -> Result<(), RemoteSqliteStorageErrorV1> {
+    let rows = query(
+        handle,
+        "SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+        Vec::new(),
+    )
+    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    let names = rows
+        .rows
+        .iter()
+        .map(|row| match row.values.as_slice() {
+            [ExactSqlValue::Text(name)] => Ok(name.as_str()),
+            _ => Err(RemoteSqliteStorageErrorV1::ResetRequired),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if names != schema::REMOTE_NODE_LOCAL_TABLES {
+        return Err(RemoteSqliteStorageErrorV1::ResetRequired);
+    }
+    let marker = query(
+        handle,
+        "SELECT contract_id FROM remote_store_contract WHERE singleton = 1",
+        Vec::new(),
+    )
+    .map_err(|_| RemoteSqliteStorageErrorV1::ResetRequired)?;
+    match marker.rows.as_slice() {
+        [row]
+            if matches!(
+                row.values.as_slice(),
+                [ExactSqlValue::Text(contract)]
+                    if contract == "tracedecay.remote-node.final-v2"
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(RemoteSqliteStorageErrorV1::ResetRequired),
     }
 }
 

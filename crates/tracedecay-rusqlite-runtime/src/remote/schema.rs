@@ -1,4 +1,13 @@
 pub const REMOTE_NODE_LOCAL_SCHEMA: &str = "
+CREATE TABLE remote_store_contract (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    contract_id TEXT NOT NULL CHECK (
+        contract_id = 'tracedecay.remote-node.final-v2'
+    )
+) STRICT;
+INSERT INTO remote_store_contract (singleton, contract_id)
+VALUES (1, 'tracedecay.remote-node.final-v2');
+
 CREATE TABLE remote_authorities (
     brain_id TEXT PRIMARY KEY,
     runtime_binding_json TEXT NOT NULL,
@@ -50,6 +59,14 @@ CREATE TABLE remote_spool_frames (
 ) STRICT;
 
 ";
+
+pub(super) const REMOTE_NODE_LOCAL_TABLES: &[&str] = &[
+    "remote_authorities",
+    "remote_enrollment_grants",
+    "remote_enrollments",
+    "remote_spool_frames",
+    "remote_store_contract",
+];
 
 /// Canonical repository-store fragment for replay identity and sequencing.
 ///
