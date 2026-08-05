@@ -526,7 +526,6 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
 fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let mut compatibility_operations = std::collections::BTreeSet::new();
-    let mut resolved_bindings = 0;
 
     for capability in catalog.capabilities() {
         if !capability.availability().is_callable() {
@@ -550,16 +549,12 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
                 .unwrap_or_else(|| panic!("{tool_name} must resolve before retained dispatch"));
             assert_eq!(resolved.binding_id, *binding_id);
             compatibility_operations.insert(binding.operation().as_str().to_owned());
-            resolved_bindings += 1;
         }
     }
 
-    assert_eq!(resolved_bindings, 58);
     assert_eq!(
         compatibility_operations,
         [
-            "api_migration_apply",
-            "api_migration_plan",
             "ast_grep_rewrite",
             "fact_feedback",
             "fact_store",

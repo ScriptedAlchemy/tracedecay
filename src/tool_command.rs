@@ -610,8 +610,6 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_replace_symbol"
         || n == "tracedecay_insert_at_symbol"
         || n == "tracedecay_move_symbol"
-        || n == "tracedecay_api_migration_plan"
-        || n == "tracedecay_api_migration_apply"
     {
         "edit"
     } else if n == "tracedecay_fact_store"
