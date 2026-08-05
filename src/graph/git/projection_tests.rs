@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -14,7 +15,9 @@ use tracedecay_graph_db::{
     GraphWriteBatch, SourceGeneration,
 };
 
-use super::native::{CollectCommitError, collect_root_tree_paths};
+use super::native::{
+    AncestorCheckV1, CollectCommitError, collect_root_tree_paths, is_ancestor_bounded,
+};
 use super::{GitHealthProjectionError, GitHealthProjectionStoreV1, MAX_CHANGED_FILES_PER_COMMIT};
 use crate::application::context::CancellationToken;
 
@@ -174,10 +177,34 @@ fn live_graph_cancellation() -> std::sync::Arc<dyn GraphCancellation> {
     std::sync::Arc::new(super::TokenCancellation(CancellationToken::new()))
 }
 
+fn read_churn(
+    store: &GitHealthProjectionStoreV1,
+    binding: &GitHealthProjectionBindingV1,
+    snapshot: &tracedecay_application::GitHealthProjectionSnapshotV1,
+) -> BTreeMap<String, usize> {
+    let mut churn = BTreeMap::new();
+    let mut cursor = None;
+    loop {
+        let page = store
+            .read_churn_page(binding, snapshot, cursor.as_deref(), 256)
+            .expect("churn page");
+        churn.extend(
+            page.entries
+                .into_iter()
+                .map(|entry| (entry.path, entry.churn)),
+        );
+        let Some(next) = page.next_cursor else {
+            return churn;
+        };
+        cursor = Some(next);
+    }
+}
+
 fn apply_corruption(
     store: &GitHealthProjectionStoreV1,
     binding: &GitHealthProjectionBindingV1,
     generation: &str,
+    watermark: &str,
     mutation: GraphMutation,
 ) {
     store
@@ -187,7 +214,7 @@ fn apply_corruption(
                 super::persistence::namespace(binding).expect("namespace"),
                 super::persistence::projection().expect("projection"),
                 SourceGeneration::new(generation).expect("generation"),
-                GraphWatermark::new(format!("{generation}:corruption-fixture")).expect("watermark"),
+                GraphWatermark::new(watermark).expect("watermark"),
                 vec![mutation],
                 live_graph_cancellation(),
             )
@@ -217,8 +244,16 @@ fn a_second_head_projects_only_the_new_commit() {
     let after = super::capture_source(repository.path(), &binding, NOW_SECS)
         .expect("capture fast-forward source");
     let repository_handle = gix::open(repository.path()).expect("open fixture repository");
-    assert!(
-        super::native::is_ancestor(&repository_handle, &before.source.commit, &after.commit),
+    assert_eq!(
+        is_ancestor_bounded(
+            &repository_handle,
+            &before.source.commit,
+            &after.commit,
+            64,
+            || false,
+        )
+        .expect("bounded ancestry"),
+        AncestorCheckV1::Ancestor,
         "the prior ready commit must be recognized as the new HEAD ancestor"
     );
     assert_eq!(
@@ -230,7 +265,110 @@ fn a_second_head_projects_only_the_new_commit() {
         panic!("incremental projection must be ready");
     };
     assert_eq!(snapshot.commits_projected, 13);
-    assert_eq!(snapshot.file_churn.get("history.rs"), Some(&13));
+    assert_eq!(
+        read_churn(&store, &binding, &snapshot).get("history.rs"),
+        Some(&13)
+    );
+}
+
+#[test]
+fn ancestry_walk_observes_cancellation_before_its_bound() {
+    let repository = repository();
+    for ordinal in 0..32 {
+        commit_file(repository.path(), ordinal, "history.rs");
+    }
+    let repository_handle = gix::open(repository.path()).expect("open fixture repository");
+    let head = super::capture_source(repository.path(), &binding(repository.path()), NOW_SECS)
+        .expect("capture head");
+    let absent = tracedecay_domain::GitOidV1::new("1111111111111111111111111111111111111111")
+        .expect("absent oid");
+    let mut checkpoints = 0usize;
+
+    let result = is_ancestor_bounded(&repository_handle, &absent, &head.commit, 64, || {
+        checkpoints += 1;
+        checkpoints > 5
+    });
+
+    assert!(matches!(result, Err(GitHealthProjectionError::Cancelled)));
+    assert!(checkpoints <= 6);
+}
+
+#[test]
+fn ancestry_walk_reports_its_bound_without_claiming_a_negative() {
+    let repository = repository();
+    for ordinal in 0..8 {
+        commit_file(repository.path(), ordinal, "history.rs");
+    }
+    let repository_handle = gix::open(repository.path()).expect("open fixture repository");
+    let head = super::capture_source(repository.path(), &binding(repository.path()), NOW_SECS)
+        .expect("capture head");
+    let absent = tracedecay_domain::GitOidV1::new("1111111111111111111111111111111111111111")
+        .expect("absent oid");
+
+    assert_eq!(
+        is_ancestor_bounded(&repository_handle, &absent, &head.commit, 2, || false)
+            .expect("bounded ancestry"),
+        AncestorCheckV1::TraversalLimit
+    );
+}
+
+#[test]
+fn non_monotonic_ancestor_inside_window_is_not_omitted() {
+    let repository = repository();
+    commit_file_at(repository.path(), 0, "retained.rs", WINDOW_START + 60);
+    commit_file_at(repository.path(), 1, "older-child.rs", WINDOW_START - 60);
+    let binding = binding(repository.path());
+    let store_root = TempDir::new().expect("projection root");
+    let store = store(&store_root);
+
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+        panic!("projection must be ready");
+    };
+    assert_eq!(snapshot.coverage, GitHealthProjectionCoverageV1::Complete);
+    assert_eq!(snapshot.commits_projected, 1);
+    assert_eq!(
+        read_churn(&store, &binding, &snapshot).get("retained.rs"),
+        Some(&1)
+    );
+}
+
+#[test]
+fn exhausted_history_bound_is_persisted_as_partial_not_complete() {
+    let repository = repository();
+    for ordinal in 0..4 {
+        commit_file_at(
+            repository.path(),
+            ordinal,
+            "old.rs",
+            WINDOW_START - 100 + ordinal as i64,
+        );
+    }
+    let binding = binding(repository.path());
+    let store_root = TempDir::new().expect("projection root");
+    let store = store(&store_root);
+
+    let progress = store
+        .advance_with_history_limit(
+            repository.path(),
+            &binding,
+            NOW_SECS,
+            16,
+            2,
+            &CancellationToken::new(),
+        )
+        .expect("bounded projection");
+    assert!(progress.complete);
+    let GitHealthProjectionAvailabilityV1::Ready { snapshot } = store.read(&binding) else {
+        panic!("bounded projection must publish a typed result");
+    };
+    assert_eq!(
+        snapshot.coverage,
+        GitHealthProjectionCoverageV1::Partial {
+            reason: GitHealthProjectionPartialReasonV1::HistoryTraversalLimit,
+        }
+    );
 }
 
 #[test]
@@ -249,8 +387,9 @@ fn day_rollover_prunes_expired_commits_and_paths_without_rewalking_head() {
         panic!("rolled projection must be ready");
     };
     assert_eq!(snapshot.commits_projected, 1);
-    assert!(!snapshot.file_churn.contains_key("expired.rs"));
-    assert_eq!(snapshot.file_churn.get("retained.rs"), Some(&1));
+    let churn = read_churn(&store, &binding, &snapshot);
+    assert!(!churn.contains_key("expired.rs"));
+    assert_eq!(churn.get("retained.rs"), Some(&1));
 }
 
 #[test]
@@ -267,8 +406,9 @@ fn commits_at_or_after_window_end_are_not_projected() {
         panic!("projection must be ready");
     };
     assert_eq!(snapshot.commits_projected, 1);
-    assert_eq!(snapshot.file_churn.get("present.rs"), Some(&1));
-    assert!(!snapshot.file_churn.contains_key("future.rs"));
+    let churn = read_churn(&store, &binding, &snapshot);
+    assert_eq!(churn.get("present.rs"), Some(&1));
+    assert!(!churn.contains_key("future.rs"));
 }
 
 #[test]
@@ -289,7 +429,7 @@ fn oversized_root_tree_stops_at_the_path_bound_with_partial_coverage() {
             reason: GitHealthProjectionPartialReasonV1::CommitPathLimit,
         }
     );
-    assert!(snapshot.file_churn.is_empty());
+    assert_eq!(snapshot.churn_entries, 0);
 }
 
 #[test]
@@ -363,6 +503,7 @@ fn persisted_state_with_a_foreign_project_profile_and_store_is_typed_as_corrupt(
         .expect("ready state")
         .expect("ready state exists");
     let generation = ready.source.projection_generation.as_str().to_owned();
+    let watermark = format!("{generation}:{}", ready.counters.batches_completed);
     let foreign_scope = tracedecay_application::ResolvedScope::new(
         ProjectId::new("project.foreign").expect("foreign project"),
         binding.scope.repository_id.clone(),
@@ -380,6 +521,7 @@ fn persisted_state_with_a_foreign_project_profile_and_store_is_typed_as_corrupt(
         &store,
         &binding,
         &generation,
+        &watermark,
         GraphMutation::UpsertEntity(
             super::persistence::state_entity(super::READY_ENTITY, &ready)
                 .expect("corrupt state entity"),
@@ -407,6 +549,7 @@ fn persisted_source_identity_must_match_its_authenticated_generation() {
         .expect("ready state")
         .expect("ready state exists");
     let generation = ready.source.projection_generation.as_str().to_owned();
+    let watermark = format!("{generation}:{}", ready.counters.batches_completed);
     ready.source.tree =
         tracedecay_domain::GitOidV1::new("2222222222222222222222222222222222222222")
             .expect("foreign tree");
@@ -414,6 +557,7 @@ fn persisted_source_identity_must_match_its_authenticated_generation() {
         &store,
         &binding,
         &generation,
+        &watermark,
         GraphMutation::UpsertEntity(
             super::persistence::state_entity(super::READY_ENTITY, &ready)
                 .expect("corrupt state entity"),
@@ -440,6 +584,7 @@ fn persisted_commit_payload_must_authenticate_its_entity_identity() {
         panic!("projection ready");
     };
     let generation = snapshot.source.projection_generation.as_str().to_owned();
+    let watermark = format!("{generation}:{}", snapshot.batches_completed);
     let mut entity = store
         .projection_entities(&binding, live_graph_cancellation())
         .expect("projection entities")
@@ -462,8 +607,41 @@ fn persisted_commit_payload_must_authenticate_its_entity_identity() {
         &store,
         &binding,
         &generation,
+        &watermark,
         GraphMutation::UpsertEntity(entity),
     );
+    assert_eq!(
+        store.read(&binding),
+        GitHealthProjectionAvailabilityV1::Unavailable {
+            reason:
+                tracedecay_application::GitHealthProjectionUnavailableReasonV1::CorruptProjection,
+        }
+    );
+}
+
+#[test]
+fn persisted_projection_commit_metadata_must_match_ready_generation_and_watermark() {
+    let repository = repository();
+    commit_file(repository.path(), 0, "history.rs");
+    let binding = binding(repository.path());
+    let store_root = TempDir::new().expect("projection root");
+    let store = store(&store_root);
+    finish_projection(&store, repository.path(), &binding, NOW_SECS);
+    let ready = store
+        .read_state::<super::ReadyStateV1>(&binding, super::READY_ENTITY, live_graph_cancellation())
+        .expect("ready state")
+        .expect("ready state exists");
+    apply_corruption(
+        &store,
+        &binding,
+        "foreign-generation",
+        "foreign-generation:foreign-watermark",
+        GraphMutation::UpsertEntity(
+            super::persistence::state_entity(super::READY_ENTITY, &ready)
+                .expect("ready state entity"),
+        ),
+    );
+
     assert_eq!(
         store.read(&binding),
         GitHealthProjectionAvailabilityV1::Unavailable {

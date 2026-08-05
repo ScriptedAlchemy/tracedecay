@@ -1,12 +1,5 @@
-//! Production project composition: the wiring that builds one project's MCP
-//! server from its store runtime, schedulers, and authority ports.
-//!
-//! `production_project_server` is the single composition root shared by the
-//! Unix broker, the portable broker, and the in-process test harness.
-//!
-//! Relocated verbatim from `daemon.rs` as a pure structural split; no logic
-//! or signatures changed. `use super::*` re-exposes every name the parent
-//! `daemon` module had in scope so the moved code resolves unchanged.
+//! Production project composition builds one MCP server from store runtimes,
+//! schedulers, and authority ports across all daemon transports.
 
 use super::*;
 
@@ -292,7 +285,7 @@ pub(super) async fn production_project_server(
         canonical_project_path.to_path_buf(),
     ));
     let route_registered = Arc::new(AtomicBool::new(true));
-    let database_owner_reconciler = runtime.database_owner_reconciler(
+    let base_database_owner_reconciler = runtime.database_owner_reconciler(
         store_administration,
         Arc::clone(&current_key),
         Arc::clone(&current_project_path),
@@ -351,7 +344,7 @@ pub(super) async fn production_project_server(
     })?;
     let git_health_lease = invocation
         .git_health_projections
-        .mount(
+        .mount_candidate(
             canonical_project_path,
             cg.store_layout().data_root.join("project-graph.grafeo"),
             git_health_binding.clone(),
@@ -365,12 +358,19 @@ pub(super) async fn production_project_server(
         Arc::new(git_health_lease);
     let git_health_projection_reader =
         tracedecay_application::GitHealthProjectionReadServiceV1::new(
-            git_health_binding,
+            git_health_binding.clone(),
             git_health_port,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("Git health projection reader is invalid: {error}"),
         })?;
+    let database_owner_reconciler = git_health_projection::reconciling_database_owner(
+        base_database_owner_reconciler,
+        invocation.git_health_projections.clone(),
+        git_health_projection_reader.clone(),
+        git_health_binding,
+        Arc::clone(&route_registered),
+    );
     let code_search_admission = query_mcp_admission::admit_query_mcp_read(
         Some(&profile_identity),
         &code_search_project_id,

@@ -1,7 +1,6 @@
 //! Application boundary for daemon-owned Git health projections.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{GitOidV1, ManifestDigest, SourceStoreId, UserProfileId};
@@ -60,8 +59,24 @@ pub struct GitHealthProjectionSnapshotV1 {
     pub source: GitHealthProjectionSourceV1,
     pub commits_projected: usize,
     pub batches_completed: u64,
-    pub file_churn: BTreeMap<String, usize>,
+    pub churn_entries: usize,
     pub coverage: GitHealthProjectionCoverageV1,
+}
+
+pub const GIT_HEALTH_CHURN_PAGE_LIMIT: usize = 256;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHealthProjectionChurnEntryV1 {
+    pub path: String,
+    pub churn: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitHealthProjectionChurnPageV1 {
+    pub entries: Vec<GitHealthProjectionChurnEntryV1>,
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -82,6 +97,7 @@ pub enum GitHealthProjectionPartialReasonV1 {
     ChangedPathLimit,
     PathBytesLimit,
     CommitPathLimit,
+    HistoryTraversalLimit,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,10 +138,21 @@ pub trait GitHealthProjectionReadPortV1: Send + Sync {
         &self,
         binding: &GitHealthProjectionBindingV1,
     ) -> GitHealthProjectionAvailabilityV1;
+
+    fn read_churn_page(
+        &self,
+        binding: &GitHealthProjectionBindingV1,
+        after_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionUnavailableReasonV1>;
 }
 
 #[derive(Clone)]
 pub struct GitHealthProjectionReadServiceV1 {
+    inner: Arc<RwLock<GitHealthProjectionReadBindingV1>>,
+}
+
+struct GitHealthProjectionReadBindingV1 {
     binding: GitHealthProjectionBindingV1,
     port: Arc<dyn GitHealthProjectionReadPortV1>,
 }
@@ -136,14 +163,61 @@ impl GitHealthProjectionReadServiceV1 {
         port: Arc<dyn GitHealthProjectionReadPortV1>,
     ) -> Result<Self, ApplicationContractError> {
         binding.validate()?;
-        Ok(Self { binding, port })
+        Ok(Self {
+            inner: Arc::new(RwLock::new(GitHealthProjectionReadBindingV1 {
+                binding,
+                port,
+            })),
+        })
     }
 
-    pub fn binding(&self) -> &GitHealthProjectionBindingV1 {
-        &self.binding
+    pub fn binding(&self) -> Result<GitHealthProjectionBindingV1, ApplicationContractError> {
+        self.inner
+            .read()
+            .map(|inner| inner.binding.clone())
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "git_health_projection_reader_lock",
+            })
+    }
+
+    pub fn rebind(
+        &self,
+        binding: GitHealthProjectionBindingV1,
+        port: Arc<dyn GitHealthProjectionReadPortV1>,
+    ) -> Result<(), ApplicationContractError> {
+        binding.validate()?;
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|_| ApplicationContractError::Inconsistent {
+                field: "git_health_projection_reader_lock",
+            })?;
+        *inner = GitHealthProjectionReadBindingV1 { binding, port };
+        Ok(())
     }
 
     pub fn read(&self) -> GitHealthProjectionAvailabilityV1 {
-        self.port.read_projection(&self.binding)
+        self.inner.read().map_or(
+            GitHealthProjectionAvailabilityV1::Unavailable {
+                reason: GitHealthProjectionUnavailableReasonV1::ProjectionStoreUnavailable,
+            },
+            |inner| inner.port.read_projection(&inner.binding),
+        )
+    }
+
+    pub fn read_churn_page(
+        &self,
+        after_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionUnavailableReasonV1> {
+        let inner = self
+            .inner
+            .read()
+            .map_err(|_| GitHealthProjectionUnavailableReasonV1::ProjectionStoreUnavailable)?;
+        inner.port.read_churn_page(
+            &inner.binding,
+            after_cursor,
+            limit.clamp(1, GIT_HEALTH_CHURN_PAGE_LIMIT),
+        )
     }
 }

@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tracedecay_application::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1, GitHealthProjectionReadPortV1,
-    GitHealthProjectionUnavailableReasonV1,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1,
+    GitHealthProjectionChurnPageV1, GitHealthProjectionReadPortV1,
+    GitHealthProjectionReadServiceV1, GitHealthProjectionUnavailableReasonV1,
 };
 use tracedecay_graph_db::GraphDb;
 
@@ -90,6 +91,43 @@ impl GitHealthProjectionRegistryV1 {
         binding: GitHealthProjectionBindingV1,
         project_open_cancellation: &CancellationToken,
     ) -> Result<GitHealthProjectionLeaseV1, GitHealthProjectionMountErrorV1> {
+        self.mount_with_limit(
+            repository_root,
+            store_path,
+            binding,
+            self.inner.max_owners,
+            project_open_cancellation,
+        )
+        .await
+    }
+
+    /// Reserves a bounded candidate owner before the project-server registry
+    /// has had the opportunity to evict an idle server and release its lease.
+    pub(super) async fn mount_candidate(
+        &self,
+        repository_root: &Path,
+        store_path: PathBuf,
+        binding: GitHealthProjectionBindingV1,
+        project_open_cancellation: &CancellationToken,
+    ) -> Result<GitHealthProjectionLeaseV1, GitHealthProjectionMountErrorV1> {
+        self.mount_with_limit(
+            repository_root,
+            store_path,
+            binding,
+            self.inner.max_owners.saturating_mul(2),
+            project_open_cancellation,
+        )
+        .await
+    }
+
+    async fn mount_with_limit(
+        &self,
+        repository_root: &Path,
+        store_path: PathBuf,
+        binding: GitHealthProjectionBindingV1,
+        owner_limit: usize,
+        project_open_cancellation: &CancellationToken,
+    ) -> Result<GitHealthProjectionLeaseV1, GitHealthProjectionMountErrorV1> {
         let _gate = tokio::select! {
             gate = self.inner.mount_gate.lock() => gate,
             () = project_open_cancellation.cancelled() => {
@@ -126,7 +164,7 @@ impl GitHealthProjectionRegistryV1 {
             self.await_retirements().await;
         }
         cancellation_checkpoint(project_open_cancellation)?;
-        if self.lock_state()?.owners.len() >= self.inner.max_owners {
+        if self.lock_state()?.owners.len() >= owner_limit {
             return Err(GitHealthProjectionMountErrorV1::Capacity);
         }
 
@@ -383,6 +421,27 @@ impl GitHealthProjectionReadPortV1 for GitHealthProjectionLeaseV1 {
         self.owner.wake.notify_one();
         self.owner.read_cached()
     }
+
+    fn read_churn_page(
+        &self,
+        binding: &GitHealthProjectionBindingV1,
+        after_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionUnavailableReasonV1> {
+        match self.read_projection(binding) {
+            GitHealthProjectionAvailabilityV1::Ready { snapshot }
+            | GitHealthProjectionAvailabilityV1::Refreshing { snapshot, .. } => self
+                .owner
+                .store
+                .read_churn_page(binding, &snapshot, after_cursor, limit)
+                .map_err(|error| error.unavailable_reason()),
+            GitHealthProjectionAvailabilityV1::Stale { reason, .. }
+            | GitHealthProjectionAvailabilityV1::Unavailable { reason } => Err(reason),
+            GitHealthProjectionAvailabilityV1::Warming { .. } => {
+                Err(GitHealthProjectionUnavailableReasonV1::ProjectionStoreUnavailable)
+            }
+        }
+    }
 }
 
 impl GitHealthProjectionOwnerV1 {
@@ -530,6 +589,87 @@ fn now_epoch_secs() -> Result<i64, String> {
             i64::try_from(duration.as_secs())
                 .map_err(|_| "system clock exceeds supported Git health range".to_owned())
         })
+}
+
+pub(super) fn reconciling_database_owner(
+    base: crate::mcp::DatabaseOwnerReconciler,
+    projections: GitHealthProjectionRegistryV1,
+    reader: GitHealthProjectionReadServiceV1,
+    prototype: GitHealthProjectionBindingV1,
+    route_registered: Arc<AtomicBool>,
+) -> crate::mcp::DatabaseOwnerReconciler {
+    Arc::new(move |fresh| {
+        let base = Arc::clone(&base);
+        let projections = projections.clone();
+        let reader = reader.clone();
+        let prototype = prototype.clone();
+        let route_registered = Arc::clone(&route_registered);
+        Box::pin(async move {
+            base(Arc::clone(&fresh)).await;
+            if !route_registered.load(Ordering::Acquire) {
+                return;
+            }
+            let scope = match crate::daemon::project_open_owners::resolved_scope_for_project(
+                fresh.project_root(),
+                &prototype.scope.project_id,
+            ) {
+                Ok(scope) => scope,
+                Err(error) => {
+                    tracing::error!(
+                        error = ?error,
+                        "Git health projection could not resolve its branch-reopen scope"
+                    );
+                    return;
+                }
+            };
+            let binding = match GitHealthProjectionBindingV1::new(
+                scope,
+                prototype.profile_id,
+                prototype.store_id,
+            ) {
+                Ok(binding) => binding,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "Git health projection could not bind its branch-reopen authority"
+                    );
+                    return;
+                }
+            };
+            if reader.binding().is_ok_and(|current| current == binding) {
+                return;
+            }
+            let cancellation = CancellationToken::new();
+            let lease = match projections
+                .mount(
+                    fresh.project_root(),
+                    fresh.store_layout().data_root.join("project-graph.grafeo"),
+                    binding.clone(),
+                    &cancellation,
+                )
+                .await
+            {
+                Ok(lease) => lease,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "Git health projection could not remount after branch reopen"
+                    );
+                    return;
+                }
+            };
+            if !route_registered.load(Ordering::Acquire) {
+                return;
+            }
+            let port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(lease);
+            if let Err(error) = reader.rebind(binding, port) {
+                tracing::error!(
+                    error = %error,
+                    "Git health projection could not publish its branch-reopen binding"
+                );
+            }
+        })
+    })
 }
 
 #[cfg(test)]

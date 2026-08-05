@@ -122,8 +122,9 @@ pub use feedback::{
 #[cfg(feature = "native-git")]
 pub use git::NativeHistoricalBlobReaderV1;
 pub use git::{
-    GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT, GitBlameRequest,
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1, GitHealthProjectionCoverageV1,
+    GIT_HEALTH_CHURN_PAGE_LIMIT, GIT_HISTORICAL_BLOB_MAX_BYTES, GIT_HISTORY_MAX_COUNT_LIMIT,
+    GitBlameRequest, GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1,
+    GitHealthProjectionChurnEntryV1, GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
     GitHealthProjectionPartialReasonV1, GitHealthProjectionReadPortV1,
     GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
     GitHealthProjectionUnavailableReasonV1, GitHistoricalBlobReadPort, GitHistoricalBlobRequestV1,

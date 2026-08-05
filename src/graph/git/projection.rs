@@ -7,15 +7,17 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_application::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1, GitHealthProjectionCoverageV1,
+    GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1,
+    GitHealthProjectionChurnEntryV1, GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
     GitHealthProjectionPartialReasonV1, GitHealthProjectionSnapshotV1, GitHealthProjectionSourceV1,
     GitHealthProjectionUnavailableReasonV1,
 };
 use tracedecay_domain::GitOidV1;
 use tracedecay_graph_db::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphFormatVersion, GraphMutation, GraphWatermark, GraphWriteBatch, ProjectionReplacement,
-    SourceGeneration,
+    GraphEntityId, GraphFormatVersion, GraphLabel, GraphMutation, GraphProjectionReadRequest,
+    GraphProjectionTelemetryRequest, GraphSnapshot, GraphWatermark, GraphWriteBatch,
+    ProjectionReplacement, SourceGeneration,
 };
 
 use crate::application::context::CancellationToken;
@@ -24,7 +26,10 @@ mod native;
 mod persistence;
 
 pub(crate) use native::capture_source;
-use native::{CollectCommitError, collect_commit_record, is_ancestor, require_current_target};
+use native::{
+    AncestorCheckV1, CollectCommitError, collect_commit_record, is_ancestor_bounded,
+    require_current_target,
+};
 use persistence::{
     authenticate_snapshot_entities, coalesce_mutations, commit_entity, commit_entity_id,
     commit_record_from_entity, file_entity, file_entity_id, namespace, projection, state_entity,
@@ -39,6 +44,8 @@ const MAX_UNIQUE_PATHS: usize = 20_000;
 const MAX_CHANGED_PATH_REFERENCES: usize = 50_000;
 const MAX_PATH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DURABLE_FRONTIER: usize = 512;
+const MAX_HISTORY_COMMITS_TRAVERSED: usize = 100_000;
+const MAX_ANCESTRY_COMMITS: usize = 100_000;
 const MAX_PROJECTION_ENTITIES: usize = MAX_WINDOW_COMMITS + MAX_UNIQUE_PATHS + 2;
 const PROJECTION_PAGE_SIZE: usize = 256;
 const GRAPH_FORMAT_VERSION: u32 = 2;
@@ -143,6 +150,7 @@ struct WorkingStateV1 {
     pending: VecDeque<GitOidV1>,
     counters: ProjectionCountersV1,
     expiration_complete: bool,
+    history_commits_traversed: usize,
     complete: bool,
 }
 
@@ -154,6 +162,7 @@ impl WorkingStateV1 {
             target,
             counters: ProjectionCountersV1::default(),
             expiration_complete: true,
+            history_commits_traversed: 0,
             complete: false,
         }
     }
@@ -170,6 +179,7 @@ impl WorkingStateV1 {
             target,
             pending,
             counters: ready.counters.clone(),
+            history_commits_traversed: 0,
             complete: false,
         }
     }
@@ -287,6 +297,12 @@ impl GitHealthProjectionStoreV1 {
             self.read_state::<ReadyStateV1>(binding, READY_ENTITY, Arc::clone(&cancellation))?;
         let working =
             self.read_state::<WorkingStateV1>(binding, WORKING_ENTITY, Arc::clone(&cancellation))?;
+        self.authenticate_projection_commit(
+            binding,
+            ready.as_ref(),
+            working.as_ref(),
+            Arc::clone(&cancellation),
+        )?;
         if let Some(working) = working.as_ref().filter(|working| !working.complete) {
             return Ok(GitHealthProjectionAvailabilityV1::Warming {
                 target: Some(working.target.clone()),
@@ -306,16 +322,161 @@ impl GitHealthProjectionStoreV1 {
             ));
         }
         let entities = self.projection_entities(binding, cancellation)?;
-        let file_churn = authenticate_snapshot_entities(entities, &ready)?;
+        authenticate_snapshot_entities(entities, &ready)?;
         Ok(GitHealthProjectionAvailabilityV1::Ready {
             snapshot: GitHealthProjectionSnapshotV1 {
                 source: ready.source,
                 commits_projected: ready.counters.commits_projected,
                 batches_completed: ready.counters.batches_completed,
-                file_churn,
+                churn_entries: ready.counters.unique_paths,
                 coverage: ready.counters.coverage,
             },
         })
+    }
+
+    pub(crate) fn read_churn_page(
+        &self,
+        binding: &GitHealthProjectionBindingV1,
+        snapshot: &GitHealthProjectionSnapshotV1,
+        after_cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<GitHealthProjectionChurnPageV1, GitHealthProjectionError> {
+        if snapshot.source.binding != *binding {
+            return Err(GitHealthProjectionError::ScopeDrift);
+        }
+        let cancellation: Arc<dyn GraphCancellation> =
+            Arc::new(TokenCancellation(CancellationToken::new()));
+        let database = self.database.snapshot()?;
+        self.authenticate_projection_source(
+            &database,
+            binding,
+            &snapshot.source,
+            snapshot.batches_completed,
+            Some(
+                snapshot
+                    .commits_projected
+                    .saturating_add(snapshot.churn_entries)
+                    .saturating_add(2),
+            ),
+            Arc::clone(&cancellation),
+        )?;
+        let page = database.read_projection(GraphProjectionReadRequest {
+            namespace: namespace(binding)?,
+            projection: projection()?,
+            after_entity: after_cursor.map(GraphEntityId::new).transpose()?,
+            after_relation: None,
+            max_entities: limit.min(PROJECTION_PAGE_SIZE),
+            max_relations: 0,
+            cancellation,
+        })?;
+        let file_label = std::collections::BTreeSet::from([GraphLabel::new(FILE_LABEL)?]);
+        let mut entries = Vec::new();
+        for entity in page.entities {
+            if entity.labels == file_label {
+                let (path, churn) = persistence::file_record_from_entity(&entity)?;
+                entries.push(GitHealthProjectionChurnEntryV1 { path, churn });
+            }
+        }
+        Ok(GitHealthProjectionChurnPageV1 {
+            entries,
+            next_cursor: page
+                .next_entity
+                .map(|identity| identity.as_str().to_owned()),
+        })
+    }
+
+    fn authenticate_projection_commit(
+        &self,
+        binding: &GitHealthProjectionBindingV1,
+        ready: Option<&ReadyStateV1>,
+        working: Option<&WorkingStateV1>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), GitHealthProjectionError> {
+        let Some(source) = working
+            .map(|state| {
+                (
+                    &state.target,
+                    state.counters.batches_completed,
+                    state.complete.then(|| {
+                        state
+                            .counters
+                            .commits_projected
+                            .saturating_add(state.counters.unique_paths)
+                            .saturating_add(2)
+                    }),
+                )
+            })
+            .or_else(|| {
+                ready.map(|state| {
+                    (
+                        &state.source,
+                        state.counters.batches_completed,
+                        Some(
+                            state
+                                .counters
+                                .commits_projected
+                                .saturating_add(state.counters.unique_paths)
+                                .saturating_add(2),
+                        ),
+                    )
+                })
+            })
+        else {
+            return Ok(());
+        };
+        let database = self.database.snapshot()?;
+        self.authenticate_projection_source(
+            &database,
+            binding,
+            source.0,
+            source.1,
+            source.2,
+            cancellation,
+        )
+    }
+
+    fn authenticate_projection_source(
+        &self,
+        database: &GraphSnapshot,
+        binding: &GitHealthProjectionBindingV1,
+        source: &GitHealthProjectionSourceV1,
+        batches_completed: u64,
+        expected_entities: Option<usize>,
+        cancellation: Arc<dyn GraphCancellation>,
+    ) -> Result<(), GitHealthProjectionError> {
+        let telemetry = database
+            .projection_telemetry(GraphProjectionTelemetryRequest {
+                namespace: namespace(binding)?,
+                projection: projection()?,
+                cancellation,
+            })?
+            .ok_or_else(|| {
+                GitHealthProjectionError::Corrupt(
+                    "persisted Git health state has no Grafeo projection commit".to_owned(),
+                )
+            })?;
+        let expected_watermark = if batches_completed == 0 {
+            format!("{}:initialize", source.projection_generation.as_str())
+        } else {
+            format!(
+                "{}:{}",
+                source.projection_generation.as_str(),
+                batches_completed
+            )
+        };
+        if telemetry.source_generation.as_str() != source.projection_generation.as_str()
+            || telemetry.watermark.as_str() != expected_watermark
+            || telemetry.relation_count != 0
+            || expected_entities.is_some_and(|expected| {
+                u64::try_from(expected).ok() != Some(telemetry.entity_count)
+            })
+        {
+            return Err(GitHealthProjectionError::Corrupt(
+                "Grafeo projection generation, watermark, or cardinality does not authenticate persisted Git health state"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn advance(
@@ -324,6 +485,25 @@ impl GitHealthProjectionStoreV1 {
         binding: &GitHealthProjectionBindingV1,
         now_epoch_secs: i64,
         commit_batch_limit: usize,
+        cancellation: &CancellationToken,
+    ) -> Result<GitHealthProjectionProgressV1, GitHealthProjectionError> {
+        self.advance_with_history_limit(
+            repository_root,
+            binding,
+            now_epoch_secs,
+            commit_batch_limit,
+            MAX_HISTORY_COMMITS_TRAVERSED,
+            cancellation,
+        )
+    }
+
+    fn advance_with_history_limit(
+        &self,
+        repository_root: &Path,
+        binding: &GitHealthProjectionBindingV1,
+        now_epoch_secs: i64,
+        commit_batch_limit: usize,
+        history_commit_limit: usize,
         cancellation: &CancellationToken,
     ) -> Result<GitHealthProjectionProgressV1, GitHealthProjectionError> {
         if commit_batch_limit == 0 {
@@ -408,6 +588,15 @@ impl GitHealthProjectionStoreV1 {
             if working.stop_at.as_ref() == Some(&oid) || existing_commits.contains(&oid) {
                 continue;
             }
+            if working.history_commits_traversed >= history_commit_limit {
+                working.mark_partial(GitHealthProjectionPartialReasonV1::HistoryTraversalLimit);
+                break;
+            }
+            working.history_commits_traversed = checked_add(
+                working.history_commits_traversed,
+                1,
+                "history traversal count",
+            )?;
             commits_examined = checked_add(commits_examined, 1, "examined commit count")?;
             let record = match collect_commit_record(&repository, &oid, cancellation) {
                 Ok(record) => record,
@@ -426,6 +615,7 @@ impl GitHealthProjectionStoreV1 {
                 continue;
             }
             if record.committed_at_epoch_secs < working.target.window_start_epoch_secs {
+                working.admit_parents(&record.parents);
                 continue;
             }
             if let Some(reason) =
@@ -544,14 +734,27 @@ impl GitHealthProjectionStoreV1 {
         target: GitHealthProjectionSourceV1,
         cancellation: Arc<dyn GraphCancellation>,
     ) -> Result<WorkingStateV1, GitHealthProjectionError> {
-        let reusable = ready
+        let reusable_candidate = ready
             .filter(|ready| ready.source.binding == target.binding)
             .filter(|ready| ready.counters.coverage == GitHealthProjectionCoverageV1::Complete)
             .filter(|ready| {
                 target.window_start_epoch_secs >= ready.source.window_start_epoch_secs
                     && target.window_end_epoch_secs >= ready.source.window_end_epoch_secs
-            })
-            .filter(|ready| is_ancestor(repository, &ready.source.commit, &target.commit));
+            });
+        let reusable = match reusable_candidate {
+            Some(ready)
+                if is_ancestor_bounded(
+                    repository,
+                    &ready.source.commit,
+                    &target.commit,
+                    MAX_ANCESTRY_COMMITS,
+                    || cancellation.is_cancelled(),
+                )? == AncestorCheckV1::Ancestor =>
+            {
+                Some(ready)
+            }
+            _ => None,
+        };
         let working = reusable.map_or_else(
             || WorkingStateV1::empty(target.clone()),
             |ready| WorkingStateV1::from_ready(target.clone(), ready),

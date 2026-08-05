@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::Serialize;
 use tracedecay_application::{
-    GitHealthProjectionAvailabilityV1, GitHealthProjectionReadServiceV1,
-    GitHealthProjectionSnapshotV1, GitHealthProjectionUnavailableReasonV1,
+    GIT_HEALTH_CHURN_PAGE_LIMIT, GitHealthProjectionAvailabilityV1,
+    GitHealthProjectionReadServiceV1, GitHealthProjectionSnapshotV1,
+    GitHealthProjectionUnavailableReasonV1,
 };
 
 use crate::errors::Result;
@@ -248,20 +249,26 @@ pub async fn analyze_test_risk(
         .filter(|risk| include_tested || !risk.has_test())
         .collect();
 
-    let git_history = git_health.map_or(
+    let mut git_history = git_health.map_or(
         GitHealthProjectionAvailabilityV1::Unavailable {
             reason: GitHealthProjectionUnavailableReasonV1::NotMounted,
         },
         GitHealthProjectionReadServiceV1::read,
     );
-    match &git_history {
+    let ready_snapshot = match &git_history {
         GitHealthProjectionAvailabilityV1::Ready { snapshot }
-        | GitHealthProjectionAvailabilityV1::Refreshing { snapshot, .. } => {
-            apply_churn(&mut risks, snapshot);
-        }
+        | GitHealthProjectionAvailabilityV1::Refreshing { snapshot, .. } => Some(snapshot.clone()),
         GitHealthProjectionAvailabilityV1::Warming { .. }
         | GitHealthProjectionAvailabilityV1::Stale { .. }
-        | GitHealthProjectionAvailabilityV1::Unavailable { .. } => {}
+        | GitHealthProjectionAvailabilityV1::Unavailable { .. } => None,
+    };
+    if let (Some(reader), Some(snapshot)) = (git_health, ready_snapshot.as_ref()) {
+        match read_relevant_churn(reader, snapshot, &risks) {
+            Ok(churn) => apply_churn(&mut risks, &churn),
+            Err(reason) => {
+                git_history = GitHealthProjectionAvailabilityV1::Unavailable { reason };
+            }
+        }
     }
     risks.sort_by(|a, b| {
         b.risk
@@ -324,9 +331,56 @@ pub async fn analyze_test_risk(
     })
 }
 
-fn apply_churn(risks: &mut [RiskEntry], snapshot: &GitHealthProjectionSnapshotV1) {
+fn read_relevant_churn(
+    reader: &GitHealthProjectionReadServiceV1,
+    snapshot: &GitHealthProjectionSnapshotV1,
+    risks: &[RiskEntry],
+) -> std::result::Result<HashMap<String, usize>, GitHealthProjectionUnavailableReasonV1> {
+    let risk_paths = risks
+        .iter()
+        .map(|risk| risk.file.as_str())
+        .collect::<HashSet<_>>();
+    let expected_entities = snapshot
+        .commits_projected
+        .saturating_add(snapshot.churn_entries)
+        .saturating_add(2);
+    let max_pages = expected_entities
+        .div_ceil(GIT_HEALTH_CHURN_PAGE_LIMIT)
+        .saturating_add(1);
+    let mut cursor = None;
+    let mut churn_entries_seen = 0usize;
+    let mut relevant = HashMap::new();
+    for _ in 0..max_pages {
+        let page = reader.read_churn_page(cursor.as_deref(), GIT_HEALTH_CHURN_PAGE_LIMIT)?;
+        churn_entries_seen = churn_entries_seen
+            .checked_add(page.entries.len())
+            .ok_or(GitHealthProjectionUnavailableReasonV1::CorruptProjection)?;
+        if churn_entries_seen > snapshot.churn_entries {
+            return Err(GitHealthProjectionUnavailableReasonV1::CorruptProjection);
+        }
+        for entry in page.entries {
+            if risk_paths.contains(entry.path.as_str()) {
+                relevant.insert(entry.path, entry.churn);
+            }
+        }
+        let Some(next) = page.next_cursor else {
+            return if churn_entries_seen == snapshot.churn_entries {
+                Ok(relevant)
+            } else {
+                Err(GitHealthProjectionUnavailableReasonV1::CorruptProjection)
+            };
+        };
+        if cursor.as_ref() == Some(&next) {
+            return Err(GitHealthProjectionUnavailableReasonV1::CorruptProjection);
+        }
+        cursor = Some(next);
+    }
+    Err(GitHealthProjectionUnavailableReasonV1::CorruptProjection)
+}
+
+fn apply_churn(risks: &mut [RiskEntry], churn_by_path: &HashMap<String, usize>) {
     for risk in risks {
-        let churn = snapshot.file_churn.get(&risk.file).copied().unwrap_or(0);
+        let churn = churn_by_path.get(&risk.file).copied().unwrap_or(0);
         risk.churn = Some(churn);
         if churn > 0 {
             risk.risk *= (churn as f64 + 1.0).log2();
@@ -396,5 +450,129 @@ fn classify_test_attribution(depth: Option<usize>) -> TestAttributionMethod {
         Some(1) => TestAttributionMethod::DirectUnit,
         Some(depth) if depth >= 2 => TestAttributionMethod::Closure,
         None | Some(_) => TestAttributionMethod::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_application::{
+        GitHealthProjectionBindingV1, GitHealthProjectionChurnEntryV1,
+        GitHealthProjectionChurnPageV1, GitHealthProjectionCoverageV1,
+        GitHealthProjectionReadPortV1, GitHealthProjectionSourceV1, ResolvedScope,
+    };
+    use tracedecay_domain::{
+        GitOidV1, ManifestDigest, ProjectId, RefId, RepositoryId, SourceStoreId, UserProfileId,
+        WorktreeId,
+    };
+
+    use super::*;
+
+    struct PagedChurnPort {
+        snapshot: GitHealthProjectionSnapshotV1,
+        calls: AtomicUsize,
+    }
+
+    impl GitHealthProjectionReadPortV1 for PagedChurnPort {
+        fn read_projection(
+            &self,
+            _binding: &GitHealthProjectionBindingV1,
+        ) -> GitHealthProjectionAvailabilityV1 {
+            GitHealthProjectionAvailabilityV1::Ready {
+                snapshot: self.snapshot.clone(),
+            }
+        }
+
+        fn read_churn_page(
+            &self,
+            _binding: &GitHealthProjectionBindingV1,
+            after_cursor: Option<&str>,
+            limit: usize,
+        ) -> std::result::Result<
+            GitHealthProjectionChurnPageV1,
+            GitHealthProjectionUnavailableReasonV1,
+        > {
+            assert!(limit <= GIT_HEALTH_CHURN_PAGE_LIMIT);
+            let call = self.calls.fetch_add(1, Ordering::AcqRel);
+            let (range, next_cursor) = match (call, after_cursor) {
+                (0, None) => (0..256, Some("page-1".to_owned())),
+                (1, Some("page-1")) => (256..300, None),
+                _ => panic!("unexpected churn page request"),
+            };
+            Ok(GitHealthProjectionChurnPageV1 {
+                entries: range
+                    .map(|ordinal| GitHealthProjectionChurnEntryV1 {
+                        path: if ordinal == 299 {
+                            "src/target.rs".to_owned()
+                        } else {
+                            format!("src/generated-{ordinal}.rs")
+                        },
+                        churn: ordinal + 1,
+                    })
+                    .collect(),
+                next_cursor,
+            })
+        }
+    }
+
+    fn fixture_binding() -> GitHealthProjectionBindingV1 {
+        GitHealthProjectionBindingV1::new(
+            ResolvedScope::new(
+                ProjectId::new("project.test-risk").expect("project"),
+                RepositoryId::new("repository.test-risk").expect("repository"),
+                WorktreeId::new("worktree.test-risk").expect("worktree"),
+                Some(RefId::new("refs/heads/main").expect("ref")),
+            )
+            .expect("scope"),
+            UserProfileId::new("profile.test-risk").expect("profile"),
+            SourceStoreId::new("store.test-risk").expect("store"),
+        )
+        .expect("binding")
+    }
+
+    #[test]
+    fn test_risk_pages_churn_and_retains_only_matching_paths() {
+        let binding = fixture_binding();
+        let snapshot = GitHealthProjectionSnapshotV1 {
+            source: GitHealthProjectionSourceV1 {
+                binding: binding.clone(),
+                commit: GitOidV1::new("1".repeat(40)).expect("commit"),
+                tree: GitOidV1::new("2".repeat(40)).expect("tree"),
+                projection_generation: ManifestDigest::new(format!("sha256:{}", "3".repeat(64)))
+                    .expect("generation"),
+                window_start_epoch_secs: 1,
+                window_end_epoch_secs: 2,
+            },
+            commits_projected: 0,
+            batches_completed: 1,
+            churn_entries: 300,
+            coverage: GitHealthProjectionCoverageV1::Complete,
+        };
+        let port = Arc::new(PagedChurnPort {
+            snapshot: snapshot.clone(),
+            calls: AtomicUsize::new(0),
+        });
+        let reader = GitHealthProjectionReadServiceV1::new(binding, port.clone())
+            .expect("projection reader");
+        let risks = vec![RiskEntry {
+            id: "target".to_owned(),
+            name: "target".to_owned(),
+            file: "src/target.rs".to_owned(),
+            line: 1,
+            complexity: 1,
+            fan_in: 1,
+            attribution_method: TestAttributionMethod::None,
+            attribution_depth: None,
+            risk: 1.0,
+            churn: None,
+        }];
+
+        let relevant = read_relevant_churn(&reader, &snapshot, &risks).expect("paged churn");
+
+        assert_eq!(relevant.len(), 1);
+        assert_eq!(relevant.get("src/target.rs"), Some(&300));
+        assert_eq!(port.calls.load(Ordering::Acquire), 2);
     }
 }

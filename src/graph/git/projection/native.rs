@@ -388,18 +388,45 @@ fn exact_path(path: &[u8]) -> Result<String, GitHealthProjectionError> {
         .map_err(|_| GitHealthProjectionError::Git("Git path is not valid UTF-8".to_owned()))
 }
 
-pub(super) fn is_ancestor(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AncestorCheckV1 {
+    Ancestor,
+    NotAncestor,
+    TraversalLimit,
+}
+
+pub(super) fn is_ancestor_bounded(
     repository: &gix::Repository,
     ancestor: &GitOidV1,
     head: &GitOidV1,
-) -> bool {
-    let Ok(ancestor_id) = gix::ObjectId::from_hex(ancestor.as_str().as_bytes()) else {
-        return false;
-    };
-    let Ok(head_id) = gix::ObjectId::from_hex(head.as_str().as_bytes()) else {
-        return false;
-    };
-    repository
-        .merge_base(head_id, ancestor_id)
-        .is_ok_and(|base| base.detach() == ancestor_id)
+    max_commits: usize,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<AncestorCheckV1, GitHealthProjectionError> {
+    if is_cancelled() {
+        return Err(GitHealthProjectionError::Cancelled);
+    }
+    let ancestor_id = gix::ObjectId::from_hex(ancestor.as_str().as_bytes())
+        .map_err(|error| GitHealthProjectionError::Git(error.to_string()))?;
+    let head_id = gix::ObjectId::from_hex(head.as_str().as_bytes())
+        .map_err(|error| GitHealthProjectionError::Git(error.to_string()))?;
+    if ancestor_id == head_id {
+        return Ok(AncestorCheckV1::Ancestor);
+    }
+    let walk = repository
+        .rev_walk([head_id])
+        .all()
+        .map_err(|error| GitHealthProjectionError::Git(error.to_string()))?;
+    for (ordinal, info) in walk.enumerate() {
+        if is_cancelled() {
+            return Err(GitHealthProjectionError::Cancelled);
+        }
+        if ordinal >= max_commits {
+            return Ok(AncestorCheckV1::TraversalLimit);
+        }
+        let info = info.map_err(|error| GitHealthProjectionError::Git(error.to_string()))?;
+        if info.id == ancestor_id {
+            return Ok(AncestorCheckV1::Ancestor);
+        }
+    }
+    Ok(AncestorCheckV1::NotAncestor)
 }

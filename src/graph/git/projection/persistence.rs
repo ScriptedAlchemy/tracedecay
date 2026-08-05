@@ -50,6 +50,9 @@ impl PersistedStateV1 for WorkingStateV1 {
         if self.pending.len() > MAX_DURABLE_FRONTIER {
             return corrupt("working frontier exceeds its durable bound");
         }
+        if self.history_commits_traversed > super::MAX_HISTORY_COMMITS_TRAVERSED {
+            return corrupt("working history traversal count exceeds its bound");
+        }
         if self.complete && !self.pending.is_empty() {
             return corrupt("complete working state retains a frontier");
         }
@@ -126,8 +129,12 @@ impl GitHealthProjectionStoreV1 {
         else {
             return Ok(None);
         };
-        if !entity.labels.contains(&GraphLabel::new(STATE_LABEL)?) {
-            return corrupt(format!("state entity `{identity}` has the wrong label"));
+        if entity.labels != BTreeSet::from([GraphLabel::new(STATE_LABEL)?])
+            || entity.properties.len() != 1
+        {
+            return corrupt(format!(
+                "state entity `{identity}` does not have its canonical shape"
+            ));
         }
         let state: T = serde_json::from_slice(bytes_property(&entity, STATE_PROPERTY)?)
             .map_err(|error| GitHealthProjectionError::Corrupt(error.to_string()))?;
@@ -168,14 +175,19 @@ impl GitHealthProjectionStoreV1 {
 pub(super) fn authenticate_snapshot_entities(
     entities: Vec<GraphEntity>,
     ready: &ReadyStateV1,
-) -> Result<BTreeMap<String, usize>, GitHealthProjectionError> {
+) -> Result<(), GitHealthProjectionError> {
     let mut commits = 0usize;
     let mut changed_references = 0usize;
     let mut path_bytes = 0usize;
     let mut expected_churn = BTreeMap::<String, usize>::new();
     let mut stored_churn = BTreeMap::<String, usize>::new();
+    let commit_label = BTreeSet::from([GraphLabel::new(COMMIT_LABEL)?]);
+    let file_label = BTreeSet::from([GraphLabel::new(FILE_LABEL)?]);
+    let state_label = BTreeSet::from([GraphLabel::new(STATE_LABEL)?]);
+    let mut ready_state_seen = false;
+    let mut working_state_seen = false;
     for entity in entities {
-        if entity.labels.contains(&GraphLabel::new(COMMIT_LABEL)?) {
+        if entity.labels == commit_label {
             let record = commit_record_from_entity(&entity, None)?;
             if record.committed_at_epoch_secs < ready.source.window_start_epoch_secs
                 || record.committed_at_epoch_secs >= ready.source.window_end_epoch_secs
@@ -192,11 +204,19 @@ pub(super) fn authenticate_snapshot_entities(
                 path_bytes = checked_add(path_bytes, path.len(), "authenticated path bytes")?;
                 *expected_churn.entry(path).or_default() += 1;
             }
-        } else if entity.labels.contains(&GraphLabel::new(FILE_LABEL)?) {
+        } else if entity.labels == file_label {
             let (path, churn) = file_record_from_entity(&entity)?;
             if stored_churn.insert(path, churn).is_some() {
                 return corrupt("Git health projection contains duplicate file paths");
             }
+        } else if entity.labels == state_label {
+            match entity.identity.as_str() {
+                super::READY_ENTITY if !ready_state_seen => ready_state_seen = true,
+                super::WORKING_ENTITY if !working_state_seen => working_state_seen = true,
+                _ => return corrupt("Git health projection contains an unauthenticated state"),
+            }
+        } else {
+            return corrupt("Git health projection contains an unauthenticated entity");
         }
     }
     if commits != ready.counters.commits_projected
@@ -204,10 +224,12 @@ pub(super) fn authenticate_snapshot_entities(
         || path_bytes != ready.counters.path_bytes
         || expected_churn.len() != ready.counters.unique_paths
         || expected_churn != stored_churn
+        || !ready_state_seen
+        || !working_state_seen
     {
         return corrupt("persisted projection entities do not authenticate ready counters");
     }
-    Ok(stored_churn)
+    Ok(())
 }
 
 pub(super) fn state_entity<T: Serialize>(
@@ -278,8 +300,10 @@ pub(super) fn commit_record_from_entity(
     entity: &GraphEntity,
     expected_oid: Option<&GitOidV1>,
 ) -> Result<CommitRecordV1, GitHealthProjectionError> {
-    if !entity.labels.contains(&GraphLabel::new(COMMIT_LABEL)?) {
-        return corrupt("Git health commit entity has the wrong label");
+    if entity.labels != BTreeSet::from([GraphLabel::new(COMMIT_LABEL)?])
+        || entity.properties.len() != 1
+    {
+        return corrupt("Git health commit entity does not have its canonical shape");
     }
     let record: CommitRecordV1 =
         serde_json::from_slice(bytes_property(entity, COMMIT_PROPERTY)?)
@@ -316,8 +340,10 @@ fn validate_commit_record(record: &CommitRecordV1) -> Result<(), GitHealthProjec
 pub(super) fn file_record_from_entity(
     entity: &GraphEntity,
 ) -> Result<(String, usize), GitHealthProjectionError> {
-    if !entity.labels.contains(&GraphLabel::new(FILE_LABEL)?) {
-        return corrupt("Git health file entity has the wrong label");
+    if entity.labels != BTreeSet::from([GraphLabel::new(FILE_LABEL)?])
+        || entity.properties.len() != 2
+    {
+        return corrupt("Git health file entity does not have its canonical shape");
     }
     let path = string_property(entity, FILE_PATH_PROPERTY)?.to_owned();
     let churn = usize_property(entity, FILE_CHURN_PROPERTY)?;

@@ -6,7 +6,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_application::{
     GitHealthProjectionAvailabilityV1, GitHealthProjectionBindingV1, GitHealthProjectionReadPortV1,
-    GitHealthProjectionReadServiceV1, GitHealthProjectionUnavailableReasonV1, ResolvedScope,
+    GitHealthProjectionReadServiceV1, ResolvedScope,
 };
 use tracedecay_domain::{ProjectId, SourceStoreId, UserProfileId};
 
@@ -149,6 +149,43 @@ async fn dropping_the_last_reader_deregisters_before_a_reopen() {
 }
 
 #[tokio::test]
+async fn project_server_candidate_can_trigger_idle_owner_eviction_at_capacity() {
+    let first = repository();
+    let second = repository();
+    let stores = TempDir::new().expect("store root");
+    let registry = GitHealthProjectionRegistryV1::new(1);
+    let first_lease = registry
+        .mount(
+            first.path(),
+            stores.path().join("first.grafeo"),
+            binding(first.path()),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("first owner");
+
+    let second_lease = registry
+        .mount_candidate(
+            second.path(),
+            stores.path().join("second.grafeo"),
+            binding(second.path()),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("candidate mounts before idle server eviction");
+    assert_eq!(registry.owner_count(), 2);
+
+    drop(first_lease);
+    assert_eq!(
+        registry.owner_count(),
+        1,
+        "evicting the idle server releases its projection lease"
+    );
+    drop(second_lease);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn distinct_worktrees_share_one_project_graph_database() {
     let first = repository();
     let second = repository();
@@ -195,6 +232,9 @@ async fn ref_rekey_retires_the_old_reader_and_keeps_one_owner() {
         )
         .await
         .expect("old ref mount");
+    let old_port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(old_lease);
+    let reader = GitHealthProjectionReadServiceV1::new(old_binding.clone(), old_port)
+        .expect("binding-pinned reader");
     git(repository.path(), &["switch", "--quiet", "-c", "other"]);
     let new_binding = binding(repository.path());
     let new_lease = registry
@@ -206,18 +246,14 @@ async fn ref_rekey_retires_the_old_reader_and_keeps_one_owner() {
         )
         .await
         .expect("rekeyed mount");
+    let new_port: Arc<dyn GitHealthProjectionReadPortV1> = Arc::new(new_lease);
+    reader
+        .rebind(new_binding.clone(), new_port)
+        .expect("publish rekeyed lease");
     assert_eq!(registry.owner_count(), 1);
-    assert_eq!(
-        old_lease.read_projection(&old_binding),
-        GitHealthProjectionAvailabilityV1::Unavailable {
-            reason: GitHealthProjectionUnavailableReasonV1::NotMounted,
-        }
-    );
     let snapshot = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let GitHealthProjectionAvailabilityV1::Ready { snapshot } =
-                new_lease.read_projection(&new_binding)
-            {
+            if let GitHealthProjectionAvailabilityV1::Ready { snapshot } = reader.read() {
                 break snapshot;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -226,8 +262,8 @@ async fn ref_rekey_retires_the_old_reader_and_keeps_one_owner() {
     .await
     .expect("rekeyed projection should rebuild");
     assert_eq!(snapshot.source.binding, new_binding);
-    drop(new_lease);
-    drop(old_lease);
+    assert_eq!(reader.binding().expect("reader binding"), new_binding);
+    drop(reader);
     registry.shutdown().await;
 }
 
@@ -260,7 +296,30 @@ async fn daemon_projection_is_read_through_the_binding_pinned_service() {
     .await
     .expect("projection should become ready");
     assert_eq!(snapshot.source.binding, binding);
-    assert_eq!(snapshot.file_churn.get("history.rs"), Some(&1));
+    assert_eq!(snapshot.churn_entries, 1);
+    let mut cursor = None;
+    let entry = loop {
+        let page = reader
+            .read_churn_page(cursor.as_deref(), 1)
+            .expect("bounded churn page");
+        if let Some(entry) = page.entries.into_iter().next() {
+            break entry;
+        }
+        cursor = page.next_cursor;
+        assert!(
+            cursor.is_some(),
+            "authenticated churn entry must be reachable"
+        );
+    };
+    assert_eq!(entry.path, "history.rs");
+    assert_eq!(entry.churn, 1);
+    assert!(
+        serde_json::to_value(&snapshot)
+            .expect("snapshot JSON")
+            .get("file_churn")
+            .is_none(),
+        "the MCP-facing snapshot must not clone the complete churn map"
+    );
     drop(reader);
     registry.shutdown().await;
 }
