@@ -1063,7 +1063,7 @@ mod observation_tests {
 
     #[tokio::test]
     async fn pre_cancelled_snapshot_capture_does_not_advance_kiro_source() {
-        use crate::admission::test_support::PanicHostAdmission;
+        use crate::admission::test_support::MemoryHostAdmission;
 
         let temp = tempfile::TempDir::new().expect("temp Kiro storage");
         let project = temp.path().join("project");
@@ -1094,11 +1094,12 @@ mod observation_tests {
             workspace_storage_dir,
             user_registered_roots: None,
         };
+        let admission = MemoryHostAdmission::default();
         let cancellation = ObservationCancellation::default();
         cancellation.cancel();
 
         let error = capture_kiro_snapshot_observations(
-            &PanicHostAdmission,
+            &admission,
             &source,
             &project,
             ObservationScopeV1::Profile,
@@ -1109,11 +1110,21 @@ mod observation_tests {
         .expect_err("pre-cancelled Kiro capture must stop before persistence");
         assert!(matches!(
             error,
-            TranscriptIngestError::NonDurableRecord {
-                reason: "admission_cancelled",
-                ..
-            }
+            TranscriptIngestError::Cancelled { provider: "kiro" }
         ));
+        assert!(admission.observations().is_empty());
+
+        let replay = capture_kiro_snapshot_observations(
+            &admission,
+            &source,
+            &project,
+            ObservationScopeV1::Profile,
+            None,
+            &ObservationCancellation::default(),
+        )
+        .await
+        .expect("uncancelled Kiro retry must admit the untouched source");
+        assert_eq!(replay.stats.messages_upserted, 1);
     }
 
     #[tokio::test]

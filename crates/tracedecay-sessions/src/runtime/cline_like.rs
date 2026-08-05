@@ -996,10 +996,9 @@ mod observation_tests {
             assert!(
                 matches!(
                     cancelled_outcome,
-                    TranscriptIngestError::NonDurableRecord {
-                        reason: "admission_cancelled",
-                        ..
-                    }
+                    TranscriptIngestError::Cancelled {
+                        provider: cancelled_provider
+                    } if cancelled_provider == provider
                 ),
                 "{provider}: {cancelled_outcome:?}"
             );
@@ -1196,10 +1195,7 @@ mod observation_tests {
         .expect_err("pre-cancelled Cline capture must stop before persistence");
         assert!(matches!(
             error,
-            TranscriptIngestError::NonDurableRecord {
-                reason: "admission_cancelled",
-                ..
-            }
+            TranscriptIngestError::Cancelled { provider: "cline" }
         ));
     }
 
