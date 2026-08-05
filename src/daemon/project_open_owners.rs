@@ -2098,24 +2098,15 @@ async fn run_production_pr13_hook_cycle(
             expires_at,
         },
     };
-    if matches!(
-        crate::daemon::external_acquisition::handle_github_hook_event(
-            external_acquisition.as_ref(),
-            &invocation.context,
-            advisory.github.as_ref(),
-            request.hook.envelope(),
-            observed_at,
-        )
-        .await,
-        crate::daemon::external_acquisition::DaemonExternalAcquisitionOutcomeV1::Unavailable
-    ) && external_acquisition.is_some()
-    {
-        tracing::warn!(
-            target: "tracedecay::external_acquisition",
-            project_id = feedback_scope.project_id.as_str(),
-            "canonical GitHub external acquisition is unavailable"
-        );
-    }
+    let acquisition_outcome = crate::daemon::external_acquisition::handle_github_hook_event(
+        external_acquisition.as_ref(),
+        &invocation.context,
+        advisory.github.as_ref(),
+        request.hook.envelope(),
+        observed_at,
+    )
+    .await;
+    acquisition_outcome.observe(&feedback_scope.project_id, external_acquisition.is_some());
     let feedback_configuration_digest =
         advisory.feedback.input.request.configuration_digest.clone();
     let host = host_kind_for_hook(request.hook.envelope().producer);

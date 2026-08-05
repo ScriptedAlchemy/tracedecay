@@ -12,7 +12,7 @@ use tracedecay_application::{
     AuthorizationPhase, AuthorizationRequest, RequestAdmission, RequestContext,
 };
 use tracedecay_domain::configuration::SourceKindV1;
-use tracedecay_domain::{ManifestDigest, ProviderId, UtcMicros};
+use tracedecay_domain::{ManifestDigest, ProjectId, ProviderId, UtcMicros};
 use tracedecay_hooks::HookEventEnvelopeV2;
 
 use crate::application::advisory::{
@@ -43,6 +43,37 @@ pub(crate) enum DaemonExternalAcquisitionOutcomeV1 {
     Processed(SourceAcquisitionRunOutcomeV1),
     Deferred(SourceAcquisitionRunOutcomeV1),
     Unavailable,
+}
+
+impl DaemonExternalAcquisitionOutcomeV1 {
+    pub(crate) fn observe(self, project_id: &ProjectId, runtime_configured: bool) {
+        match self {
+            Self::Processed(outcome) => {
+                tracing::info!(
+                    target: "tracedecay::external_acquisition",
+                    project_id = project_id.as_str(),
+                    outcome = ?outcome,
+                    "canonical GitHub external acquisition bounded run observed"
+                );
+            }
+            Self::Deferred(outcome) => {
+                tracing::debug!(
+                    target: "tracedecay::external_acquisition",
+                    project_id = project_id.as_str(),
+                    outcome = ?outcome,
+                    "canonical GitHub external acquisition remains deferred"
+                );
+            }
+            Self::Unavailable if runtime_configured => {
+                tracing::warn!(
+                    target: "tracedecay::external_acquisition",
+                    project_id = project_id.as_str(),
+                    "canonical GitHub external acquisition is unavailable"
+                );
+            }
+            Self::Unavailable => {}
+        }
+    }
 }
 
 pub(crate) trait DaemonExternalAcquisitionRuntimeV1: Send + Sync {
@@ -221,7 +252,13 @@ impl ProductionGitHubExternalAcquisitionV1 {
         {
             return DaemonExternalAcquisitionOutcomeV1::Unavailable;
         }
-        DaemonExternalAcquisitionOutcomeV1::Deferred(SourceAcquisitionRunOutcomeV1::Idle)
+        match self.owner.run_one(observed_at, &self.cancellation).await {
+            Ok(SourceAcquisitionRunOutcomeV1::Idle) => {
+                DaemonExternalAcquisitionOutcomeV1::Deferred(SourceAcquisitionRunOutcomeV1::Idle)
+            }
+            Ok(outcome) => DaemonExternalAcquisitionOutcomeV1::Processed(outcome),
+            Err(_) => DaemonExternalAcquisitionOutcomeV1::Unavailable,
+        }
     }
 }
 
