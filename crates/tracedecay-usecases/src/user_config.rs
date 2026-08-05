@@ -203,7 +203,7 @@ pub fn automation_is_configured() -> bool {
         .is_some_and(|table| table.contains_key("automation"))
 }
 
-/// Errors returned by [`UserConfig::save`] / [`UserConfig::save_with_recovery`].
+/// Errors returned by strict loads and configuration saves.
 ///
 /// Distinguishes the ways a save can fail so callers can surface an actionable
 /// message instead of a bare boolean. The corrupt-existing-file case carries
@@ -426,6 +426,28 @@ impl UserConfig {
             return Self::default();
         };
         parse_or_warn_default(&path, &contents)
+    }
+
+    /// Loads configuration without substituting defaults for an unreadable or
+    /// malformed persisted file.
+    ///
+    /// Lifecycle callers use this when a missing policy would enable host
+    /// behavior: corruption must stop the operation rather than silently turn
+    /// an opt-out back on. A genuinely missing file still means defaults.
+    pub fn load_strict() -> std::result::Result<Self, ConfigSaveError> {
+        let path = config_path().ok_or(ConfigSaveError::PathUnavailable)?;
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(source) => {
+                return Err(ConfigSaveError::ExistingUnreadable { path, source });
+            }
+        };
+        toml::from_str(&contents).map_err(|error| ConfigSaveError::CorruptExisting {
+            path,
+            line: parse_error_line(&contents, &error),
+            message: error.to_string(),
+        })
     }
 
     /// Canonical content revision for compare-and-swap callers.
@@ -1052,5 +1074,24 @@ mod tests {
 
         assert!(!decoded.dashboard_enabled_for_agent("hermes"));
         assert!(decoded.dashboard_enabled_for_agent("claude"));
+    }
+
+    #[test]
+    fn strict_load_rejects_corrupt_dashboard_policy_instead_of_enabling_it() {
+        let _lock = lock_user_data_dir_test_env();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
+        let path = config_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "installed_agents = [\"hermes\"]\nagent_dashboard_enabled = { hermes = false\n",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            UserConfig::load_strict(),
+            Err(ConfigSaveError::CorruptExisting { .. })
+        ));
     }
 }

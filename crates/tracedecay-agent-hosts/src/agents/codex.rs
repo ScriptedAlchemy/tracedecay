@@ -365,7 +365,7 @@ fn codex_embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
 }
 
 fn codex_plugin_install_dir(home: &Path) -> PathBuf {
-    home.join("plugins/tracedecay")
+    home.join(".codex/plugins/tracedecay")
 }
 
 fn codex_plugin_cached_root(home: &Path, marketplace_name: &str) -> PathBuf {
@@ -476,7 +476,7 @@ fn install_codex_personal_bootstrap(home: &Path, tracedecay_bin: &str) -> Result
         &codex_personal_marketplace_path(home),
         "personal",
         "Personal",
-        "./plugins/tracedecay",
+        CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
     )?;
     Ok(install_dir)
 }
@@ -795,6 +795,7 @@ const CODEX_MANAGED_HOOKS: &[CodexManagedHook] = &[
 /// Subcommands from older bundles that uninstall must also strip even though
 /// the current bundle no longer registers them.
 const CODEX_DEFAULT_MARKETPLACE_NAME: &str = "personal";
+const CODEX_GLOBAL_PLUGIN_SOURCE_PATH: &str = "./.codex/plugins/tracedecay";
 const CODEX_MCP_STARTUP_TIMEOUT_SECS: u64 = 120;
 const CODEX_MCP_TOOL_TIMEOUT_SECS: u64 = 900;
 
@@ -1121,7 +1122,29 @@ fn codex_loaded_cache_matches_rendered_bundle(
     else {
         return Ok(false);
     };
-    Ok(source == cache && expected.is_none_or(|expected| source == expected))
+    if source != cache || expected.is_some_and(|expected| source != expected) {
+        return Ok(false);
+    }
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+    let overlay = crate::automation::skill_targets::rendered_native_skill_overlay_files(
+        &profile_root,
+        crate::automation::skill_targets::SkillInstallTarget::Codex,
+        &source_root,
+    )
+    .map_err(|_| ())?;
+    let mut discovery_relatives = relatives;
+    for (path, _) in overlay {
+        let relative = path.strip_prefix(&source_root).map_err(|_| ())?;
+        let relative = relative.to_str().ok_or(())?;
+        discovery_relatives.push(relative.replace(std::path::MAIN_SEPARATOR, "/"));
+    }
+    super::observed_bundle_discovery_matches(
+        &source_root,
+        &cache_root,
+        &discovery_relatives,
+        &[".codex-plugin", "agents", "commands", "hooks", "skills"],
+    )
+    .map_err(|_| ())
 }
 
 fn codex_source_manifest_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
@@ -1167,7 +1190,7 @@ fn codex_exact_personal_marketplace_name(home: &Path) -> std::result::Result<Opt
                     && entry
                         .pointer("/source/path")
                         .and_then(serde_json::Value::as_str)
-                        == Some("./plugins/tracedecay")
+                        == Some(CODEX_GLOBAL_PLUGIN_SOURCE_PATH)
             })
         });
     Ok(source_matches.then(|| name.to_string()))
@@ -1616,7 +1639,7 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
         dc,
         &codex_personal_marketplace_path(home),
         "personal marketplace",
-        "./plugins/tracedecay",
+        CODEX_GLOBAL_PLUGIN_SOURCE_PATH,
         "tracedecay install --agent codex",
     );
 }

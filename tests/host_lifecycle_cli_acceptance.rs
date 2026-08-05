@@ -703,7 +703,7 @@ fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
     assert!(
         cli.home
             .path()
-            .join("plugins/tracedecay/.codex-plugin/plugin.json")
+            .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
             .is_file(),
         "Codex manual remediation has no staged plugin source"
     );

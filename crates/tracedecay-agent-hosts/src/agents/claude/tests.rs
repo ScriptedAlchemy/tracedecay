@@ -92,6 +92,24 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
         NonInteractiveInstallOutcome::Ready
     ));
 
+    let retired_command =
+        claude_current_cached_plugin_root(home.path()).join("commands/retired.md");
+    std::fs::create_dir_all(retired_command.parent().unwrap()).unwrap();
+    std::fs::write(&retired_command, "# stale auto-discovered command\n").unwrap();
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::DeferredUserAction(_)
+    ));
+    std::fs::remove_file(retired_command).unwrap();
+    assert!(matches!(
+        ClaudeIntegration
+            .preflight_non_interactive_install(&old_ctx)
+            .unwrap(),
+        NonInteractiveInstallOutcome::Ready
+    ));
+
     std::fs::write(
         claude_current_cached_plugin_root(home.path()).join(".mcp.json"),
         "{}\n",
