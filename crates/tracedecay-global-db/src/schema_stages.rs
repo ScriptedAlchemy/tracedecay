@@ -499,8 +499,8 @@ async fn inspect_workflow_schema_for_admission(
 
     let mut schema = conn
         .query(
-            "SELECT schema_version, definition_digest FROM workflow_schema
-             WHERE singleton = 1",
+            "SELECT singleton, schema_version, definition_digest FROM workflow_schema
+             ORDER BY singleton",
             (),
         )
         .await
@@ -514,20 +514,24 @@ async fn inspect_workflow_schema_for_admission(
             "workflow schema identity is missing",
         ));
     };
-    let schema_version = identity
+    let singleton = identity
         .get::<i64>(0)
+        .map_err(|error| global_db_operation_error("decode workflow schema singleton", error))?;
+    let schema_version = identity
+        .get::<i64>(1)
         .map_err(|error| global_db_operation_error("decode workflow schema version", error))?;
     let definition_digest = identity
-        .get::<String>(1)
+        .get::<String>(2)
         .map_err(|error| global_db_operation_error("decode workflow schema digest", error))?;
-    let duplicate_identity = schema
+    let extra_identity = schema
         .next()
         .await
         .map_err(|error| global_db_operation_error("read workflow schema identity", error))?
         .is_some();
-    if schema_version != WORKFLOW_SCHEMA_VERSION_V1
+    if singleton != 1
+        || schema_version != WORKFLOW_SCHEMA_VERSION_V1
         || definition_digest != WORKFLOW_SCHEMA_DEFINITION_DIGEST_V1
-        || duplicate_identity
+        || extra_identity
     {
         return Err(workflow_schema_reset_required(
             "workflow schema identity does not match the final contract",
