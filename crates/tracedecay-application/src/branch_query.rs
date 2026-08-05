@@ -42,7 +42,10 @@ pub struct BranchSearchRequestV1 {
 impl BranchSearchRequestV1 {
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
         validate_branch_name(&self.branch)?;
-        if self.query.trim().is_empty() || self.query.len() > BRANCH_QUERY_MAX_BYTES_V1 {
+        if self.query.trim().is_empty()
+            || self.query.len() > BRANCH_QUERY_MAX_BYTES_V1
+            || self.query.chars().any(char::is_control)
+        {
             return Err(ApplicationContractError::InvalidRange {
                 field: "branch search query",
             });
@@ -312,6 +315,13 @@ mod tests {
             limit: 10,
         };
         assert!(transport_ref.validate().is_err());
+
+        let control_query = BranchSearchRequestV1 {
+            branch: "main".to_owned(),
+            query: "needle\nsecond request".to_owned(),
+            limit: 10,
+        };
+        assert!(control_query.validate().is_err());
     }
 
     #[test]

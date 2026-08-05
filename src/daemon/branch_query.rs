@@ -311,12 +311,20 @@ impl RegisteredBranchSnapshotResolver {
         scope: &GraphScopeRecord,
         source_commit: String,
     ) -> Result<BranchGraphGenerationV1, BranchQueryUnavailableReasonV1> {
+        if scope.graph_scope_id.is_empty() || scope.graph_scope_id.chars().any(char::is_control) {
+            return Err(BranchQueryUnavailableReasonV1::GenerationUnavailable);
+        }
         let source_commit = CommitId::new(source_commit)
             .map_err(|_| BranchQueryUnavailableReasonV1::GenerationUnavailable)?;
-        let recorded_sync_at = scope
-            .last_synced_at
-            .and_then(|seconds| seconds.checked_mul(1_000_000))
-            .map(UtcMicros);
+        let recorded_sync_at = match scope.last_synced_at {
+            Some(seconds) if seconds >= 0 => {
+                Some(UtcMicros(seconds.checked_mul(1_000_000).ok_or(
+                    BranchQueryUnavailableReasonV1::GenerationUnavailable,
+                )?))
+            }
+            Some(_) => return Err(BranchQueryUnavailableReasonV1::GenerationUnavailable),
+            None => None,
+        };
         let generation_digest = canonical_sha256(&(
             BRANCH_GRAPH_GENERATION_DOMAIN_V1,
             &scope.graph_scope_id,

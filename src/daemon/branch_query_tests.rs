@@ -364,3 +364,14 @@ async fn elapsed_deadline_stops_before_graph_resolution() {
         BranchQueryOutcomeV1::TimedOut
     ));
 }
+
+#[test]
+fn invalid_registered_generation_is_unavailable() {
+    let resolver = FakeResolver::ready("worktree.main");
+    let mut scope = resolver.snapshot("main").registered_scope;
+    scope.last_synced_at = Some(-1);
+    assert!(matches!(
+        RegisteredBranchSnapshotResolver::generation(&scope, "a".repeat(40)),
+        Err(BranchQueryUnavailableReasonV1::GenerationUnavailable)
+    ));
+}
