@@ -5890,6 +5890,7 @@ name = "tracedecay-code-extraction"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "thiserror",
  "tokensave-large-treesitters",
  "tokensave-medium-treesitters",
  "tracedecay-domain",
@@ -6055,6 +6056,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
+ "tracedecay-code-extraction",
  "tracedecay-domain",
  "url",
 ]

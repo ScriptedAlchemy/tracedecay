@@ -2081,6 +2081,10 @@ impl crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort
                 .transpose()?;
             Ok(
                 crate::application::lsp_runtime::LspCodeIndexProjectionIdentity {
+                    repository: generation.snapshot().repository.clone(),
+                    worktree: generation.snapshot().worktree.clone(),
+                    reference: generation.snapshot().reference.clone(),
+                    source_revision: generation.snapshot().source_revision.clone(),
                     code_generation_id: generation.manifest().generation_id.clone(),
                     snapshot_digest: generation.manifest().snapshot_digest.clone(),
                     invalidation_digest: generation.manifest().invalidation_digest.clone(),

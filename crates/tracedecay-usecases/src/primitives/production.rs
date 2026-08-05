@@ -27,9 +27,8 @@ use tracedecay_application::{
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
-    CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
-    RetrievalAnchorId, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, canonical_sha256,
+    CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
+    RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -2209,6 +2208,7 @@ pub async fn open_pr12_production_primitive_runtime(
     let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
         Arc::new(ProductionManagedTestRunCurrentScope {
             project_root,
+            scope: scope.clone(),
             code_index: Arc::clone(&code_index),
         });
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
@@ -2246,45 +2246,37 @@ pub async fn open_pr12_production_primitive_runtime(
 #[derive(Clone)]
 struct ProductionManagedTestRunCurrentScope {
     project_root: PathBuf,
+    scope: ResolvedScope,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
 }
 
 impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
     fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_> {
         let project_root = self.project_root.clone();
+        let scope = self.scope.clone();
         let code_index = Arc::clone(&self.code_index);
         Box::pin(async move {
-            let head_commit_id = current_managed_test_run_head(&project_root)?;
             let current = code_index
                 .current_identity(project_root, None)
                 .await
                 .map_err(|_| ApplicationContractError::Inconsistent {
                     field: "PR12 managed test result code generation",
                 })?;
+            let current = current.admit_for_scope(&scope).map_err(|_| {
+                ApplicationContractError::Inconsistent {
+                    field: "PR12 managed test result sealed scope",
+                }
+            })?;
             Ok(ManagedTestRunCurrentIdentity {
-                head_commit_id,
+                head_commit_id: current.head_commit_id,
                 code_generation_id: current.code_generation_id,
             })
         })
     }
 }
 
-fn current_managed_test_run_head(
-    project_root: &Path,
-) -> Result<CommitId, ApplicationContractError> {
-    let repository =
-        gix::open(project_root).map_err(|_| ApplicationContractError::Inconsistent {
-            field: "PR12 managed test result repository",
-        })?;
-    let head_commit_id = repository
-        .head_commit()
-        .ok()
-        .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
-        .ok_or(ApplicationContractError::Inconsistent {
-            field: "PR12 managed test result head",
-        })?;
-    Ok(head_commit_id)
-}
+#[cfg(test)]
+mod managed_test_scope_tests;
 
 pub fn admitted_root_uri_for_project(
     project_root: &Path,

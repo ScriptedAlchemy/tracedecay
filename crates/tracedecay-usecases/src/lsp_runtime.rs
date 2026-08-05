@@ -53,10 +53,8 @@ use tracedecay_lsp::{
     UpstreamCapabilities, byte_offset_to_utf16_position, percent_hex_nibble,
 };
 use tracedecay_policy::diagnostic_curation::{DiagnosticCurationDecisionV1, curate_diagnostic};
-use tracedecay_store::DiagnosticStore as _;
 use url::Url;
 
-use crate::diagnostics_store::DiagnosticsStore;
 use crate::feedback::concrete::{
     ConcretePr12FeedbackOwner, Pr12FeedbackRuntime, ProjectFeedbackStore,
 };
@@ -76,11 +74,12 @@ use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
-use tracedecay_runtime_core::db::Database;
-
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_TTL_MICROS: i64 = 15 * 60 * 1_000_000;
+
+mod projection_identity;
+pub use projection_identity::{LspCodeIndexProjectionIdentity, LspCodeIndexProjectionIdentityPort};
 
 /// Current canonical Git/graph address for an admitted LSP root.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -270,26 +269,6 @@ pub(crate) struct StoredLspTestRunExpansionV1 {
     page_size: u32,
 }
 
-/// Exact current immutable code-index identity resolved by the daemon-owned
-/// mounted worktree scheduler. A mutable graph database or path-derived
-/// generation is not a legal implementation of this port.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LspCodeIndexProjectionIdentity {
-    pub code_generation_id: CodeGenerationId,
-    pub snapshot_digest: ManifestDigest,
-    pub invalidation_digest: ManifestDigest,
-    pub snapshot_content_digest: ContentDigest,
-    pub document_content_digest: Option<ContentDigest>,
-}
-
-pub trait LspCodeIndexProjectionIdentityPort: Send + Sync {
-    fn current_identity(
-        &self,
-        project_root: PathBuf,
-        document_relative_path: Option<String>,
-    ) -> LspRuntimeFuture<Result<LspCodeIndexProjectionIdentity, LspRuntimeFailure>>;
-}
-
 /// Resolves current scope through the existing admitted Git/graph owner.
 pub trait LspFeedbackProjectionScopePort: Send + Sync {
     fn resolve(
@@ -302,8 +281,8 @@ pub trait LspFeedbackProjectionScopePort: Send + Sync {
 /// Exact registered project/root authority used by production LSP sessions.
 ///
 /// Project identity and authorization scope come from the already-registered
-/// feedback runtime. Current generation comes from the canonical diagnostics
-/// store and HEAD comes from the admitted repository root.
+/// feedback runtime. The mounted scheduler supplies one sealed generation with
+/// its repository, worktree, reference, and source-revision identity.
 #[derive(Clone)]
 pub struct RegisteredProjectLspAuthority {
     feedback: Arc<Pr12FeedbackRuntime>,
@@ -397,34 +376,15 @@ impl RegisteredProjectLspAuthority {
         &self,
         document_relative_path: Option<String>,
     ) -> Result<LspFeedbackProjectionScope, LspRuntimeFailure> {
-        self.feedback
-            .scope()
+        let scope = self.feedback.scope();
+        scope
             .validate()
             .map_err(|_| LspRuntimeFailure::new("registered-project-scope-invalid"))?;
-        let head_commit_id = {
-            let repository = gix::open(&self.project_root)
-                .map_err(|_| LspRuntimeFailure::new("registered-repository-unavailable"))?;
-            repository
-                .head_commit()
-                .ok()
-                .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
-                .ok_or_else(|| LspRuntimeFailure::new("registered-head-unavailable"))?
-        };
         let identity = self
             .code_index
             .current_identity(self.project_root.clone(), document_relative_path)
             .await?;
-        let generation = generation_sequence(&identity.code_generation_id)
-            .ok_or_else(|| LspRuntimeFailure::new("current-generation-invalid"))?;
-        Ok(LspFeedbackProjectionScope {
-            head_commit_id,
-            code_generation_id: identity.code_generation_id,
-            snapshot_digest: identity.snapshot_digest,
-            invalidation_digest: identity.invalidation_digest,
-            snapshot_content_digest: identity.snapshot_content_digest,
-            document_content_digest: identity.document_content_digest,
-            generation,
-        })
+        identity.admit_for_scope(scope)
     }
 }
 
@@ -518,6 +478,19 @@ pub trait LspFeedbackDiagnosticProjectionPort: Send + Sync {
         cycle: FeedbackCycleResultV1,
         expansion_handles: BTreeMap<String, String>,
     ) -> LspRuntimeFuture<Result<Vec<GatewayDiagnostic>, LspRuntimeFailure>>;
+}
+
+/// Canonical managed-diagnostics read authority for LSP finding anchors.
+///
+/// The projection receives this authority from daemon composition and never
+/// opens a database or constructs a store.
+pub trait LspFeedbackDiagnosticRecordPort: Send + Sync {
+    fn diagnostic_by_anchor(
+        &self,
+        anchor: tracedecay_domain::RetrievalAnchorId,
+    ) -> LspRuntimeFuture<
+        Result<Option<tracedecay_domain::GenerationDiagnosticV1>, LspRuntimeFailure>,
+    >;
 }
 
 /// Canonical source identity and text needed to project byte-addressed
@@ -681,16 +654,13 @@ const fn advisory_diagnostic_source(
 
 /// Real finding-anchor hydration over the canonical managed diagnostics store.
 pub struct DiagnosticsStoreLspFeedbackProjection<S> {
-    database: Database,
+    records: Arc<dyn LspFeedbackDiagnosticRecordPort>,
     documents: Arc<S>,
 }
 
 impl<S> DiagnosticsStoreLspFeedbackProjection<S> {
-    pub fn new(database: Database, documents: Arc<S>) -> Self {
-        Self {
-            database,
-            documents,
-        }
+    pub fn new(records: Arc<dyn LspFeedbackDiagnosticRecordPort>, documents: Arc<S>) -> Self {
+        Self { records, documents }
     }
 }
 
@@ -706,7 +676,7 @@ where
         cycle: FeedbackCycleResultV1,
         expansion_handles: BTreeMap<String, String>,
     ) -> LspRuntimeFuture<Result<Vec<GatewayDiagnostic>, LspRuntimeFailure>> {
-        let database = self.database.clone();
+        let records = Arc::clone(&self.records);
         let documents = Arc::clone(&self.documents);
         Box::pin(async move {
             let document = documents.snapshot(root, document_uri.clone()).await?;
@@ -720,7 +690,6 @@ where
             {
                 return Err(LspRuntimeFailure::new("diagnostic-document-content-stale"));
             }
-            let store = DiagnosticsStore::new(database.conn());
             let coverage = gateway_diagnostic_coverage(cycle_coverage(&cycle));
             let mut diagnostics = Vec::new();
             let impact_target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
@@ -782,11 +751,7 @@ where
                     });
                     continue;
                 }
-                let Some(record) = store
-                    .diagnostic_by_anchor(anchor)
-                    .await
-                    .map_err(|_| LspRuntimeFailure::new("diagnostic-anchor-read-failed"))?
-                else {
+                let Some(record) = records.diagnostic_by_anchor(anchor.clone()).await? else {
                     skipped(
                         finding_id,
                         FeedbackDiagnosticProjectionSkipV1::AnchorNotPublished,
@@ -2226,8 +2191,8 @@ fn canonical_application_value<T: Serialize>(
 pub fn lsp_session_factory<F>(
     runtime: tokio::runtime::Handle,
     feedback_runtime: Arc<Pr12FeedbackRuntime>,
-    database: Database,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_records: Arc<dyn LspFeedbackDiagnosticRecordPort>,
     feedback_cycle: F,
     semantics: Arc<dyn SemanticProviderPort + Send + Sync>,
     diagnostic_broker: Arc<AsyncMutex<DiagnosticBroker>>,
@@ -2245,7 +2210,7 @@ where
     )?);
     let test_runs = lsp_test_result_port(project.clone());
     let diagnostic_projection = Arc::new(DiagnosticsStoreLspFeedbackProjection::new(
-        database,
+        diagnostic_records,
         project.clone(),
     ));
     let feedback = Arc::new(ConcretePr12FeedbackLspSource::new(
@@ -2801,10 +2766,6 @@ fn open_project_file(
         .open(&canonical)
         .map_err(|_| LspRuntimeFailure::new("document-unavailable"))?;
     Ok((canonical, file))
-}
-
-fn generation_sequence(generation: &CodeGenerationId) -> Option<u64> {
-    generation.as_str().split('.').nth(3)?.parse().ok()
 }
 
 fn micros_to_seconds(value: UtcMicros) -> i64 {

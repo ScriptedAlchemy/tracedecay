@@ -954,12 +954,17 @@ impl DaemonLspOwnerRegistrar {
             supports_diagnostics: semantics.analyzer_available,
             semantic: semantics.semantic_capabilities.clone(),
         };
+        let diagnostic_records = Arc::new(
+            crate::application::feedback::diagnostics::DatabaseDiagnosticStore::new(
+                database.clone(),
+            ),
+        );
         let factory = Arc::new(
             lsp_session_factory(
                 runtime,
                 feedback_runtime,
-                database,
                 code_index,
+                diagnostic_records,
                 move |_| Arc::clone(&feedback_cycle_input),
                 semantics.semantics,
                 diagnostic_broker,

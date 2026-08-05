@@ -5015,6 +5015,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 {
     use std::collections::{BTreeMap, BTreeSet};
 
+    use crate::application::feedback::diagnostics::DatabaseDiagnosticStore;
     use crate::application::lsp_runtime::{
         DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
         LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
@@ -5159,7 +5160,6 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
 
     // The saved-edit cycle's impact target is minted by the same authority, so
     // the projection's identity comparison can succeed.
-    let head_commit = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
     let projection_identity = LspCodeIndexProjectionIdentityPort::current_identity(
         &registry,
         fixture.path().to_path_buf(),
@@ -5167,6 +5167,10 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     )
     .await
     .expect("lsp code-index projection identity");
+    let head_commit = projection_identity
+        .source_revision
+        .clone()
+        .expect("sealed generation source revision");
     let document_content_digest: ContentDigest = projection_identity
         .document_content_digest
         .clone()
@@ -5194,7 +5198,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 .expect("worktree identity")
                 .as_str()),
             branch_ref: "refs/heads/main".to_owned(),
-            head_commit_id: id(&head_commit),
+            head_commit_id: head_commit.clone(),
         },
         content_identity: None,
         durability: FeedbackDurabilityV1::Durable,
@@ -5263,7 +5267,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
         .expect("root uri")
         .to_string();
     let projection = DiagnosticsStoreLspFeedbackProjection::new(
-        database.clone(),
+        Arc::new(DatabaseDiagnosticStore::new(database.clone())),
         Arc::new(FixedDocument(source.to_owned())),
     );
     let published = projection
@@ -5271,7 +5275,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             AdmittedRoot::new(root_uri.clone()),
             document_uri.clone(),
             LspFeedbackProjectionScope {
-                head_commit_id: id(&head_commit),
+                head_commit_id: head_commit.clone(),
                 code_generation_id: generation.clone(),
                 snapshot_digest: projection_identity.snapshot_digest.clone(),
                 invalidation_digest: projection_identity.invalidation_digest.clone(),
@@ -5305,7 +5309,7 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
             AdmittedRoot::new(root_uri),
             document_uri,
             LspFeedbackProjectionScope {
-                head_commit_id: id(&head_commit),
+                head_commit_id: head_commit,
                 code_generation_id: generation,
                 snapshot_digest: projection_identity.snapshot_digest,
                 invalidation_digest: projection_identity.invalidation_digest,

@@ -521,7 +521,13 @@ fn context_request_binds_exact_session_overlay_digest() {
     let document_uri = "file:///root/a.rs";
     let mut overlays = OverlayStore::default();
     overlays
-        .open(document_uri, "rust", 1, "fn dirty() {}")
+        .open(
+            &AdmittedRoot::new("file:///root"),
+            document_uri,
+            "rust",
+            1,
+            "fn dirty() {}",
+        )
         .expect("open overlay");
     let mut request = ContextProjectionRequest {
         kind: ContextProjectionKind::test_run_results(),
