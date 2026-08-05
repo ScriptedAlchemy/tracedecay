@@ -10,6 +10,7 @@ use tracedecay_code_index::{
         CodeIndexExecutionControlV1, CodeIndexGenerationScopeV1, CodeIndexInterruptionV1,
         CodeIndexProductionConfigV1, CodeIndexProductionErrorV1, CodeIndexProductionOwnerV1,
         CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+        CodeIndexRepositoryParseIdentityV1,
     },
     projection::{
         ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
@@ -21,9 +22,10 @@ use tracedecay_domain::{
     BranchStackNodeV1, ChunkerRevision, CodeGenerationId, CommitId, FileOccurrenceId, LanguageId,
     ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1,
-    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RepositoryId, SanitizationReceiptId,
-    SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
-    StackNodeId, TestAttributionEvidenceClassV1, UtcMicros, WorktreeId, canonical_sha256,
+    ProjectionOutcomeV1, ProviderEvaluationStateV1, RefId, RepositoryDirtyStateV1, RepositoryId,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SnapshotFileDispositionV1, StackNodeId, TestAttributionEvidenceClassV1, TreeId, UtcMicros,
+    WorktreeId, canonical_sha256,
 };
 
 use crate::support::{RUST_SOURCE, id};
@@ -84,7 +86,7 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
         &mut self,
         request: ProjectionBatchRequestV1,
     ) -> Result<ProjectionBatchReceiptV1, ProjectionSinkErrorV1> {
-        let decisions: Vec<ChunkProjectionDecisionV1> = request
+        let mut decisions: Vec<ChunkProjectionDecisionV1> = request
             .changes
             .added_or_changed
             .iter()
@@ -106,6 +108,34 @@ impl CodeChunkProjectionSink for ApplyingProjectionSink {
                 ),
             })
             .collect();
+        decisions.extend(
+            request
+                .changes
+                .deleted
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: None,
+                    operation: ProjectionOperationV1::Deleted,
+                    outcome: ProjectionOutcomeV1::Applied,
+                    output_digest: None,
+                }),
+        );
+        decisions.extend(
+            request
+                .changes
+                .reused
+                .iter()
+                .map(|change| ChunkProjectionDecisionV1 {
+                    chunk_id: change.chunk_id.clone(),
+                    prior_chunk_digest: change.prior_digest.clone(),
+                    current_chunk_digest: change.current_digest.clone(),
+                    operation: ProjectionOperationV1::Reused,
+                    outcome: ProjectionOutcomeV1::Reused,
+                    output_digest: None,
+                }),
+        );
         build_batch_receipt(&request, &decisions)
             .map_err(|error| ProjectionSinkErrorV1::Rejected(error.to_string()))
     }
@@ -196,6 +226,10 @@ fn request_in_scope(
     request.snapshot.reference = Some(id::<RefId>(reference));
     request.snapshot.worktree = worktree.map(id::<WorktreeId>);
     request.snapshot.source_revision = Some(id::<CommitId>(source_revision));
+    request.repository_parse_identity = CodeIndexRepositoryParseIdentityV1 {
+        tree: Some(id::<TreeId>(&format!("tree.{source_revision}"))),
+        dirty: RepositoryDirtyStateV1::Dirty,
+    };
     request
 }
 
@@ -233,9 +267,73 @@ fn request_at_path(
         }],
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
         sealed_at: UtcMicros(sealed_at),
         target_projection_key: projection_key(),
     }
+}
+
+fn request_with_source(
+    file_occurrence: &str,
+    sealed_at: i64,
+    source_revision: &str,
+    tree: &str,
+    source: &str,
+) -> CodeIndexBuildRequestV1 {
+    let mut request = request_in_scope(
+        file_occurrence,
+        sealed_at,
+        "refs/heads/feature",
+        Some("worktree.feature"),
+        source_revision,
+    );
+    let bytes = source.as_bytes().to_vec();
+    request.snapshot.files[0].content_digest = content_digest(&bytes);
+    request.snapshot.content_identity = content_digest(&bytes);
+    request.captured_files[0].sanitized_bytes = bytes;
+    request.repository_parse_identity.tree = Some(id::<TreeId>(tree));
+    request.changed_files.insert("src/lib.rs".to_owned());
+    request
+}
+
+#[test]
+fn production_increment_reuses_retained_tree_and_reports_bounded_parse_work() {
+    let store = SharedPublicationStore::default();
+    let mut owner = CodeIndexProductionOwnerV1::new(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    owner
+        .build_and_publish(
+            request_with_source(
+                "file.retained.1",
+                1_100_000,
+                "commit.retained.1",
+                "tree.retained.1",
+                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 2 }\n",
+            ),
+            &ActiveControl,
+        )
+        .expect("initial generation");
+    owner
+        .build_and_publish(
+            request_with_source(
+                "file.retained.2",
+                1_200_000,
+                "commit.retained.2",
+                "tree.retained.2",
+                "fn unchanged() -> u32 { 1 }\nfn edited() -> u32 { 20 }\n",
+            ),
+            &ActiveControl,
+        )
+        .expect("incremental generation");
+
+    let stats = owner.retained_parse_stats();
+    assert_eq!(stats.initial_parses, 1);
+    assert_eq!(stats.incremental_parses, 1);
+    assert_eq!(stats.retained_documents, 1);
+    assert!(stats.changed_bytes < 60);
 }
 
 #[test]
@@ -762,6 +860,10 @@ fn multi_file_request(file_count: usize, sealed_at: i64) -> CodeIndexBuildReques
         captured_files: captured,
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
+        repository_parse_identity: CodeIndexRepositoryParseIdentityV1 {
+            tree: None,
+            dirty: RepositoryDirtyStateV1::Dirty,
+        },
         sealed_at: UtcMicros(sealed_at),
         target_projection_key: projection_key(),
     }

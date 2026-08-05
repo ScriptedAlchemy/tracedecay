@@ -9,6 +9,7 @@ mod language_registry;
 mod lineage;
 mod production_orchestration;
 mod projection_receipts;
+mod retained_parse;
 mod sanitized_intake;
 mod search_chunks;
 mod support;

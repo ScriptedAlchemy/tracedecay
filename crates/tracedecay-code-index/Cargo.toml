@@ -76,3 +76,8 @@ tracedecay-code-extraction = { path = "../tracedecay-code-extraction", version =
 name = "code_index_chunks"
 harness = false
 test = false
+
+[[bench]]
+name = "retained_parse"
+harness = false
+test = false
