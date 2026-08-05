@@ -6,6 +6,60 @@ use tracedecay_application::{
 };
 use tracedecay_tool_catalog::{BindingId, SchemaId};
 
+#[test]
+fn cold_git_warming_retries_only_typed_retryable_problems_within_the_catalog_budget() {
+    let retryable: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+        ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+        RequestId::new("request.cli.git-warming").unwrap(),
+        ApplicationProblem::unavailable(
+            SafeDiagnostic::new("git.project.warming", "The Git project route is warming").unwrap(),
+        ),
+    )
+    .with_retry_after_millis(Some(1))
+    .unwrap());
+    let terminal: ApplicationResult<Value> = Err(ApplicationProblemEnvelope::new(
+        ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+        RequestId::new("request.cli.git-terminal").unwrap(),
+        ApplicationProblem::not_found_or_not_authorized(
+            tracedecay_application::RetryDirective::Never,
+        ),
+    ));
+    let budget_deadline = Instant::now() + Duration::from_secs(1);
+
+    assert_eq!(
+        typed_cold_git_retry_delay(
+            ApplicationSurfaceOperation::GitStatus,
+            &retryable,
+            budget_deadline
+        ),
+        Some(Duration::from_millis(1))
+    );
+    assert_eq!(
+        typed_cold_git_retry_delay(
+            ApplicationSurfaceOperation::GitStatus,
+            &terminal,
+            budget_deadline
+        ),
+        None
+    );
+    assert_eq!(
+        typed_cold_git_retry_delay(
+            ApplicationSurfaceOperation::GitApply,
+            &retryable,
+            budget_deadline
+        ),
+        None
+    );
+    assert_eq!(
+        typed_cold_git_retry_delay(
+            ApplicationSurfaceOperation::GitStatus,
+            &retryable,
+            Instant::now()
+        ),
+        None
+    );
+}
+
 fn defs() -> Vec<ToolDefinition> {
     get_tool_definitions()
 }

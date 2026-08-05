@@ -56,7 +56,9 @@ use tracedecay::mcp::tools::{
     render_tool_cli_help, short_tool_name,
 };
 use tracedecay::request_identity::{GlobalRequestSurface, mint_global_request_id};
-use tracedecay_application::{CancellationSignal, Deadline};
+use tracedecay_application::{
+    ApplicationResult, CancellationSignal, Deadline, LegalAction, RetryDirective,
+};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -217,23 +219,22 @@ pub(crate) async fn run(
     }
 
     let explicit_project = project.or(parsed_project);
-    let deadline = Instant::now()
-        .checked_add(tool_command_deadline()?)
-        .ok_or_else(tool_deadline_range_error)?;
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
         let (request, requested_format) = cli_surface_invocation(&def.name, tool_args, raw_json)
             .map_err(|error| TraceDecayError::Config {
                 message: error.to_string(),
             })?;
-        return dispatch_cli_application_surface(
+        return dispatch_catalogued_cli_operation(
             operation,
             request,
             DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path,
-            requested_format,
-            deadline,
+            requested_format == RequestedOutputFormat::Json,
         )
         .await;
     }
+    let deadline = Instant::now()
+        .checked_add(tool_command_deadline()?)
+        .ok_or_else(tool_deadline_range_error)?;
     // Catalog-declared operations must pass the same binding resolver as the
     // typed application surfaces before entering the retained compatibility
     // owner. Operations with no catalog contract remain explicitly owned by
@@ -281,6 +282,69 @@ fn cli_surface_invocation(
     Ok((normalized.request, requested_format))
 }
 
+/// Dispatches one named CLI operation through the deadline contract declared
+/// by its selected catalog capability. The adapter never accepts a process
+/// environment deadline because that would give this surface a different
+/// budget from MCP and HTTP for the same operation.
+pub(crate) async fn dispatch_catalogued_cli_operation(
+    operation: ApplicationSurfaceOperation,
+    tool_args: Value,
+    project: Option<PathBuf>,
+    json: bool,
+) -> Result<()> {
+    let deadline = Instant::now()
+        .checked_add(catalogued_cli_deadline(operation)?)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "catalogued operation deadline exceeds the supported monotonic range"
+                .to_string(),
+        })?;
+    dispatch_cli_application_surface(
+        operation,
+        tool_args,
+        project,
+        if json {
+            RequestedOutputFormat::Json
+        } else {
+            RequestedOutputFormat::Markdown
+        },
+        deadline,
+    )
+    .await
+}
+
+fn catalogued_cli_deadline(operation: ApplicationSurfaceOperation) -> Result<Duration> {
+    let catalog =
+        tracedecay::application_surface::application_surface_catalog().map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
+    let profile = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: error.to_string(),
+    })?;
+    let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+    let capability = catalog
+        .resolve_binding(
+            &profile,
+            BindingSurface::Cli,
+            &operation_name,
+            1,
+            &std::collections::BTreeSet::new(),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "requested CLI operation is unavailable for this catalog profile".to_string(),
+        })?;
+    Ok(Duration::from_millis(
+        capability.deadline().maximum_millis(),
+    ))
+}
+
 /// Every application-surface operation is project-scoped on the daemon side
 /// (`DaemonInvocationRequest::requires_project`), so `project` must already be
 /// the resolved project route — not just an explicit `--project`. A handshake
@@ -292,13 +356,13 @@ async fn dispatch_cli_application_surface(
     tool_args: Value,
     project: Option<PathBuf>,
     requested_format: RequestedOutputFormat,
-    deadline: Instant,
+    budget_deadline: Instant,
 ) -> Result<()> {
     let request_id =
         mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
             message: "could not allocate an application surface request id".to_owned(),
         })?;
-    let request = match parse_application_surface_request(operation, tool_args) {
+    let request = match parse_application_surface_request(operation, tool_args.clone()) {
         Ok(request) => request,
         Err(error) => {
             if let Ok(handshake) =
@@ -319,17 +383,6 @@ async fn dispatch_cli_application_surface(
             });
         }
     };
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
-        .unwrap_or(i64::MAX);
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    let deadline = Deadline::new(UtcMicros(
-        now.saturating_add(i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX)),
-    ))
-    .map_err(|error| TraceDecayError::Config {
-        message: error.to_string(),
-    })?;
     let cancellation =
         CancellationSignal::active(format!("cancellation.cli.{}", request_id.as_str())).map_err(
             |error| TraceDecayError::Config {
@@ -338,20 +391,81 @@ async fn dispatch_cli_application_surface(
         )?;
     let handshake = DaemonHandshake::for_current_client(project, None, false, false)?;
     let client = DaemonInvocationClient::for_current(handshake)?;
-    let result = resolve_cli_application_surface(
-        operation,
-        request_id,
-        request,
-        requested_format,
-        deadline,
-        cancellation,
-        Some(&client),
-    )
-    .await
+    let mut first_request = Some(request);
+    loop {
+        let application_deadline = application_deadline_from_catalog_budget(budget_deadline)?;
+        let request = match first_request.take() {
+            Some(request) => request,
+            None => parse_application_surface_request(operation, tool_args.clone()).map_err(
+                |error| TraceDecayError::Config {
+                    message: error.to_string(),
+                },
+            )?,
+        };
+        let result = resolve_cli_application_surface(
+            operation,
+            request_id.clone(),
+            request,
+            requested_format,
+            application_deadline,
+            cancellation.clone(),
+            Some(&client),
+        )
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?;
+        let Some(delay) = typed_cold_git_retry_delay(operation, &result.result, budget_deadline)
+        else {
+            return print_cli_application_surface(
+                result,
+                requested_format == RequestedOutputFormat::Json,
+            );
+        };
+        tokio::time::sleep(delay).await;
+    }
+}
+
+fn application_deadline_from_catalog_budget(budget_deadline: Instant) -> Result<Deadline> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_micros()).unwrap_or(i64::MAX))
+        .unwrap_or(i64::MAX);
+    let remaining = budget_deadline.saturating_duration_since(Instant::now());
+    Deadline::new(UtcMicros(now.saturating_add(
+        i64::try_from(remaining.as_micros()).unwrap_or(i64::MAX),
+    )))
     .map_err(|error| TraceDecayError::Config {
         message: error.to_string(),
-    })?;
-    print_cli_application_surface(result, requested_format == RequestedOutputFormat::Json)
+    })
+}
+
+fn typed_cold_git_retry_delay(
+    operation: ApplicationSurfaceOperation,
+    result: &ApplicationResult<Value>,
+    budget_deadline: Instant,
+) -> Option<Duration> {
+    if !matches!(
+        operation,
+        ApplicationSurfaceOperation::GitStatus
+            | ApplicationSurfaceOperation::GitDiff
+            | ApplicationSurfaceOperation::GitHistory
+            | ApplicationSurfaceOperation::GitBlame
+            | ApplicationSurfaceOperation::GitHunks
+    ) {
+        return None;
+    }
+    let problem = result.as_ref().err()?;
+    if problem.problem.retry != RetryDirective::AfterDelay
+        || !problem.problem.legal_actions.contains(&LegalAction::Retry)
+    {
+        return None;
+    }
+    let delay = Duration::from_millis(problem.problem.retry_after_millis?);
+    Instant::now()
+        .checked_add(delay)
+        .filter(|retry_at| *retry_at < budget_deadline)
+        .map(|_| delay)
 }
 
 fn print_cli_application_surface(

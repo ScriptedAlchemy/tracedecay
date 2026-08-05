@@ -136,6 +136,27 @@ fn run_surface_tool_from(
     }
 }
 
+/// Runs the first-class Git read command from an admitted checkout. Unlike the
+/// generic `tool` escape hatch, this is the operator-facing journey for
+/// catalogued Git intelligence.
+fn run_git_status_from(home: &Path, working_directory: &Path) -> SurfaceOutcome {
+    let mut command = tracedecay_command_with_home(home);
+    command
+        .current_dir(working_directory)
+        .args(["git", "status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = command
+        .output()
+        .expect("first-class tracedecay git status should run");
+    SurfaceOutcome {
+        success: output.status.success(),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
 fn assert_surface_resolves_project(
     home: &Path,
     working_directory: &Path,
@@ -210,6 +231,25 @@ fn application_surface_git_reads_resolve_the_working_directory_worktree() {
     for tool in ["git_status", "git_diff", "git_history"] {
         assert_surface_resolves_project(&home_path, &project_path, tool, r#"{"format":"json"}"#);
     }
+}
+
+#[test]
+fn first_class_git_status_reads_the_admitted_worktree_through_the_daemon() {
+    let (_home, _project, home_path, project_path) = surface_fixture();
+    let _daemon = spawn_tracedecay_daemon(&home_path);
+
+    let outcome = run_git_status_from(&home_path, &project_path);
+    assert!(
+        outcome.success,
+        "first-class git status must reach the daemon-owned application route\nstdout:\n{}\nstderr:\n{}",
+        outcome.stdout, outcome.stderr
+    );
+    let payload = outcome.payload();
+    assert!(
+        payload.get("scope").is_some(),
+        "first-class git status must preserve the authenticated scope, got:\n{}",
+        outcome.stdout
+    );
 }
 
 #[test]

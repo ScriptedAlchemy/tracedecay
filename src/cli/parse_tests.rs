@@ -3,7 +3,7 @@ use super::{
     AutomationRunsAction, AutomationSkillsAction, AutomationSkillsInstallTarget, BranchAction, Cli,
     Commands, DaemonAction, FeedbackRollbackAction, HostBundleAction, LspAction, MemoryAction,
     MigrateAction, PackageHookAction, ScoopPackageHookAction, SessionsAction,
-    SessionsRefreshAction, WorkflowCliOperationArg,
+    SessionsRefreshAction,
 };
 use clap::{Command, CommandFactory, Parser, error::ErrorKind};
 
@@ -45,6 +45,16 @@ fn hidden_scoop_package_hook_contract_parses_both_operations() {
         assert_eq!(package_id, "tracedecay-beta");
         assert_eq!(state_file, std::path::Path::new(r"C:\state\scoop.json"));
     }
+}
+
+#[test]
+fn first_class_git_status_parses_as_a_cli_journey() {
+    let parsed = Cli::try_parse_from(["tracedecay", "git", "status", "--json"]);
+
+    assert!(
+        parsed.is_ok(),
+        "catalogued Git status must be available without the generic tool escape hatch"
+    );
 }
 
 fn visible_subcommand_paths(command: &Command) -> Vec<Vec<String>> {
@@ -222,13 +232,34 @@ fn workflow_command_binds_one_closed_typed_operation() {
     let Some(Commands::Workflow { invocation }) = cli.command else {
         panic!("unexpected Workflow command");
     };
-    assert_eq!(invocation.operation, WorkflowCliOperationArg::ExecuteFanOut);
+    assert_eq!(
+        invocation.operation,
+        tracedecay_api::WorkflowOperation::ExecuteFanOut
+    );
     assert_eq!(
         invocation.request_file,
         std::path::Path::new("workflow.json")
     );
     assert_eq!(invocation.project.as_deref(), Some("/tmp/project"));
     assert!(invocation.json);
+}
+
+#[test]
+fn workflow_help_lists_every_canonical_operation_route_segment() {
+    let error = match Cli::try_parse_from(["tracedecay", "workflow", "--help"]) {
+        Ok(_) => panic!("Workflow help must short-circuit parsing"),
+        Err(error) => error,
+    };
+    assert_eq!(error.kind(), ErrorKind::DisplayHelp);
+    let rendered = error.to_string();
+
+    for operation in tracedecay_api::WorkflowOperation::ALL {
+        assert!(
+            rendered.contains(operation.route_segment()),
+            "Workflow help must expose canonical route segment {}",
+            operation.route_segment()
+        );
+    }
 }
 
 #[test]
