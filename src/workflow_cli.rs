@@ -244,6 +244,10 @@ fn daemon_application_problem(problem: DaemonInvocationProblem) -> ApplicationPr
         DaemonInvocationProblem::NotFoundOrNotAuthorized => {
             ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never)
         }
+        DaemonInvocationProblem::ResetRequired => ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "workflow_authority_reset_required".to_owned(),
+            message: "The owning Workflow authority requires an explicit reset".to_owned(),
+        }),
         DaemonInvocationProblem::Unavailable => ApplicationProblem::unavailable(SafeDiagnostic {
             code: "workflow_authority_unavailable".to_owned(),
             message: "The owning Workflow authority is unavailable".to_owned(),
