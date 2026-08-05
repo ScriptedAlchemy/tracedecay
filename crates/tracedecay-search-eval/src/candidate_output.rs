@@ -80,6 +80,10 @@ use tracedecay_query::retrieval::lexical::{
 };
 use tracedecay_query::retrieval::ports::CodeCandidateBindingV1;
 
+mod environment;
+
+use environment::{hardware_fingerprint, toolchain_fingerprint};
+
 const WORKLOAD_RELATIVE: &str =
     "tests/fixtures/search_quality/query-semantic-candidate-workload-v1.json";
 pub(super) const PRODUCTION_BOUNDARY: &str = "CompositionKernel::compose";
@@ -3468,16 +3472,8 @@ fn peak_rss_bytes_from_status(status: &str) -> Option<u64> {
     None
 }
 
-fn toolchain_fingerprint() -> String {
-    format!(
-        "rustc:{}",
-        option_env!("RUSTC_COMMIT_HASH").unwrap_or("unknown")
-    )
-}
-
-fn hardware_fingerprint() -> String {
-    std::env::consts::ARCH.to_owned()
-}
+#[cfg(test)]
+mod fallback_baseline_tests;
 
 #[cfg(test)]
 mod tests {
