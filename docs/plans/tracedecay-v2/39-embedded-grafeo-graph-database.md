@@ -24,7 +24,7 @@
 - Preserve typed cancellation, staleness, denial, unavailable, reset-required, corruption, and budget-exhaustion outcomes.
 - Validation and pre-commit mutation failures leave the prior graph readable. A Grafeo post-commit WAL/checkpoint failure is reported as typed `DurabilityUncertain`, permanently closes that handle, and permits no further reads until exact reopen/recovery validates the store.
 - Preserve deterministic ordering, pagination, authorization, coverage, and exact source hydration above the storage layer.
-- Never install, dogfood, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
+- Never install, run, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
 - Each implementation lane uses its own recognized worktree, merges the current integration floor before review, and is parent-reviewed before merge.
 
 Official implementation references:
@@ -753,9 +753,12 @@ Classify every hit. Retained hits must be relational fixtures/docs that describe
 
 Delete SQLite graph/vector fixtures and protocols, graph branch cloning, V1/V2 graph and memory migrations, backfills, compatibility readers, feature flags, aliases, and unused dependencies. Remove a dependency with its last production caller.
 
-- [ ] **Step 3: Verify documentation authority**
+- [x] **Step 3: Verify documentation authority**
 
-Update the V2 plan set to name Grafeo and `tracedecay-graph-db`; remove petgraph, sidecar, branch-fact, dual-write, old graph-SQL, and migration language from active plans.
+The active V2 plan set names Grafeo and `tracedecay-graph-db` as the sole graph
+authority. It contains no instruction to introduce a second graph library,
+sidecar, branch-fact store, dual-write, old graph-SQL authority, or data-format
+migration path.
 
 - [ ] **Step 4: Verify and commit**
 

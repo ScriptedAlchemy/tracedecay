@@ -9,7 +9,7 @@
 //!
 //! [`PRODUCT_VERSION`] is that product version. `build.rs` reads the root
 //! package's `version` out of the workspace-root `Cargo.toml` — the single
-//! authoring point release-plz already owns — and bakes it into
+//! authoring point Release Please owns — and bakes it into
 //! `TRACEDECAY_PRODUCT_VERSION`, exactly the way it bakes `TRACEDECAY_GIT_SHA`
 //! for the same reason. There is no literal version in this crate's source.
 

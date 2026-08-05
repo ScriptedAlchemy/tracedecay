@@ -13,8 +13,8 @@ pub(super) fn invocation_lsp_session_transition(
     request: &DaemonInvocationRequest,
 ) -> Option<service::invocation::DaemonLspSessionAccess> {
     match &request.payload {
-        service::invocation::DaemonInvocationPayload::LspReconnect { session }
-        | service::invocation::DaemonInvocationPayload::LspDetach { session } => {
+        service::invocation::DaemonInvocationPayload::LspReconnect { session, .. }
+        | service::invocation::DaemonInvocationPayload::LspDetach { session, .. } => {
             Some(session.clone())
         }
         _ => None,

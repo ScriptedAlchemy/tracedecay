@@ -1,8 +1,3 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-use tokio::sync::Notify;
-
 /// Operational analyzer-process failure retained for daemon-local reporting.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum AnalyzerRuntimeError {
@@ -38,40 +33,5 @@ impl From<serde_json::Error> for AnalyzerRuntimeError {
 
 pub type AnalyzerResult<T> = Result<T, AnalyzerRuntimeError>;
 
-#[derive(Default)]
-struct AnalyzerCancellationInner {
-    cancelled: AtomicBool,
-    notification: Notify,
-}
-
 /// Cloneable cancellation signal for one analyzer operation.
-#[derive(Clone, Default)]
-pub struct AnalyzerCancellation {
-    inner: Arc<AnalyzerCancellationInner>,
-}
-
-impl AnalyzerCancellation {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn cancel(&self) {
-        if !self.inner.cancelled.swap(true, Ordering::AcqRel) {
-            self.inner.notification.notify_waiters();
-        }
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.inner.cancelled.load(Ordering::Acquire)
-    }
-
-    pub async fn cancelled(&self) {
-        loop {
-            let notified = self.inner.notification.notified();
-            if self.is_cancelled() {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
+pub type AnalyzerCancellation = tokio_util::sync::CancellationToken;

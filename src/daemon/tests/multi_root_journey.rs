@@ -320,6 +320,7 @@ async fn run_authenticated_multi_root_journey() {
         .to_string();
     // A single folder that is not the active project is still refused: a lone
     // sibling hint must not reroute the session.
+    let (deadline, cancellation) = controls("sibling-root-lsp", now());
     let sibling_root_lsp = execute_daemon_invocation(
         &engine,
         &first_handshake,
@@ -328,6 +329,8 @@ async fn run_authenticated_multi_root_journey() {
             "client.sibling-root",
             Some(second_uri.clone()),
             vec![second_uri.clone()],
+            deadline,
+            cancellation,
         ),
     )
     .await;
@@ -343,6 +346,7 @@ async fn run_authenticated_multi_root_journey() {
         "a sibling single-folder hint must not mount a runtime"
     );
 
+    let (deadline, cancellation) = controls("single-root-lsp", now());
     let single_root_lsp = execute_daemon_invocation(
         &engine,
         &first_handshake,
@@ -351,6 +355,8 @@ async fn run_authenticated_multi_root_journey() {
             "client.single-root",
             Some(first_uri.clone()),
             vec![first_uri.clone()],
+            deadline,
+            cancellation,
         ),
     )
     .await;
@@ -379,6 +385,7 @@ async fn run_authenticated_multi_root_journey() {
 
     // A multi-folder initialize now admits a federated workspace and reports
     // the authorized scope set it was bound to.
+    let (deadline, cancellation) = controls("multi-root-lsp", now());
     let lsp = execute_daemon_invocation(
         &engine,
         &first_handshake,
@@ -387,6 +394,8 @@ async fn run_authenticated_multi_root_journey() {
             "client.multi-root",
             Some(first_uri.clone()),
             vec![second_uri.clone(), first_uri.clone()],
+            deadline,
+            cancellation,
         ),
     )
     .await;

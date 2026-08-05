@@ -31,6 +31,7 @@ import {
 } from '../../contracts/generated.ts';
 import { projectRegistryListKey } from '../../data/query/projectRegistry.ts';
 import { UNSCOPED_CACHE_KEY, scopeWritable, useScope } from '../../data/scope/store.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
 /**
  * A registry entry as the daemon sends it.
@@ -101,7 +102,7 @@ function stubListing(payload: ProjectsPayloadV1) {
     'fetch',
     vi.fn(
       async () =>
-        new Response(JSON.stringify(payload), {
+        new Response(JSON.stringify(fixtureEnvelope(payload)), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         }),
@@ -332,7 +333,7 @@ describe('CommandPalette keyboard operation', () => {
       vi.fn(async () => {
         const body = bodies[Math.min(call, bodies.length - 1)]!;
         call += 1;
-        return new Response(JSON.stringify(body), {
+        return new Response(JSON.stringify(fixtureEnvelope(body)), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -493,8 +494,10 @@ describe('CommandPalette long and shrinking lists', () => {
     // project was removed. Every row past the new end disappears at once.
     act(() => {
       client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
-        outcome: 'ok',
-        data: listing([registryEntry('proj-0', 'Project 00', false)]),
+        outcome: 'envelope',
+        envelope: fixtureEnvelope(
+          listing([registryEntry('proj-0', 'Project 00', false)]),
+        ),
       });
     });
 
@@ -516,7 +519,10 @@ describe('CommandPalette long and shrinking lists', () => {
 
     await user.keyboard('{ArrowDown}'.repeat(26));
     act(() => {
-      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], { outcome: 'offline' });
+      client.setQueryData([...projectRegistryListKey, UNSCOPED_CACHE_KEY], {
+        outcome: 'transport',
+        state: 'offline',
+      });
     });
 
     await waitFor(() => expect(activeOptionLabel()).not.toContain('names no row'));
