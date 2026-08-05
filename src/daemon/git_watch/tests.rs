@@ -7,6 +7,16 @@ use tokio::sync::Notify;
 
 mod lifecycle;
 
+fn worktree_git_dir(project_root: &Path) -> Option<PathBuf> {
+    match tracedecay_runtime_core::git_discovery::discover_repository_identity_bounded(project_root)
+    {
+        GitRepositoryIdentityOutcome::Resolved(identity) => Some(identity.git_dir),
+        GitRepositoryIdentityOutcome::NotRepository | GitRepositoryIdentityOutcome::Unknown(_) => {
+            None
+        }
+    }
+}
+
 #[test]
 fn debris_retention_enables_maintenance_without_orphan_gc() {
     let mut retention = crate::config::RetentionConfig::default();
@@ -770,7 +780,7 @@ async fn missing_or_dangling_project_identity_is_rejected() {
         let outcome = watcher.ensure_watching(root).await;
         assert_eq!(
             outcome,
-            GitWatcherAdmission::IdentityUnavailable,
+            GitWatcherAdmission::NotRepository,
             "an unresolved project root must not be admitted as a watcher identity"
         );
     }

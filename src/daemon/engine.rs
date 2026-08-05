@@ -579,6 +579,12 @@ impl DaemonEngine {
                     &[("reason", "capacity".to_string())],
                 );
             }
+            git_watch::GitWatcherAdmission::NotRepository => {
+                log_daemon_event(
+                    "git_watch_admission_rejected",
+                    &[("reason", "not_repository".to_string())],
+                );
+            }
             git_watch::GitWatcherAdmission::IdentityUnavailable => {
                 log_daemon_event(
                     "git_watch_admission_rejected",

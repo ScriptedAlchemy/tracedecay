@@ -6,6 +6,7 @@ use std::sync::Arc;
 use notify::{RecursiveMode, Watcher};
 use walkdir::WalkDir;
 
+use super::GIT_OBSERVATION_BUDGET;
 use super::state::{WatchCancellation, WatchState};
 
 pub(super) const MAX_METADATA_WATCH_DIRECTORIES: usize = 512;
@@ -103,11 +104,19 @@ pub(super) async fn observe_watch_plan(
     cancellation: WatchCancellation,
 ) -> Result<Vec<PathBuf>, WatchPlanFailure> {
     let worker_cancellation = cancellation.clone();
-    match tokio::task::spawn_blocking(move || build_watch_plan(&state, &worker_cancellation)).await
-    {
-        Ok(plan) => plan,
-        Err(_) if cancellation.is_cancelled() => Err(WatchPlanFailure::Cancelled),
-        Err(_) => Err(WatchPlanFailure::Unavailable),
+    let mut handle =
+        tokio::task::spawn_blocking(move || build_watch_plan(&state, &worker_cancellation));
+    tokio::select! {
+        biased;
+        () = cancellation.cancelled() => {
+            handle.abort();
+            Err(WatchPlanFailure::Cancelled)
+        }
+        result = tokio::time::timeout(GIT_OBSERVATION_BUDGET, &mut handle) => match result {
+            Ok(Ok(plan)) => plan,
+            Ok(Err(_)) if cancellation.is_cancelled() => Err(WatchPlanFailure::Cancelled),
+            Ok(Err(_)) | Err(_) => Err(WatchPlanFailure::Unavailable),
+        }
     }
 }
 

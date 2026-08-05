@@ -22,6 +22,19 @@ pub(super) enum WorktreeRegistration {
     Capacity,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct WatchTiming {
+    pub(super) debounce: Duration,
+    pub(super) max_delay: Duration,
+    pub(super) backstop_interval: Option<Duration>,
+}
+
+#[derive(Clone)]
+struct WorktreeWatchRegistration {
+    git_dir: PathBuf,
+    config: SyncConfig,
+}
+
 #[derive(Clone)]
 pub(super) struct WatchCancellation {
     daemon: CancellationToken,
@@ -84,6 +97,28 @@ impl OperationScanProbe {
     }
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct RetirementRaceProbe {
+    armed: AtomicBool,
+    pub(super) after_empty: Notify,
+    pub(super) release: Notify,
+}
+
+#[cfg(test)]
+impl RetirementRaceProbe {
+    pub(super) fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    pub(super) async fn pause_if_armed(&self) {
+        if self.armed.swap(false, Ordering::AcqRel) {
+            self.after_empty.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
 /// Repository-scoped watcher state.
 ///
 /// Git metadata belongs to the repository common directory, while HEAD,
@@ -92,8 +127,7 @@ impl OperationScanProbe {
 /// OS watchers without collapsing their freshness requests.
 pub(super) struct WatchState {
     pub(super) common_dir: PathBuf,
-    pub(super) config: SyncConfig,
-    worktrees: RwLock<BTreeMap<PathBuf, PathBuf>>,
+    worktrees: RwLock<BTreeMap<PathBuf, WorktreeWatchRegistration>>,
     pub(super) dirty: Mutex<DirtySet>,
     pub(super) reconciliation_pending: AtomicBool,
     pub(super) wake: Notify,
@@ -112,6 +146,8 @@ pub(super) struct WatchState {
     pub(super) plan_drained: Notify,
     #[cfg(test)]
     pub(super) operation_scan_probe: OperationScanProbe,
+    #[cfg(test)]
+    pub(super) retirement_probe: RetirementRaceProbe,
 }
 
 impl WatchState {
@@ -140,8 +176,10 @@ impl WatchState {
     ) -> Self {
         Self {
             common_dir,
-            config,
-            worktrees: RwLock::new(BTreeMap::from([(project_root, git_dir)])),
+            worktrees: RwLock::new(BTreeMap::from([(
+                project_root,
+                WorktreeWatchRegistration { git_dir, config },
+            )])),
             dirty: Mutex::new(DirtySet::default()),
             reconciliation_pending: AtomicBool::new(false),
             wake: Notify::new(),
@@ -160,6 +198,8 @@ impl WatchState {
             plan_drained: Notify::new(),
             #[cfg(test)]
             operation_scan_probe: OperationScanProbe::default(),
+            #[cfg(test)]
+            retirement_probe: RetirementRaceProbe::default(),
         }
     }
 
@@ -168,23 +208,41 @@ impl WatchState {
     /// A new git directory changes the exact set of marker paths watched by
     /// the repository task, so the task is told to rebuild its small metadata
     /// watch set. Re-registering an existing root is a no-op.
+    #[cfg(test)]
     pub(super) fn register_worktree(
         &self,
         project_root: PathBuf,
         git_dir: PathBuf,
         max_worktrees: usize,
     ) -> WorktreeRegistration {
+        self.register_worktree_with_config(
+            project_root,
+            git_dir,
+            SyncConfig::default(),
+            max_worktrees,
+        )
+    }
+
+    pub(super) fn register_worktree_with_config(
+        &self,
+        project_root: PathBuf,
+        git_dir: PathBuf,
+        config: SyncConfig,
+        max_worktrees: usize,
+    ) -> WorktreeRegistration {
         let mut worktrees = self
             .worktrees
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if worktrees.get(&project_root) == Some(&git_dir) {
+        if worktrees.get(&project_root).is_some_and(|registration| {
+            registration.git_dir == git_dir && registration.config == config
+        }) {
             return WorktreeRegistration::Ready;
         }
         if !worktrees.contains_key(&project_root) && worktrees.len() >= max_worktrees {
             return WorktreeRegistration::Capacity;
         }
-        worktrees.insert(project_root, git_dir);
+        worktrees.insert(project_root, WorktreeWatchRegistration { git_dir, config });
         drop(worktrees);
         self.reconfigure.notify_one();
         WorktreeRegistration::Ready
@@ -204,7 +262,7 @@ impl WatchState {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .values()
-            .cloned()
+            .map(|registration| registration.git_dir.clone())
             .collect()
     }
 
@@ -213,7 +271,7 @@ impl WatchState {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .map(|(root, git_dir)| (root.clone(), git_dir.clone()))
+            .map(|(root, registration)| (root.clone(), registration.git_dir.clone()))
             .collect()
     }
 
@@ -290,11 +348,11 @@ impl WatchState {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut missing = Vec::new();
-        for (root, git_dir) in worktrees.iter() {
+        for (root, registration) in worktrees.iter() {
             if should_stop() {
                 return false;
             }
-            if !root.is_dir() || !git_dir.is_dir() {
+            if !root.is_dir() || !registration.git_dir.is_dir() {
                 missing.push(root.clone());
             }
         }
@@ -309,6 +367,64 @@ impl WatchState {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
+    }
+
+    pub(super) fn effective_timing(&self) -> WatchTiming {
+        let worktrees = self
+            .worktrees
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let debounce_ms = worktrees
+            .values()
+            .map(|registration| registration.config.watch_debounce_ms)
+            .min()
+            .unwrap_or(0);
+        let max_delay_ms = worktrees
+            .values()
+            .map(|registration| registration.config.watch_max_delay_ms)
+            .min()
+            .unwrap_or(0);
+        let backstop_interval = worktrees
+            .values()
+            .map(|registration| registration.config.backstop_interval_mins)
+            .filter(|minutes| *minutes != 0)
+            .min()
+            .map(|minutes| Duration::from_secs(minutes.saturating_mul(60)));
+        WatchTiming {
+            debounce: Duration::from_millis(debounce_ms),
+            max_delay: Duration::from_millis(max_delay_ms),
+            backstop_interval,
+        }
+    }
+
+    pub(super) fn backstop_intervals(&self) -> Vec<(PathBuf, Option<Duration>)> {
+        self.worktrees
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|(root, registration)| {
+                (
+                    root.clone(),
+                    (registration.config.backstop_interval_mins != 0).then(|| {
+                        Duration::from_secs(
+                            registration
+                                .config
+                                .backstop_interval_mins
+                                .saturating_mul(60),
+                        )
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(super) fn config_for_root(&self, project_root: &Path) -> Option<SyncConfig> {
+        self.worktrees
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(project_root)
+            .map(|registration| registration.config.clone())
     }
 
     #[cfg(test)]
