@@ -522,9 +522,7 @@ for line in sys.stdin:
     assert!(matches!(
         registered,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcome::RegisterDefinition(ApplicationOutcome::Effect(
-                _
-            )),
+            outcome: WorkflowApplicationOutcome::RegisterDefinition(ApplicationOutcome::Effect(_)),
             ..
         }
     ));
@@ -541,9 +539,7 @@ for line in sys.stdin:
     assert!(matches!(
         activated,
         DaemonInvocationOutcome::WorkflowApplication {
-            outcome: WorkflowApplicationOutcome::ActivateDefinition(ApplicationOutcome::Effect(
-                _
-            )),
+            outcome: WorkflowApplicationOutcome::ActivateDefinition(ApplicationOutcome::Effect(_)),
             ..
         }
     ));

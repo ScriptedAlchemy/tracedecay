@@ -4,11 +4,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ManifestDigest, RunId, WorkflowDefinitionId, WorkflowDefinition, WorkflowOperationRef,
-    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEventContext,
-    WorkflowRunEvent, WorkflowRunProjection, WorkflowRunStateError,
-    WorkflowStepEffectReceipt, WorkflowStepId, WorkflowStepInput, WorkflowStepOutput,
-    canonical_sha256,
+    ManifestDigest, RunId, WorkflowDefinition, WorkflowDefinitionId, WorkflowOperationRef,
+    WorkflowPlacementReceipt, WorkflowRunCommand, WorkflowRunEvent, WorkflowRunEventContext,
+    WorkflowRunProjection, WorkflowRunStateError, WorkflowStepEffectReceipt, WorkflowStepId,
+    WorkflowStepInput, WorkflowStepOutput, canonical_sha256,
 };
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -48,10 +47,7 @@ impl WorkflowRunAppendOutcome {
 }
 
 pub trait WorkflowRunStoragePort: Send + Sync {
-    fn projection(
-        &self,
-        run_id: &RunId,
-    ) -> Result<WorkflowRunProjection, WorkflowRunStorageError>;
+    fn projection(&self, run_id: &RunId) -> Result<WorkflowRunProjection, WorkflowRunStorageError>;
 
     fn append(
         &self,

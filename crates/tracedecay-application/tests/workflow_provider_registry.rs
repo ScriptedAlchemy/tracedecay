@@ -1,6 +1,6 @@
 use tracedecay_application::{
-    WorkflowProviderPlacementError, WorkflowProviderPlacementService,
-    WorkflowProviderRegistration, WorkflowProviderRegistry, WorkflowTopologyPlacementRequest,
+    WorkflowProviderPlacementError, WorkflowProviderPlacementService, WorkflowProviderRegistration,
+    WorkflowProviderRegistry, WorkflowTopologyPlacementRequest,
 };
 use tracedecay_domain::configuration::safe_work_topology_policy_v1;
 use tracedecay_domain::{
