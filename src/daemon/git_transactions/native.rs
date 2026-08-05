@@ -155,31 +155,9 @@ impl NativeGitIndexPreviewAssembler {
             .iter()
             .filter(|entry| matches!(entry, GitStatusEntryV1::Tracked(_)))
             .collect::<Vec<_>>();
-        let untracked = status
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                GitStatusEntryV1::Untracked { path } => Some(path),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
         let tracked_digest = runner.tracked_worktree_digest().map_err(map_native_error)?;
-        let untracked_name_digest = (!untracked.is_empty())
-            .then(|| canonical_sha256(&untracked))
-            .transpose()
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let ignored = status
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                GitStatusEntryV1::Ignored { path } => Some(path),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let ignored_collision_digest = (!ignored.is_empty())
-            .then(|| canonical_sha256(&ignored))
-            .transpose()
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let untracked_name_digest = runner.untracked_name_digest().map_err(map_native_error)?;
+        let ignored_collision_digest = runner.ignored_name_digest().map_err(map_native_error)?;
 
         let index_state = if status.coverage.records(GitDegradationV1::SplitIndex) {
             RepositoryIndexStateV1::Split
@@ -1198,11 +1176,10 @@ fn live_result_matches_preview(
 }
 
 /// Compare native facts that must remain unchanged across an index-only
-/// publication. Working-tree status is intentionally excluded: its digest is
-/// calculated relative to the index, so a correctly published index changes
-/// that observation even when no worktree byte changed. The operation-specific
-/// proof owns its index/ref checks, and commit recovery additionally compares
-/// its unchanged working-tree snapshot.
+/// publication. The byte manifest spans HEAD, index, and untracked names, so
+/// moving a path between the index and untracked set preserves the digest.
+/// Status and the untracked-name digest remain operation-relative and are
+/// therefore owned by the operation-specific proof.
 fn same_stable_native_evidence(
     current: &RepositoryStateSnapshotV1,
     old: &RepositoryStateSnapshotV1,
@@ -1215,6 +1192,9 @@ fn same_stable_native_evidence(
         && current.git_version == old.git_version
         && current.adapter_revision == old.adapter_revision
         && current.operation_state == old.operation_state
+        && current.working_tree.tracked_digest == old.working_tree.tracked_digest
+        && current.working_tree.ignored_collision_digest
+            == old.working_tree.ignored_collision_digest
         && current.configuration_digest == old.configuration_digest
         && current.attributes_digest == old.attributes_digest
         && current.sparse_digest == old.sparse_digest

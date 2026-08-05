@@ -1,5 +1,6 @@
 //! Exact native Git safety evidence and executable-policy classification.
 
+use std::collections::BTreeSet;
 use std::process::{Command, Stdio};
 
 use tracedecay_domain::{
@@ -139,20 +140,36 @@ impl FixedGitIndexRunner {
     }
 
     pub(crate) fn tracked_worktree_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
-        let paths = match self.head_state()? {
+        let head_paths = match self.head_state()? {
             GitHeadStateV1::Unborn { .. } => Vec::new(),
             GitHeadStateV1::Attached { .. } | GitHeadStateV1::Detached { .. } => {
                 self.run_git("ls-tree", &["ls-tree", "-r", "-z", "--name-only", "HEAD"])?
                     .stdout
             }
         };
-        let mut manifest = Vec::new();
-        for path in paths
+        let mut paths = nul_paths(&head_paths);
+        let index = self.run_git("ls-files", &["ls-files", "--stage", "-z"])?;
+        for entry in index
+            .stdout
             .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
+            .filter(|entry| !entry.is_empty())
         {
+            let (_, path) = entry.split_once(|byte| *byte == b'\t').ok_or(
+                NativeGitIndexError::MalformedOutput {
+                    operation: "ls-files",
+                },
+            )?;
+            paths.insert(path.to_vec());
+        }
+        // An untracked path may become an index entry during the intended
+        // publication. Including it in the same manifest before and after
+        // staging binds its bytes without making the digest index-relative.
+        paths.extend(self.other_paths(false)?);
+
+        let mut manifest = Vec::new();
+        for path in paths {
             let path =
-                std::str::from_utf8(path).map_err(|_| NativeGitIndexError::MalformedOutput {
+                std::str::from_utf8(&path).map_err(|_| NativeGitIndexError::MalformedOutput {
                     operation: "ls-tree",
                 })?;
             let absolute = self.repository_root.join(path);
@@ -185,6 +202,38 @@ impl FixedGitIndexRunner {
             manifest.push((path.to_owned(), entry.0, entry.1));
         }
         canonical_sha256(&manifest).map_err(Into::into)
+    }
+
+    pub(crate) fn untracked_name_digest(
+        &self,
+    ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
+        self.other_name_digest(false)
+    }
+
+    pub(crate) fn ignored_name_digest(
+        &self,
+    ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
+        self.other_name_digest(true)
+    }
+
+    fn other_name_digest(
+        &self,
+        ignored: bool,
+    ) -> Result<Option<ManifestDigest>, NativeGitIndexError> {
+        let paths = self.other_paths(ignored)?;
+        (!paths.is_empty())
+            .then(|| canonical_sha256(&paths))
+            .transpose()
+            .map_err(Into::into)
+    }
+
+    fn other_paths(&self, ignored: bool) -> Result<BTreeSet<Vec<u8>>, NativeGitIndexError> {
+        let mut args = vec!["ls-files", "--others"];
+        if ignored {
+            args.push("--ignored");
+        }
+        args.extend(["--exclude-standard", "-z"]);
+        Ok(nul_paths(&self.run_git("ls-files", &args)?.stdout))
     }
 
     pub(crate) fn configuration_digest(&self) -> Result<ManifestDigest, NativeGitIndexError> {
@@ -335,4 +384,12 @@ impl FixedGitIndexRunner {
                     && identity.common_dir == self.common_dir
         )
     }
+}
+
+fn nul_paths(bytes: &[u8]) -> BTreeSet<Vec<u8>> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
 }
