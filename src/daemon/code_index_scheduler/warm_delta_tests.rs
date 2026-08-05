@@ -155,6 +155,112 @@ fn exact_hook_reconciles_a_dirty_file_reverted_to_clean_head_content() {
 }
 
 #[test]
+fn exact_hook_tombstones_a_deleted_untracked_retained_candidate() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn value() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(&fixture, &store);
+    let baseline = published(scheduler.reconcile_now().expect("baseline"));
+
+    fixture.edit("src/transient.rs", "pub fn transient() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/transient.rs")]);
+    let added = published(scheduler.reconcile_now().expect("untracked addition"));
+    assert_ne!(
+        added.snapshot_content_identity,
+        baseline.snapshot_content_identity
+    );
+
+    std::fs::remove_file(fixture.path().join("src/transient.rs")).expect("delete untracked source");
+    scheduler.notify_hook_paths([PathBuf::from("src/transient.rs")]);
+    let deleted = published(
+        scheduler
+            .reconcile_now()
+            .expect("untracked deletion reconcile"),
+    );
+    assert_eq!(
+        deleted.snapshot_content_identity,
+        baseline.snapshot_content_identity
+    );
+    assert_eq!(deleted.source_files_read, 0);
+    assert_eq!(deleted.full_status_scans, 0);
+}
+
+#[test]
+fn unrelated_exact_hint_revisits_a_retained_dirty_path_after_dropped_revert() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(&fixture, &store);
+    published(scheduler.reconcile_now().expect("baseline"));
+
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/a.rs")]);
+    published(scheduler.reconcile_now().expect("first dirty generation"));
+
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 1 }\n");
+    fixture.edit("src/b.rs", "pub fn b() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/b.rs")]);
+    let combined = published(
+        scheduler
+            .reconcile_now()
+            .expect("unrelated exact hint reconcile"),
+    );
+    assert_eq!(
+        combined.source_files_read, 2,
+        "the exact hint and every retained dirty path are one frontier"
+    );
+    assert_eq!(combined.full_status_scans, 0);
+
+    let verified = scheduler
+        .reconcile_now()
+        .expect("authoritative status backstop");
+    assert!(
+        matches!(verified, CodeIndexReconcileOutcomeV1::Noop(_)),
+        "the exact frontier must already equal the status backstop"
+    );
+}
+
+#[test]
+fn head_tree_diff_revisits_a_retained_dirty_path_after_dropped_edit() {
+    let fixture = GitFixture::new(&[
+        ("src/a.rs", "pub fn a() -> u32 { 1 }\n"),
+        ("src/b.rs", "pub fn b() -> u32 { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(&fixture, &store);
+    published(scheduler.reconcile_now().expect("baseline"));
+
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 2 }\n");
+    scheduler.notify_hook_paths([PathBuf::from("src/a.rs")]);
+    published(scheduler.reconcile_now().expect("first dirty generation"));
+
+    fixture.edit("src/a.rs", "pub fn a() -> u32 { 3 }\n");
+    fixture.edit("src/b.rs", "pub fn b() -> u32 { 2 }\n");
+    git(fixture.path(), &["add", "src/b.rs"]);
+    git(fixture.path(), &["commit", "-qm", "update b"]);
+    let combined = published(
+        scheduler
+            .reconcile_now()
+            .expect("head and retained dirty reconcile"),
+    );
+    assert_eq!(
+        combined.source_files_read, 2,
+        "the HEAD diff and every retained dirty path are one frontier"
+    );
+    assert_eq!(combined.head_tree_diffs, 1);
+    assert_eq!(combined.full_status_scans, 0);
+
+    let verified = scheduler
+        .reconcile_now()
+        .expect("authoritative status backstop");
+    assert!(
+        matches!(verified, CodeIndexReconcileOutcomeV1::Noop(_)),
+        "the combined frontier must already equal the status backstop"
+    );
+}
+
+#[test]
 fn full_status_backstop_reconciles_a_dropped_revert_event() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn value() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");

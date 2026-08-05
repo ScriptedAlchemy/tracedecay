@@ -152,6 +152,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             next_state.candidates.clear();
         } else {
             let exact_paths = normalize_hints(&self.project_root, &hints.paths);
+            let mut has_head_tree_frontier = false;
             if prior_identity.head_tree() != self.identity.head_tree() {
                 match (prior_identity.head_tree(), self.identity.head_tree()) {
                     (Some(old_tree), Some(new_tree)) => {
@@ -161,6 +162,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                             new_tree.as_str(),
                         )?);
                         measurements.head_tree_diffs = 1;
+                        has_head_tree_frontier = true;
                     }
                     _ => {
                         let classification =
@@ -176,22 +178,29 @@ impl CodeIndexWorktreeSchedulerV1 {
                     }
                 }
             }
-            if !exact_paths.is_empty() {
+            let mut reconciliation_paths = next_state.dirty_paths.clone();
+            reconciliation_paths.extend(exact_paths.iter().cloned());
+            if !reconciliation_paths.is_empty() {
                 let exact =
                     super::classification::WorktreeChangeClassificationV1::changed_paths_for(
                         &repository,
-                        &exact_paths,
+                        &reconciliation_paths,
                     )
                     .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+                // Every valid exact hint and every retained dirty candidate is
+                // an indexing frontier even when gix status no longer reports
+                // it. In particular, deleting an untracked retained file makes
+                // it disappear from status, but it still needs a tombstone.
+                changed_paths.extend(reconciliation_paths.iter().cloned());
                 changed_paths.extend(exact.paths);
-                for path in &exact_paths {
+                for path in &reconciliation_paths {
                     next_state.dirty_paths.remove(path);
                 }
                 next_state.dirty_paths.extend(exact.dirty_paths);
             }
             let needs_backstop = force_full_status
                 || hints.overflow
-                || (changed_paths.is_empty() && exact_paths.is_empty());
+                || (!has_head_tree_frontier && exact_paths.is_empty());
             if needs_backstop && measurements.full_status_scans == 0 {
                 let classification =
                     super::classification::WorktreeChangeClassificationV1::classify(&repository)
