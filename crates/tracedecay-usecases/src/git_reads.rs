@@ -18,6 +18,9 @@ use tracedecay_domain::{
 };
 
 use tracedecay_application::git::{GitBlameRequest, GitHistoryRequest};
+mod wire;
+pub use wire::{GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest};
+
 // SEAM: the native `git` spawn adapter is still root-owned
 // (`src/git_intelligence.rs`). See `SEAMS.md`.
 use crate::git_intelligence::NativeGitIntelligence;
@@ -34,7 +37,7 @@ pub use tracedecay_application::historical_query::{
     HistoricalGitReadOutcomeV1, HistoricalGitReadUnavailableReasonV1,
 };
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(tag = "query", rename_all = "snake_case")]
 pub enum GitReadRequestV1 {
     Status,
@@ -80,7 +83,7 @@ impl GitReadRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(tag = "query", content = "result", rename_all = "snake_case")]
 pub enum GitReadResultV1 {
     Status(GitQueryEnvelopeV1<GitStatusSummaryV1>),

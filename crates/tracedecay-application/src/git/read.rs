@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use thiserror::Error;
 use tracedecay_domain::{
@@ -48,7 +49,7 @@ pub enum GitIntelligenceError {
 }
 
 /// Bounded history request profile.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, PartialEq, Eq)]
 pub struct GitHistoryRequest {
     pub max_count: u32,
     pub path: Option<String>,
@@ -68,7 +69,7 @@ impl Default for GitHistoryRequest {
 }
 
 /// Blame request profile for one path at the current HEAD/worktree.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, JsonSchema, PartialEq, Eq)]
 pub struct GitBlameRequest {
     pub path: String,
     pub follow_renames: bool,

@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::code_intelligence::CodeGenerationId;
@@ -142,7 +143,7 @@ pub enum GitQueryError {
 /// adapter-reported coverage plus any query-level degradation (entry-bound
 /// truncation); `truncated_by_bound` distinguishes query-level truncation
 /// from adapter-level capture bounds.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitQueryEnvelopeV1<T> {
     pub value: T,
@@ -153,7 +154,7 @@ pub struct GitQueryEnvelopeV1<T> {
 /// Bounded status summary derived from the typed [`tracedecay_domain::git::GitStatusV1`]:
 /// HEAD and operation state, per-class counts, and a bounded sorted sample of
 /// changed paths.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitStatusSummaryV1 {
     pub repository: RepositoryId,

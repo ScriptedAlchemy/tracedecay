@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::git::{GitCoverageV1, GitHeadStateV1, GitObjectFormatV1, GitOidV1, GitOperationStateV1};
@@ -15,7 +16,7 @@ use crate::research::{
 
 const REPOSITORY_STATE_ID_DOMAIN: &str = "tracedecay.repository-state.v1";
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct RepositoryStateSnapshotId(String);
 
@@ -54,7 +55,9 @@ impl fmt::Display for RepositoryStateSnapshotId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryIndexStateV1 {
     Clean,
@@ -66,7 +69,9 @@ pub enum RepositoryIndexStateV1 {
     Unreadable,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RepositoryWorkingTreeStateV1 {
     Clean,
@@ -77,7 +82,7 @@ pub enum RepositoryWorkingTreeStateV1 {
     Unreadable,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryIndexSnapshotV1 {
     pub checksum: ManifestDigest,
@@ -117,7 +122,7 @@ impl RepositoryIndexSnapshotV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryWorkingTreeSnapshotV1 {
     pub state: RepositoryWorkingTreeStateV1,
@@ -149,7 +154,7 @@ impl RepositoryWorkingTreeSnapshotV1 {
 /// Immutable content-addressed native repository state. Missing/partial
 /// evidence remains typed by fields and coverage instead of being upgraded to
 /// a guessed clean snapshot.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RepositoryStateSnapshotV1 {
     pub snapshot_id: RepositoryStateSnapshotId,
