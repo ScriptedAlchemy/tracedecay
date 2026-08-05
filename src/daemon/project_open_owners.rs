@@ -1347,9 +1347,8 @@ pub(super) async fn register_project_open_dependent_owners(
                 message: format!("project-open deferred advisory registration failed: {error}"),
             })?;
         let setup_project_root = advisory_project_root.clone();
-        let setup_cancellation = deferred.cancellation();
         let advisory_worker_owner = Arc::clone(&deferred);
-        let setup = async move {
+        let setup = move |setup_cancellation| async move {
             register_production_advisory_owner(
                 &advisory_invocation,
                 &advisory_project_root,
@@ -1788,6 +1787,11 @@ async fn register_production_advisory_owner(
     advisory_worker_owner: Arc<DeferredAdvisoryHookOrchestratorV1>,
     setup_cancellation: CancellationToken,
 ) -> Result<crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1> {
+    if setup_cancellation.is_cancelled() {
+        return Err(TraceDecayError::Config {
+            message: "advisory runtime setup was cancelled".to_owned(),
+        });
+    }
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&scout_configuration)
         .ok_or_else(|| TraceDecayError::Config {
             message: "project-open Context Scout configuration is unavailable".to_owned(),
@@ -1814,6 +1818,11 @@ async fn register_production_advisory_owner(
         setup_cancellation.clone(),
     )
     .await;
+    if setup_cancellation.is_cancelled() {
+        return Err(TraceDecayError::Config {
+            message: "advisory runtime setup was cancelled".to_owned(),
+        });
+    }
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
@@ -1943,6 +1952,11 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    if setup_cancellation.is_cancelled() {
+        return Err(TraceDecayError::Config {
+            message: "advisory runtime setup was cancelled".to_owned(),
+        });
+    }
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
         lsp_input: Arc::clone(&feedback_lsp_input),
@@ -1967,8 +1981,14 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory owner publication failed: {error}"),
         })?;
+    if setup_cancellation.is_cancelled() {
+        return Err(TraceDecayError::Config {
+            message: "advisory runtime setup was cancelled".to_owned(),
+        });
+    }
     let work_root = project_root.to_path_buf();
-    let work = move |request: AdvisoryHookOrchestrationRequestV1| {
+    let work = move |request: AdvisoryHookOrchestrationRequestV1,
+                     work_cancellation: CancellationToken| {
         let registration = Arc::clone(&registration);
         let feedback_lsp_input = Arc::clone(&feedback_lsp_input);
         let graph = Arc::clone(&scout_claim_graph);
@@ -1998,6 +2018,7 @@ async fn register_production_advisory_owner(
                 root_uri,
                 indexed_files,
                 scout_configuration_revision,
+                work_cancellation,
             )
             .await;
         }
@@ -2035,7 +2056,11 @@ async fn run_daemon_owned_advisory_work(
     root_uri: String,
     indexed_files: Vec<String>,
     scout_configuration_revision: tracedecay_domain::configuration::ConfigurationRevisionId,
+    work_cancellation: CancellationToken,
 ) {
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &project_root,
         &indexed_files,
@@ -2067,6 +2092,9 @@ async fn run_daemon_owned_advisory_work(
             return;
         }
     };
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     if request.trigger == AdvisoryHookOrchestrationTriggerV1::Stop {
         invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
         let Ok(validated) =
@@ -2094,6 +2122,9 @@ async fn run_daemon_owned_advisory_work(
         },
         Err(_) => return,
     };
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let Some(scout_configuration) = context_scout_execution_pin(
         &current_scout_configuration,
         &scout_configuration_revision,
@@ -2116,6 +2147,9 @@ async fn run_daemon_owned_advisory_work(
     {
         return;
     }
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let observed_at = invocation.request.input.observed_at;
     let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
     let operation_authority = daemon_operation_event_authority();
@@ -2134,8 +2168,10 @@ async fn run_daemon_owned_advisory_work(
         );
         return;
     };
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let cycle_deadline = MonotonicDeadline::at(Instant::now() + Duration::from_secs(5));
-    let cycle_cancellation = CancellationToken::new();
     let ci = match ci_discovery_config.as_ref() {
         Some(config) => {
             discover_production_ci_failure_request_v1(
@@ -2143,12 +2179,15 @@ async fn run_daemon_owned_advisory_work(
                 config,
                 &feedback_scope,
                 cycle_deadline,
-                &cycle_cancellation,
+                &work_cancellation,
             )
             .await
         }
         None => crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured,
     };
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let advisory = AdvisoryCycleRequest {
         feedback: invocation.request,
         github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
@@ -2192,6 +2231,9 @@ async fn run_daemon_owned_advisory_work(
         );
         return;
     }
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let Some(lifecycle) = request.lifecycle else {
         return;
     };
@@ -2219,12 +2261,18 @@ async fn run_daemon_owned_advisory_work(
     else {
         return;
     };
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let trigger = match request.trigger {
         AdvisoryHookOrchestrationTriggerV1::SavedEdit => ContextScoutTriggerV1::SavedEdit,
         AdvisoryHookOrchestrationTriggerV1::Stop => ContextScoutTriggerV1::StopBoundary,
         AdvisoryHookOrchestrationTriggerV1::Explicit => ContextScoutTriggerV1::ExplicitRequest,
     };
     let recent = scout_owner.recent_exact(canonical.address, 32).await.ok();
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     let has_recent_delivery = recent
         .as_ref()
         .is_some_and(|recent| !recent.deliveries.is_empty());
@@ -2265,9 +2313,12 @@ async fn run_daemon_owned_advisory_work(
         .prepare_configured(
             &selection,
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-            CancellationToken::new(),
+            work_cancellation.clone(),
         )
         .await;
+    if work_cancellation.is_cancelled() {
+        return;
+    }
     if matches!(
         outcome,
         Ok(crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Enqueued { .. })

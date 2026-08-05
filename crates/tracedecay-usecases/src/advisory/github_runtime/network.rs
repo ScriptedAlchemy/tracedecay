@@ -741,7 +741,7 @@ impl Default for GitHubHttpReadConfigV1 {
             graphql_uri: "https://api.github.com/graphql".to_owned(),
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(10),
-            socket_timeout: Duration::from_secs(20),
+            socket_timeout: MAX_GITHUB_READ_DURATION_V1,
         }
     }
 }
@@ -1960,6 +1960,15 @@ mod tests {
             0,
             "GitHub DNS must be asynchronously cancellable, not detached getaddrinfo work"
         );
+    }
+
+    #[test]
+    fn default_http_read_configuration_is_mountable_within_the_global_bound() {
+        let config = GitHubHttpReadConfigV1::default();
+        assert!(config.validate());
+        assert!(config.request_timeout <= MAX_GITHUB_READ_DURATION_V1);
+        assert!(config.connect_timeout <= MAX_GITHUB_READ_DURATION_V1);
+        assert!(config.socket_timeout <= MAX_GITHUB_READ_DURATION_V1);
     }
 
     #[derive(Clone, Copy)]

@@ -69,12 +69,33 @@ pub(crate) trait AdvisoryHookOrchestrationPortV1: Send + Sync {
 }
 
 type AdvisoryHookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
-type AdvisoryHookOrchestrationWorkV1 =
-    dyn Fn(AdvisoryHookOrchestrationRequestV1) -> AdvisoryHookOrchestrationFutureV1 + Send + Sync;
-type AdvisoryHookOrchestrationKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type AdvisoryHookOrchestrationWorkV1 = dyn Fn(
+        AdvisoryHookOrchestrationRequestV1,
+        crate::application::context::CancellationToken,
+    ) -> AdvisoryHookOrchestrationFutureV1
+    + Send
+    + Sync;
+type AdvisoryHookOrchestrationEventKeyV1 = ([u8; 16], [u8; 16], [u8; 16]);
+type AdvisoryHookOrchestrationAddressV1 = String;
 type AdvisoryHookOrchestrationCompletionV1 = Arc<dyn Fn() + Send + Sync + 'static>;
-type AdvisoryHookOrchestrationInFlightV1 =
-    StdMutex<BTreeMap<AdvisoryHookOrchestrationKeyV1, Vec<AdvisoryHookOrchestrationCompletionV1>>>;
+
+struct AdvisoryHookOrchestrationInFlightEntryV1 {
+    event: AdvisoryHookOrchestrationEventKeyV1,
+    cancellation: crate::application::context::CancellationToken,
+    superseded: AtomicBool,
+    completions: StdMutex<Vec<AdvisoryHookOrchestrationCompletionV1>>,
+}
+
+#[derive(Default)]
+struct AdvisoryHookOrchestrationInFlightV1 {
+    addresses:
+        BTreeMap<AdvisoryHookOrchestrationAddressV1, Arc<AdvisoryHookOrchestrationInFlightEntryV1>>,
+    events: BTreeMap<
+        AdvisoryHookOrchestrationEventKeyV1,
+        Arc<AdvisoryHookOrchestrationInFlightEntryV1>,
+    >,
+}
+
 pub(in crate::daemon::service) const MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS: usize = 32;
 
 struct AdvisoryHookTaskRegistryStateV1 {
@@ -170,7 +191,7 @@ fn report_advisory_hook_task_result(result: Result<(), tokio::task::JoinError>) 
 pub(crate) struct BoundedAdvisoryHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<AdvisoryHookOrchestrationWorkV1>,
-    in_flight: Arc<AdvisoryHookOrchestrationInFlightV1>,
+    in_flight: Arc<StdMutex<AdvisoryHookOrchestrationInFlightV1>>,
     tasks: Arc<AdvisoryHookTaskRegistryV1>,
 }
 
@@ -181,19 +202,81 @@ impl BoundedAdvisoryHookOrchestratorV1 {
         tasks: Arc<AdvisoryHookTaskRegistryV1>,
     ) -> Option<Arc<Self>>
     where
-        F: Fn(AdvisoryHookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        F: Fn(
+                AdvisoryHookOrchestrationRequestV1,
+                crate::application::context::CancellationToken,
+            ) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         let work: Arc<AdvisoryHookOrchestrationWorkV1> =
-            Arc::new(move |request| Box::pin(work(request)));
+            Arc::new(move |request, cancellation| Box::pin(work(request, cancellation)));
         (max_concurrent > 0).then(|| {
             Arc::new(Self {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
-                in_flight: Arc::new(StdMutex::new(BTreeMap::new())),
+                in_flight: Arc::new(StdMutex::new(AdvisoryHookOrchestrationInFlightV1::default())),
                 tasks,
             })
         })
+    }
+
+    fn stable_address(
+        request: &AdvisoryHookOrchestrationRequestV1,
+    ) -> Option<AdvisoryHookOrchestrationAddressV1> {
+        let envelope = request.hook.envelope();
+        canonical_sha256(&(
+            "tracedecay.advisory-hook-address.v1",
+            envelope.project_id,
+            envelope.repository_id,
+            envelope.worktree_id,
+            envelope.protected_session_id,
+            request.lifecycle.as_ref(),
+        ))
+        .ok()
+        .map(|digest| digest.as_str().to_owned())
+    }
+
+    fn settle_operation(
+        in_flight: &StdMutex<AdvisoryHookOrchestrationInFlightV1>,
+        address: &AdvisoryHookOrchestrationAddressV1,
+        operation: &Arc<AdvisoryHookOrchestrationInFlightEntryV1>,
+        emit_terminal: bool,
+    ) {
+        let completions = {
+            let mut in_flight = in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let completions = {
+                let mut completions = operation
+                    .completions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                std::mem::take(&mut *completions)
+            };
+            if in_flight
+                .addresses
+                .get(address)
+                .is_some_and(|current| Arc::ptr_eq(current, operation))
+            {
+                in_flight.addresses.remove(address);
+            }
+            if in_flight
+                .events
+                .get(&operation.event)
+                .is_some_and(|current| Arc::ptr_eq(current, operation))
+            {
+                in_flight.events.remove(&operation.event);
+            }
+            completions
+        };
+        if emit_terminal {
+            for completion in completions {
+                completion();
+            }
+        }
     }
 }
 
@@ -207,14 +290,20 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
             return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
         }
         let envelope = request.hook.envelope();
-        let key = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let event = (envelope.project_id, envelope.worktree_id, envelope.event_id);
+        let Some(address) = Self::stable_address(&request) else {
+            return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+        };
         let completion = request.completion.take();
-        let permit = {
+        let (permit, operation) = {
             let Ok(mut in_flight) = self.in_flight.lock() else {
                 return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
             };
-            if let Some(completions) = in_flight.get_mut(&key) {
+            if let Some(incumbent) = in_flight.events.get(&event).cloned() {
                 if let Some(completion) = completion {
+                    let Ok(mut completions) = incumbent.completions.lock() else {
+                        return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+                    };
                     if completions.len() >= MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS {
                         return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
                     }
@@ -222,53 +311,98 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
                 }
                 return AdvisoryHookOrchestrationAdmissionV1::Enqueued;
             }
-            let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
-                return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+            let permit = if let Some(incumbent) = in_flight.addresses.remove(&address) {
+                incumbent
+                    .superseded
+                    .store(true, std::sync::atomic::Ordering::Release);
+                incumbent.cancellation.cancel();
+                None
+            } else {
+                let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                    return AdvisoryHookOrchestrationAdmissionV1::Backpressured;
+                };
+                Some(permit)
             };
-            in_flight.insert(key, completion.into_iter().collect());
-            permit
+            let work_cancellation = crate::application::context::CancellationToken::new();
+            let operation = Arc::new(AdvisoryHookOrchestrationInFlightEntryV1 {
+                event,
+                cancellation: work_cancellation,
+                superseded: AtomicBool::new(false),
+                completions: StdMutex::new(completion.into_iter().collect()),
+            });
+            in_flight
+                .addresses
+                .insert(address.clone(), Arc::clone(&operation));
+            in_flight.events.insert(event, Arc::clone(&operation));
+            (permit, operation)
         };
         let work = Arc::clone(&self.work);
         let in_flight = Arc::clone(&self.in_flight);
+        let permits = Arc::clone(&self.permits);
         let (start, started) = tokio::sync::oneshot::channel();
+        let task_address = address.clone();
+        let task_operation = Arc::clone(&operation);
         let task = async move {
+            let work_cancellation = task_operation.cancellation.clone();
             let admitted = tokio::select! {
                 biased;
+                () = work_cancellation.cancelled() => false,
                 () = cancellation.cancelled() => false,
                 result = started => result.is_ok(),
             };
-            let completed = tokio::select! {
-                biased;
-                () = cancellation.cancelled() => false,
-                () = async {
-                    if admitted {
-                        (work)(request).await;
-                    }
-                } => admitted,
-            };
-            let completions = in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&key);
-            match completions {
-                Some(completions) if completed => {
-                    for completion in completions {
-                        completion();
-                    }
-                }
-                Some(_) => {}
-                None => tracing::error!(
-                    event = "advisory_hook_orchestration_completion_missing",
-                    "daemon-owned advisory work finished without its in-flight admission"
-                ),
+            if !admitted {
+                let superseded = task_operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self::settle_operation(&in_flight, &task_address, &task_operation, superseded);
+                return;
             }
+            let permit = match permit {
+                Some(permit) => Some(permit),
+                None => tokio::select! {
+                    biased;
+                    () = work_cancellation.cancelled() => None,
+                    () = cancellation.cancelled() => None,
+                    permit = permits.acquire_owned() => permit.ok(),
+                },
+            };
+            let Some(permit) = permit else {
+                let superseded = task_operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self::settle_operation(&in_flight, &task_address, &task_operation, superseded);
+                return;
+            };
+            if cancellation.is_cancelled() || work_cancellation.is_cancelled() {
+                let superseded = task_operation
+                    .superseded
+                    .load(std::sync::atomic::Ordering::Acquire);
+                Self::settle_operation(&in_flight, &task_address, &task_operation, superseded);
+                return;
+            }
+            let mut work_future = (work)(request, work_cancellation.clone());
+            let emit_terminal = tokio::select! {
+                biased;
+                () = work_cancellation.cancelled() => {
+                    (&mut work_future).await;
+                    task_operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                },
+                () = cancellation.cancelled() => {
+                    work_cancellation.cancel();
+                    (&mut work_future).await;
+                    task_operation
+                        .superseded
+                        .load(std::sync::atomic::Ordering::Acquire)
+                },
+                () = &mut work_future => true,
+            };
+            Self::settle_operation(&in_flight, &task_address, &task_operation, emit_terminal);
             drop(permit);
         };
         if !self.tasks.spawn(task) {
-            self.in_flight
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(&key);
+            Self::settle_operation(&self.in_flight, &address, &operation, false);
             return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
         }
         if start.send(()).is_err() {
@@ -281,6 +415,11 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
 impl Drop for BoundedAdvisoryHookOrchestratorV1 {
     fn drop(&mut self) {
         self.tasks.cancel();
+        if let Ok(in_flight) = self.in_flight.lock() {
+            for entry in in_flight.events.values() {
+                entry.cancellation.cancel();
+            }
+        }
     }
 }
 
@@ -357,7 +496,13 @@ impl DeferredAdvisoryHookOrchestratorV1 {
         work: F,
     ) -> Option<Arc<BoundedAdvisoryHookOrchestratorV1>>
     where
-        F: Fn(AdvisoryHookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        F: Fn(
+                AdvisoryHookOrchestrationRequestV1,
+                crate::application::context::CancellationToken,
+            ) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: Future<Output = ()> + Send + 'static,
     {
         BoundedAdvisoryHookOrchestratorV1::new(max_concurrent, work, Arc::clone(&self.tasks))

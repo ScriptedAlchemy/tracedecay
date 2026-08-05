@@ -14,6 +14,8 @@ use super::service::invocation::{
 use crate::errors::{Result, TraceDecayError};
 
 const POST_OPEN_ADVISORY_SETUP_BUDGET: Duration = Duration::from_secs(15);
+const POST_OPEN_ADVISORY_RETIREMENT_GRACE: Duration = Duration::from_secs(15);
+const POST_OPEN_ADVISORY_DEADLINE_GRACE: Duration = Duration::from_millis(250);
 
 struct AdvisorySetupSettlementGuardV1(Arc<DeferredAdvisoryHookOrchestratorV1>);
 
@@ -39,26 +41,26 @@ impl PreparedAdvisoryRuntimeV1 {
         }
     }
 
-    fn commit(mut self) -> Arc<dyn AdvisoryHookOrchestrationPortV1> {
+    fn commit(mut self) {
         if let Some(commit) = self.commit.take() {
             commit();
         }
-        self.runtime
     }
 }
 
 /// Starts at most one bounded setup for a retained deferred gateway.
 ///
 /// The gateway itself is already published, so callers see `warming` while
-/// this future runs. Project-runtime retirement cancels the shared token and
-/// joins setup after any staged publication has rolled back.
-pub(super) async fn schedule_bounded_post_open_advisory_setup<F>(
+/// this future runs. Project-runtime retirement cancels and joins setup until
+/// every staged publication has either committed or rolled back.
+pub(super) async fn schedule_bounded_post_open_advisory_setup<F, Fut>(
     project_root: PathBuf,
     deferred: Arc<DeferredAdvisoryHookOrchestratorV1>,
     setup: F,
 ) -> bool
 where
-    F: Future<Output = Result<PreparedAdvisoryRuntimeV1>> + Send + 'static,
+    F: FnOnce(crate::application::context::CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<PreparedAdvisoryRuntimeV1>> + Send + 'static,
 {
     schedule_bounded_post_open_advisory_setup_with_budget(
         project_root,
@@ -69,14 +71,15 @@ where
     .await
 }
 
-async fn schedule_bounded_post_open_advisory_setup_with_budget<F>(
+async fn schedule_bounded_post_open_advisory_setup_with_budget<F, Fut>(
     project_root: PathBuf,
     deferred: Arc<DeferredAdvisoryHookOrchestratorV1>,
     setup: F,
     budget: Duration,
 ) -> bool
 where
-    F: Future<Output = Result<PreparedAdvisoryRuntimeV1>> + Send + 'static,
+    F: FnOnce(crate::application::context::CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = Result<PreparedAdvisoryRuntimeV1>> + Send + 'static,
 {
     if !deferred.claim_setup() {
         deferred.join_setup().await;
@@ -91,31 +94,40 @@ where
             | AdvisoryRuntimeReadinessV1::Ready { started_at, .. }
             | AdvisoryRuntimeReadinessV1::Unavailable { started_at, .. } => started_at,
         };
-        tokio::pin!(setup);
         enum SetupOutcome {
             Ready(PreparedAdvisoryRuntimeV1),
             Cancelled,
             DeadlineExceeded,
             Failed(TraceDecayError),
         }
+        let work_cancellation = crate::application::context::CancellationToken::new();
+        let mut setup_task = tokio::spawn(setup(work_cancellation.clone()));
         let outcome = tokio::select! {
             biased;
-            () = cancellation.cancelled() => SetupOutcome::Cancelled,
+            result = &mut setup_task => match result {
+                Ok(Ok(runtime)) => SetupOutcome::Ready(runtime),
+                Ok(Err(error)) => SetupOutcome::Failed(error),
+                Err(error) => SetupOutcome::Failed(TraceDecayError::Config {
+                    message: format!("advisory runtime setup task failed: {error}"),
+                }),
+            },
+            () = cancellation.cancelled() => {
+                work_cancellation.cancel();
+                join_cancelled_setup(&mut setup_task, POST_OPEN_ADVISORY_RETIREMENT_GRACE).await;
+                SetupOutcome::Cancelled
+            },
             () = tokio::time::sleep(budget) => {
-                cancellation.cancel();
+                work_cancellation.cancel();
+                join_cancelled_setup(&mut setup_task, POST_OPEN_ADVISORY_DEADLINE_GRACE).await;
                 SetupOutcome::DeadlineExceeded
             }
-            result = &mut setup => match result {
-                Ok(runtime) => SetupOutcome::Ready(runtime),
-                Err(error) => SetupOutcome::Failed(error),
-            },
         };
         let finished_at = now_micros();
         match outcome {
             SetupOutcome::Ready(prepared) => {
                 let runtime = Arc::clone(&prepared.runtime);
                 if deferred.mark_ready(runtime, finished_at) {
-                    let _ = prepared.commit();
+                    prepared.commit();
                     tracing::info!(
                         event = "project_open_owner_phase",
                         project = %project_root.display(),
@@ -187,6 +199,19 @@ where
     true
 }
 
+async fn join_cancelled_setup(
+    task: &mut tokio::task::JoinHandle<Result<PreparedAdvisoryRuntimeV1>>,
+    grace: Duration,
+) {
+    match tokio::time::timeout(grace, &mut *task).await {
+        Ok(_) => {}
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -201,7 +226,7 @@ mod tests {
             schedule_bounded_post_open_advisory_setup_with_budget(
                 PathBuf::from("/project"),
                 Arc::clone(&deferred),
-                async move {
+                move |_| async move {
                     started_tx.send(()).unwrap();
                     std::future::pending().await
                 },
@@ -211,7 +236,78 @@ mod tests {
         );
         started_rx.await.unwrap();
         tokio::time::advance(Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
+        deferred.join_setup().await;
+        assert!(matches!(
+            deferred.readiness(),
+            AdvisoryRuntimeReadinessV1::Unavailable {
+                reason: AdvisoryRuntimeUnavailableReasonV1::DeadlineExceeded,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn deadline_rolls_back_a_late_success_before_reporting_terminal() {
+        struct Ready;
+        impl AdvisoryHookOrchestrationPortV1 for Ready {
+            fn admit(
+                &self,
+                _request: super::super::service::invocation::AdvisoryHookOrchestrationRequestV1,
+            ) -> super::super::service::invocation::AdvisoryHookOrchestrationAdmissionV1
+            {
+                super::super::service::invocation::AdvisoryHookOrchestrationAdmissionV1::Unavailable
+            }
+        }
+        struct PublicationGuard {
+            committed: bool,
+            rolled_back: Arc<AtomicBool>,
+        }
+        impl PublicationGuard {
+            fn commit(mut self) {
+                self.committed = true;
+            }
+        }
+        impl Drop for PublicationGuard {
+            fn drop(&mut self) {
+                if !self.committed {
+                    self.rolled_back.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        let deferred = DeferredAdvisoryHookOrchestratorV1::new(now_micros());
+        let rolled_back = Arc::new(AtomicBool::new(false));
+        let observed_rollback = Arc::clone(&rolled_back);
+        assert!(
+            schedule_bounded_post_open_advisory_setup_with_budget(
+                PathBuf::from("/project"),
+                Arc::clone(&deferred),
+                move |cancellation| async move {
+                    cancellation.cancelled().await;
+                    let guard = PublicationGuard {
+                        committed: false,
+                        rolled_back: observed_rollback,
+                    };
+                    Ok(PreparedAdvisoryRuntimeV1::new(Arc::new(Ready), move || {
+                        guard.commit();
+                    }))
+                },
+                Duration::from_millis(1),
+            )
+            .await
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while matches!(
+                deferred.readiness(),
+                AdvisoryRuntimeReadinessV1::Warming { .. }
+            ) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("late success reached a terminal");
+        deferred.cancel_and_join_setup().await;
+        assert!(rolled_back.load(Ordering::Acquire));
         assert!(matches!(
             deferred.readiness(),
             AdvisoryRuntimeReadinessV1::Unavailable {
@@ -233,13 +329,12 @@ mod tests {
 
         let deferred = DeferredAdvisoryHookOrchestratorV1::new(now_micros());
         let setup_dropped = Arc::new(AtomicBool::new(false));
-        let cancellation = deferred.cancellation();
         let setup_drop = Arc::clone(&setup_dropped);
         assert!(
             schedule_bounded_post_open_advisory_setup_with_budget(
                 PathBuf::from("/project"),
                 Arc::clone(&deferred),
-                async move {
+                move |cancellation| async move {
                     let _drop = SetupDrop(setup_drop);
                     cancellation.cancelled().await;
                     Err(TraceDecayError::Config {
@@ -251,7 +346,7 @@ mod tests {
             .await
         );
         tokio::task::yield_now().await;
-        deferred.cancel();
+        deferred.cancel_and_join_setup().await;
         tokio::time::timeout(Duration::from_secs(1), async {
             while !setup_dropped.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
@@ -276,7 +371,7 @@ mod tests {
             schedule_bounded_post_open_advisory_setup_with_budget(
                 PathBuf::from("/project"),
                 Arc::clone(&deferred),
-                async move {
+                move |_| async move {
                     setup.await.map_err(|error| TraceDecayError::Config {
                         message: error.to_string(),
                     })?;
@@ -294,7 +389,7 @@ mod tests {
             schedule_bounded_post_open_advisory_setup_with_budget(
                 PathBuf::from("/project"),
                 joiner_deferred,
-                std::future::pending(),
+                |_| std::future::pending(),
                 Duration::from_secs(10),
             )
             .await
@@ -342,7 +437,7 @@ mod tests {
             schedule_bounded_post_open_advisory_setup_with_budget(
                 PathBuf::from("/project"),
                 Arc::clone(&deferred),
-                async move {
+                move |_| async move {
                     let guard = PublicationGuard {
                         committed: false,
                         rolled_back: setup_rolled_back,
