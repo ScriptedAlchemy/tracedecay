@@ -50,12 +50,26 @@ pub(crate) enum RuntimeSourceCaptureOutcomeV1 {
     ProjectionPending(SourceCommitReceiptV1),
 }
 
+pub(crate) enum RuntimeSourceCaptureAuthorityV1<'a> {
+    Poll,
+    CanonicalRefetch(&'a SourceCanonicalRefetchAuthorityV1),
+}
+
+impl RuntimeSourceCaptureAuthorityV1<'_> {
+    fn canonical_refetch(&self) -> Option<&SourceCanonicalRefetchAuthorityV1> {
+        match self {
+            Self::Poll => None,
+            Self::CanonicalRefetch(authority) => Some(authority),
+        }
+    }
+}
+
 pub(crate) struct RuntimeSourceCaptureRequestV1<'a> {
     pub(crate) definition: SourceDefinitionV1,
     pub(crate) binding: SourceBindingV1,
     pub(crate) refresh: SourceRefreshReceiptV1,
     pub(crate) provider_envelope: SourceProviderEnvelopeV1,
-    pub(crate) canonical_refetch: Option<&'a SourceCanonicalRefetchAuthorityV1>,
+    pub(crate) authority: RuntimeSourceCaptureAuthorityV1<'a>,
     pub(crate) expected_frontier: Option<SourceAggregateFrontierV1>,
     pub(crate) next_partition: SourcePartitionFrontierV1,
     pub(crate) previous_whole_root_stage: Option<&'a SourceWholeRootStageV1>,
@@ -120,7 +134,7 @@ impl RuntimeExternalSourceStore {
             request.binding,
             request.refresh,
             request.provider_envelope,
-            request.canonical_refetch,
+            request.authority.canonical_refetch(),
             request.expected_frontier,
             request.next_partition,
             request.previous_whole_root_stage,
@@ -392,7 +406,7 @@ impl RuntimeExternalSourceStore {
                 binding,
                 refresh,
                 provider_envelope: envelope,
-                canonical_refetch: None,
+                authority: RuntimeSourceCaptureAuthorityV1::Poll,
                 expected_frontier,
                 next_partition,
                 previous_whole_root_stage: None,
@@ -428,10 +442,23 @@ impl RuntimeExternalSourceStore {
         max: usize,
         cancellation: &crate::observation::ObservationCancellation,
     ) -> Result<usize, RuntimeExternalSourceErrorV1> {
-        let projector = host_external_source_projector()?;
+        self.drain_projection_replay(None, host_external_source_projector()?, max, cancellation)
+            .await
+    }
+
+    pub(crate) async fn drain_projection_replay(
+        &self,
+        binding: Option<tracedecay_domain::SourceBindingIdentityV1>,
+        projector: ComponentVersion,
+        max: usize,
+        cancellation: &crate::observation::ObservationCancellation,
+    ) -> Result<usize, RuntimeExternalSourceErrorV1> {
+        projector
+            .validate()
+            .map_err(|error| RuntimeExternalSourceErrorV1::Invalid(error.to_string()))?;
         let mut projected = 0;
         while projected < max && !cancellation.is_cancelled() {
-            let Some(pending) = self.read_pending_projection(None).await? else {
+            let Some(pending) = self.read_pending_projection(binding.clone()).await? else {
                 break;
             };
             let projection =
@@ -533,7 +560,7 @@ impl RuntimeExternalSourceStore {
         }
     }
 
-    async fn read_state(
+    pub(crate) async fn read_state(
         &self,
         binding: tracedecay_domain::SourceBindingIdentityV1,
     ) -> Result<Option<SourceStoreStateV1>, RuntimeExternalSourceErrorV1> {
