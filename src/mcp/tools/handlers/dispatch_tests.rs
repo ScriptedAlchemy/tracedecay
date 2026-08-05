@@ -1539,7 +1539,7 @@ fn unavailable_effect_contract_fails_before_handler_dispatch() {
         Some((
             "mcp_dispatch_effect_journey_unverified",
             false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
+            "MCP tool 'tracedecay_lcm_doctor' is unavailable until its effect journey is verified",
         ))
     );
     assert!(super::ensure_mcp_dispatch_available("tracedecay_dashboard").is_ok());
@@ -1591,7 +1591,7 @@ async fn unavailable_application_effect_is_rejected_before_canonical_executor_in
         Some((
             "mcp_dispatch_effect_journey_unverified",
             false,
-            "MCP tool 'tracedecay_configuration_set' is advertised but unavailable until its effect journey is verified",
+            "MCP tool 'tracedecay_configuration_set' is unavailable until its effect journey is verified",
         ))
     );
     assert_eq!(executor.invocations.load(Ordering::SeqCst), 0);
@@ -1639,7 +1639,7 @@ async fn unavailable_user_lcm_effect_is_rejected_before_profile_store_open() {
         Some((
             "mcp_dispatch_effect_journey_unverified",
             false,
-            "MCP tool 'tracedecay_lcm_doctor' is advertised but unavailable until its effect journey is verified",
+            "MCP tool 'tracedecay_lcm_doctor' is unavailable until its effect journey is verified",
         ))
     );
     assert!(

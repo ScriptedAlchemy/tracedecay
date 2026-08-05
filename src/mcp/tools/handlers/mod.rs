@@ -159,9 +159,7 @@ fn ensure_mcp_dispatch_available(tool_name: &str) -> Result<()> {
                 }
             },
             *retryable,
-            format!(
-                "MCP tool '{tool_name}' is advertised but unavailable until its effect journey is verified"
-            ),
+            format!("MCP tool '{tool_name}' is unavailable until its effect journey is verified"),
         ));
     }
     Ok(())

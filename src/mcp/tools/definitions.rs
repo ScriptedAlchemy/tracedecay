@@ -364,6 +364,10 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
         .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
         .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))
         .collect::<BTreeSet<_>>();
+    let typed_application_operations = crate::application_surface::APPLICATION_SURFACE_OPERATIONS
+        .iter()
+        .map(|operation| format!("tracedecay_{}", operation.as_str()))
+        .collect::<BTreeSet<_>>();
     let mut definitions = get_maximal_tool_definitions_with_budget(node_count, budget);
     if registry_mode == ToolRegistryMode::HostAvailable {
         retain_host_available_tool_definitions(&mut definitions);
@@ -371,10 +375,25 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     let mut definitions = definitions
         .into_iter()
         .filter(|definition| {
-            !catalog_operations.contains(&definition.name)
-                || visible_operations.contains(&definition.name)
+            if typed_application_operations.contains(&definition.name) {
+                visible_operations.contains(&definition.name)
+            } else {
+                !catalog_operations.contains(&definition.name)
+                    || visible_operations.contains(&definition.name)
+            }
         })
         .collect::<Vec<_>>();
+    let mut available_definitions = Vec::with_capacity(definitions.len());
+    for definition in definitions {
+        let contract = super::binding::mcp_dispatch_contract(&definition.name)?;
+        if matches!(
+            contract.availability(),
+            tracedecay_tool_catalog::McpDispatchAvailability::Available
+        ) {
+            available_definitions.push(definition);
+        }
+    }
+    let mut definitions = available_definitions;
     enforce_profile_schema_budget(
         profile_id,
         profile.budget().maximum_schema_bytes(),
@@ -1106,15 +1125,12 @@ mod tests {
         assert_eq!(dispatch["idempotency"], "idempotent");
         assert_eq!(dispatch["inverse"]["mode"], "same_tool");
 
-        let doctor = definitions
-            .iter()
-            .find(|definition| definition.name == "tracedecay_lcm_doctor")
-            .unwrap();
-        let dispatch = &doctor.meta.as_ref().unwrap()["tracedecay/dispatch"];
-        assert_eq!(dispatch["effect"], "administrative");
-        assert_eq!(dispatch["availability"]["state"], "unavailable");
-        assert!(dispatch.get("receipt").is_none());
-        assert!(dispatch.get("reconciliation").is_none());
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.name != "tracedecay_lcm_doctor"),
+            "unverified effects must remain absent from tools/list"
+        );
     }
 
     #[test]
@@ -1243,6 +1259,47 @@ mod tests {
                 .iter()
                 .all(|definition| definition.name != "tracedecay_git_preview"),
             "catalog-bound tools require explicit capability authority"
+        );
+    }
+
+    #[test]
+    fn catalog_discovery_exposes_only_callable_dispatches() {
+        let profile =
+            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+        let definitions = get_catalog_filtered_tool_definitions_with_budget(
+            10_000,
+            4,
+            &profile,
+            &default_catalog_discovery_authority().unwrap(),
+            &project_catalog_discovery_scope(),
+            ToolRegistryMode::DeterministicMaximal,
+        )
+        .unwrap();
+
+        assert!(
+            definitions.iter().all(|definition| {
+                definition
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("tracedecay/dispatch"))
+                    .and_then(|dispatch| dispatch.get("availability"))
+                    .and_then(|availability| availability.get("state"))
+                    .and_then(Value::as_str)
+                    == Some("available")
+            }),
+            "tools/list must not publish a tool whose dispatch contract rejects it"
+        );
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.name != "tracedecay_session_lookup"),
+            "a canonical application operation with no callable MCP binding must not survive as compatibility"
+        );
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "tracedecay_context"),
+            "genuine non-catalog compatibility tools remain discoverable"
         );
     }
 

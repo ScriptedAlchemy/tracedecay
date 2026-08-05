@@ -35,9 +35,6 @@ enum AdminCliAction {
         all: bool,
         no_sync: bool,
     },
-    RegistryUpdate {
-        tokens: u64,
-    },
     RegistryList {
         limit: usize,
         query: Option<String>,
@@ -51,7 +48,6 @@ enum AdminCliAction {
     },
     RegistryGc {
         prefix: Option<String>,
-        apply: bool,
     },
     MigrationInventory {
         roots: Vec<PathBuf>,
@@ -220,6 +216,17 @@ pub(crate) async fn handle_projectless_admin_cli(
 }
 
 fn parse_admin_cli_action(args: Value) -> Result<AdminCliAction> {
+    let action = args.get("action").and_then(Value::as_str);
+    let unsupported_mutation = action == Some("registry_update")
+        || (action == Some("registry_gc")
+            && args.get("apply").and_then(Value::as_bool) == Some(true));
+    if unsupported_mutation {
+        return Err(TraceDecayError::Config {
+            message:
+                "registry mutation requires a canonical application owner; direct admin database mutation is unavailable"
+                    .to_owned(),
+        });
+    }
     serde_json::from_value(args).map_err(|error| TraceDecayError::Config {
         message: format!("invalid tracedecay_admin_cli arguments: {error}"),
     })
@@ -280,12 +287,6 @@ async fn dispatch_admin_cli(
             )
             .await?
         }
-        AdminCliAction::RegistryUpdate { tokens } => {
-            let cg = context.require_project()?;
-            let previous = global_db.get_project_tokens(cg.project_root()).await;
-            global_db.upsert(cg.project_root(), tokens).await;
-            json!({ "previous": previous, "current": tokens })
-        }
         AdminCliAction::RegistryList { limit, query } => {
             registry_list(context.project, global_db, limit, query.as_deref()).await?
         }
@@ -296,14 +297,11 @@ async fn dispatch_admin_cli(
         AdminCliAction::RegistryProjectTokens { project_args } => {
             registry_project_tokens(global_db, &project_args).await
         }
-        AdminCliAction::RegistryGc { prefix, apply } => {
+        AdminCliAction::RegistryGc { prefix } => {
             let profile_root = context.require_profile_root()?;
-            let report = if apply {
-                crate::migrate::registry::apply_registry_gc(global_db, profile_root, prefix).await?
-            } else {
+            let report =
                 crate::migrate::registry::registry_gc_report(global_db, profile_root, prefix)
-                    .await?
-            };
+                    .await?;
             serde_json::to_value(report)?
         }
         AdminCliAction::MigrationInventory {
@@ -653,7 +651,9 @@ async fn sessions_git_backfill(
             ..Default::default()
         })
         .await
-        .unwrap_or_default();
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("git backfill analytics read failed: {error}"),
+        })?;
     let stats = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(session_db))
         .run_backfill(
             &analytics_events,
@@ -729,5 +729,19 @@ mod tests {
     #[test]
     fn rejects_unknown_admin_action() {
         assert!(serde_json::from_value::<AdminCliAction>(json!({ "action": "vacuum" })).is_err());
+    }
+
+    #[test]
+    fn rejects_registry_mutations_without_an_application_owner() {
+        for arguments in [
+            json!({ "action": "registry_update", "tokens": 42 }),
+            json!({ "action": "registry_gc", "prefix": null, "apply": true }),
+        ] {
+            let error = parse_admin_cli_action(arguments).unwrap_err();
+            assert!(
+                error.to_string().contains("canonical application owner"),
+                "unexpected rejection: {error}"
+            );
+        }
     }
 }
