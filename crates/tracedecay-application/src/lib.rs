@@ -39,6 +39,7 @@ pub mod retrieval;
 pub mod sdk_catalog;
 pub mod settings_preview;
 pub mod source_edit;
+mod source_edit_rollback;
 pub mod storage;
 pub mod work;
 pub mod work_catalog;
@@ -219,10 +220,10 @@ pub use source_edit::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
     SourceEditDiagnosticV1, SourceEditEffectProofV1, SourceEditEffectRequestV1, SourceEditKind,
     SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
-    SourceEditRollbackRequestV1, SourceEditVerificationStateV1, SourceEditVerificationV1,
-    source_edit_catalog_contribution, source_edit_handler_descriptors, source_edit_operation,
-    source_edit_reconciliation_operation, source_edit_rollback_operation,
+    SourceEditVerificationStateV1, SourceEditVerificationV1, source_edit_catalog_contribution,
+    source_edit_handler_descriptors, source_edit_operation, source_edit_reconciliation_operation,
 };
+pub use source_edit_rollback::{SourceEditRollbackRequestV1, source_edit_rollback_operation};
 pub use storage::{
     BranchRefV1, CompactionDecisionV1, CompactionPlacementV1, CompactionTriggerPolicyV1,
     FreePageRatioV1, IncidentDebrisArtifactV1, IncidentDebrisKindV1, IncidentDebrisScanV1,

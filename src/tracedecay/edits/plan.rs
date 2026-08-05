@@ -43,7 +43,7 @@ pub(in crate::tracedecay) fn rollback_planned_source_edit_files(
         if current.as_deref() == file.expected.as_deref().map(str::as_bytes) {
             continue;
         }
-        publish_planned_source_edit_state(
+        publish_source_edit_state(
             project_root,
             &file.relative_path,
             file.intended.as_deref(),
@@ -69,6 +69,15 @@ pub(super) fn publish_planned_source_edit_state(
     intended: Option<&str>,
 ) -> Result<()> {
     validate_planned_source_edit(relative_path, expected, intended)?;
+    publish_source_edit_state(project_root, relative_path, expected, intended)
+}
+
+fn publish_source_edit_state(
+    project_root: &Path,
+    relative_path: &str,
+    expected: Option<&str>,
+    intended: Option<&str>,
+) -> Result<()> {
     let file = SourceEditFileAuthority::open(project_root, Path::new(relative_path))?;
     let expected_identity = file.current_identity()?;
     match intended {
