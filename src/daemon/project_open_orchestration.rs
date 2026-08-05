@@ -119,20 +119,39 @@ pub(super) async fn ensure_registered_project_route(
     allow_init: bool,
 ) -> Result<()> {
     let registry = store_administration.registered_profile_database().await?;
-    let context = match registry
+    if registry
         .project_registry_context_by_alias(project_path)
         .await?
+        .is_some()
     {
-        Some(context) => Some(context),
-        None => {
-            let git_root = crate::worktree::git_worktree_root(project_path)
-                .unwrap_or_else(|| project_path.to_path_buf());
-            let git_common_dir = crate::worktree::git_common_dir(&git_root);
-            registry
-                .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
-                .await?
-        }
-    };
+        return Ok(());
+    }
+    let (repository_root, repository_common_dir, requested_path_is_repository_root) =
+        match super::core_proxy::bounded_repository_identity(project_path).await {
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+                identity,
+            ) => {
+                let requested = project_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| project_path.to_path_buf());
+                let is_root = identity.worktree_root == requested;
+                (identity.worktree_root, Some(identity.common_dir), is_root)
+            }
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+                (project_path.to_path_buf(), None, true)
+            }
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(
+                reason,
+            ) => {
+                return Err(super::core_proxy::repository_discovery_deferred(
+                    project_path,
+                    reason,
+                ));
+            }
+        };
+    let context = registry
+        .project_registry_context_by_identity(&repository_root, repository_common_dir.as_deref())
+        .await?;
     if context.is_none() {
         let project_path = project_path
             .canonicalize()
@@ -140,11 +159,13 @@ pub(super) async fn ensure_registered_project_route(
         if durable_enrollment_resolves_existing_store(store_administration, &project_path) {
             return Ok(());
         }
-        let is_project_root = crate::worktree::git_worktree_root(&project_path)
-            .is_none_or(|git_root| git_root == project_path);
         let owns_repository_identity =
-            crate::worktree::repository_identity_root(&project_path).is_none();
-        if allow_init && is_project_root && owns_repository_identity {
+            tracedecay_runtime_core::project_registry::primary_checkout_root(
+                &project_path,
+                repository_common_dir.as_deref(),
+            )
+            .is_none();
+        if allow_init && requested_path_is_repository_root && owns_repository_identity {
             return Ok(());
         }
         return Err(unenrolled_project_route_error(&project_path));

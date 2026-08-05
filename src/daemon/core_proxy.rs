@@ -311,55 +311,97 @@ pub(crate) async fn resolve_daemon_initialize_route(
                     break;
                 }
             }
-            if let Some(git_root) = crate::worktree::git_worktree_root(root) {
-                let git_common_dir = crate::worktree::git_common_dir(&git_root);
-                if registry
-                    .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
-                    .await?
-                    .is_some()
-                {
-                    return Ok(Some(InitializeRouteMetadata {
-                        project_path: git_root,
-                        allow_init: false,
-                    }));
+            match bounded_repository_identity(root).await {
+                tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+                    identity,
+                ) => {
+                    if registry
+                        .project_registry_context_by_identity(
+                            &identity.worktree_root,
+                            Some(&identity.common_dir),
+                        )
+                        .await?
+                        .is_some()
+                    {
+                        return Ok(Some(InitializeRouteMetadata {
+                            project_path: identity.worktree_root,
+                            allow_init: false,
+                        }));
+                    }
                 }
+                tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {}
+                tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(
+                    reason,
+                ) => return Err(repository_discovery_deferred(root, reason)),
             }
         }
     }
-    if let Some(project_path) =
-        crate::mcp::server::resolve_initialize_roots_project_path(params, registry).await
-    {
-        return Ok(Some(InitializeRouteMetadata {
-            project_path,
-            allow_init: false,
-        }));
-    }
-
     for root in roots {
+        let repository_identity = bounded_repository_identity(&root).await;
+        if let tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(
+            reason,
+        ) = &repository_identity
+        {
+            return Err(repository_discovery_deferred(&root, *reason));
+        }
         if let Some(project_path) = crate::config::discover_project_root(&root) {
             return Ok(Some(InitializeRouteMetadata {
                 project_path,
                 allow_init: false,
             }));
         }
-        if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
-            // An initialize route has no retained configuration authority.
-            // Never revive legacy-file fallback here — but a fresh repo with
-            // no published snapshot follows the schema default (auto-init
-            // enabled), not fail-closed: treating a missing snapshot as
-            // "disabled" contradicted the config default and left explicit
-            // initialize-roots repos unable to open at all.
-            let allow_init = crate::config::cached_sync_config(&git_root).map_or_else(
-                |_| crate::config::SyncConfig::default().auto_init,
-                |config| config.auto_init,
-            );
-            return Ok(Some(InitializeRouteMetadata {
-                project_path: git_root,
-                allow_init,
-            }));
+        match repository_identity {
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Resolved(
+                identity,
+            ) => {
+                // An initialize route has no retained configuration authority.
+                // Never revive legacy-file fallback here — but a fresh repo with
+                // no published snapshot follows the schema default (auto-init
+                // enabled), not fail-closed: treating a missing snapshot as
+                // "disabled" contradicted the config default and left explicit
+                // initialize-roots repos unable to open at all.
+                let allow_init = crate::config::cached_sync_config(&identity.worktree_root)
+                    .map_or_else(
+                        |_| crate::config::SyncConfig::default().auto_init,
+                        |config| config.auto_init,
+                    );
+                return Ok(Some(InitializeRouteMetadata {
+                    project_path: identity.worktree_root,
+                    allow_init,
+                }));
+            }
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::NotRepository => {
+            }
+            tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome::Unknown(_) => {}
         }
     }
     Ok(None)
+}
+
+pub(super) async fn bounded_repository_identity(
+    path: &Path,
+) -> tracedecay_runtime_core::git_discovery::GitRepositoryIdentityOutcome {
+    let deadline = tracedecay_runtime_core::cancellation::MonotonicDeadline::at(
+        std::time::Instant::now() + Duration::from_secs(2),
+    );
+    tracedecay_runtime_core::git_discovery::discover_repository_identity(
+        path,
+        deadline,
+        &tracedecay_runtime_core::cancellation::CancellationToken::new(),
+    )
+    .await
+}
+
+pub(super) fn repository_discovery_deferred(
+    path: &Path,
+    reason: tracedecay_runtime_core::git_discovery::GitDiscoveryUnknown,
+) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "initialize route repository discovery deferred for {}: {reason:?}",
+            path.display()
+        ),
+    }
 }
 
 #[cfg(unix)]
