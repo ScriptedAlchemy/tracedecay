@@ -465,7 +465,7 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             }
             return Err(GitIndexTransactionPortError::StalePreview);
         }
-        if let Some(reason) = unsupported_commit_preflight(request, &runner)? {
+        if let Some(reason) = unsupported_commit_preflight(request)? {
             drop(lock);
             return unsupported_materialized(request, runner, reason);
         }
@@ -764,28 +764,16 @@ fn unsupported_native_preflight(
 
 fn unsupported_commit_preflight(
     request: &GitIndexPreviewRequestV1,
-    runner: &FixedGitIndexRunner,
 ) -> Result<Option<GitIndexUnsupportedStateV1>, GitIndexTransactionPortError> {
     if request.binding.operation != GitIndexTransactionOperationV1::CommitIndex {
         return Ok(None);
     }
-    if runner
-        .has_applicable_commit_hooks()
-        .map_err(map_native_error)?
-    {
-        return Ok(Some(GitIndexUnsupportedStateV1::ApplicableCommitHooks));
-    }
-    if let Some(GitIndexSigningPolicyV1::SignatureRequired { key_reference }) = request
-        .commit_intent
-        .as_ref()
-        .map(|intent| &intent.signing_policy)
-        && !runner
-            .signing_key_available(key_reference)
-            .map_err(map_native_error)?
-    {
-        return Ok(Some(GitIndexUnsupportedStateV1::SigningKeyUnavailable));
-    }
-    Ok(None)
+    // The files ref backend locks only names already present in an update-ref
+    // transaction. It has no primitive that prevents a new loose ref from
+    // appearing between namespace validation and destination publication.
+    Ok(Some(
+        GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable,
+    ))
 }
 
 fn supported_object_format(format: &str) -> bool {
@@ -1437,16 +1425,7 @@ where
                 None
             }
             GitIndexTransactionOperationV1::CommitIndex => {
-                let Some(intent) = materialized.commit_intent.as_ref() else {
-                    return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
-                };
-                match materialized
-                    .runner
-                    .commit_index(&index_lock, preview, intent)
-                {
-                    Ok(commit) => Some(commit),
-                    Err(error) => return Ok(classify_native_failure(&error)),
-                }
+                return Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation);
             }
         };
         drop(index_lock);
@@ -1486,14 +1465,11 @@ where
 #[allow(clippy::needless_pass_by_value)]
 fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError {
     match error {
-        NativeGitIndexError::IndexLocked
-        | NativeGitIndexError::PartialHunkSelectionUnsupported
-        | NativeGitIndexError::CommitStateUnsupported
-        | NativeGitIndexError::EmptyIndexCommit
-        | NativeGitIndexError::UnsupportedHookPolicy => GitIndexTransactionPortError::Unsupported,
+        NativeGitIndexError::IndexLocked | NativeGitIndexError::PartialHunkSelectionUnsupported => {
+            GitIndexTransactionPortError::Unsupported
+        }
         NativeGitIndexError::PatchDoesNotMatchHunk
         | NativeGitIndexError::CandidateTreeMismatch
-        | NativeGitIndexError::CommitIntentMismatch
         | NativeGitIndexError::StaleRepositoryState => GitIndexTransactionPortError::StalePreview,
         // Native output we could not interpret is not evidence that the
         // caller's snapshot moved. Reporting it as staleness told every caller
@@ -1736,30 +1712,6 @@ mod tests {
         (preview, patches)
     }
 
-    fn commit_preview(
-        assembler: &NativeGitIndexPreviewAssembler,
-        runner: &FixedGitIndexRunner,
-        preview_id: &str,
-        intent: &GitIndexCommitIntentV1,
-    ) -> GitIndexPreviewV1 {
-        let snapshot = exact_snapshot(assembler, runner);
-        let snapshot_digest =
-            GitIndexPreviewV1::repository_snapshot_digest(&snapshot).expect("snapshot digest");
-        GitIndexPreviewV1::new_with_commit_intent(
-            GitIndexPreviewId::new(preview_id).expect("preview id"),
-            GitIndexTransactionOperationV1::CommitIndex,
-            snapshot.clone(),
-            snapshot_digest,
-            Vec::new(),
-            snapshot.index.tree_id,
-            Some(intent),
-            GitIndexPreviewDispositionV1::Applicable,
-            UtcMicros(2),
-            UtcMicros(3),
-        )
-        .expect("commit preview")
-    }
-
     fn commit_intent(message: &str) -> GitIndexCommitIntentV1 {
         let identity = GitCommitIdentityV1 {
             name: "TraceDecay Test".to_owned(),
@@ -1840,20 +1792,6 @@ mod tests {
             commit_intent: Some(intent),
             observed_at: UtcMicros(10),
         }
-    }
-
-    fn object_file_count(path: &Path) -> usize {
-        fs::read_dir(path)
-            .expect("object directory")
-            .filter_map(Result::ok)
-            .map(|entry| {
-                if entry.path().is_dir() {
-                    object_file_count(&entry.path())
-                } else {
-                    1
-                }
-            })
-            .sum()
     }
 
     fn recovery_record(
@@ -1987,25 +1925,6 @@ mod tests {
         ));
         fs::remove_file(runner.index_lock_path()).expect("remove fixture lock");
 
-        let hook = directory.path().join(".git/hooks/pre-commit");
-        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write hook");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = fs::metadata(&hook).expect("hook metadata").permissions();
-            permissions.set_mode(0o755);
-            fs::set_permissions(&hook, permissions).expect("executable hook");
-            assert!(
-                runner
-                    .has_applicable_commit_hooks()
-                    .expect("hook classification")
-            );
-        }
-        assert!(
-            !runner
-                .signing_key_available("tracedecay-missing-signing-key")
-                .expect("missing signing key classification")
-        );
         assert_eq!(runner.index_bytes().expect("index after probes"), before);
     }
 
@@ -2052,8 +1971,35 @@ mod tests {
         assert_eq!(
             materialized.preview.disposition,
             GitIndexPreviewDispositionV1::Unsupported(
-                GitIndexUnsupportedStateV1::ApplicableCommitHooks
+                GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
             )
+        );
+    }
+
+    #[test]
+    fn files_ref_backend_exposes_no_destination_publication_window() {
+        let (directory, assembler, runner) = repository_fixture();
+        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
+        git(directory.path(), &["add", "packet.txt"]);
+        let request = commit_request(
+            exact_snapshot(&assembler, &runner),
+            commit_intent("unavailable commit\n"),
+            "git-index-preview.atomic-ref-unavailable",
+        );
+        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
+        let materialized = assembler.materialize(&request).expect("typed preview");
+        assert_eq!(
+            materialized.preview.disposition,
+            GitIndexPreviewDispositionV1::Unsupported(
+                GitIndexUnsupportedStateV1::AtomicRefNamespaceUnavailable
+            )
+        );
+
+        git(directory.path(), &["branch", "concurrent", &head_before]);
+        assert_eq!(
+            git_value(directory.path(), &["rev-parse", "HEAD"]),
+            head_before,
+            "a concurrent new ref cannot race a destination publication because no publication is admitted"
         );
     }
 
@@ -2320,72 +2266,6 @@ mod tests {
     }
 
     #[test]
-    fn recovery_rejects_commit_with_matching_tree_but_wrong_durable_intent() {
-        let (directory, assembler, runner) = repository_fixture();
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let expected_intent = commit_intent("expected transaction message\n");
-        let preview = commit_preview(
-            &assembler,
-            &runner,
-            "git-index-preview.recovery-intent",
-            &expected_intent,
-        );
-        git(
-            directory.path(),
-            &["commit", "--quiet", "-m", "different external message"],
-        );
-
-        let record = recovery_record(&preview, GitIndexJournalPhaseV1::RefCommitted);
-        assert_eq!(
-            assembler
-                .reconcile(&record)
-                .expect("reconcile wrong intent")
-                .outcome,
-            GitIndexReceiptOutcomeV1::NeedsInspection
-        );
-    }
-
-    #[test]
-    fn recovery_commits_when_git_normalizes_unaligned_intent_timestamps() {
-        let (directory, assembler, runner) = repository_fixture();
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let identity = GitCommitIdentityV1 {
-            name: "TraceDecay Test".to_owned(),
-            email: "tracedecay@example.com".to_owned(),
-            at: UtcMicros(1_234_567),
-        };
-        let intent = GitIndexCommitIntentV1::new(
-            "unaligned timestamp transaction\n".to_owned(),
-            identity.clone(),
-            identity,
-            GitIndexSigningPolicyV1::UnsignedPermitted,
-        )
-        .expect("commit intent");
-        let preview = commit_preview(
-            &assembler,
-            &runner,
-            "git-index-preview.recovery-unaligned-timestamp",
-            &intent,
-        );
-        let lock = runner.acquire_index_lock().expect("commit lock");
-        runner
-            .commit_index(&lock, &preview, &intent)
-            .expect("commit exact index");
-        drop(lock);
-
-        let record = recovery_record(&preview, GitIndexJournalPhaseV1::RefCommitted);
-        assert_eq!(
-            assembler
-                .reconcile(&record)
-                .expect("reconcile normalized intent")
-                .outcome,
-            GitIndexReceiptOutcomeV1::Committed
-        );
-    }
-
-    #[test]
     fn stale_worktree_hunk_and_index_lock_leave_index_unchanged() {
         let (directory, assembler, runner) = repository_fixture();
         fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
@@ -2437,179 +2317,6 @@ mod tests {
             Some(GitIndexUnsupportedStateV1::IntentToAdd)
         );
         assert!(!snapshot.is_mutation_eligible());
-    }
-
-    #[test]
-    fn commit_rejects_empty_index_and_stale_ref_before_commit_object_creation() {
-        let (directory, assembler, runner) = repository_fixture();
-        let intent = commit_intent("transaction commit\n");
-        let empty = commit_preview(
-            &assembler,
-            &runner,
-            "git-index-preview.empty-commit",
-            &intent,
-        );
-        let lock = runner.acquire_index_lock().expect("empty commit lock");
-        assert!(matches!(
-            runner.commit_index(&lock, &empty, &intent),
-            Err(NativeGitIndexError::EmptyIndexCommit)
-        ));
-        drop(lock);
-
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let stale = commit_preview(&assembler, &runner, "git-index-preview.stale-ref", &intent);
-        git(directory.path(), &["commit", "--quiet", "-m", "external"]);
-        let object_path = directory.path().join(".git").join("objects");
-        let objects_before = object_file_count(&object_path);
-        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
-        let lock = runner.acquire_index_lock().expect("stale ref lock");
-        assert!(matches!(
-            runner.commit_index(&lock, &stale, &intent),
-            Err(NativeGitIndexError::StaleRepositoryState)
-        ));
-        drop(lock);
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD"]),
-            head_before
-        );
-        assert_eq!(object_file_count(&object_path), objects_before);
-    }
-
-    #[test]
-    fn commit_intent_mismatch_fails_before_object_or_ref_mutation() {
-        let (directory, assembler, runner) = repository_fixture();
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let previewed_intent = commit_intent("previewed message\n");
-        let preview = commit_preview(
-            &assembler,
-            &runner,
-            "git-index-preview.intent-mismatch",
-            &previewed_intent,
-        );
-        let replacement_intent = commit_intent("replacement message\n");
-        let object_path = directory.path().join(".git").join("objects");
-        let objects_before = object_file_count(&object_path);
-        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
-
-        let lock = runner.acquire_index_lock().expect("commit lock");
-        assert!(matches!(
-            runner.commit_index(&lock, &preview, &replacement_intent),
-            Err(NativeGitIndexError::CommitIntentMismatch)
-        ));
-        drop(lock);
-
-        assert_eq!(object_file_count(&object_path), objects_before);
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD"]),
-            head_before
-        );
-    }
-
-    #[test]
-    fn signing_failure_is_safe_and_wrong_ref_never_advances() {
-        let (directory, assembler, runner) = repository_fixture();
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let mut signed_intent = commit_intent("signed transaction\n");
-        signed_intent.signing_policy = GitIndexSigningPolicyV1::SignatureRequired {
-            key_reference: "tracedecay-missing-signing-key".to_owned(),
-        };
-        signed_intent.validate().expect("signed intent");
-        let signed_preview = commit_preview(
-            &assembler,
-            &runner,
-            "git-index-preview.signing-failure",
-            &signed_intent,
-        );
-        let head_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
-        let lock = runner.acquire_index_lock().expect("signed commit lock");
-        let signing_error = runner
-            .commit_index(&lock, &signed_preview, &signed_intent)
-            .expect_err("missing signing key must fail");
-        drop(lock);
-        assert!(!signing_error.is_commit_boundary_unknown());
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD"]),
-            head_before
-        );
-
-        let unsigned_intent = commit_intent("wrong ref transaction\n");
-        let wrong_ref_preview = commit_preview(
-            &assembler,
-            &runner,
-            "git-index-preview.wrong-ref",
-            &unsigned_intent,
-        );
-        git(directory.path(), &["checkout", "-q", "-b", "other"]);
-        let other_before = git_value(directory.path(), &["rev-parse", "HEAD"]);
-        let lock = runner.acquire_index_lock().expect("wrong ref lock");
-        assert!(matches!(
-            runner.commit_index(&lock, &wrong_ref_preview, &unsigned_intent),
-            Err(NativeGitIndexError::StaleRepositoryState
-                | NativeGitIndexError::CommitStateUnsupported)
-        ));
-        drop(lock);
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD"]),
-            other_before
-        );
-    }
-
-    #[test]
-    fn commit_advances_only_the_previewed_ref_to_the_previewed_tree() {
-        let (directory, assembler, runner) = repository_fixture();
-        fs::write(directory.path().join("packet.txt"), "after\n").expect("change worktree");
-        git(directory.path(), &["add", "packet.txt"]);
-        let intent = commit_intent("transaction commit\n");
-        let preview = commit_preview(&assembler, &runner, "git-index-preview.commit", &intent);
-        let old_head = git_value(directory.path(), &["rev-parse", "HEAD"]);
-        let lock = runner.acquire_index_lock().expect("commit lock");
-        let commit = runner
-            .commit_index(&lock, &preview, &intent)
-            .expect("commit exact index");
-        drop(lock);
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD"]),
-            commit.as_str()
-        );
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD^"]),
-            old_head
-        );
-        assert_eq!(
-            git_value(directory.path(), &["rev-parse", "HEAD^{tree}"]),
-            preview
-                .candidate_index_tree
-                .as_ref()
-                .expect("candidate tree")
-                .as_str()
-        );
-        let lock = runner.acquire_index_lock().expect("commit snapshot lock");
-        let committed = assembler
-            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
-            .expect("committed snapshot");
-        drop(lock);
-        assert!(live_result_matches_preview(
-            directory.path(),
-            &preview,
-            &committed,
-            Some(&commit)
-        ));
-
-        git(directory.path(), &["checkout", "-q", "-b", "same-tip"]);
-        let lock = runner
-            .acquire_index_lock()
-            .expect("branch drift snapshot lock");
-        let branch_drift = assembler
-            .capture_snapshot(&preview.repository_snapshot, &runner, &lock)
-            .expect("branch drift snapshot");
-        drop(lock);
-        assert!(
-            !live_result_matches_preview(directory.path(), &preview, &branch_drift, Some(&commit)),
-            "the same commit on a different attached branch is not the previewed HEAD state"
-        );
     }
 
     /// Portable stand-in for macOS `/tmp` → `/private/tmp`: capture through a
