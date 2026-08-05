@@ -46,7 +46,7 @@ impl AgentIntegration for ClaudeIntegration {
         &self,
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
-        claude_non_interactive_install_state(&ctx.home, Vec::new())
+        claude_non_interactive_install_state(&ctx.home, &ctx.tracedecay_bin, Vec::new())
     }
 
     fn prepare_non_interactive_install(
@@ -54,7 +54,7 @@ impl AgentIntegration for ClaudeIntegration {
         ctx: &InstallContext,
     ) -> Result<NonInteractiveInstallOutcome> {
         let deploy_dir = deploy_plugin_bundle(&ctx.home, &ctx.tracedecay_bin)?;
-        claude_non_interactive_install_state(&ctx.home, vec![deploy_dir])
+        claude_non_interactive_install_state(&ctx.home, &ctx.tracedecay_bin, vec![deploy_dir])
     }
 
     fn interactive_activation_guidance(&self) -> Option<String> {
@@ -106,7 +106,7 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if claude_plugin_is_natively_active(&ctx.home)? {
+        if claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             Ok(())
         } else {
             Err(deferred_user_action_error(claude_native_install_action(
@@ -116,7 +116,7 @@ impl AgentIntegration for ClaudeIntegration {
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        if claude_plugin_is_natively_active(&ctx.home)? {
+        if claude_plugin_is_natively_active(&ctx.home, Some(&ctx.tracedecay_bin))? {
             Err(deferred_user_action_error(claude_native_remove_action()))
         } else {
             Ok(())
@@ -175,10 +175,30 @@ impl AgentIntegration for ClaudeIntegration {
         if !marketplace_residue && !settings_residue {
             return State::Missing;
         }
-        match claude_plugin_is_natively_active(&ctx.home) {
+        match claude_plugin_is_natively_active(&ctx.home, None) {
             Ok(true) => State::Current,
             Ok(false) => State::Repairable,
             Err(_) => State::Corrupt,
+        }
+    }
+
+    fn host_component_registration_for_lifecycle(
+        &self,
+        component: super::host_bundle_v2::HostBundleComponentV1,
+        ctx: &HealthcheckContext,
+        install: &InstallContext,
+    ) -> super::host_bundle_v2::HostBundleRegistrationStateV1 {
+        use super::host_bundle_v2::HostBundleRegistrationStateV1 as State;
+
+        match self.host_component_registration(component, ctx) {
+            State::Current => {
+                match claude_plugin_is_natively_active(&ctx.home, Some(&install.tracedecay_bin)) {
+                    Ok(true) => State::Current,
+                    Ok(false) => State::Repairable,
+                    Err(_) => State::Corrupt,
+                }
+            }
+            state => state,
         }
     }
 
@@ -251,9 +271,10 @@ impl AgentIntegration for ClaudeIntegration {
 
 fn claude_non_interactive_install_state(
     home: &Path,
+    tracedecay_bin: &str,
     staged_paths: Vec<PathBuf>,
 ) -> Result<NonInteractiveInstallOutcome> {
-    if claude_plugin_is_natively_active(home)? {
+    if claude_plugin_is_natively_active(home, Some(tracedecay_bin))? {
         Ok(NonInteractiveInstallOutcome::Ready)
     } else if claude_plugin_registration_is_active(home)? {
         Ok(NonInteractiveInstallOutcome::DeferredUserAction(
@@ -271,13 +292,9 @@ fn claude_non_interactive_install_state(
     }
 }
 
-fn claude_plugin_is_natively_active(home: &Path) -> Result<bool> {
+fn claude_plugin_is_natively_active(home: &Path, tracedecay_bin: Option<&str>) -> Result<bool> {
     let active = claude_plugin_registration_is_active(home)?;
-    let cache_current = claude_loaded_cache_matches_catalog_version(home).map_err(|()| {
-        TraceDecayError::Config {
-            message: "could not read Claude native plugin cache state".to_string(),
-        }
-    })?;
+    let cache_current = claude_loaded_cache_matches_rendered_bundle(home, tracedecay_bin)?;
     Ok(active && cache_current)
 }
 
@@ -336,9 +353,12 @@ fn plugin_source_manifest_path(home: &Path) -> PathBuf {
 }
 
 fn claude_current_cached_plugin_manifest_path(home: &Path) -> PathBuf {
+    claude_current_cached_plugin_root(home).join(".claude-plugin/plugin.json")
+}
+
+fn claude_current_cached_plugin_root(home: &Path) -> PathBuf {
     home.join(".claude/plugins/cache/tracedecay/tracedecay")
         .join(crate::PRODUCT_VERSION)
-        .join(".claude-plugin/plugin.json")
 }
 
 fn plugin_manifest_version(path: &Path) -> std::result::Result<Option<String>, ()> {
@@ -354,11 +374,33 @@ fn plugin_manifest_version(path: &Path) -> std::result::Result<Option<String>, (
         .map(str::to_string))
 }
 
-fn claude_loaded_cache_matches_catalog_version(home: &Path) -> std::result::Result<bool, ()> {
-    Ok(
-        plugin_manifest_version(&claude_current_cached_plugin_manifest_path(home))?.as_deref()
-            == Some(crate::PRODUCT_VERSION),
-    )
+fn claude_loaded_cache_matches_rendered_bundle(
+    home: &Path,
+    tracedecay_bin: Option<&str>,
+) -> Result<bool> {
+    let cache_root = claude_current_cached_plugin_root(home);
+    let source_root = plugin_deploy_dir(home);
+    let (expected, relatives) = match tracedecay_bin {
+        Some(tracedecay_bin) => {
+            let rendered = rendered_plugin_files(tracedecay_bin)?;
+            let (digest, relatives) = super::rendered_bundle_content_digest(&rendered)?;
+            (Some(digest), relatives)
+        }
+        None => (
+            None,
+            claude_embedded_plugin_files()
+                .into_iter()
+                .map(|(relative, _)| relative.to_string())
+                .collect(),
+        ),
+    };
+    let Some(source) = super::observed_bundle_content_digest(&source_root, &relatives)? else {
+        return Ok(false);
+    };
+    let Some(cache) = super::observed_bundle_content_digest(&cache_root, &relatives)? else {
+        return Ok(false);
+    };
+    Ok(source == cache && expected.is_none_or(|expected| source == expected))
 }
 
 fn claude_native_install_action(staged_dir: Option<&Path>) -> DeferredUserAction {

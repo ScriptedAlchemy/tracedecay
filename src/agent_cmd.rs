@@ -2246,13 +2246,15 @@ fn feedback_rollback_apply(agent_id: &str, state_path: &Path) -> tracedecay::err
     let lifecycle = rollback.into_lifecycle();
     let writer = lifecycle.into_storage();
 
+    let dashboard =
+        tracedecay::user_config::UserConfig::load().dashboard_enabled_for_agent(&state.agent_id);
     let context = tracedecay::agents::InstallContext {
         home: home.clone(),
         tracedecay_bin: tracedecay::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
         tool_permissions: tracedecay::agents::expected_tool_perms(),
         project_root: None,
-        dashboard: true,
+        dashboard,
     };
     let registration_snapshot = validate_feedback_registration_snapshot(
         &home,
@@ -2574,13 +2576,15 @@ fn feedback_rollback_restore(state_path: &Path) -> tracedecay::errors::Result<()
     persist_feedback_state(state_path, &lifecycle_root, &state)?;
     let lifecycle = rollback.into_lifecycle();
     let writer = lifecycle.into_storage();
+    let dashboard =
+        tracedecay::user_config::UserConfig::load().dashboard_enabled_for_agent(&state.agent_id);
     let context = tracedecay::agents::InstallContext {
         home,
         tracedecay_bin: tracedecay::agents::which_tracedecay()
             .unwrap_or_else(|| "tracedecay".to_string()),
         tool_permissions: tracedecay::agents::expected_tool_perms(),
         project_root: None,
-        dashboard: true,
+        dashboard,
     };
     if !state.compensation_preserves_registration {
         restore_feedback_registration(
@@ -3036,6 +3040,9 @@ pub(crate) async fn handle_install_command(
             let scoped_project_path = validate_codex_automation_project_path()?;
             install_codex_daemon_automation(&scoped_project_path, &home, options).await?;
         }
+        user_cfg
+            .agent_dashboard_enabled
+            .insert(id.clone(), !no_dashboard);
         if !user_cfg.installed_agents.contains(&id) {
             user_cfg.installed_agents.push(id);
             installed_names.push(name);
@@ -3054,6 +3061,7 @@ pub(crate) async fn handle_install_command(
             apply_default_canonical_component_set(id, HostBundleCliOperation::Uninstall, &home)?;
             removed_names.push(ag.name().to_string());
             user_cfg.installed_agents.retain(|a| a != id);
+            user_cfg.agent_dashboard_enabled.remove(id);
         }
         for id in &to_install {
             let ag = tracedecay::agents::get_integration(id)?;
@@ -3076,6 +3084,9 @@ pub(crate) async fn handle_install_command(
             if !user_cfg.installed_agents.contains(id) {
                 user_cfg.installed_agents.push(id.clone());
             }
+            user_cfg
+                .agent_dashboard_enabled
+                .insert(id.clone(), !no_dashboard);
         }
         user_cfg
             .save()
@@ -3191,15 +3202,21 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
 
     for id in &user_cfg.installed_agents {
         let integration = tracedecay::agents::get_integration(id)?;
+        let dashboard = user_cfg.dashboard_enabled_for_agent(id);
         let context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
-            dashboard: true,
+            dashboard,
         };
         prepare_native_activation_if_needed(integration.as_ref(), &context)?;
-        apply_default_canonical_component_set(id, HostBundleCliOperation::Update, &home)?;
+        apply_default_canonical_component_set_with_dashboard(
+            id,
+            HostBundleCliOperation::Update,
+            &home,
+            dashboard,
+        )?;
     }
     Ok(())
 }
@@ -3217,7 +3234,7 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result
         .to_string_lossy()
         .into_owned();
     let user_config = tracedecay::user_config::UserConfig::load();
-    let agent_ids = user_config.installed_agents;
+    let agent_ids = user_config.installed_agents.clone();
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let health_context = tracedecay::agents::HealthcheckContext {
         home: home.clone(),
@@ -3240,12 +3257,13 @@ pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result
             }
         };
         checked += 1;
+        let dashboard = user_config.dashboard_enabled_for_agent(id);
         let install_context = tracedecay::agents::InstallContext {
             home: home.clone(),
             tracedecay_bin: tracedecay_bin.clone(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
-            dashboard: true,
+            dashboard,
         };
         match integration.preflight_non_interactive_install(&install_context) {
             Ok(tracedecay::agents::NonInteractiveInstallOutcome::Ready) => {}
@@ -3374,7 +3392,14 @@ pub(crate) async fn reinstall_agent_integrations(
     home: &Path,
     tracedecay_bin: &str,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
-    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin).await
+    let user_config = tracedecay::user_config::UserConfig::load();
+    reinstall_agent_integrations_with_dashboard_policies(
+        agent_ids,
+        home,
+        tracedecay_bin,
+        &user_config.agent_dashboard_enabled,
+    )
+    .await
 }
 
 /// Reinstalls tracked integrations while reusing lifecycle authority already
@@ -3386,13 +3411,21 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
     lifecycle: &tracedecay::lifecycle_lease::LifecycleLease,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let _ = lifecycle;
-    reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin).await
+    let user_config = tracedecay::user_config::UserConfig::load();
+    reinstall_agent_integrations_with_dashboard_policies(
+        agent_ids,
+        home,
+        tracedecay_bin,
+        &user_config.agent_dashboard_enabled,
+    )
+    .await
 }
 
-async fn reinstall_agent_integrations_with_lease(
+async fn reinstall_agent_integrations_with_dashboard_policies(
     agent_ids: &[String],
     home: &Path,
     tracedecay_bin: &str,
+    dashboard_policies: &std::collections::BTreeMap<String, bool>,
 ) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let mut results = Vec::new();
     for id in agent_ids {
@@ -3406,18 +3439,24 @@ async fn reinstall_agent_integrations_with_lease(
                 continue;
             }
         };
+        let dashboard = dashboard_policies.get(id).copied().unwrap_or(true);
         let context = tracedecay::agents::InstallContext {
             home: home.to_path_buf(),
             tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
-            dashboard: true,
+            dashboard,
         };
         if let Err(error) = prepare_native_activation_if_needed(ag.as_ref(), &context) {
             results.push((id.clone(), Err(error)));
             continue;
         }
-        match apply_default_canonical_component_set(id, HostBundleCliOperation::Repair, home) {
+        match apply_default_canonical_component_set_with_dashboard(
+            id,
+            HostBundleCliOperation::Repair,
+            home,
+            dashboard,
+        ) {
             Ok(()) => {
                 results.push((id.clone(), Ok(AgentReinstallOutcome::Installed)));
                 continue;
@@ -3444,6 +3483,7 @@ pub(crate) async fn handle_uninstall_command(
     if let Some(id) = agent {
         apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
         user_cfg.installed_agents.retain(|a| a != &id);
+        user_cfg.agent_dashboard_enabled.remove(&id);
         user_cfg
             .save()
             .map_err(|err| tracedecay::errors::TraceDecayError::Config {
@@ -3454,6 +3494,7 @@ pub(crate) async fn handle_uninstall_command(
             apply_default_canonical_component_set(&id, HostBundleCliOperation::Uninstall, &home)?;
         }
         user_cfg.installed_agents.clear();
+        user_cfg.agent_dashboard_enabled.clear();
         user_cfg
             .save()
             .map_err(|err| tracedecay::errors::TraceDecayError::Config {
@@ -3478,7 +3519,7 @@ mod tests {
         apply_canonical_component_set, apply_canonical_component_set_with_tracedecay_bin,
         broker_codex_daemon_automation_project, canonical_host_component_set,
         canonical_host_component_set_with_tracedecay_bin, component_set_request,
-        reinstall_agent_integrations,
+        reinstall_agent_integrations, reinstall_agent_integrations_with_dashboard_policies,
     };
     use tracedecay::agents::host_bundle_v2::{
         CompetingHostExtensionClaimV1, HostBundleError, HostComponentSetExecutionRequestV1,
@@ -3512,6 +3553,21 @@ mod tests {
     /// windows from overlapping each other or a profile pin.
     fn pinned_host_profile() -> tracedecay_runtime_core::config::PinnedUserDataDir {
         tracedecay_runtime_core::config::PinnedUserDataDir::new()
+    }
+
+    fn copy_test_bundle(source: &std::path::Path, destination: &std::path::Path) {
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                std::fs::create_dir_all(&destination_path).unwrap();
+                copy_test_bundle(&source_path, &destination_path);
+            } else {
+                std::fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
+                std::fs::copy(source_path, destination_path).unwrap();
+            }
+        }
     }
 
     /// `--yes` confirms the plan the preview showed; taking ownership of bytes
@@ -5316,18 +5372,13 @@ mod tests {
             "[plugins.\"tracedecay@personal\"]\nenabled = true\n",
         )
         .unwrap();
-        let cache_manifest = home
+        let cache_root = home
             .path()
             .join(".codex/plugins/cache/personal/tracedecay")
-            .join(tracedecay_agent_hosts::PRODUCT_VERSION)
-            .join(".codex-plugin/plugin.json");
-        std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
-        std::fs::copy(
-            home.path()
-                .join("plugins/tracedecay/.codex-plugin/plugin.json"),
-            &cache_manifest,
-        )
-        .unwrap();
+            .join(tracedecay_agent_hosts::PRODUCT_VERSION);
+        let cache_manifest = cache_root.join(".codex-plugin/plugin.json");
+        std::fs::create_dir_all(&cache_root).unwrap();
+        copy_test_bundle(&home.path().join("plugins/tracedecay"), &cache_root);
 
         let results =
             reinstall_agent_integrations(&["codex".to_string()], home.path(), "new-tracedecay")
@@ -5414,19 +5465,24 @@ mod tests {
             .path()
             .join(".codex/plugins/cache/personal/tracedecay")
             .join(tracedecay_agent_hosts::PRODUCT_VERSION);
-        let cache_manifest = cache_root.join(".codex-plugin/plugin.json");
-        std::fs::create_dir_all(cache_manifest.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&cache_root).unwrap();
         std::fs::create_dir_all(source_manifest.parent().unwrap()).unwrap();
-        let rendered_manifest = component_set
+        for artifact in component_set
             .component_set
             .components
             .iter()
             .flat_map(|component| component.contents.iter())
-            .find(|artifact| {
-                artifact.relative_path == "plugins/tracedecay/.codex-plugin/plugin.json"
+            .filter_map(|artifact| {
+                artifact
+                    .relative_path
+                    .strip_prefix("plugins/tracedecay/")
+                    .map(|relative| (relative, &artifact.bytes))
             })
-            .unwrap();
-        std::fs::write(&cache_manifest, &rendered_manifest.bytes).unwrap();
+        {
+            let cache_path = cache_root.join(artifact.0);
+            std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
+            std::fs::write(cache_path, artifact.1).unwrap();
+        }
         let options = crate::cli::HostBundleCliOptions {
             component: None,
             dry_run: false,
@@ -5649,5 +5705,50 @@ mod tests {
             std::fs::read(registration_path).unwrap(),
             b"{\"external\":true}"
         );
+    }
+
+    #[tokio::test]
+    async fn hermes_dashboard_opt_out_survives_update_and_reinstall() {
+        let _profile = pinned_host_profile();
+        let home = tempfile::tempdir().unwrap();
+        let tracedecay_bin = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let plugin = home.path().join(".hermes/plugins/tracedecay");
+
+        apply_default_canonical_component_set_with_dashboard(
+            "hermes",
+            HostBundleCliOperation::Install,
+            home.path(),
+            false,
+        )
+        .unwrap();
+        apply_default_canonical_component_set_with_dashboard(
+            "hermes",
+            HostBundleCliOperation::Update,
+            home.path(),
+            false,
+        )
+        .unwrap();
+        assert!(!plugin.join("dashboard/manifest.json").exists());
+        assert!(!plugin.join("dashboard/plugin_api.py").exists());
+        assert!(!plugin.join("dashboard/dist/index.js").exists());
+
+        let policies = std::collections::BTreeMap::from([("hermes".to_string(), false)]);
+        let results = reinstall_agent_integrations_with_dashboard_policies(
+            &["hermes".to_string()],
+            home.path(),
+            &tracedecay_bin,
+            &policies,
+        )
+        .await;
+        assert!(matches!(
+            results.as_slice(),
+            [(id, Ok(AgentReinstallOutcome::Installed))] if id == "hermes"
+        ));
+        assert!(!plugin.join("dashboard/manifest.json").exists());
+        assert!(!plugin.join("dashboard/plugin_api.py").exists());
+        assert!(!plugin.join("dashboard/dist/index.js").exists());
     }
 }

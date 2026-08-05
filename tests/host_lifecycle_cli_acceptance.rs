@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
@@ -209,6 +209,21 @@ fn seed_host(case: HostCase, cli: &IsolatedCli) -> BTreeMap<PathBuf, Vec<u8>> {
     originals
 }
 
+fn copy_test_bundle(source: &Path, destination: &Path) {
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir_all(&destination_path).unwrap();
+            copy_test_bundle(&source_path, &destination_path);
+        } else {
+            fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
+            fs::copy(source_path, destination_path).unwrap();
+        }
+    }
+}
+
 fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
     let settings_path = cli.home.path().join(".claude/settings.json");
     let mut settings: serde_json::Value =
@@ -266,14 +281,13 @@ fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
         .join(".claude/plugins/cache/tracedecay/tracedecay")
         .join(tracedecay_agent_hosts::PRODUCT_VERSION);
     if active {
-        fs::create_dir_all(cache_root.join(".claude-plugin")).unwrap();
-        fs::copy(
-            cli.home
+        fs::create_dir_all(&cache_root).unwrap();
+        copy_test_bundle(
+            &cli.home
                 .path()
-                .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json"),
-            cache_root.join(".claude-plugin/plugin.json"),
-        )
-        .unwrap();
+                .join(".claude/plugins/marketplaces/tracedecay"),
+            &cache_root,
+        );
     } else if cache_root.exists() {
         fs::remove_dir_all(cache_root).unwrap();
     }
@@ -626,6 +640,37 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
                 })
         );
     }
+}
+
+#[test]
+fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Hermes);
+    seed_host(case, &cli);
+
+    let assert_dashboard_absent = || {
+        for plugin in [
+            cli.home.path().join(".hermes/plugins/tracedecay"),
+            cli.home
+                .path()
+                .join(".hermes/profiles/review/plugins/tracedecay"),
+        ] {
+            assert!(!plugin.join("dashboard/manifest.json").exists());
+            assert!(!plugin.join("dashboard/plugin_api.py").exists());
+            assert!(!plugin.join("dashboard/dist/index.js").exists());
+        }
+    };
+
+    assert_success(
+        case.id,
+        "install --no-dashboard",
+        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
+    );
+    assert_dashboard_absent();
+    assert_success(case.id, "update", cli.run(&["update-plugin"]));
+    assert_dashboard_absent();
+    assert_success(case.id, "reinstall", cli.run(&["reinstall"]));
+    assert_dashboard_absent();
 }
 
 #[test]
