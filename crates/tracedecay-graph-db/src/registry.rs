@@ -10,14 +10,18 @@ use tracedecay_store::{
 
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
-    GraphDbRuntimeState, GraphDurability, GraphFormatVersion,
+    GraphDbRuntimeState, GraphDurability, GraphFormatVersion, NeverCancelled,
 };
 
 use self::identity::{
     binding, entry_binding, require_binding, require_closing, validate_registration,
 };
-use self::path::{GraphPathAnchor, GraphPathPreparation, validate_managed_graph_path};
+use self::path::{
+    GraphPathAcquisitionFailure, GraphPathPreparation, RetainedGraphFile,
+    retained_initialization_failure, validate_managed_graph_path,
+};
 use crate::error::rollback_failure;
+use crate::runtime::GraphDbFileState;
 
 #[path = "registry/identity.rs"]
 mod identity;
@@ -122,6 +126,7 @@ enum RegistryEntry {
         path: PathBuf,
         expected_format: GraphFormatVersion,
         owner: Option<Arc<GraphDbOwner>>,
+        retained_file: Option<Arc<RetainedGraphFile>>,
         error: GraphDbError,
     },
 }
@@ -134,6 +139,7 @@ struct Eviction {
     path: PathBuf,
     expected_format: GraphFormatVersion,
     owner: Arc<GraphDbOwner>,
+    retained_file: Option<Arc<RetainedGraphFile>>,
     prior_fault: Option<GraphDbError>,
     last_used: Instant,
 }
@@ -301,28 +307,33 @@ impl GraphDbRegistry {
         let opened = open_registered_graph(&path, expected_format, &registration);
         let mut state = self.state_lock()?;
         match opened {
-            Ok((owner, mut path_anchor)) => {
-                let publication_verification = check_request(
-                    registration.lifecycle_cancellation.as_ref(),
-                    registration.deadline,
-                )
-                .and_then(|()| {
-                    check_request(registration.cancellation.as_ref(), registration.deadline)
-                })
-                .and_then(|()| path_anchor.verify(&path))
-                .and_then(|verification| {
-                    verification.verify_engine_lock()?;
-                    Ok(verification)
-                });
+            Ok((owner, path_authority)) => {
+                let publication_verification = if path_authority.was_created() {
+                    path_authority.verify(&path)
+                } else {
+                    check_request(
+                        registration.lifecycle_cancellation.as_ref(),
+                        registration.deadline,
+                    )
+                    .and_then(|()| {
+                        check_request(registration.cancellation.as_ref(), registration.deadline)
+                    })
+                    .and_then(|()| path_authority.verify(&path))
+                };
                 let publication_verification = match publication_verification {
                     Ok(verification) => verification,
                     Err(error) => {
-                        let error = close_and_abort_graph_open(
-                            &owner,
-                            path_anchor,
-                            "reject unpublished registered graph",
-                            error,
-                        );
+                        let failure = retained_initialization_failure(path_authority, error);
+                        let retained_file = failure.retained_file.map(Arc::new);
+                        let close_result = owner.close();
+                        let error = match close_result {
+                            Ok(()) => failure.error,
+                            Err(close_error) => rollback_failure(
+                                "reject unpublished registered graph",
+                                failure.error,
+                                close_error,
+                            ),
+                        };
                         if retains_fault(&error) {
                             let retained_owner = (!owner.is_closed()).then(|| Arc::new(owner));
                             state.entries.insert(
@@ -334,6 +345,7 @@ impl GraphDbRegistry {
                                     path,
                                     expected_format,
                                     owner: retained_owner,
+                                    retained_file,
                                     error: error.clone(),
                                 },
                             );
@@ -344,7 +356,6 @@ impl GraphDbRegistry {
                         return Err(error);
                     }
                 };
-                path_anchor.commit();
                 let owner = Arc::new(owner);
                 let database = owner.handle();
                 state.entries.insert(
@@ -363,8 +374,9 @@ impl GraphDbRegistry {
                 self.inner.changed.notify_all();
                 Ok(database)
             }
-            Err(error) => {
-                if retains_fault(&error) {
+            Err(failure) => {
+                if retains_fault(&failure.error) {
+                    let error = failure.error;
                     state.entries.insert(
                         shard_id,
                         RegistryEntry::Faulted {
@@ -374,14 +386,17 @@ impl GraphDbRegistry {
                             path,
                             expected_format,
                             owner: None,
+                            retained_file: failure.retained_file.map(Arc::new),
                             error: error.clone(),
                         },
                     );
+                    self.inner.changed.notify_all();
+                    Err(error)
                 } else {
                     state.entries.remove(&shard_id);
+                    self.inner.changed.notify_all();
+                    Err(failure.error)
                 }
-                self.inner.changed.notify_all();
-                Err(error)
             }
         }
     }
@@ -497,6 +512,7 @@ impl GraphDbRegistry {
                         path: path.clone(),
                         expected_format: *expected_format,
                         owner: Arc::clone(owner),
+                        retained_file: None,
                         prior_fault: None,
                         last_used: *last_used,
                     };
@@ -615,6 +631,7 @@ impl GraphDbRegistry {
                 path: path.clone(),
                 expected_format: *expected_format,
                 owner: Arc::clone(owner),
+                retained_file: None,
                 prior_fault: None,
                 last_used: *last_used,
             },
@@ -625,6 +642,7 @@ impl GraphDbRegistry {
                 path,
                 expected_format,
                 owner: Some(owner),
+                retained_file,
                 error,
             } => Eviction {
                 authority_lease: Arc::clone(authority_lease),
@@ -633,6 +651,7 @@ impl GraphDbRegistry {
                 path: path.clone(),
                 expected_format: *expected_format,
                 owner: Arc::clone(owner),
+                retained_file: retained_file.clone(),
                 prior_fault: Some(error.clone()),
                 last_used: Instant::now(),
             },
@@ -672,6 +691,7 @@ impl GraphDbRegistry {
                 path: eviction.path,
                 expected_format: eviction.expected_format,
                 owner: Some(eviction.owner),
+                retained_file: eviction.retained_file,
                 error,
             }
         } else {
@@ -717,6 +737,7 @@ impl GraphDbRegistry {
                         path: reservation.path,
                         expected_format: reservation.expected_format,
                         owner: Some(reservation.owner),
+                        retained_file: reservation.retained_file,
                         error,
                     },
                 );
@@ -857,6 +878,7 @@ fn reserve_capacity_eviction(
         path: path.clone(),
         expected_format: *expected_format,
         owner: Arc::clone(owner),
+        retained_file: None,
         prior_fault: None,
         last_used: *last_used,
     };
@@ -905,94 +927,59 @@ fn open_registered_graph(
     path: &Path,
     expected_format: GraphFormatVersion,
     registration: &GraphDbRegistration,
-) -> Result<(GraphDbOwner, GraphPathAnchor), GraphDbError> {
+) -> Result<(GraphDbOwner, path::GraphPathAuthority), GraphPathAcquisitionFailure> {
     check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
-    )?;
-    let preparation = GraphPathPreparation::prepare(path)?;
-    if let Err(error) = check_request(
+    )
+    .map_err(open_failure)?;
+    check_request(registration.cancellation.as_ref(), registration.deadline)
+        .map_err(open_failure)?;
+    let preparation = GraphPathPreparation::prepare(path).map_err(open_failure)?;
+    check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
+    )
+    .map_err(open_failure)?;
+    check_request(registration.cancellation.as_ref(), registration.deadline)
+        .map_err(open_failure)?;
+    let creates_file = preparation.creates_file();
+    let authority = preparation.acquire()?;
+    let file = match authority.clone_file() {
+        Ok(file) => file,
+        Err(error) => return Err(retained_initialization_failure(authority, error)),
+    };
+    let cancellation: Arc<dyn GraphCancellation> = if creates_file {
+        Arc::new(NeverCancelled)
+    } else {
+        Arc::clone(&registration.lifecycle_cancellation)
+    };
+    let owner = match GraphDbOwner::open_with_file(
+        GraphDbOpenOptions {
+            location: GraphDbLocation::Persistent(path.to_path_buf()),
+            expected_format,
+            durability: GraphDurability::Sync,
+            cancellation,
+        },
+        file,
+        if creates_file {
+            GraphDbFileState::Created
+        } else {
+            GraphDbFileState::Existing
+        },
     ) {
-        return Err(preparation.abort_failed_open(error));
-    }
-    let owner = match GraphDbOwner::open(GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path.to_path_buf()),
-        expected_format,
-        durability: GraphDurability::Sync,
-        cancellation: Arc::clone(&registration.lifecycle_cancellation),
-    }) {
         Ok(owner) => owner,
-        Err(error) => return Err(preparation.abort_failed_open(error)),
-    };
-    let path_anchor = match preparation.complete_after_open() {
-        Ok(path_anchor) => path_anchor,
-        Err(failure) => {
-            let close_result = owner.close();
-            let cleanup_error = match failure.anchor {
-                Some(anchor) => anchor.abort(failure.error),
-                None => rollback_failure(
-                    "refuse created graph cleanup without identity",
-                    failure.error,
-                    "created graph identity was never anchored",
-                ),
-            };
-            return Err(match close_result {
-                Ok(()) => cleanup_error,
-                Err(close_error) => rollback_failure(
-                    "reject unverified registered graph open",
-                    cleanup_error,
-                    close_error,
-                ),
-            });
-        }
-    };
-    if let Err(error) = check_request(
-        registration.lifecycle_cancellation.as_ref(),
-        registration.deadline,
-    ) {
-        return Err(close_and_abort_graph_open(
-            &owner,
-            path_anchor,
-            "cancel registered graph open",
-            error,
-        ));
-    }
-    let verification = match path_anchor.verify(path) {
-        Ok(verification) => verification,
         Err(error) => {
-            return Err(close_and_abort_graph_open(
-                &owner,
-                path_anchor,
-                "reject replaced registered graph open",
-                error,
-            ));
+            return Err(retained_initialization_failure(authority, error));
         }
     };
-    if let Err(error) = verification.verify_engine_lock() {
-        drop(verification);
-        return Err(close_and_abort_graph_open(
-            &owner,
-            path_anchor,
-            "reject mismatched Grafeo graph file",
-            error,
-        ));
-    }
-    Ok((owner, path_anchor))
+    Ok((owner, authority))
 }
 
-fn close_and_abort_graph_open(
-    owner: &GraphDbOwner,
-    path_anchor: GraphPathAnchor,
-    context: &str,
-    primary: GraphDbError,
-) -> GraphDbError {
-    let close_result = owner.close();
-    let cleanup_result = path_anchor.abort(primary);
-    match close_result {
-        Ok(()) => cleanup_result,
-        Err(close_error) => rollback_failure(context, cleanup_result, close_error),
+fn open_failure(error: GraphDbError) -> GraphPathAcquisitionFailure {
+    GraphPathAcquisitionFailure {
+        retained_file: None,
+        error,
     }
 }
 
@@ -1050,52 +1037,5 @@ fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             | GraphDbError::Unavailable { .. }
             | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
         },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-
-    use tempfile::tempdir;
-    use tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY;
-
-    use super::{GraphPathPreparation, close_and_abort_graph_open};
-    use crate::{GraphDbError, GraphDbOwner, NeverCancelled};
-
-    #[test]
-    fn close_and_cleanup_failures_preserve_both_causes_and_replacement() {
-        let temp = tempdir().unwrap();
-        let private_directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
-        tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
-        let graph_path = private_directory.join("graph.grafeo");
-        let preparation = GraphPathPreparation::prepare(&graph_path).unwrap();
-        let manager = grafeo_storage::file::GrafeoFileManager::create(&graph_path).unwrap();
-        let anchor = match preparation.complete_after_open() {
-            Ok(anchor) => anchor,
-            Err(failure) => panic!("created graph anchor failed: {}", failure.error),
-        };
-        drop(manager);
-        let moved = private_directory.join("moved.grafeo");
-        std::fs::rename(&graph_path, &moved).unwrap();
-        drop(tracedecay_private_fs::create_private_file(&graph_path).unwrap());
-
-        let owner = GraphDbOwner::memory(Arc::new(NeverCancelled)).unwrap();
-        owner.handle().inner.poisoned.store(true, Ordering::Release);
-        let error = close_and_abort_graph_open(
-            &owner,
-            anchor,
-            "test close and cleanup",
-            GraphDbError::Cancelled,
-        );
-
-        let GraphDbError::DurabilityUncertain { message } = error else {
-            panic!("close plus cleanup failure must report uncertain durability");
-        };
-        assert!(message.contains("operation cancelled"));
-        assert!(message.contains("identity changed before cleanup"));
-        assert!(message.contains("uncertain durability"));
-        assert!(graph_path.is_file(), "replacement must never be deleted");
     }
 }
