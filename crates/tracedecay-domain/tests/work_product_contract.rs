@@ -1,11 +1,13 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{
-    AcceptanceCriterionId, InitiativeId, ManifestDigest, MilestoneId, ProposalId,
-    RetrievalAnchorId, TaskEvidenceLinkId, TaskId, UtcMicros, WorkAcceptanceCriterionV1,
-    WorkGraphChangeV1, WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1,
-    WorkItemV1, WorkPlanId, WorkPlanV1, WorkProductContractError, WorkProductGraphV1,
+    AcceptanceCriterionId, AttemptId, InitiativeId, ManifestDigest, MilestoneId, ProposalId,
+    ProviderId, RetrievalAnchorId, RunId, TaskEvidenceLinkId, TaskEvidenceLinkV1, TaskId,
+    UtcMicros, WorkAcceptanceCriterionV1, WorkAttemptIdentityV1, WorkGraphChangeV1,
+    WorkGraphVersionV1, WorkHierarchyV1, WorkInitiativeV1, WorkItemInputV1, WorkItemV1,
+    WorkLegalActionV1, WorkPlanId, WorkPlanV1, WorkProductContractError, WorkProductGraphV1,
     WorkProductProjectionBundleV1, WorkProductRelationV1, WorkProposalV1, WorkProposedChildV1,
+    WorkProviderOutcomeV1, WorkProviderRouteId, WorkProviderRouteV1, WorkProviderTerminalV1,
     WorkRouteDecisionV1, WorkScoreKindV1, WorkShapeAssessmentV1, WorkSizingV1,
     WorkTaskEvidenceCoverageV1, WorkTaskEvidenceV1, WorkTimelineLaneV1,
 };
@@ -94,6 +96,23 @@ fn graph(items: Vec<WorkItemV1>) -> WorkProductGraphV1 {
     .unwrap()
 }
 
+fn attempt(task_id: &TaskId, suffix: &str) -> WorkAttemptIdentityV1 {
+    WorkAttemptIdentityV1::new(
+        task_id.clone(),
+        id::<RunId>(&format!("run.{suffix}")),
+        id::<AttemptId>(&format!("attempt.{suffix}")),
+    )
+    .unwrap()
+}
+
+fn route() -> WorkProviderRouteV1 {
+    WorkProviderRouteV1::new(
+        id::<ProviderId>("provider.contract"),
+        id::<WorkProviderRouteId>("route.contract"),
+    )
+    .unwrap()
+}
+
 #[test]
 fn hierarchy_and_gating_dag_are_validated_as_one_graph() {
     let valid = graph(vec![
@@ -143,6 +162,15 @@ fn hierarchy_and_gating_dag_are_validated_as_one_graph() {
         missing_milestone,
         WorkProductContractError::UnknownHierarchy
     );
+}
+
+#[test]
+fn crafted_json_cannot_deserialize_a_cyclic_graph_snapshot() {
+    let graph = graph(vec![item("task.a", &[], 3), item("task.b", &["task.a"], 5)]);
+    let mut encoded = serde_json::to_value(graph).unwrap();
+    encoded["items"][0]["input"]["dependencies"] = serde_json::json!(["task.b"]);
+
+    assert!(serde_json::from_value::<WorkProductGraphV1>(encoded).is_err());
 }
 
 #[test]
@@ -278,4 +306,118 @@ fn accepting_a_decomposition_proposal_fans_out_without_changing_parent_identity(
         accepted.item(&id("task.child.b")).unwrap().dependencies(),
         &BTreeSet::from([id("task.child.a")])
     );
+}
+
+#[test]
+fn retry_projections_ignore_historical_outcomes_and_failed_current_attempt_cannot_accept() {
+    let task_id = id::<TaskId>("task.retry");
+    let graph = graph(vec![item(task_id.as_str(), &[], 8)]);
+    let proposal = WorkProposalV1::new(
+        id("proposal.retry"),
+        task_id.clone(),
+        graph.version(),
+        WorkShapeAssessmentV1::new(WorkScoreKindV1::Ordinal, 2, 2, 2, 2).unwrap(),
+        WorkSizingV1::new(WorkScoreKindV1::Heuristic, 3, 5, 8, "retry fixture").unwrap(),
+        Vec::new(),
+        WorkRouteDecisionV1::selected(
+            route(),
+            Vec::new(),
+            BTreeSet::new(),
+            "selected fixture route".to_owned(),
+        )
+        .unwrap(),
+        "Exercise current-attempt truth".to_owned(),
+        digest('a'),
+    )
+    .unwrap();
+    let graph = graph
+        .apply(WorkGraphChangeV1::ProposalAccepted {
+            proposal: proposal.clone(),
+            accepted_at: UtcMicros(20),
+        })
+        .unwrap();
+    let first = attempt(&task_id, "first");
+    let graph = graph
+        .apply(WorkGraphChangeV1::ProviderAdmitted {
+            task_id: task_id.clone(),
+            proposal_id: proposal.proposal_id().clone(),
+            identity: first.clone(),
+            route: route(),
+            admitted_at: UtcMicros(30),
+        })
+        .unwrap();
+    let graph = graph
+        .apply(WorkGraphChangeV1::ProviderOutcomeRecorded {
+            task_id: task_id.clone(),
+            outcome: WorkProviderOutcomeV1::new(
+                first.clone(),
+                WorkProviderTerminalV1::Failed,
+                digest('b'),
+                UtcMicros(40),
+            ),
+        })
+        .unwrap();
+    let second = attempt(&task_id, "second");
+    let graph = graph
+        .apply(WorkGraphChangeV1::AttemptRetried {
+            task_id: task_id.clone(),
+            prior_identity: first,
+            identity: second.clone(),
+            route: route(),
+            admitted_at: UtcMicros(50),
+        })
+        .unwrap();
+    let projection = WorkProductProjectionBundleV1::from_graph(&graph).unwrap();
+    assert_eq!(
+        projection.kanban().lane_for(&task_id),
+        Some(WorkTimelineLaneV1::Running)
+    );
+    assert_eq!(
+        projection.kanban().legal_actions_for(&task_id),
+        Some(&BTreeSet::from([
+            WorkLegalActionV1::ViewEvidence,
+            WorkLegalActionV1::RecordOutcome,
+            WorkLegalActionV1::CancelAttempt,
+            WorkLegalActionV1::RollbackAdmission,
+            WorkLegalActionV1::Handoff,
+        ]))
+    );
+
+    let graph = graph
+        .apply(WorkGraphChangeV1::ProviderOutcomeRecorded {
+            task_id: task_id.clone(),
+            outcome: WorkProviderOutcomeV1::new(
+                second,
+                WorkProviderTerminalV1::Failed,
+                digest('c'),
+                UtcMicros(60),
+            ),
+        })
+        .unwrap();
+    let evidence = TaskEvidenceLinkV1::new(
+        id("evidence.retry"),
+        1,
+        task_id.clone(),
+        id("anchor.retry"),
+        digest('d'),
+        UtcMicros(70),
+    )
+    .unwrap();
+    let graph = graph
+        .apply(WorkGraphChangeV1::EvidenceLinked {
+            task_id: task_id.clone(),
+            evidence,
+        })
+        .unwrap();
+    let rejected = graph
+        .apply(WorkGraphChangeV1::TaskAccepted {
+            task_id,
+            evidence_by_criterion: BTreeMap::from([(
+                id("criterion.task.retry"),
+                id("evidence.retry"),
+            )]),
+            accepted_at: UtcMicros(80),
+        })
+        .unwrap_err();
+    assert_eq!(rejected, WorkProductContractError::AcceptanceUnsatisfied);
 }

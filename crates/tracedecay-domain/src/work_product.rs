@@ -964,6 +964,14 @@ impl WorkItemV1 {
         &self.provider_outcomes
     }
 
+    pub fn current_provider_outcome(&self) -> Option<&WorkProviderOutcomeV1> {
+        let identity = self.provider_admission.as_ref()?.identity();
+        self.provider_outcomes
+            .iter()
+            .rev()
+            .find(|outcome| outcome.identity() == identity)
+    }
+
     pub fn evidence_links(&self) -> &BTreeSet<TaskEvidenceLinkId> {
         &self.evidence_links
     }
