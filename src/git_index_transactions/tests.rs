@@ -2,6 +2,7 @@ use std::fs;
 use std::process::Command;
 
 use tempfile::tempdir;
+use tracedecay_domain::GitOidV1;
 
 use super::{FixedGitIndexRunner, NativeGitIndexError};
 
@@ -356,4 +357,106 @@ fn tracked_worktree_digest_is_independent_of_index_publication() {
             .tracked_worktree_digest()
             .expect("worktree digest after drift")
     );
+}
+
+#[test]
+fn unrelated_ref_drift_rejects_atomic_destination_update() {
+    let directory = tempdir().expect("temporary repository");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init starts")
+            .success()
+    );
+    fs::write(directory.path().join("tracked.txt"), b"tracked\n").expect("tracked file");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["add", "--", "tracked.txt"])
+            .status()
+            .expect("git add starts")
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args([
+                "-c",
+                "user.name=TraceDecay",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .status()
+            .expect("git commit starts")
+            .success()
+    );
+    let value = |arguments: &[&str]| {
+        let output = Command::new("git")
+            .current_dir(directory.path())
+            .args(arguments)
+            .output()
+            .expect("git command starts");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("utf-8 git output")
+            .trim()
+            .to_owned()
+    };
+    let branch = value(&["symbolic-ref", "-q", "HEAD"]);
+    let old = GitOidV1::new(value(&["rev-parse", "HEAD"])).expect("old oid");
+    let tree = value(&["rev-parse", "HEAD^{tree}"]);
+    let created = Command::new("git")
+        .current_dir(directory.path())
+        .args([
+            "-c",
+            "user.name=TraceDecay",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit-tree",
+            &tree,
+            "-p",
+            old.as_str(),
+            "-m",
+            "candidate",
+        ])
+        .output()
+        .expect("commit-tree starts");
+    assert!(created.status.success());
+    let new_value = GitOidV1::new(
+        String::from_utf8(created.stdout)
+            .expect("utf-8 commit")
+            .trim(),
+    )
+    .expect("new oid");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["branch", "other", old.as_str()])
+            .status()
+            .expect("branch starts")
+            .success()
+    );
+    let runner = FixedGitIndexRunner::new(directory.path()).expect("runner");
+    let expected_refs = runner.ref_snapshot().expect("ref snapshot");
+    assert!(
+        Command::new("git")
+            .current_dir(directory.path())
+            .args(["update-ref", "refs/heads/other", new_value.as_str()])
+            .status()
+            .expect("unrelated update starts")
+            .success()
+    );
+
+    assert!(
+        runner
+            .update_ref_with_namespace_cas(&branch, &new_value, &old, &expected_refs)
+            .is_err()
+    );
+    assert_eq!(value(&["rev-parse", &branch]), old.as_str());
 }
