@@ -119,6 +119,59 @@ impl AgentIntegration for KimiIntegration {
         Ok(())
     }
 
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = project_path.join(".kimi-code/mcp.json");
+        let agents_md = project_path.join("AGENTS.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [mcp_path.as_path(), agents_md.as_path()],
+        )?;
+        std::fs::create_dir_all(project_path.join(".kimi-code"))?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_prompt_rules(&agents_md)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::Kimi,
+        )
+    }
+
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            project_path.join(".kimi-code/mcp.json"),
+            project_path.join("AGENTS.md"),
+            super::managed_memory_digest_targets_path(home),
+        ])
+    }
+
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = project_path.join(".kimi-code/mcp.json");
+        uninstall_mcp_server(&mcp_path);
+        let agents_md = project_path.join("AGENTS.md");
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::Kimi,
+        )?;
+        uninstall_prompt_rules(&agents_md);
+        Ok(())
+    }
+
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
         let code_home = kimi_code_home(&ctx.home);
         if !installed_json_has_tracedecay(&code_home) {
@@ -347,12 +400,8 @@ fn kimi_plugin_is_natively_active(home: &Path, code_home: &Path) -> Result<bool>
     )
 }
 
-/// Canonical rendered Kimi Code plugin inventory. The legacy installer and the
-/// receipt-backed first-party host-bundle catalog must produce byte-identical
-/// files: the component-set transaction verifies installed artifact digests
-/// after the compatibility registration adapter re-runs this installer, so any
-/// rendering drift between the two writers fails installs with
-/// `ArtifactContentMismatch`.
+/// Canonical rendered Kimi Code plugin inventory shared by native-activation
+/// staging and the receipt-backed first-party catalog.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     super::plugin_bundle::kimi_files()
         .into_iter()

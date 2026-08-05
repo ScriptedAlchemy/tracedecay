@@ -21,7 +21,7 @@ use tracedecay::agents::host_bundle_v2::{
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
 };
-use tracedecay::agents::host_component_registration::HostComponentRegistrationDelegate;
+use tracedecay::agents::host_component_registration::CatalogHostComponentRegistrationAuthority;
 use tracedecay::agents::{
     AgentIntegration, HealthcheckContext, KimiIntegration, OpenCodeIntegration,
     inspect_receipt_backed_host_components,
@@ -320,7 +320,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         operation_id: [31; 16],
     };
 
-    let mut clean_registration = HostComponentRegistrationDelegate::new(
+    let mut clean_registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
         lifecycle.path(),
@@ -352,7 +352,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         .unwrap(),
     )
     .unwrap();
-    let mut retained_registration = HostComponentRegistrationDelegate::new(
+    let mut retained_registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
         lifecycle.path(),
@@ -382,7 +382,7 @@ fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
         .unwrap(),
     )
     .unwrap();
-    let mut conflicting_registration = HostComponentRegistrationDelegate::new(
+    let mut conflicting_registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
         lifecycle.path(),
@@ -481,7 +481,7 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
         operation_id: [43; 16],
     };
     let preview_now = |home: &Path| {
-        let mut registration = HostComponentRegistrationDelegate::new(
+        let mut registration = CatalogHostComponentRegistrationAuthority::new(
             "opencode",
             home,
             lifecycle.path(),
@@ -561,7 +561,7 @@ fn component_set_dry_run_reports_competing_claims_and_binds_them_to_the_plan() {
     let mut writer =
         HostBundleWriterV1::open_with_lifecycle_root(home.path(), lifecycle.path()).unwrap();
     let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
-    let mut registration = HostComponentRegistrationDelegate::new(
+    let mut registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
         lifecycle.path(),
@@ -605,7 +605,7 @@ fn unreadable_host_registration_refuses_instead_of_reporting_no_conflict() {
         },
         operation_id: [44; 16],
     };
-    let mut registration = HostComponentRegistrationDelegate::new(
+    let mut registration = CatalogHostComponentRegistrationAuthority::new(
         "opencode",
         home.path(),
         lifecycle.path(),

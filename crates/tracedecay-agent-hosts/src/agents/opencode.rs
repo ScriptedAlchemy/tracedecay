@@ -99,6 +99,65 @@ impl AgentIntegration for OpenCodeIntegration {
         Ok(())
     }
 
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        let mcp_path = project_path.join("opencode.json");
+        let plugin_path = project_path.join(".opencode/plugins/tracedecay.ts");
+        let agents_md = project_path.join("AGENTS.md");
+        super::ensure_project_local_safe_paths(
+            project_path,
+            [
+                mcp_path.as_path(),
+                plugin_path.as_path(),
+                agents_md.as_path(),
+            ],
+        )?;
+        install_mcp_server(&mcp_path, &ctx.tracedecay_bin)?;
+        install_opencode_plugin(&plugin_path, &ctx.tracedecay_bin)?;
+        install_prompt_rules(&agents_md)?;
+        super::install_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+        )
+    }
+
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+        project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(vec![
+            project_path.join("opencode.json"),
+            project_path.join(".opencode/plugins/tracedecay.ts"),
+            project_path.join("AGENTS.md"),
+            super::managed_memory_digest_targets_path(home),
+        ])
+    }
+
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[super::host_bundle_v2::HostBundleComponentV1],
+        ctx: &InstallContext,
+        project_path: &Path,
+    ) -> Result<()> {
+        uninstall_mcp_server(&project_path.join("opencode.json"));
+        remove_opencode_plugin(&project_path.join(".opencode/plugins/tracedecay.ts"))?;
+        let agents_md = project_path.join("AGENTS.md");
+        super::remove_managed_skill_prompt_index(
+            &ctx.home,
+            &agents_md,
+            crate::automation::skill_targets::SkillInstallTarget::OpenCode,
+        )?;
+        uninstall_prompt_rules(&agents_md);
+        Ok(())
+    }
+
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let config_path = opencode_config_path(&ctx.home);
         uninstall_mcp_server(&config_path);
@@ -423,7 +482,7 @@ fn opencode_config_path_for(home: &Path, xdg: Option<&std::ffi::OsStr>) -> std::
 /// `~/.config/opencode` directory exists. The directory is created by
 /// TraceDecay's own managed artifacts (`plugins/`, `agent/`, `command/`,
 /// `skills/`), which a component-set transaction writes between the moment the
-/// registration adapter confirms a revision and the moment it applies. Keying
+/// registration authority confirms a revision and the moment it applies. Keying
 /// on the directory therefore moved this path — and with it the hashed
 /// registration path list — mid-transaction, so every apply rechecked against a
 /// different revision and rolled back with `StalePreview`. No managed artifact
@@ -568,13 +627,8 @@ fn opencode_plugin_path(home: &Path) -> std::path::PathBuf {
         .join("plugins/tracedecay.ts")
 }
 
-/// Rendered inventory of the managed `OpenCode` plugin files. This installer and
-/// the receipt-backed first-party host-bundle catalog must produce
-/// byte-identical files: the component-set transaction verifies installed
-/// artifact digests after the compatibility registration adapter re-runs this
-/// installer, so any rendering drift between the two writers fails installs
-/// with `ArtifactContentMismatch` — and, before the convergent rollback rules,
-/// wedged the shared component-set journal.
+/// Rendered inventory of the managed `OpenCode` plugin files used by the
+/// receipt-backed first-party catalog and explicit artifact refresh.
 pub(crate) fn rendered_plugin_files(tracedecay_bin: &str) -> Result<Vec<(&'static str, String)>> {
     let encoded = serde_json::to_string(tracedecay_bin)?;
     Ok(vec![(

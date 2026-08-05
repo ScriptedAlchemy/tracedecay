@@ -2543,7 +2543,7 @@ fn execute_host_repair(
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
     let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
     let mut registration =
-        crate::agents::host_component_registration::HostComponentRegistrationDelegate::new(
+        crate::agents::host_component_registration::CatalogHostComponentRegistrationAuthority::new(
             crate::agents::integration_id_for_host(host),
             &home,
             &lifecycle_root,

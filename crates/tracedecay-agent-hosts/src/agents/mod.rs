@@ -93,6 +93,11 @@ pub(crate) fn remove_managed_skill_prompt_index(
     )
 }
 
+pub(crate) fn managed_memory_digest_targets_path(profile_home: &Path) -> PathBuf {
+    let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(profile_home);
+    crate::automation::memory_digest::digest_targets_path(&profile_root)
+}
+
 /// Per-agent outcome of a managed-skill export refresh, keyed by agent id.
 /// `error` carries the failure message when the refresh failed; `exports`
 /// lists the destinations that were (re)written on success.
@@ -373,7 +378,7 @@ pub trait AgentIntegration {
 
     /// Every mutable host registration/configuration path participating in an
     /// aggregate component-set lifecycle. The transaction stages backups for
-    /// all returned paths before invoking the host registration adapter.
+    /// all returned paths before invoking the host registration authority.
     fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
         self.primary_config_path(home).into_iter().collect()
     }
@@ -396,6 +401,23 @@ pub trait AgentIntegration {
         _project_path: &Path,
     ) -> Vec<PathBuf> {
         self.host_component_registration_paths(components, home)
+    }
+
+    /// Exact project-scoped paths the catalog registration projection may
+    /// create, replace, or remove. The aggregate transaction snapshots this
+    /// complete set before invoking the projection.
+    fn project_host_component_registration_paths(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _home: &Path,
+        _project_path: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "{} has no catalog-backed project registration projection",
+                self.name()
+            ),
+        })
     }
 
     /// Re-activate host-native registration for already-deployed component
@@ -438,6 +460,40 @@ pub trait AgentIntegration {
         } else {
             Ok(())
         }
+    }
+
+    /// Apply only this host's project-scoped registration projection.
+    ///
+    /// The component-set transaction calls this boundary after it has staged
+    /// exact registration backups. Implementations must mutate only bounded
+    /// project registration paths; they must not install global assets.
+    fn activate_project_host_component_registration(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _ctx: &InstallContext,
+        _project_path: &Path,
+    ) -> Result<()> {
+        Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "{} has no catalog-backed project registration projection",
+                self.name()
+            ),
+        })
+    }
+
+    /// Remove only this host's project-scoped registration projection.
+    fn deactivate_project_host_component_registration(
+        &self,
+        _components: &[host_bundle_v2::HostBundleComponentV1],
+        _ctx: &InstallContext,
+        _project_path: &Path,
+    ) -> Result<()> {
+        Err(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "{} has no catalog-backed project registration projection",
+                self.name()
+            ),
+        })
     }
 }
 
