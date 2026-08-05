@@ -614,6 +614,23 @@ impl StoreRuntimeResolver for LocalStoreRuntimeResolverV1 {
             }
         })
     }
+
+    fn resolve_graph<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        Box::pin(async move {
+            match self.resolve_graph_key(key) {
+                LocalStoreLocatorResolutionV1::Resolved(locator) => {
+                    Ok(locator.into_registry_locator())
+                }
+                LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+                    Err(unavailable.into_registry_failure())
+                }
+            }
+        })
+    }
 }
 
 /// The exactly mapped database family selected by this resolver.

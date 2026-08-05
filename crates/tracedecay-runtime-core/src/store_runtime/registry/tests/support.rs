@@ -72,6 +72,7 @@ fn code_shard(worktree: &str) -> StoreShardIdV1 {
 #[derive(Default)]
 pub(super) struct TestResolver {
     pub(super) calls: AtomicUsize,
+    pub(super) graph_calls: AtomicUsize,
 }
 
 impl StoreRuntimeResolver for TestResolver {
@@ -94,6 +95,25 @@ impl StoreRuntimeResolver for TestResolver {
                 PathBuf::from(format!("/verified/{call}")),
             ))
         })
+    }
+
+    fn resolve_graph<'a>(
+        &'a self,
+        key: &'a StoreRuntimeKey,
+    ) -> StoreRuntimeRegistryFuture<'a, Result<ResolvedStoreLocator, StoreRuntimeRegistryFailure>>
+    {
+        self.graph_calls.fetch_add(1, Ordering::SeqCst);
+        let locator = VerifiedStoreLocatorV1::new(
+            key.shard_id.clone(),
+            key.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+        );
+        let path = PathBuf::from(format!(
+            "/verified/graph/{:?}/{}.grafeo",
+            key.shard_id.scope,
+            key.incarnation.get()
+        ));
+        Box::pin(async move { Ok(ResolvedStoreLocator::new(locator, path)) })
     }
 }
 

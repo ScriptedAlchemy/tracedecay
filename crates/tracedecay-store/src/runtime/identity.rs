@@ -383,6 +383,17 @@ pub struct VerifiedStoreLocatorV1 {
     pub locator_digest: LocatorDigest,
 }
 
+/// Canonical storage-registry lease retained by a graph runtime.
+///
+/// The lease is the sole authority for the logical binding and physical graph
+/// locator. Consumers cannot supply those fields independently, and dropping
+/// the last retained lease releases only its exact authority epoch.
+pub trait RetainedGraphStoreLeaseV1: Send + Sync + fmt::Debug {
+    fn binding(&self) -> &StoreRuntimeBindingV1;
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1;
+    fn canonical_path(&self) -> &Path;
+}
+
 impl VerifiedStoreLocatorV1 {
     pub fn new(
         shard_id: StoreShardIdV1,

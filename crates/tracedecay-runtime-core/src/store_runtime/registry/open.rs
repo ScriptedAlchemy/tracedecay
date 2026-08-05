@@ -105,6 +105,7 @@ pub(super) enum OpenState {
 }
 
 pub(super) struct OpeningRuntime {
+    pub(super) binding: StoreRuntimeBindingV1,
     pub(super) attempt: u64,
     pub(super) updates: watch::Sender<OpenState>,
     pub(super) database_authority: Option<crate::db::DatabaseAuthority>,
@@ -151,6 +152,18 @@ impl StoreRuntimeRegistry {
             if let Err(failure) = validate_profile_authority(&state, request) {
                 return StoreRuntimeOpenBegin::Rejected(failure);
             }
+            if let Some((_, graph)) = state
+                .graph_publications
+                .iter()
+                .find(|(graph_key, _)| graph_key.shard_id() == key.shard_id() && *graph_key != &key)
+            {
+                return StoreRuntimeOpenBegin::Rejected(
+                    StoreRuntimeRegistryFailure::GraphIncarnationConflict {
+                        requested: Box::new(key),
+                        retained: Box::new(graph.binding.clone()),
+                    },
+                );
+            }
             if let Some(entry) = state.entries.get(&key) {
                 return match entry {
                     RegistryEntry::Ready(ready)
@@ -190,9 +203,12 @@ impl StoreRuntimeRegistry {
                 };
             }
 
-            let authority_epoch = match allocate_authority_epoch() {
-                Ok(epoch) => epoch,
-                Err(failure) => return StoreRuntimeOpenBegin::Rejected(failure),
+            let authority_epoch = match state.graph_publications.get(&key) {
+                Some(graph) => graph.binding.authority_epoch,
+                None => match allocate_authority_epoch() {
+                    Ok(epoch) => epoch,
+                    Err(failure) => return StoreRuntimeOpenBegin::Rejected(failure),
+                },
             };
             let Some(attempt) = allocate_counter(&mut state.next_open_attempt) else {
                 return StoreRuntimeOpenBegin::Rejected(
@@ -221,6 +237,7 @@ impl StoreRuntimeRegistry {
             state.entries.insert(
                 key.clone(),
                 RegistryEntry::Opening(OpeningRuntime {
+                    binding: binding.clone(),
                     attempt,
                     updates: updates.clone(),
                     database_authority: request.database_authority.clone(),
@@ -554,7 +571,8 @@ pub(super) fn retain_authority_epoch_floor(floor: StoreAuthorityEpochV1) {
     PROCESS_AUTHORITY_EPOCH.fetch_max(floor.get(), Ordering::AcqRel);
 }
 
-fn allocate_authority_epoch() -> Result<StoreAuthorityEpochV1, StoreRuntimeRegistryFailure> {
+pub(super) fn allocate_authority_epoch()
+-> Result<StoreAuthorityEpochV1, StoreRuntimeRegistryFailure> {
     let previous = PROCESS_AUTHORITY_EPOCH
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
             value.checked_add(1)
