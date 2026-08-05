@@ -209,7 +209,7 @@ pub fn work_executable_binding_registry()
     ExecutableBindingRegistryV1::new(bindings)
 }
 
-fn available<Request, Output>(
+pub(crate) fn available<Request, Output>(
     operation: &str,
     route_path: &str,
     effect: EffectClass,
