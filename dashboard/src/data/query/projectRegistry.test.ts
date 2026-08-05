@@ -13,7 +13,7 @@
  * registry reader uses must be one the invalidation actually matches.
  */
 import { QueryClient } from '@tanstack/react-query';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { targetedInvalidationKeys } from '../sse/useEvents.tsx';
 import type { SseBatch } from '../sse/types.ts';
@@ -22,10 +22,18 @@ import {
   projectRegistryEntryKey,
   projectRegistryInvalidationKey,
   projectRegistryListKey,
+  fetchProjectRegistry,
   registryAnnotation,
   registryReading,
+  type ProjectRegistryResult,
 } from './projectRegistry.ts';
-import type { ProjectContextPayloadV1 } from '../../contracts/generated.ts';
+import {
+  ProjectContextPayloadV1Schema,
+  type DashboardEnvelopeV1,
+  type ProjectContextPayloadV1,
+} from '../../contracts/generated.ts';
+import { resolveFixture } from '../../../stories/fixtures/data.ts';
+import { fixtureEnvelope } from '../../test/fixtureEnvelope.ts';
 
 /**
  * React Query's default key matching: a query is invalidated when the
@@ -62,16 +70,15 @@ describe('project registry query keys', () => {
   });
 
   /**
-   * The heart of it. `useLegacy` appends the scope token to every key, so the
-   * shapes below are what the client actually holds — and the invalidation has
-   * to match all of them, including a per-project entry it cannot enumerate.
+   * The registry's direct daemon route carries no selected project. Its query
+   * key therefore ends in the unscoped token, while the invalidation still has
+   * to match the listing and every per-project entry it cannot enumerate.
    */
   it('is reached by the registry invalidation, listing and entries alike', () => {
     const held = [
-      [...projectRegistryListKey, 'all'],
-      [...projectRegistryListKey, 'project:proj_a'],
-      [...projectRegistryEntryKey('proj_a'), 'project:proj_a'],
-      [...projectRegistryEntryKey('proj_b'), 'project:proj_b'],
+      [...projectRegistryListKey, 'unscoped'],
+      [...projectRegistryEntryKey('proj_a'), 'unscoped'],
+      [...projectRegistryEntryKey('proj_b'), 'unscoped'],
     ];
     for (const queryKey of held) {
       expect(matches(projectRegistryInvalidationKey, queryKey)).toBe(true);
@@ -84,12 +91,14 @@ describe('project registry query keys', () => {
     const keys = targetedInvalidationKeys(registryBatch());
     expect(keys).toContainEqual([...projectRegistryInvalidationKey]);
 
-    const invalidation = keys.find((key) => matches(key, [...projectRegistryListKey, 'all']));
+    const invalidation = keys.find((key) =>
+      matches(key, [...projectRegistryListKey, 'unscoped']),
+    );
     expect(invalidation).toBeDefined();
     expect(
       matches(invalidation as readonly string[], [
         ...projectRegistryEntryKey('proj_a'),
-        'project:proj_a',
+        'unscoped',
       ]),
     ).toBe(true);
   });
@@ -104,8 +113,8 @@ describe('project registry query keys', () => {
   it('marks both the listing and each entry stale in a real client', async () => {
     const client = new QueryClient();
     const listing = [...projectRegistryListKey, 'unscoped'];
-    const entryA = [...projectRegistryEntryKey('proj_a'), 'project:proj_a'];
-    const entryB = [...projectRegistryEntryKey('proj_b'), 'project:proj_b'];
+    const entryA = [...projectRegistryEntryKey('proj_a'), 'unscoped'];
+    const entryB = [...projectRegistryEntryKey('proj_b'), 'unscoped'];
     const unrelated = ['doctor', 'report', 'project:proj_a'];
     for (const key of [listing, entryA, entryB, unrelated]) {
       client.setQueryData(key, { outcome: 'ok', data: {} });
@@ -129,6 +138,72 @@ describe('project registry query keys', () => {
     for (const key of targetedInvalidationKeys(registryBatch())) {
       expect(key.length).toBeGreaterThan(0);
     }
+  });
+});
+
+function fixturePayload(pathname: string): Record<string, unknown> {
+  const fixture = resolveFixture(pathname) as Record<string, unknown>;
+  return (fixture.payload ?? fixture) as Record<string, unknown>;
+}
+
+describe('fetchProjectRegistry', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('accepts only the envelope at the daemon-wide project route', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify(fixtureEnvelope(fixturePayload('/api/projects/proj_b'))), {
+        status: 200,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await fetchProjectRegistry(
+      '/api/projects/proj_b',
+      ProjectContextPayloadV1Schema,
+    );
+
+    expect(result.outcome).toBe('envelope');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/projects/proj_b',
+      expect.objectContaining({ headers: { accept: 'application/json' } }),
+    );
+  });
+
+  it('keeps a decoded 503 registry answer as its typed non-ok payload', async () => {
+    const payload = {
+      ...fixturePayload('/api/projects/proj_b'),
+      status: 'registry_unavailable',
+      error: 'unable to open the global registry',
+      is_active: null,
+      project: null,
+      aliases: [],
+      stores: [],
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(fixtureEnvelope(payload)), { status: 503 })),
+    );
+
+    await expect(
+      fetchProjectRegistry('/api/projects/proj_b', ProjectContextPayloadV1Schema),
+    ).resolves.toMatchObject({
+      outcome: 'source_unavailable',
+      httpStatus: 503,
+      envelope: { payload: { status: 'registry_unavailable' } },
+    });
+  });
+
+  it('rejects a bare registry payload instead of treating it as an envelope', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify(fixturePayload('/api/projects/proj_b')), { status: 200 })),
+    );
+
+    await expect(
+      fetchProjectRegistry('/api/projects/proj_b', ProjectContextPayloadV1Schema),
+    ).resolves.toEqual({ outcome: 'transport', state: 'unsupported_schema' });
   });
 });
 
@@ -157,68 +232,79 @@ function project(label: string) {
   };
 }
 
+function registryEnvelope(
+  payload: ProjectContextPayloadV1,
+): ProjectRegistryResult<ProjectContextPayloadV1> {
+  return {
+    outcome: 'envelope',
+    envelope: { payload } as DashboardEnvelopeV1<ProjectContextPayloadV1>,
+  };
+}
+
+function sourceUnavailable(
+  payload: ProjectContextPayloadV1,
+  httpStatus: number,
+): ProjectRegistryResult<ProjectContextPayloadV1> {
+  return {
+    outcome: 'source_unavailable',
+    httpStatus,
+    envelope: { payload } as DashboardEnvelopeV1<ProjectContextPayloadV1>,
+  };
+}
+
 describe('registryReading', () => {
   it('measures both facts from an ok answer', () => {
     expect(
-      registryReading({
-        outcome: 'ok',
-        data: context({ is_active: true, project: project('Canonical') }),
-      }),
+      registryReading(
+        registryEnvelope(context({ is_active: true, project: project('Canonical') })),
+      ),
     ).toEqual({ state: 'measured', label: 'Canonical', isActive: true });
   });
 
   it('measures a not-active answer as a real reading', () => {
     expect(
-      registryReading({
-        outcome: 'ok',
-        data: context({ is_active: false, project: project('Canonical') }),
-      }),
+      registryReading(
+        registryEnvelope(context({ is_active: false, project: project('Canonical') })),
+      ),
     ).toEqual({ state: 'measured', label: 'Canonical', isActive: false });
   });
 
   it('carries a null through rather than reading it as a no', () => {
-    // Both fields are nullable on the wire. Absent is "did not say".
     expect(
-      registryReading({ outcome: 'ok', data: context({ is_active: null, project: null }) }),
+      registryReading(registryEnvelope(context({ is_active: null, project: null }))),
     ).toEqual({ state: 'measured', label: null, isActive: null });
   });
 
   it('treats a non-ok status as no reading at all', () => {
     expect(
-      registryReading({ outcome: 'ok', data: context({ status: 'missing_registry' }) }),
+      registryReading(registryEnvelope(context({ status: 'missing_registry' }))),
     ).toEqual({ state: 'unknown' });
   });
 
-  /**
-   * A registry that could not be read establishes nothing about the project.
-   * Reporting a measurement for any of these would let a failed read discard a
-   * label and withdraw a write; `unknown` keeps the name and says nothing it
-   * has not established.
-   */
   it.each([
-    ['offline', { outcome: 'offline' as const }],
-    ['unauthorized', { outcome: 'unauthorized' as const }],
-    ['denied', { outcome: 'denied' as const }],
-    ['error', { outcome: 'error' as const, detail: 'HTTP 500' }],
-    ['unsupported_schema', { outcome: 'unsupported_schema' as const }],
+    ['offline', { outcome: 'transport' as const, state: 'offline' as const }],
+    ['unauthorized', { outcome: 'transport' as const, state: 'unauthorized' as const }],
+    ['denied', { outcome: 'transport' as const, state: 'denied' as const }],
+    ['error', { outcome: 'transport' as const, state: 'error' as const, detail: 'HTTP 500' }],
+    [
+      'unsupported_schema',
+      { outcome: 'transport' as const, state: 'unsupported_schema' as const },
+    ],
   ])('reports %s as unknown', (_name, result) => {
     expect(registryReading(result)).toEqual({ state: 'unknown' });
   });
 
-  /**
-   * The two conditions the route reports with a status code, told apart. Both
-   * used to arrive as `error` — the body was discarded — so a dead deep link
-   * and a broken install were the same reading, and neither ever resolved.
-   */
   it('measures a 404 not_found as the registry holding no such project', () => {
     expect(
-      registryReading({
-        outcome: 'unavailable',
-        httpStatus: 404,
-        status: 'not_found',
-        reason: 'no project registered with id proj_ghost',
-        data: context({ status: 'not_found', error: 'no project registered with id proj_ghost' }),
-      }),
+      registryReading(
+        sourceUnavailable(
+          context({
+            status: 'not_found',
+            error: 'no project registered with id proj_ghost',
+          }),
+          404,
+        ),
+      ),
     ).toEqual({ state: 'absent', reason: 'no project registered with id proj_ghost' });
   });
 
@@ -226,13 +312,15 @@ describe('registryReading', () => {
     'reports a 503 %s as unknown, not as an absent project',
     (status) => {
       expect(
-        registryReading({
-          outcome: 'unavailable',
-          httpStatus: 503,
-          status,
-          reason: 'registry database could not be opened',
-          data: context({ status }),
-        }),
+        registryReading(
+          sourceUnavailable(
+            context({
+              status,
+              error: 'registry database could not be opened',
+            }),
+            503,
+          ),
+        ),
       ).toEqual({ state: 'unknown' });
     },
   );
@@ -245,14 +333,12 @@ describe('registryReading', () => {
 describe('registryAnnotation', () => {
   it('says nothing about a name the registry confirmed', () => {
     expect(
-      registryAnnotation({ outcome: 'ok', data: context({ project: project('Canonical') }) }),
+      registryAnnotation(registryEnvelope(context({ project: project('Canonical') }))),
     ).toBeNull();
   });
 
   it('marks a name the answer did not confirm', () => {
-    expect(registryAnnotation({ outcome: 'ok', data: context({ project: null }) })).toBe(
-      'unconfirmed',
-    );
+    expect(registryAnnotation(registryEnvelope(context({ project: null })))).toBe('unconfirmed');
   });
 
   it('says the read is still in flight rather than presenting the name as settled', () => {
@@ -260,41 +346,43 @@ describe('registryAnnotation', () => {
   });
 
   it('names the transport state, and still says the name is unconfirmed', () => {
-    expect(registryAnnotation({ outcome: 'offline' })).toBe('registry offline');
-    expect(registryAnnotation({ outcome: 'error', detail: 'HTTP 500' })).toContain('unconfirmed');
+    expect(registryAnnotation({ outcome: 'transport', state: 'offline' })).toBe('registry offline');
+    expect(registryAnnotation({ outcome: 'transport', state: 'error', detail: 'HTTP 500' })).toContain(
+      'unconfirmed',
+    );
   });
 
   it("repeats the registry's own sentence rather than restating the status code", () => {
     expect(
-      registryAnnotation({
-        outcome: 'unavailable',
-        httpStatus: 404,
-        status: 'not_found',
-        reason: 'no project registered with id proj_ghost',
-        data: context({ status: 'not_found' }),
-      }),
+      registryAnnotation(
+        sourceUnavailable(
+          context({
+            status: 'not_found',
+            error: 'no project registered with id proj_ghost',
+          }),
+          404,
+        ),
+      ),
     ).toBe('not in registry · no project registered with id proj_ghost');
 
     expect(
-      registryAnnotation({
-        outcome: 'unavailable',
-        httpStatus: 503,
-        status: 'missing_registry',
-        reason: 'no registry at /home/x/.tracedecay/registry.db',
-        data: context({ status: 'missing_registry' }),
-      }),
+      registryAnnotation(
+        sourceUnavailable(
+          context({
+            status: 'missing_registry',
+            error: 'no registry at /home/x/.tracedecay/registry.db',
+          }),
+          503,
+        ),
+      ),
     ).toBe('registry unavailable · no registry at /home/x/.tracedecay/registry.db');
   });
 
   it('still names the state when the payload sent no sentence', () => {
     expect(
-      registryAnnotation({
-        outcome: 'unavailable',
-        httpStatus: 503,
-        status: 'registry_unavailable',
-        reason: null,
-        data: context({ status: 'registry_unavailable' }),
-      }),
+      registryAnnotation(
+        sourceUnavailable(context({ status: 'registry_unavailable' }), 503),
+      ),
     ).toBe('registry unavailable');
   });
 });
