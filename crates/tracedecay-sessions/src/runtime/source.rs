@@ -892,6 +892,12 @@ fn stable_jsonl_file_id(
     Ok(u64::from_be_bytes(bytes))
 }
 
+pub(super) fn jsonl_file_identity(path: &Path) -> std::io::Result<u64> {
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    stable_jsonl_file_id(&mut file, &metadata)
+}
+
 fn jsonl_head_fingerprint(file: &mut std::fs::File) -> std::io::Result<u64> {
     file.seek(SeekFrom::Start(0))?;
     let mut reader = BufReader::new(file);
