@@ -7,6 +7,15 @@ use super::{
     AnalyticsToolCounts, RegisteredGlobalDb, analytics_scope_query, row_to_analytics_event,
 };
 
+const OBSERVABILITY_DETAIL_RETENTION_SECONDS: i64 = 30 * 86_400;
+const OBSERVABILITY_ROLLUP_RETENTION_SECONDS: i64 = 395 * 86_400;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservabilityRetentionReceiptV1 {
+    pub expired_detail: u64,
+    pub expired_rollup: u64,
+}
+
 impl RegisteredGlobalDb {
     pub async fn append_analytics_event(
         &self,
@@ -86,6 +95,55 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| format!("failed to commit observability event: {error}"))?;
         Ok(id)
+    }
+
+    /// Expires only Plan 26 optional detail and rollup rows through the
+    /// registered writer. Product receipts retain their owning lifecycle.
+    pub async fn prune_observability_events(
+        &self,
+        now_seconds: i64,
+    ) -> Result<ObservabilityRetentionReceiptV1, String> {
+        if now_seconds < 0 {
+            return Err("invalid observability retention time".to_owned());
+        }
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin observability retention: {error}"))?;
+        let expired_detail = transaction
+            .execute(
+                "DELETE FROM analytics_events
+                 WHERE provider = 'tracedecay-observability'
+                   AND timestamp < ?1
+                   AND json_extract(metadata_json, '$.retention_class')
+                       = 'optional_local_detail30d'",
+                tracedecay_runtime_core::db::engine::params![
+                    now_seconds.saturating_sub(OBSERVABILITY_DETAIL_RETENTION_SECONDS)
+                ],
+            )
+            .await
+            .map_err(|error| format!("failed to expire observability detail: {error}"))?;
+        let expired_rollup = transaction
+            .execute(
+                "DELETE FROM analytics_events
+                 WHERE provider = 'tracedecay-observability'
+                   AND timestamp < ?1
+                   AND json_extract(metadata_json, '$.retention_class')
+                       = 'local_rollup395d'",
+                tracedecay_runtime_core::db::engine::params![
+                    now_seconds.saturating_sub(OBSERVABILITY_ROLLUP_RETENTION_SECONDS)
+                ],
+            )
+            .await
+            .map_err(|error| format!("failed to expire observability rollups: {error}"))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit observability retention: {error}"))?;
+        Ok(ObservabilityRetentionReceiptV1 {
+            expired_detail,
+            expired_rollup,
+        })
     }
 
     pub async fn append_analytics_events(

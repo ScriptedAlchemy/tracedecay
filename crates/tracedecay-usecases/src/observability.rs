@@ -1,5 +1,14 @@
 //! Production Plan 26 read-model composition over the canonical accounting store.
 
+mod export;
+mod producer;
+
+pub use export::RegisteredAggregateShareExporterV1;
+pub use producer::{
+    BoundedObservabilityProducerV1, ObservabilityEmissionOutcomeV1,
+    ObservabilityProducerIdentityV1, ObservabilityProducerSummaryV1,
+};
+
 use tracedecay_application::{
     ApplicationContractError, ObservabilityFuture, ObservabilityPageV1, ObservabilityQueryPort,
     ObservabilityQueryV1, ObservabilityRecordPort,
@@ -1041,7 +1050,7 @@ mod tests {
     fn envelope(event_id: &str, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
         ObservabilityEnvelopeV1 {
             event_id: event_id.to_string(),
-            event_kind: "retrieval.query.observed.v1".to_string(),
+            event_kind: "retrieval.query.completed.v1".to_string(),
             schema_revision: 1,
             idempotency_key: format!("idempotency:{event_id}"),
             trace_id: format!("trace:{event_id}"),
@@ -1192,7 +1201,7 @@ mod tests {
         let first = port
             .query(ObservabilityQueryV1 {
                 authorized_scope_ref: "scope:boundary".to_string(),
-                event_kinds: vec!["retrieval.query.observed.v1".to_string()],
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
                 horizon: ObservabilityHorizonV1 {
                     since_micros: 1_500_000,
                     until_micros: 1_600_000,
@@ -1214,7 +1223,7 @@ mod tests {
         let second = port
             .query(ObservabilityQueryV1 {
                 authorized_scope_ref: "scope:boundary".to_string(),
-                event_kinds: vec!["retrieval.query.observed.v1".to_string()],
+                event_kinds: vec!["retrieval.query.completed.v1".to_string()],
                 horizon: ObservabilityHorizonV1 {
                     since_micros: 1_500_000,
                     until_micros: 1_600_000,
