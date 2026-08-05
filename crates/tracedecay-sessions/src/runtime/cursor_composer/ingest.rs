@@ -34,7 +34,7 @@ use super::store::{
     MAX_COMPOSER_STORE_BLOB_VISITS, StoreWalkOutcome, order_store_messages_bounded,
     read_store_meta_bounded,
 };
-use super::{CursorComposerSweepOutcome, PROVIDER};
+use super::{CursorComposerSweepOutcome, CursorComposerSweepResult, PROVIDER};
 /// Default ceiling on how many *new/changed* composer sessions one sweep pass
 /// ingests, so the first backfill of thousands of sessions never blocks
 /// startup; already-watermarked sessions are skipped cheaply and do not count.
@@ -79,8 +79,8 @@ impl ComposerIngestContext<'_, '_> {
 
 async fn drain_composer_projection_queue(
     context: &ComposerIngestContext<'_, '_>,
-) -> TranscriptIngestResult<crate::runtime::cursor::CursorTranscriptIngestStats> {
-    crate::runtime::cursor::drain_cursor_observation_projections(
+) -> TranscriptIngestResult<crate::runtime::cursor::projection::CursorProjectionDrainStats> {
+    crate::runtime::cursor::projection::drain_cursor_observation_projections_with_sessions(
         context.facade,
         &context.scope,
         context.cancellation,
@@ -168,48 +168,6 @@ impl CursorComposerSource {
         }
     }
 
-    /// Ingest every composer session (and per-session `store.db` chat) that
-    /// belongs to `project_root` into `db`, bounded to `envelope_cap`
-    /// newly-changed sessions this pass. SQLite and parse failures leave the
-    /// source fail-open, while projection authority failures stay typed.
-    pub async fn ingest(
-        &self,
-        admission: &dyn HostAdmission,
-        project_root: &Path,
-        project_id: ProjectId,
-        envelope_cap: usize,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
-        self.ingest_capped(
-            admission,
-            project_root,
-            project_id,
-            envelope_cap,
-            Some(DEFAULT_COMPOSER_SWEEP_BYTES),
-        )
-        .await
-    }
-
-    /// [`Self::ingest`] with one aggregate serialized-payload byte budget
-    /// shared across every composer store discovered during the pass.
-    pub async fn ingest_capped(
-        &self,
-        admission: &dyn HostAdmission,
-        project_root: &Path,
-        project_id: ProjectId,
-        envelope_cap: usize,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
-        self.ingest_capped_with_cancellation(
-            admission,
-            project_root,
-            project_id,
-            envelope_cap,
-            max_new_bytes,
-            &ObservationCancellation::default(),
-        )
-        .await
-    }
-
     pub async fn ingest_capped_with_cancellation(
         &self,
         admission: &dyn HostAdmission,
@@ -218,7 +176,7 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
         cancellation: &ObservationCancellation,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
+    ) -> CursorComposerSweepResult {
         let context = ComposerIngestContext {
             facade: admission,
             scope: ObservationScopeV1::Project { project_id },
@@ -230,40 +188,6 @@ impl CursorComposerSource {
             .await
     }
 
-    pub async fn ingest_user(
-        &self,
-        admission: &dyn HostAdmission,
-        registered_roots: &[PathBuf],
-        envelope_cap: usize,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
-        self.ingest_user_capped(
-            admission,
-            registered_roots,
-            envelope_cap,
-            Some(DEFAULT_COMPOSER_SWEEP_BYTES),
-        )
-        .await
-    }
-
-    /// [`Self::ingest_user`] with one aggregate serialized-payload byte budget
-    /// shared across every composer store discovered during the pass.
-    pub async fn ingest_user_capped(
-        &self,
-        admission: &dyn HostAdmission,
-        registered_roots: &[PathBuf],
-        envelope_cap: usize,
-        max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
-        self.ingest_user_capped_with_cancellation(
-            admission,
-            registered_roots,
-            envelope_cap,
-            max_new_bytes,
-            &ObservationCancellation::default(),
-        )
-        .await
-    }
-
     pub async fn ingest_user_capped_with_cancellation(
         &self,
         admission: &dyn HostAdmission,
@@ -271,7 +195,7 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
         cancellation: &ObservationCancellation,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
+    ) -> CursorComposerSweepResult {
         let context = ComposerIngestContext {
             facade: admission,
             scope: ObservationScopeV1::Profile,
@@ -288,21 +212,24 @@ impl CursorComposerSource {
         context: &ComposerIngestContext<'_, '_>,
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
-    ) -> TranscriptIngestResult<CursorComposerSweepOutcome> {
+    ) -> CursorComposerSweepResult {
         let mut outcome = CursorComposerSweepOutcome::default();
-        if context.cancellation.is_cancelled() {
-            return Err(composer_cancellation_error());
-        }
         let mut byte_budget =
             IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
-        let projection_stats = drain_composer_projection_queue(context).await?;
+        if context.cancellation.is_cancelled() {
+            return Err(outcome.terminated(composer_cancellation_error(), 0, false));
+        }
+        let projection_stats = match drain_composer_projection_queue(context).await {
+            Ok(stats) => stats,
+            Err(error) => return Err(outcome.terminated(error, 0, false)),
+        };
         outcome.add_projection(
-            projection_stats.sessions_upserted,
+            projection_stats.session_ids,
             projection_stats.messages_upserted,
             projection_stats.source_deferred,
         );
         if context.cancellation.is_cancelled() {
-            return Err(composer_cancellation_error());
+            return Err(outcome.terminated(composer_cancellation_error(), 0, false));
         }
         let mut workspace_paths = HashMap::new();
         self.ingest_state_vscdb(
@@ -314,25 +241,44 @@ impl CursorComposerSource {
         )
         .await;
         if context.cancellation.is_cancelled() {
-            return Err(composer_cancellation_error());
+            return Err(outcome.terminated(
+                composer_cancellation_error(),
+                byte_budget.consumed(),
+                byte_budget.deferred(),
+            ));
         }
         self.ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
             .await;
         if context.cancellation.is_cancelled() {
-            return Err(composer_cancellation_error());
+            return Err(outcome.terminated(
+                composer_cancellation_error(),
+                byte_budget.consumed(),
+                byte_budget.deferred(),
+            ));
         }
-        let projection_stats = drain_composer_projection_queue(context).await?;
+        let projection_stats = match drain_composer_projection_queue(context).await {
+            Ok(stats) => stats,
+            Err(error) => {
+                return Err(outcome.terminated(
+                    error,
+                    byte_budget.consumed(),
+                    byte_budget.deferred(),
+                ));
+            }
+        };
         outcome.add_projection(
-            projection_stats.sessions_upserted,
+            projection_stats.session_ids,
             projection_stats.messages_upserted,
             projection_stats.source_deferred,
         );
         if context.cancellation.is_cancelled() {
-            return Err(composer_cancellation_error());
+            return Err(outcome.terminated(
+                composer_cancellation_error(),
+                byte_budget.consumed(),
+                byte_budget.deferred(),
+            ));
         }
-        outcome.bytes_consumed = byte_budget.consumed();
-        outcome.deferred_by_byte_cap |= byte_budget.deferred();
-        Ok(outcome)
+        Ok(outcome.finished(byte_budget.consumed(), byte_budget.deferred()))
     }
 
     async fn ingest_state_vscdb(
@@ -485,6 +431,7 @@ impl CursorComposerSource {
                     .unwrap_or_default();
                 if ingested_this_pass >= envelope_cap {
                     // Deferred to a later pass; still owned so JSONL stands down.
+                    byte_budget.defer();
                     continue;
                 }
                 let Some(generation) = snapshot_generation(&self.state_db_path) else {
@@ -519,10 +466,14 @@ impl CursorComposerSource {
                                 envelope_expected_cursor,
                                 context.cancellation,
                             )
-                        && let Ok(outcome) = context.facade.capture_observation(request).await
-                        && let CaptureObservationOutcome::Persisted { .. } = outcome
                     {
-                        session_accepted = true;
+                        match context.facade.capture_observation(request).await {
+                            Ok(CaptureObservationOutcome::Persisted { .. }) => {
+                                session_accepted = true;
+                            }
+                            Err(_) => byte_budget.defer(),
+                            _ => {}
+                        }
                     }
                 }
                 for (position, header) in headers.iter().enumerate() {
@@ -564,6 +515,7 @@ impl CursorComposerSource {
                         .get_source_cursor(&source, &context.scope)
                         .await
                     else {
+                        byte_budget.defer();
                         break;
                     };
                     let position = expected_cursor.as_ref().map_or(header_position, |cursor| {
@@ -727,7 +679,10 @@ impl CursorComposerSource {
                                         break;
                                     }
                                 }
-                                Err(_) => break,
+                                Err(_) => {
+                                    byte_budget.defer();
+                                    break;
+                                }
                             }
                         }
                     }
@@ -969,7 +924,10 @@ impl CursorComposerSource {
                         return;
                     }
                 }
-                Err(_) => return,
+                Err(_) => {
+                    byte_budget.defer();
+                    return;
+                }
             }
         }
     }

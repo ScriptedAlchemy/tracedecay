@@ -52,16 +52,14 @@ const CURSOR_EVENT_LOCATION_KEYS: TranscriptLocationMetadataKeys =
     );
 const MAX_CURSOR_PROJECTIONS_PER_PASS: usize = 256;
 
-mod projection;
-pub(super) use projection::drain_cursor_observation_projections;
-
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct CursorTranscriptIngestStats {
-    pub sessions_upserted: u64,
-    pub messages_upserted: u64,
-    pub bytes_consumed: u64,
-    pub source_deferred: bool,
-}
+pub(in crate::runtime) mod projection;
+pub(in crate::runtime) use projection::CursorSweepIngestOutcome;
+pub use projection::{
+    CursorTranscriptIngestStats, try_ingest_cursor_project_sweep_capped,
+    try_ingest_cursor_project_sweep_capped_with_admission, try_ingest_cursor_user_sweep_capped,
+    try_ingest_cursor_user_sweep_capped_with_admission,
+};
+pub(super) use projection::{cursor_ingest_or_default, drain_cursor_observation_projections};
 
 #[derive(Clone)]
 struct CursorObservationContext {
@@ -681,47 +679,26 @@ pub async fn try_ingest_cursor_user_transcript_event_capped_with_admission(
     Ok(stats)
 }
 
-/// Canonically admit Cursor JSONL transcripts discovered during a project startup
-/// sweep. Composer-owned session ids are skipped before discovery results reach
-/// observation admission.
-pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
-    project_root: &Path,
-    admission: &dyn HostAdmission,
-    project_id: ProjectId,
-    max_new_bytes: Option<u64>,
-    skip_session_ids: std::collections::HashSet<String, S>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_project_sweep_capped_with_admission(
-        project_root,
-        project_id,
-        admission,
-        max_new_bytes,
-        skip_session_ids,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
-/// Project startup-sweep variant whose authority has already been prepared by
-/// the caller from the authoritative project identity and privacy policy.
-pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>(
+pub(in crate::runtime) fn try_ingest_cursor_project_sweep_capped_with_session_ids<
+    'a,
+    S: BuildHasher,
+>(
     project_root: &'a Path,
     project_id: ProjectId,
     admission: &'a dyn HostAdmission,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &'a ObservationCancellation,
-) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorTranscriptIngestStats>> + Send + 'a>>
-{
+) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorSweepIngestOutcome>> + Send + 'a>> {
     // Rehash into the default (Send) hasher before boxing so the returned
     // future never captures the caller's `S` hasher and stays `Send`.
     let skip_session_ids: std::collections::HashSet<String> =
         skip_session_ids.into_iter().collect();
     Box::pin(async move {
         let Some(source) = CursorSweepSource::new() else {
-            return Ok(CursorTranscriptIngestStats::default());
+            return Ok(CursorSweepIngestOutcome::default());
         };
-        admit_cursor_sweep_observations_with_admission(
+        admit_cursor_sweep_observations_with_session_ids(
             &source.with_skip_session_ids(skip_session_ids),
             project_root,
             admission,
@@ -733,36 +710,19 @@ pub fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: BuildHasher>
     })
 }
 
-/// Canonically admit Cursor JSONL transcripts discovered during a profile startup
-/// sweep. Registered project slugs and composer-owned session ids are excluded
-/// before observation admission.
-pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
-    registered_roots: &[PathBuf],
-    admission: &dyn HostAdmission,
-    max_new_bytes: Option<u64>,
-    skip_session_ids: std::collections::HashSet<String, S>,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    try_ingest_cursor_user_sweep_capped_with_admission(
-        registered_roots,
-        admission,
-        max_new_bytes,
-        skip_session_ids,
-        &ObservationCancellation::default(),
-    )
-    .await
-}
-
-pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
+pub(in crate::runtime) async fn try_ingest_cursor_user_sweep_capped_with_session_ids<
+    S: BuildHasher,
+>(
     registered_roots: &[PathBuf],
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
     cancellation: &ObservationCancellation,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+) -> TranscriptIngestResult<CursorSweepIngestOutcome> {
     let Some(source) = CursorSweepSource::new() else {
-        return Ok(CursorTranscriptIngestStats::default());
+        return Ok(CursorSweepIngestOutcome::default());
     };
-    admit_cursor_sweep_observations_with_admission(
+    admit_cursor_sweep_observations_with_session_ids(
         &source
             .with_skip_session_ids(skip_session_ids.into_iter().collect())
             .for_user_scope(registered_roots),
@@ -775,14 +735,14 @@ pub async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildHasher>(
     .await
 }
 
-async fn admit_cursor_sweep_observations_with_admission(
+async fn admit_cursor_sweep_observations_with_session_ids(
     source: &CursorSweepSource,
     project_root: &Path,
     admission: &dyn HostAdmission,
     max_new_bytes: Option<u64>,
     scope: ObservationScopeV1,
     cancellation: &ObservationCancellation,
-) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+) -> TranscriptIngestResult<CursorSweepIngestOutcome> {
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
     }
@@ -822,25 +782,9 @@ async fn admit_cursor_sweep_observations_with_admission(
     if cancellation.is_cancelled() {
         return Err(TranscriptIngestError::Cancelled { provider: "cursor" });
     }
-    let mut stats = drain_cursor_observation_projections(admission, &scope, cancellation).await?;
-    stats.bytes_consumed = budget.consumed();
-    stats.source_deferred |= budget.deferred();
-    Ok(stats)
-}
-
-fn cursor_ingest_or_default(
-    result: &TranscriptIngestResult<CursorTranscriptIngestStats>,
-) -> CursorTranscriptIngestStats {
-    result.as_ref().map_or_else(
-        |_| {
-            tracing::error!(
-                reason_code = "cursor_observation_ingest_failed",
-                "Cursor transcript ingest failed"
-            );
-            CursorTranscriptIngestStats::default()
-        },
-        |stats| *stats,
-    )
+    projection::drain_cursor_observation_projections_with_sessions(admission, &scope, cancellation)
+        .await
+        .map(|stats| stats.into_sweep_outcome(budget.consumed(), budget.deferred()))
 }
 
 fn cursor_event_workspace_roots(event: &Value) -> Vec<PathBuf> {

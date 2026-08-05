@@ -106,14 +106,9 @@ pub(super) fn cancelled_provider_outcome(
 pub(super) fn cancelled_claude_provider_outcome(
     error: &claude_observation::ClaudeObservationIngestError,
 ) -> Option<ProviderRunOutcome> {
-    use claude_observation::ClaudeObservationIngestError as Ingest;
-
-    let typed_cancellation = match error {
-        Ingest::Application(crate::observation::ObservationApplicationError::Cancelled) => true,
-        Ingest::Transcript(error) => error.is_cancelled(),
-        _ => false,
-    };
-    typed_cancellation.then(ProviderRunOutcome::skipped)
+    error
+        .is_typed_cancellation()
+        .then(ProviderRunOutcome::skipped)
 }
 
 /// Hard limits for one multi-source ingest pass.
@@ -507,6 +502,7 @@ pub fn classify_claude_observation_failure(
         Ingest::Store(error) => store(error),
         Ingest::Projection(error) => projection(error),
         Ingest::Transcript(error) => transcript(error),
+        Ingest::Terminated { error, .. } => return classify_claude_observation_failure(error),
         Ingest::Application(error) => match error {
             crate::observation::ObservationApplicationError::Store(error) => store(error),
             crate::observation::ObservationApplicationError::Cancelled => {

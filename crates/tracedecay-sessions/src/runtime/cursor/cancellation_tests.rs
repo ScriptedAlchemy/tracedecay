@@ -53,7 +53,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
     let cancellation = ObservationCancellation::default();
     cancellation.cancel();
 
-    let error = admit_cursor_sweep_observations_with_admission(
+    let error = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -72,7 +72,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
     ));
     assert!(admission.observations().is_empty());
 
-    let replay = admit_cursor_sweep_observations_with_admission(
+    let replay = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -85,9 +85,9 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
     assert_eq!(admission.observations().len(), 1);
-    assert_eq!(replay.messages_upserted, 1);
+    assert_eq!(replay.stats.messages_upserted, 1);
 
-    let deduplicated = admit_cursor_sweep_observations_with_admission(
+    let deduplicated = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -97,7 +97,7 @@ async fn cancelled_startup_sweep_stops_before_admitting_cursor_jsonl() {
     )
     .await
     .expect("completed Cursor retry must be deduplicated");
-    assert_eq!(deduplicated.messages_upserted, 0);
+    assert_eq!(deduplicated.stats.messages_upserted, 0);
 }
 
 #[tokio::test]
@@ -107,7 +107,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
     let cancellation = ObservationCancellation::default();
     admission.cancel_on_next_cursor_read(cancellation.clone());
 
-    let error = admit_cursor_sweep_observations_with_admission(
+    let error = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -126,7 +126,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
     ));
     assert!(admission.observations().is_empty());
 
-    let replay = admit_cursor_sweep_observations_with_admission(
+    let replay = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -136,7 +136,7 @@ async fn mid_admission_cancellation_stops_cursor_before_projection() {
     )
     .await
     .expect("uncancelled Cursor retry must admit the untouched source");
-    assert_eq!(replay.messages_upserted, 1);
+    assert_eq!(replay.stats.messages_upserted, 1);
 }
 
 #[tokio::test]
@@ -148,7 +148,7 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
         project_id: project_id.clone(),
     };
 
-    let first = admit_cursor_sweep_observations_with_admission(
+    let first = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -160,13 +160,13 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
     .expect("first bounded projection pass");
 
     assert_eq!(
-        first.messages_upserted,
+        first.stats.messages_upserted,
         MAX_CURSOR_PROJECTIONS_PER_PASS as u64
     );
-    assert!(first.source_deferred);
+    assert!(first.stats.source_deferred);
     assert_eq!(admission.pending_projection_count(), 1);
 
-    let second = admit_cursor_sweep_observations_with_admission(
+    let second = admit_cursor_sweep_observations_with_session_ids(
         &source,
         project.path(),
         &admission,
@@ -177,8 +177,8 @@ async fn projection_backlog_over_pass_limit_converges_in_two_passes() {
     .await
     .expect("second bounded projection pass");
 
-    assert_eq!(second.messages_upserted, 1);
-    assert!(!second.source_deferred);
+    assert_eq!(second.stats.messages_upserted, 1);
+    assert!(!second.stats.source_deferred);
     assert_eq!(admission.pending_projection_count(), 0);
 }
 

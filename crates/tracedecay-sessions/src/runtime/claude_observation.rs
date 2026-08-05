@@ -4,6 +4,7 @@
 //! through the host admission authority, then drains projection work in source
 //! order. The projector is the only writer of V1 session and message rows.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -46,7 +47,7 @@ const CLAUDE_SOURCE_FRONTIER_KEY: &str =
     "tracedecay-internal:claude-observation-source-frontier:v1";
 const MAX_PROJECTIONS_PER_PASS: usize = 256;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ClaudeObservationIngestStats {
     pub transcript: TranscriptIngestStats,
     pub observations_committed: u64,
@@ -61,12 +62,19 @@ pub struct ClaudeObservationIngestStats {
     pub projection_duplicates: u64,
     pub deferred_sources: u64,
     pub source_bytes_scanned: u64,
+    projected_session_ids: BTreeSet<String>,
 }
 
 impl ClaudeObservationIngestStats {
     #[must_use]
     fn merge(mut self, other: Self) -> Self {
         self.transcript = self.transcript.merge(other.transcript);
+        self.projected_session_ids
+            .extend(other.projected_session_ids);
+        self.transcript.sessions_upserted = self
+            .projected_session_ids
+            .iter()
+            .fold(0_u64, |count, _| count.saturating_add(1));
         self.observations_committed = self
             .observations_committed
             .saturating_add(other.observations_committed);
@@ -99,6 +107,23 @@ impl ClaudeObservationIngestStats {
             .saturating_add(other.source_bytes_scanned);
         self
     }
+
+    pub(crate) fn projected_session_ids(&self) -> &BTreeSet<String> {
+        &self.projected_session_ids
+    }
+
+    pub(crate) fn deduplicated_transcript_stats(
+        &self,
+        projected_session_ids: &mut BTreeSet<String>,
+    ) -> TranscriptIngestStats {
+        let mut stats = self.transcript;
+        stats.sessions_upserted = self
+            .projected_session_ids
+            .iter()
+            .filter(|session_id| projected_session_ids.insert((*session_id).clone()))
+            .fold(0_u64, |count, _| count.saturating_add(1));
+        stats
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +150,12 @@ pub enum ClaudeObservationIngestError {
     Projection(#[from] ProjectionStoreError),
     #[error("Claude transcript ingest failed")]
     Transcript(#[from] TranscriptIngestError),
+    #[error("Claude observation ingestion terminated after durable progress")]
+    Terminated {
+        stats: Box<ClaudeObservationIngestStats>,
+        #[source]
+        error: Box<Self>,
+    },
     #[error("Claude observation frame is not in the parsed state")]
     MissingParsedRecord,
     #[error("Claude observation frame rejected its sanitized replacement")]
@@ -139,6 +170,48 @@ pub enum ClaudeObservationIngestError {
         first_reason_code: &'static str,
         first_retryable: bool,
     },
+}
+
+impl ClaudeObservationIngestError {
+    pub(crate) fn accumulated_stats(&self) -> Option<&ClaudeObservationIngestStats> {
+        match self {
+            Self::Terminated { stats, .. } => Some(stats),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_typed_cancellation(&self) -> bool {
+        match self {
+            Self::Application(ObservationApplicationError::Cancelled) => true,
+            Self::Transcript(error) => error.is_cancelled(),
+            Self::Terminated { error, .. } => error.is_typed_cancellation(),
+            _ => false,
+        }
+    }
+}
+
+fn terminal_error_after_progress(
+    stats: ClaudeObservationIngestStats,
+    error: ClaudeObservationIngestError,
+) -> ClaudeObservationIngestError {
+    let has_durable_progress = stats.observations_committed > 0
+        || stats.observation_duplicates > 0
+        || stats.cursor_advances > 0
+        || stats.cursor_duplicates > 0
+        || stats.records_rejected > 0
+        || stats.records_quarantined > 0
+        || stats.projections_completed > 0
+        || stats.projection_outputs > 0
+        || stats.projections_skipped > 0
+        || stats.projection_duplicates > 0;
+    if has_durable_progress {
+        ClaudeObservationIngestError::Terminated {
+            stats: Box::new(stats),
+            error: Box::new(error),
+        }
+    } else {
+        error
+    }
 }
 
 enum FrameCaptureOutcome {
@@ -647,17 +720,24 @@ async fn apply_prepared_source<A: HostAdmission + ?Sized>(
     } = prepared;
     for segment in segments {
         if cancellation.is_cancelled() {
-            return Err(ObservationApplicationError::Cancelled.into());
+            return Err(terminal_error_after_progress(
+                stats,
+                ObservationApplicationError::Cancelled.into(),
+            ));
         }
-        if !apply_scanned_segment(
+        let applied = match apply_scanned_segment(
             admission,
             &capture_context,
             &mut observation_cursor,
             segment,
             &mut stats,
         )
-        .await?
+        .await
         {
+            Ok(applied) => applied,
+            Err(error) => return Err(terminal_error_after_progress(stats, error)),
+        };
+        if !applied {
             break;
         }
     }
@@ -698,9 +778,13 @@ pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
                 host_admission_error("claude", outcome)
             }
         })?;
+    let projected_session_ids = outcome.session_ids.into_iter().collect::<BTreeSet<_>>();
+    let projected_sessions = projected_session_ids
+        .iter()
+        .fold(0_u64, |count, _| count.saturating_add(1));
     Ok(ClaudeObservationIngestStats {
         transcript: TranscriptIngestStats {
-            sessions_upserted: u64::try_from(outcome.session_ids.len()).unwrap_or(u64::MAX),
+            sessions_upserted: projected_sessions,
             messages_upserted: outcome.projected,
         },
         projections_completed: outcome.projected,
@@ -708,6 +792,7 @@ pub async fn drain_projection_queue<A: HostAdmission + ?Sized>(
         projections_skipped: outcome.skipped,
         projection_duplicates: outcome.exact_duplicates,
         deferred_sources: u64::from(outcome.deferred),
+        projected_session_ids,
         ..ClaudeObservationIngestStats::default()
     })
 }
@@ -823,6 +908,9 @@ where
         let outcome = match process_source(&processing_context, &path, Some(source_budget)).await {
             Ok(outcome) => outcome,
             Err(error) => {
+                if let Some(progress) = error.accumulated_stats() {
+                    stats = stats.merge(progress.clone());
+                }
                 let failure = crate::runtime::classify_claude_observation_failure(&error);
                 let summary =
                     source_failures.get_or_insert((0_u64, failure.reason_code, failure.retryable));
@@ -845,15 +933,37 @@ where
         stats = stats.merge(outcome);
     }
     if deferred > 0 || attempted_sources < scheduled_source_count {
-        advance_source_frontier(admission, &scope, attempted_sources).await?;
+        if let Err(error) = advance_source_frontier(admission, &scope, attempted_sources).await {
+            return Err(terminal_error_after_progress(stats, error));
+        }
     }
-    let projection_stats = drain_projection_queue(admission, &scope, &cancellation).await?;
+    let projection_stats = match drain_projection_queue(admission, &scope, &cancellation).await {
+        Ok(stats) => stats,
+        Err(error) => {
+            if error.is_typed_cancellation()
+                && let Some((failed_sources, first_reason_code, first_retryable)) = source_failures
+            {
+                return Err(terminal_error_after_progress(
+                    stats,
+                    ClaudeObservationIngestError::SourceFailures {
+                        failed_sources,
+                        first_reason_code,
+                        first_retryable,
+                    },
+                ));
+            }
+            return Err(terminal_error_after_progress(stats, error));
+        }
+    };
     if let Some((failed_sources, first_reason_code, first_retryable)) = source_failures {
-        return Err(ClaudeObservationIngestError::SourceFailures {
-            failed_sources,
-            first_reason_code,
-            first_retryable,
-        });
+        return Err(terminal_error_after_progress(
+            stats.merge(projection_stats),
+            ClaudeObservationIngestError::SourceFailures {
+                failed_sources,
+                first_reason_code,
+                first_retryable,
+            },
+        ));
     }
     Ok(stats.merge(projection_stats))
 }
