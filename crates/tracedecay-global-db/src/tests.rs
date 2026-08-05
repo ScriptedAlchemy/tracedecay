@@ -1256,6 +1256,21 @@ async fn project_store_resolution_rejects_conflicting_common_dir_and_marker_iden
 #[tokio::test]
 async fn session_sync_journal_survives_remount_and_compare_and_swap() {
     let harness = RegisteredGlobalDbHarness::open("session-sync-journal").await;
+    let source = tracedecay_domain::ObservationSourceIdentityV1::for_provider(
+        tracedecay_domain::ProviderId::new("codex").unwrap(),
+        tracedecay_domain::SessionId::new("session.fixture").unwrap(),
+    )
+    .unwrap();
+    let scope = tracedecay_domain::ObservationScopeV1::Project {
+        project_id: tracedecay_domain::ProjectId::new("project.fixture").unwrap(),
+    };
+    let cursor = tracedecay_domain::ObservationSourceCursorV1::new(
+        source.clone(),
+        scope.clone(),
+        tracedecay_domain::ObservationSourceGenerationV1::new(1).unwrap(),
+        72,
+    )
+    .unwrap();
     harness
         .registered
         .writer_connection()
@@ -1264,9 +1279,9 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
             "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
              VALUES (?1, ?2, ?3)",
             tracedecay_runtime_core::db::engine::params![
-                r#"{"provider":"codex"}"#,
-                r#"{"project_id":"project.fixture"}"#,
-                r#"{"byte_offset":72}"#,
+                serde_json::to_string(&source).unwrap(),
+                serde_json::to_string(&scope).unwrap(),
+                serde_json::to_string(&cursor).unwrap(),
             ],
         )
         .await
@@ -1321,9 +1336,9 @@ async fn session_sync_journal_survives_remount_and_compare_and_swap() {
             .await
             .unwrap(),
         vec![(
-            r#"{"provider":"codex"}"#.to_owned(),
-            r#"{"project_id":"project.fixture"}"#.to_owned(),
-            r#"{"byte_offset":72}"#.to_owned(),
+            serde_json::to_string(&source).unwrap(),
+            serde_json::to_string(&scope).unwrap(),
+            serde_json::to_string(&cursor).unwrap(),
         )]
     );
 }
