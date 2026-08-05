@@ -72,7 +72,7 @@ pub(crate) async fn handle_sessions_action(
                 json!({ "action": "sessions_import" }),
             )
             .await?;
-            print_session_sync_admission("session import", &outcome)?;
+            await_session_sync_completion(&project_path, "session import", outcome).await?;
         }
         SessionsAction::Search(args) => {
             let project_id = args.project_id.clone();
@@ -743,17 +743,25 @@ async fn run_git_sync(
     )
     .await?;
 
+    await_session_sync_completion(&project_root, "session git sync", outcome).await?;
     if dry_run {
-        println!("git-sync (dry-run): no rows will be written");
+        println!("git-sync (dry-run): no rows were written");
     }
-    print_session_sync_admission("session git sync", &outcome)?;
     Ok(())
 }
 
-fn print_session_sync_admission(
+enum SessionSyncPollState {
+    Pending {
+        operation_id: String,
+        idempotency_key: String,
+    },
+    Completed,
+}
+
+fn session_sync_poll_state(
     label: &str,
     outcome: &serde_json::Value,
-) -> tracedecay::errors::Result<()> {
+) -> tracedecay::errors::Result<SessionSyncPollState> {
     let status = outcome
         .get("status")
         .and_then(serde_json::Value::as_str)
@@ -761,7 +769,7 @@ fn print_session_sync_admission(
             message: format!("daemon {label} response omitted its typed status"),
         })?;
     match status {
-        "accepted" | "joined" | "complete" => {
+        "accepted" | "joined" => {
             let operation_id = outcome
                 .get("operation_id")
                 .and_then(serde_json::Value::as_str)
@@ -770,12 +778,60 @@ fn print_session_sync_admission(
                         "daemon {label} response reported {status} without an operation id"
                     ),
                 })?;
-            println!("{label} {status} ({operation_id})");
-            Ok(())
+            let idempotency_key = outcome
+                .get("idempotency_key")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon {label} response reported {status} without an idempotency key"
+                    ),
+                })?;
+            Ok(SessionSyncPollState::Pending {
+                operation_id: operation_id.to_owned(),
+                idempotency_key: idempotency_key.to_owned(),
+            })
+        }
+        "complete" => {
+            let operation_id = outcome
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon {label} response reported complete without an operation id"
+                    ),
+                })?;
+            let termination = outcome
+                .get("termination")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon {label} response reported complete without a termination"
+                    ),
+                })?;
+            if termination != "completed" {
+                let failures = outcome
+                    .get("failure_codes")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>();
+                let detail = if failures.is_empty() {
+                    termination.to_owned()
+                } else {
+                    format!("{termination}: {}", failures.join(", "))
+                };
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!("{label} did not complete successfully ({detail})"),
+                });
+            }
+            println!("{label} completed ({operation_id})");
+            Ok(SessionSyncPollState::Completed)
         }
         "cancelled" | "deadline_exceeded" | "wrong_scope" => {
-            println!("{label} {status}");
-            Ok(())
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!("{label} did not complete successfully ({status})"),
+            })
         }
         "unavailable" => {
             let reason = outcome
@@ -786,12 +842,48 @@ fn print_session_sync_admission(
                         "daemon {label} response reported unavailable without a reason code"
                     ),
                 })?;
-            println!("{label} unavailable ({reason})");
-            Ok(())
+            Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!("{label} unavailable ({reason})"),
+            })
         }
         unexpected => Err(tracedecay::errors::TraceDecayError::Config {
             message: format!("daemon {label} response reported unknown status {unexpected:?}"),
         }),
+    }
+}
+
+async fn await_session_sync_completion(
+    project_root: &Path,
+    label: &str,
+    mut outcome: Value,
+) -> tracedecay::errors::Result<()> {
+    let client_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(35);
+    loop {
+        match session_sync_poll_state(label, &outcome)? {
+            SessionSyncPollState::Completed => return Ok(()),
+            SessionSyncPollState::Pending {
+                operation_id,
+                idempotency_key,
+            } => {
+                if tokio::time::Instant::now() >= client_deadline {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: format!(
+                            "{label} operation {operation_id} did not reach a terminal state"
+                        ),
+                    });
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                outcome = call_daemon_tool(
+                    project_root,
+                    "tracedecay_admin_cli",
+                    json!({
+                        "action": "sessions_sync_status",
+                        "idempotency_key": idempotency_key,
+                    }),
+                )
+                .await?;
+            }
+        }
     }
 }
 
@@ -884,8 +976,69 @@ mod tests {
         SessionRefreshDaemonFuture, SessionRefreshDaemonTransport, SessionRefreshMode,
         SessionRefreshOutcome, SessionRefreshSelectors, dispatch_session_refresh,
         execute_session_refresh, message_search_rpc_args, session_refresh_human_outcome,
+        session_sync_poll_state,
     };
     use crate::cli::{Cli, SessionsSearchArgs};
+
+    #[test]
+    fn session_sync_admission_is_pending_until_truthful_completion() {
+        assert!(matches!(
+            session_sync_poll_state(
+                "session import",
+                &json!({
+                    "status": "accepted",
+                    "operation_id": "operation.fixture",
+                    "idempotency_key": "session-sync.fixture"
+                })
+            )
+            .unwrap(),
+            super::SessionSyncPollState::Pending { ref idempotency_key, .. }
+                if idempotency_key == "session-sync.fixture"
+        ));
+        assert!(matches!(
+            session_sync_poll_state(
+                "session import",
+                &json!({
+                    "status": "complete",
+                    "operation_id": "operation.fixture",
+                    "idempotency_key": "session-sync.fixture",
+                    "termination": "completed",
+                    "stats": {}
+                })
+            )
+            .unwrap(),
+            super::SessionSyncPollState::Completed
+        ));
+    }
+
+    #[test]
+    fn session_sync_noncompletion_is_a_cli_error() {
+        for outcome in [
+            json!({"status": "wrong_scope"}),
+            json!({"status": "deadline_exceeded"}),
+            json!({"status": "cancelled"}),
+            json!({
+                "status": "unavailable",
+                "reason_code": "session_sync_authority_unavailable"
+            }),
+            json!({
+                "status": "complete",
+                "operation_id": "operation.fixture",
+                "idempotency_key": "session-sync.fixture",
+                "termination": "failed",
+                "failure_codes": ["native_transcript_scan_failed"]
+            }),
+            json!({
+                "status": "complete",
+                "operation_id": "operation.fixture",
+                "idempotency_key": "session-sync.fixture",
+                "termination": "partial",
+                "failure_codes": ["cursor_unavailable"]
+            }),
+        ] {
+            assert!(session_sync_poll_state("session import", &outcome).is_err());
+        }
+    }
 
     #[test]
     fn message_search_rpc_args_omit_absent_optional_filters() {
