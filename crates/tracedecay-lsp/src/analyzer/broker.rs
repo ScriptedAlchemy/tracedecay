@@ -176,6 +176,12 @@ pub struct DiagnosticsSnapshot {
     pub settings_unavailable: Option<SettingsUnavailable>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshCommitOutcome {
+    Applied(DiagnosticsSnapshot),
+    Superseded,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct LspSessionKey {
     language: String,
@@ -538,23 +544,26 @@ impl DiagnosticBroker {
     }
 
     pub fn finish_refresh(&mut self, completed: CompletedRefresh) -> Result<()> {
+        self.finish_refresh_snapshot(completed).map(|_| ())
+    }
+
+    pub fn finish_refresh_snapshot(
+        &mut self,
+        completed: CompletedRefresh,
+    ) -> Result<RefreshCommitOutcome> {
         let language = completed.language;
-        if self
-            .refresh_epochs
-            .get(&language)
-            .is_some_and(|current| completed.epoch < *current)
-        {
-            return Ok(());
+        if self.refresh_epochs.get(&language) != Some(&completed.epoch) {
+            return Ok(RefreshCommitOutcome::Superseded);
         }
         if !self.settings.language_enabled(&language) {
             self.engine_overrides
                 .insert(language.clone(), EngineState::Disabled);
             self.remove_language_clients(&language);
             self.clear_language(&language);
-            return Ok(());
+            return Ok(RefreshCommitOutcome::Superseded);
         }
         if !self.command_matches_current_settings(&language, &completed.command) {
-            return Ok(());
+            return Ok(RefreshCommitOutcome::Superseded);
         }
         match completed.result {
             Ok(mut diagnostics) => {
@@ -563,7 +572,7 @@ impl DiagnosticBroker {
                 self.diagnostics.append(&mut diagnostics);
                 self.engine_errors.remove(&language);
                 self.engine_overrides.insert(language, EngineState::Ready);
-                Ok(())
+                Ok(RefreshCommitOutcome::Applied(self.snapshot()))
             }
             Err(failure) => {
                 let message = failure.message;

@@ -10,29 +10,33 @@ use std::sync::Arc;
 
 use crate::diagnostics::{LspRange, PositionError};
 use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission, OperationPoll};
-use crate::gateway::{AdmittedRoot, LspRuntimeFailure, LspRuntimeFuture, LspRuntimeSpawner};
+use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
 use crate::provider::{
     DiagnosticRefreshAdmission, DiagnosticRefreshIdentity, DiagnosticSnapshotOutcome,
-    DiagnosticSnapshotPort, GenerationDiagnostics,
+    DiagnosticSnapshotPort,
 };
 use crate::request_sequence::ProcessLocalRequestSequence;
-use crate::workspace_diagnostics::{
-    CanonicalWorkspaceDiagnosticRefreshRequest, WorkspaceDiagnosticSnapshotOutcome,
-};
+use crate::session::AuthorizedLspWorkspace;
+use crate::workspace_diagnostics::WorkspaceDiagnosticSnapshotOutcome;
 use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
 #[cfg(test)]
 use tracedecay_code_extraction::incremental::{ParseReport, ParseReuse};
 use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
 
+mod diagnostic_authority;
 mod retained_parse;
 mod retention;
 mod text_edits;
 mod workspace_diagnostics;
 
+pub use diagnostic_authority::{
+    CanonicalDiagnosticRefreshRequest, CanonicalDiagnosticSnapshotAuthority,
+    ManagedDiagnosticSnapshot, ManagedDiagnosticSnapshotPort,
+};
 use retained_parse::RetainedOverlayParse;
 pub use retained_parse::{OverlayExtractionState, OverlayParseState, OverlayParseUnavailable};
 use text_edits::apply_change;
-use workspace_diagnostics::WorkspaceDiagnosticAdapter;
+use workspace_diagnostics::{WorkspaceDiagnosticAdapter, diagnostic_refresh_is_partial};
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -263,51 +267,6 @@ fn ensure_size(text: &str) -> Result<(), OverlayError> {
 
 pub const MAX_DIAGNOSTIC_OPERATIONS: usize = 128;
 
-/// Exact input passed to canonical diagnostic refresh work.
-#[derive(Clone, Debug)]
-pub struct CanonicalDiagnosticRefreshRequest {
-    pub root: AdmittedRoot,
-    pub document_uri: String,
-    pub overlay: Option<OverlaySnapshot>,
-    pub source_generation: Option<u64>,
-    pub expected_content_digest: Option<ContentDigest>,
-}
-
-/// Current canonical managed diagnostics created by the feedback owner.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedDiagnosticSnapshot {
-    pub generation: u64,
-    pub diagnostics: Vec<crate::diagnostics::GatewayDiagnostic>,
-}
-
-pub trait ManagedDiagnosticSnapshotPort: Send + Sync {
-    fn snapshot(
-        &self,
-        request: CanonicalDiagnosticRefreshRequest,
-    ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>>;
-}
-
-/// Non-blocking application boundary for a complete diagnostic snapshot.
-pub trait CanonicalDiagnosticSnapshotAuthority: Send + Sync {
-    fn refresh(
-        &self,
-        request: CanonicalDiagnosticRefreshRequest,
-    ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>>;
-
-    fn supports_workspace_diagnostics(&self) -> bool {
-        false
-    }
-
-    fn refresh_workspace(
-        &self,
-        _request: CanonicalWorkspaceDiagnosticRefreshRequest,
-    ) -> LspRuntimeFuture<
-        Result<crate::workspace_diagnostics::WorkspaceGenerationDiagnostics, LspRuntimeFailure>,
-    > {
-        Box::pin(async { Err(LspRuntimeFailure::new("workspace-diagnostics-unsupported")) })
-    }
-}
-
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DiagnosticOperationKey {
     root_uri: String,
@@ -423,6 +382,12 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
                             diagnostics,
                             completed_operation_id: Some(operation_id),
                         },
+                        Err(error) if diagnostic_refresh_is_partial(error.class()) => {
+                            DiagnosticSnapshotOutcome::Partial {
+                                source_generation,
+                                coverage: error.class().to_owned(),
+                            }
+                        }
                         Err(error) => DiagnosticSnapshotOutcome::Failed {
                             source_generation,
                             failure_class: error.class().to_owned(),
@@ -456,18 +421,20 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
 
     fn workspace_diagnostics(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
-        self.workspace.snapshot(root, overlays)
+        self.workspace.snapshot(workspace, root, overlays)
     }
 
     fn request_workspace_refresh(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
-        self.workspace.request(root, overlays)
+        self.workspace.request(workspace, root, overlays)
     }
 }
 
@@ -958,6 +925,11 @@ mod tests {
             Box::pin(async {
                 Ok(GenerationDiagnostics {
                     generation: 7,
+                    authority_digest: tracedecay_domain::ManifestDigest::new(format!(
+                        "sha256:{}",
+                        "a".repeat(64)
+                    ))
+                    .unwrap(),
                     upstream: Vec::new(),
                     tracedecay: Vec::new(),
                 })

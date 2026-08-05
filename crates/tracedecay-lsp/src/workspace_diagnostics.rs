@@ -3,6 +3,7 @@ use tracedecay_domain::{ContentDigest, ManifestDigest};
 use crate::gateway::AdmittedRoot;
 use crate::overlay::OverlaySnapshot;
 use crate::provider::{DiagnosticRefreshIdentity, GenerationDiagnostics};
+use crate::session::AuthorizedLspWorkspace;
 
 pub const MAX_WORKSPACE_DIAGNOSTIC_FANOUT: usize = 4;
 pub const MAX_WORKSPACE_DIAGNOSTIC_RESULTS: usize = 128;
@@ -11,6 +12,7 @@ pub const MAX_WORKSPACE_DIAGNOSTIC_RESULT_ID_BYTES: usize = 1024;
 
 #[derive(Clone, Debug)]
 pub struct CanonicalWorkspaceDiagnosticRefreshRequest {
+    pub workspace: AuthorizedLspWorkspace,
     pub root: AdmittedRoot,
     pub overlays: Vec<OverlaySnapshot>,
 }

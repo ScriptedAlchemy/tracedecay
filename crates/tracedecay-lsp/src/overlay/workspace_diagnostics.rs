@@ -7,6 +7,7 @@ use crate::gateway::operation_table::{BoundedOperationTable, OperationAdmission,
 use crate::gateway::{AdmittedRoot, LspRuntimeFuture, LspRuntimeSpawner};
 use crate::provider::{DiagnosticRefreshAdmission, DiagnosticRefreshIdentity};
 use crate::request_sequence::ProcessLocalRequestSequence;
+use crate::session::AuthorizedLspWorkspace;
 use crate::workspace_diagnostics::{
     CanonicalWorkspaceDiagnosticRefreshRequest, MAX_WORKSPACE_DIAGNOSTIC_FANOUT,
     WorkspaceDiagnosticSnapshotOutcome,
@@ -53,10 +54,11 @@ impl WorkspaceDiagnosticAdapter {
 
     pub(super) fn snapshot(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> WorkspaceDiagnosticSnapshotOutcome {
-        let Some(key) = workspace_key(root, overlays) else {
+        let Some(key) = workspace_key(workspace, root, overlays) else {
             return WorkspaceDiagnosticSnapshotOutcome::Failed {
                 code_generation_id: None,
                 failure_class: "workspace-diagnostic-identity-unavailable".to_owned(),
@@ -95,19 +97,21 @@ impl WorkspaceDiagnosticAdapter {
 
     pub(super) fn request(
         &self,
+        workspace: &AuthorizedLspWorkspace,
         root: &AdmittedRoot,
         overlays: &[OverlaySnapshot],
     ) -> DiagnosticRefreshAdmission {
         if !self.supports() {
             return rejected("workspace-diagnostics-unsupported");
         }
-        let Some(key) = workspace_key(root, overlays) else {
+        let Some(key) = workspace_key(workspace, root, overlays) else {
             return rejected("workspace-diagnostic-identity-unavailable");
         };
         if !self.adopt_key(&key) {
             return rejected("runtime-busy");
         }
         let request = CanonicalWorkspaceDiagnosticRefreshRequest {
+            workspace: workspace.clone(),
             root: root.clone(),
             overlays: overlays.to_vec(),
         };
@@ -128,6 +132,12 @@ impl WorkspaceDiagnosticAdapter {
                             diagnostics,
                             completed_operation_id: Some(operation_id),
                         },
+                        Err(error) if diagnostic_refresh_is_partial(error.class()) => {
+                            WorkspaceDiagnosticSnapshotOutcome::Partial {
+                                code_generation_id: None,
+                                coverage: error.class().to_owned(),
+                            }
+                        }
                         Err(error) => WorkspaceDiagnosticSnapshotOutcome::Failed {
                             code_generation_id: None,
                             failure_class: error.class().to_owned(),
@@ -175,6 +185,7 @@ impl WorkspaceDiagnosticAdapter {
 }
 
 fn workspace_key(
+    workspace: &AuthorizedLspWorkspace,
     root: &AdmittedRoot,
     overlays: &[OverlaySnapshot],
 ) -> Option<WorkspaceDiagnosticOperationKey> {
@@ -191,7 +202,11 @@ fn workspace_key(
     Some(WorkspaceDiagnosticOperationKey {
         root_uri: root.uri().to_owned(),
         scope_digest: root.scope_digest().cloned(),
-        overlay_set_digest: canonical_sha256(&identities).ok()?,
+        overlay_set_digest: canonical_sha256(&(
+            workspace.scope_set_digest().map(ManifestDigest::as_str),
+            identities,
+        ))
+        .ok()?,
     })
 }
 
@@ -199,4 +214,15 @@ fn rejected(failure_class: &str) -> DiagnosticRefreshAdmission {
     DiagnosticRefreshAdmission::Rejected {
         failure_class: failure_class.to_owned(),
     }
+}
+
+pub(super) fn diagnostic_refresh_is_partial(failure_class: &str) -> bool {
+    matches!(
+        failure_class,
+        "diagnostic-broker-refresh-superseded"
+            | "document-content-stale"
+            | "managed-diagnostic-content-identity-unavailable"
+            | "managed-diagnostic-content-stale"
+            | "workspace-code-generation-warming"
+    )
 }

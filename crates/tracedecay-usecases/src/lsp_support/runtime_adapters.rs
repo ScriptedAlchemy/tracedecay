@@ -8,6 +8,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::AbortHandle;
 use tracedecay_lsp::analyzer::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
+    RefreshCommitOutcome,
 };
 use tracedecay_lsp::analyzer::client::{
     LspDocument, LspSemanticRequest as AnalyzerSemanticRequest, decode_semantic_request,
@@ -22,6 +23,25 @@ use tracedecay_lsp::{
     SemanticProviderAdapter, SemanticProviderOutcome, SemanticProviderPort, SemanticRequest,
     SemanticResponse, WorkspaceDocumentDiagnostics, WorkspaceGenerationDiagnostics,
 };
+
+pub(crate) fn managed_diagnostic_authority_digest(
+    scope: &crate::lsp_runtime::LspFeedbackProjectionScope,
+) -> Result<tracedecay_domain::ManifestDigest, LspRuntimeFailure> {
+    tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.managed-diagnostic-authority.v1",
+        scope.head_commit_id.as_str(),
+        scope.code_generation_id.as_str(),
+        scope.snapshot_digest.as_str(),
+        scope.invalidation_digest.as_str(),
+        scope.snapshot_content_digest.as_str(),
+        scope
+            .document_content_digest
+            .as_ref()
+            .map(tracedecay_domain::ContentDigest::as_str),
+        scope.generation,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("managed-diagnostic-authority-identity-unavailable"))
+}
 
 #[derive(Clone)]
 struct TokioLspRuntime {
@@ -133,12 +153,18 @@ where
         let managed = Arc::clone(&self.managed);
         let diagnostics_quiet_window = self.diagnostics_quiet_window;
         Box::pin(async move {
-            let indexed = documents
+            let mut indexed = documents
                 .indexed_documents(
                     request.root.clone(),
                     tracedecay_lsp::MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
                 )
                 .await?;
+            indexed.documents.retain(|document| {
+                request
+                    .workspace
+                    .resolve_document(&document.uri)
+                    .is_ok_and(|owner| owner == &request.root)
+            });
             if request
                 .overlays
                 .iter()
@@ -197,41 +223,67 @@ async fn refresh_document_snapshot<S, M>(
     documents: Arc<S>,
     managed: Arc<M>,
     diagnostics_quiet_window: Duration,
-    request: CanonicalDiagnosticRefreshRequest,
+    mut request: CanonicalDiagnosticRefreshRequest,
 ) -> Result<GenerationDiagnostics, LspRuntimeFailure>
 where
     S: LspDiagnosticDocumentPort + 'static,
     M: ManagedDiagnosticSnapshotPort + 'static,
 {
     let document = documents.load_document(request.clone()).await?;
+    request.expected_content_digest = Some(tracedecay_domain::ContentDigest::of_bytes(
+        document.text.as_bytes(),
+    ));
     let language = document.language.clone();
     let relative_path = document.relative_path.clone();
-    let prepared = {
+    let (prepared, immediate_snapshot) = {
         let mut broker = broker.lock().await;
-        broker
+        let prepared = broker
             .prepare_refresh(&language, vec![document])
-            .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-preparation-failed"))?
+            .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-preparation-failed"))?;
+        let immediate_snapshot = prepared.is_none().then(|| broker.snapshot());
+        (prepared, immediate_snapshot)
     };
-    if let Some(prepared) = prepared {
+    let snapshot = if let Some(prepared) = prepared {
         let completed = prepared.collect_diagnostics(diagnostics_quiet_window).await;
-        broker
+        match broker
             .lock()
             .await
-            .finish_refresh(completed)
-            .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-refresh-failed"))?;
-    }
-    let upstream = broker
-        .lock()
-        .await
-        .snapshot()
+            .finish_refresh_snapshot(completed)
+            .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-refresh-failed"))?
+        {
+            RefreshCommitOutcome::Applied(snapshot) => snapshot,
+            RefreshCommitOutcome::Superseded => {
+                return Err(LspRuntimeFailure::new(
+                    "diagnostic-broker-refresh-superseded",
+                ));
+            }
+        }
+    } else {
+        immediate_snapshot
+            .ok_or_else(|| LspRuntimeFailure::new("diagnostic-broker-snapshot-unavailable"))?
+    };
+    let upstream_authority_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.upstream-diagnostic-authority.v1",
+        &snapshot.settings,
+        &snapshot.settings_unavailable,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-broker-authority-identity-unavailable"))?;
+    let upstream = snapshot
         .diagnostics
         .into_iter()
         .filter(|diagnostic| diagnostic.file == relative_path)
         .map(|diagnostic| broker_diagnostic(request.document_uri.as_str(), diagnostic))
         .collect();
     let managed = managed.snapshot(request).await?;
+    let authority_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.lsp.merged-diagnostic-authority.v1",
+        upstream_authority_digest,
+        &managed.authority_digest,
+    ))
+    .map_err(|_| LspRuntimeFailure::new("diagnostic-authority-identity-unavailable"))?;
     Ok(GenerationDiagnostics {
         generation: managed.generation,
+        authority_digest,
         upstream,
         tracedecay: managed.diagnostics,
     })

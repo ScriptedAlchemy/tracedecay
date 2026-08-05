@@ -1616,6 +1616,29 @@ impl CodeIndexSchedulerRegistryV1 {
         .await
     }
 
+    /// Admit an already-decoded current generation for one exact mounted root
+    /// and authorized scope. This never mounts, decodes, or reconciles.
+    pub(in crate::daemon) async fn latest_complete_ready_decoded_for_root_scope(
+        &self,
+        project_root: &Path,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> Option<LatestCompleteCodeIndexV1> {
+        let project_root = project_root.canonicalize().ok()?;
+        {
+            let mounted = self.mounted.try_lock().ok()?;
+            let worktree = mounted.get(&project_root)?;
+            if worktree.repository_id != scope.repository_id
+                || worktree.worktree_id != scope.worktree_id
+            {
+                return None;
+            }
+        }
+        let latest = self
+            .latest_complete_ready_with(&project_root, GenerationDecodeAdmissionV1::AlreadyDecoded)
+            .await?;
+        Self::latest_matches_scope(&latest, scope).then_some(latest)
+    }
+
     async fn latest_complete_ready_for_scope_with(
         &self,
         scope: &tracedecay_application::ResolvedScope,

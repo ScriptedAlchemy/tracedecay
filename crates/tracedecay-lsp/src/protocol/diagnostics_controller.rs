@@ -807,6 +807,7 @@ pub(super) fn workspace_result_identity(
     code_generation_id: &str,
     snapshot_digest: &ManifestDigest,
     document: &WorkspaceDocumentDiagnostics,
+    diagnostic_digest: &ManifestDigest,
 ) -> Result<WorkspaceDiagnosticResultIdentity, RpcFailure> {
     let root_scope_digest = root.scope_digest().cloned().ok_or_else(|| {
         workspace_diagnostic_failure("workspace-root-scope-unavailable", Vec::new())
@@ -824,6 +825,7 @@ pub(super) fn workspace_result_identity(
         snapshot_digest,
         &document.uri,
         &document.content_digest,
+        diagnostic_digest,
         document.diagnostics.generation,
         document.version,
     ))
@@ -846,6 +848,7 @@ pub(super) fn workspace_result_identity(
         code_generation_id: code_generation_id.to_owned(),
         snapshot_digest: snapshot_digest.clone(),
         content_digest: document.content_digest.clone(),
+        diagnostic_digest: diagnostic_digest.clone(),
         diagnostic_generation: document.diagnostics.generation,
         version: document.version,
     })

@@ -326,3 +326,24 @@ fn refresh_rejects_root_batch_queue_saturation_before_starting_analyzers() {
     assert!(error.to_string().contains("analyzer root queue saturated"));
     assert_eq!(broker.snapshot().engines[0].state, EngineState::Unavailable);
 }
+
+#[test]
+fn superseded_refresh_cannot_supply_a_snapshot_to_its_caller() {
+    let mut broker = DiagnosticBroker::new_for_test("/project", Vec::new());
+    broker.refresh_epochs.insert("rust".to_owned(), 2);
+    let completed = |epoch| CompletedRefresh {
+        language: "rust".to_owned(),
+        command: "rust-analyzer".to_owned(),
+        epoch,
+        result: Ok(Vec::new()),
+    };
+
+    assert!(matches!(
+        broker.finish_refresh_snapshot(completed(1)),
+        Ok(RefreshCommitOutcome::Superseded)
+    ));
+    assert!(matches!(
+        broker.finish_refresh_snapshot(completed(3)),
+        Ok(RefreshCommitOutcome::Superseded)
+    ));
+}

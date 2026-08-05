@@ -16,6 +16,7 @@ pub(super) struct WorkspaceDiagnosticResultIdentity {
     pub(super) code_generation_id: String,
     pub(super) snapshot_digest: ManifestDigest,
     pub(super) content_digest: tracedecay_domain::ContentDigest,
+    pub(super) diagnostic_digest: ManifestDigest,
     pub(super) diagnostic_generation: u64,
     pub(super) version: Option<i64>,
 }
@@ -44,7 +45,8 @@ where
         validate_workspace_progress_tokens(params)?;
         let previous = parse_workspace_previous_results(params)?;
 
-        let roots = self.lifecycle.gateway.workspace().roots().to_vec();
+        let workspace = self.lifecycle.gateway.workspace().clone();
+        let roots = workspace.roots().to_vec();
         let mut started = 0_usize;
         let mut pending = false;
         let mut failures = Vec::new();
@@ -57,14 +59,14 @@ where
             {
                 continue;
             }
-            let overlays = self.lifecycle.overlays.snapshots_for_root(root);
+            let overlays = self.lifecycle.overlays.snapshots_for_root(&workspace, root);
             match self
                 .diagnostics
                 .provider
-                .workspace_diagnostics(root, &overlays)
+                .workspace_diagnostics(&workspace, root, &overlays)
             {
                 WorkspaceDiagnosticSnapshotOutcome::Ready { diagnostics, .. } => {
-                    if valid_workspace_generation(root, &diagnostics) {
+                    if valid_workspace_generation(&workspace, root, &diagnostics) {
                         self.diagnostics
                             .workspace_snapshots
                             .insert(root.uri().to_owned(), diagnostics);
@@ -90,7 +92,7 @@ where
                     match self
                         .diagnostics
                         .provider
-                        .request_workspace_refresh(root, &overlays)
+                        .request_workspace_refresh(&workspace, root, &overlays)
                     {
                         DiagnosticRefreshAdmission::Started(_)
                         | DiagnosticRefreshAdmission::AlreadyRunning(_) => {
@@ -184,8 +186,45 @@ where
                     failures,
                 ));
             }
-            let identity =
-                workspace_result_identity(root, &code_generation_id, &snapshot_digest, &document)?;
+            let serialization =
+                DiagnosticSerializationCapabilities::pull(self.lifecycle.gateway.capabilities());
+            let merged = self.merge_document_diagnostics(
+                &document.uri,
+                document.diagnostics.upstream.clone(),
+                document.diagnostics.tracedecay.clone(),
+            );
+            let diagnostic_identity = merged
+                .items
+                .iter()
+                .cloned()
+                .map(|diagnostic| {
+                    diagnostic_value(
+                        diagnostic,
+                        DiagnosticSerializationCapabilities::full_identity(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let diagnostic_digest = tracedecay_domain::canonical_sha256(&(
+                "tracedecay.lsp.workspace-diagnostic-contents.v1",
+                &document.diagnostics.authority_digest,
+                diagnostic_identity,
+                merged.omitted_count,
+                serialization.identity(),
+                self.diagnostics.cursor_native_mode,
+            ))
+            .map_err(|_| {
+                workspace_diagnostic_failure(
+                    "workspace-diagnostic-content-identity-unavailable",
+                    failures.clone(),
+                )
+            })?;
+            let identity = workspace_result_identity(
+                root,
+                &code_generation_id,
+                &snapshot_digest,
+                &document,
+                &diagnostic_digest,
+            )?;
             let unchanged = previous
                 .get(&document.uri)
                 .is_some_and(|previous| previous == &identity.result_id)
@@ -199,11 +238,6 @@ where
                     result_id: identity.result_id.clone(),
                 }
             } else {
-                let merged = self.merge_document_diagnostics(
-                    &document.uri,
-                    document.diagnostics.upstream,
-                    document.diagnostics.tracedecay,
-                );
                 DocumentDiagnosticReport::full(
                     identity.result_id.clone(),
                     self.visible_diagnostics(
@@ -215,10 +249,7 @@ where
                     ),
                 )
             };
-            let mut item = document_diagnostic_report_value(
-                report,
-                DiagnosticSerializationCapabilities::pull(self.lifecycle.gateway.capabilities()),
-            );
+            let mut item = document_diagnostic_report_value(report, serialization);
             item["uri"] = Value::String(document.uri.clone());
             item["version"] = document.version.map_or(Value::Null, Value::from);
             items.push(item);
@@ -254,14 +285,16 @@ where
 }
 
 fn valid_workspace_generation(
+    workspace: &AuthorizedLspWorkspace,
     root: &AdmittedRoot,
     diagnostics: &WorkspaceGenerationDiagnostics,
 ) -> bool {
     root.scope_digest().is_some()
         && !diagnostics.code_generation_id.is_empty()
         && diagnostics.code_generation_id.len() <= 256
-        && diagnostics
-            .documents
-            .iter()
-            .all(|document| root.contains_document(&document.uri))
+        && diagnostics.documents.iter().all(|document| {
+            workspace
+                .resolve_document(&document.uri)
+                .is_ok_and(|owner| owner == root)
+        })
 }

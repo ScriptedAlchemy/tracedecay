@@ -54,6 +54,11 @@ impl DiagnosticSnapshotPort for SnapshotProvider {
         DiagnosticSnapshotOutcome::Ready {
             diagnostics: GenerationDiagnostics {
                 generation,
+                authority_digest: tracedecay_domain::ManifestDigest::new(format!(
+                    "sha256:{}",
+                    "a".repeat(64)
+                ))
+                .expect("valid digest"),
                 upstream: Vec::new(),
                 tracedecay: vec![GatewayDiagnostic {
                     uri: uri.to_owned(),
