@@ -5,10 +5,9 @@ use std::sync::Arc;
 use axum::response::Response;
 use tracedecay_api::WorkflowOperation;
 use tracedecay_application::{
-    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionActivateRequest,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, WorkflowDefinitionDiffRequest,
+    WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
 };
 use tracedecay_tool_catalog::RouteExposureV1;
 
@@ -160,36 +159,6 @@ async fn invoke_operation(
             )
             .await
         }
-        WorkflowOperation::ActivateDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionActivateRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_application::WorkflowActivation>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::ActivateDefinition(decoded),
-                activate_definition_outcome,
-            )
-            .await
-        }
-        WorkflowOperation::RetireDefinition => {
-            let Ok(decoded) = serde_json::from_value::<WorkflowDefinitionRetireRequest>(body)
-            else {
-                return tracedecay_api::workflow_invalid_request_response(request_id);
-            };
-            invoke::<tracedecay_application::WorkflowRetirement>(
-                executor,
-                operation,
-                request_id,
-                controls,
-                WorkflowApplicationInvocation::RetireDefinition(decoded),
-                retire_definition_outcome,
-            )
-            .await
-        }
         WorkflowOperation::HandoffIssue => {
             let Ok(decoded) = serde_json::from_value::<TaskHandoffIssueRequest>(body) else {
                 return tracedecay_api::workflow_invalid_request_response(request_id);
@@ -298,16 +267,6 @@ workflow_selector!(
     diff_definition_outcome,
     DiffDefinition,
     tracedecay_application::WorkflowDefinitionDiff
-);
-workflow_selector!(
-    activate_definition_outcome,
-    ActivateDefinition,
-    tracedecay_application::WorkflowActivation
-);
-workflow_selector!(
-    retire_definition_outcome,
-    RetireDefinition,
-    tracedecay_application::WorkflowRetirement
 );
 workflow_selector!(
     handoff_issue_outcome,

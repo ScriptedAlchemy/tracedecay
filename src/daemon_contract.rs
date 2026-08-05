@@ -34,11 +34,10 @@ use tracedecay_application::{
     WorkAttemptPublishProgressRequestV1, WorkAttemptRecoverRequestV1,
     WorkAttemptRenewLeaseRequestV1, WorkAttemptResponseV1, WorkAttemptStartRequestV1,
     WorkAttemptTerminalizeRequestV1, WorkProjectionDeltaRequestV1, WorkProjectionSnapshotRequestV1,
-    WorkflowActivation, WorkflowDefinitionActivateRequest, WorkflowDefinitionDiff,
-    WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest, WorkflowDefinitionHistoryRequest,
-    WorkflowDefinitionListRequest, WorkflowDefinitionRegisterRequest,
-    WorkflowDefinitionRetireRequest, WorkflowDefinitionValidateRequest,
-    WorkflowDefinitionValidation, WorkflowRetirement,
+    WorkflowDefinitionDiff, WorkflowDefinitionDiffRequest, WorkflowDefinitionGetRequest,
+    WorkflowDefinitionHistoryRequest, WorkflowDefinitionListRequest,
+    WorkflowDefinitionRegisterRequest, WorkflowDefinitionValidateRequest,
+    WorkflowDefinitionValidation,
 };
 use tracedecay_domain::{
     ActorId, GitIndexPreviewV1, GitIndexTransactionReceiptV1, ManifestDigest, RetrievalAnchorId,
@@ -307,8 +306,6 @@ pub(crate) enum WorkflowApplicationInvocation {
     ListDefinitions(WorkflowDefinitionListRequest),
     DefinitionHistory(WorkflowDefinitionHistoryRequest),
     DiffDefinition(WorkflowDefinitionDiffRequest),
-    ActivateDefinition(WorkflowDefinitionActivateRequest),
-    RetireDefinition(WorkflowDefinitionRetireRequest),
     HandoffIssue(TaskHandoffIssueRequest),
     HandoffRedeem(TaskHandoffRedeemRequest),
 }
@@ -322,8 +319,6 @@ impl WorkflowApplicationInvocation {
             Self::ListDefinitions(_) => "list_definitions",
             Self::DefinitionHistory(_) => "definition_history",
             Self::DiffDefinition(_) => "diff_definition",
-            Self::ActivateDefinition(_) => "activate_definition",
-            Self::RetireDefinition(_) => "retire_definition",
             Self::HandoffIssue(_) => "handoff_issue",
             Self::HandoffRedeem(_) => "handoff_redeem",
         }
@@ -2387,8 +2382,6 @@ pub(crate) enum WorkflowApplicationOutcome {
     ListDefinitions(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
     DefinitionHistory(ApplicationOutcome<Vec<tracedecay_domain::WorkflowDefinition>>),
     DiffDefinition(ApplicationOutcome<WorkflowDefinitionDiff>),
-    ActivateDefinition(ApplicationOutcome<WorkflowActivation>),
-    RetireDefinition(ApplicationOutcome<WorkflowRetirement>),
     HandoffIssue(ApplicationOutcome<TaskHandoffGrant>),
     HandoffRedeem(ApplicationOutcome<TaskHandoffRedeemed>),
 }

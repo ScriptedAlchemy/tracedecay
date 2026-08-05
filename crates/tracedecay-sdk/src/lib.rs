@@ -32,13 +32,12 @@ pub mod work {
     pub use tracedecay_domain::{WorkProjection, WorkProjectionDeltaV1, WorkProjectionSnapshotV1};
 }
 
-/// Workflow definition, activation, placement, and task-handoff
-/// commands, plus their executable capability inventory.
+/// Workflow definition storage and task-handoff commands, plus their
+/// executable capability inventory.
 pub mod workflow {
     pub use tracedecay_application::{
-        TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed, WorkflowActivation,
-        WorkflowDefinitionActivateRequest, WorkflowDefinitionRegisterRequest,
-        WorkflowPlacementRequest,
+        TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffRedeemed,
+        WorkflowDefinitionRegisterRequest,
         workflow_executable_binding_registry as executable_binding_registry,
     };
     pub use tracedecay_domain::{WorkflowDefinition, WorkflowStep};
