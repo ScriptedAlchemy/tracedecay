@@ -276,18 +276,15 @@ async fn owner_archive_requires_affirmative_eligibility_for_private_details() {
     let owner = owner();
     let owner_key = owner_key(&owner).unwrap();
 
-    for (ordinal, payload_access) in [
-        Some("quarantined"),
-        Some("retention_expired"),
-        None,
-        Some("eligible"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let fact_id = format!("archive.denied.fact.{ordinal}");
-        let assertion_id = format!("archive.denied.assertion.{ordinal}");
-        let event_id = format!("archive.denied.event.{ordinal}");
+    for (case, payload_access) in [
+        ("quarantined", Some("quarantined")),
+        ("retention-expired", Some("retention_expired")),
+        ("missing-current", None),
+        ("eligible", Some("eligible")),
+    ] {
+        let fact_id = format!("archive.privacy.fact.{case}");
+        let assertion_id = format!("archive.privacy.assertion.{case}");
+        let event_id = format!("archive.privacy.event.{case}");
         conn.execute(
             "INSERT INTO memory_v2_facts(
                 fact_id, owner_kind, project_id, owner_json, identity_json, created_at
@@ -395,60 +392,77 @@ async fn owner_archive_requires_affirmative_eligibility_for_private_details() {
     let archive = export_memory_v2_owner_archive(&conn, MemoryV2ArchiveDatabase::Main, &owner)
         .await
         .unwrap();
-    assert_eq!(
-        archive
+    let eligible_fact_id =
+        MemoryV2ArchiveScalarV1::Text("archive.privacy.fact.eligible".to_owned());
+    for family in [
+        MemoryV2ArchiveFamilyV1::AssertionPayload,
+        MemoryV2ArchiveFamilyV1::AssertionVector,
+    ] {
+        let private_records = archive
             .records()
             .iter()
-            .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::AssertionPayload)
-            .count(),
-        1,
-        "only an affirmatively eligible payload may leave the owner store"
-    );
-    assert_eq!(
-        archive
-            .records()
-            .iter()
-            .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::AssertionVector)
-            .count(),
-        1,
-        "only an affirmatively eligible vector may leave the owner store"
-    );
+            .filter(|record| record.family() == family)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            private_records.len(),
+            1,
+            "only an affirmatively eligible {family:?} may leave the owner store"
+        );
+        assert_eq!(
+            private_records[0].key().get("fact_id"),
+            Some(&eligible_fact_id),
+            "the exported {family:?} must belong to the affirmatively eligible fact"
+        );
+    }
     let feedback_records = archive
         .records()
         .iter()
         .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::FeedbackHistory)
         .collect::<Vec<_>>();
     assert_eq!(feedback_records.len(), 4);
-    assert_eq!(
-        feedback_records
-            .iter()
-            .filter(|record| {
-                record.fields().get("source")
-                    == Some(&MemoryV2ArchiveScalarV1::Text("private source".to_owned()))
-                    && record.fields().get("note")
-                        == Some(&MemoryV2ArchiveScalarV1::Text("private note".to_owned()))
-                    && record.fields().get("details_availability")
-                        == Some(&MemoryV2ArchiveScalarV1::Text("available".to_owned()))
-            })
-            .count(),
-        1,
-        "only affirmatively eligible feedback may retain private details"
-    );
-    for record in feedback_records.into_iter().filter(|record| {
-        record.fields().get("details_availability")
-            != Some(&MemoryV2ArchiveScalarV1::Text("available".to_owned()))
-    }) {
-        assert_eq!(
-            record.fields().get("source"),
-            Some(&MemoryV2ArchiveScalarV1::Null)
-        );
-        assert_eq!(
-            record.fields().get("note"),
-            Some(&MemoryV2ArchiveScalarV1::Null)
-        );
-        assert_eq!(
-            record.fields().get("details_availability"),
-            Some(&MemoryV2ArchiveScalarV1::Text("legacy_redacted".to_owned()))
-        );
+    let mut redacted_records = 0;
+    for record in feedback_records {
+        let fact_id = match record.key().get("fact_id") {
+            Some(MemoryV2ArchiveScalarV1::Text(fact_id)) => fact_id.as_str(),
+            value => panic!("feedback record has invalid fact identity: {value:?}"),
+        };
+        if fact_id == "archive.privacy.fact.eligible" {
+            assert_eq!(
+                record.fields().get("source"),
+                Some(&MemoryV2ArchiveScalarV1::Text("private source".to_owned()))
+            );
+            assert_eq!(
+                record.fields().get("note"),
+                Some(&MemoryV2ArchiveScalarV1::Text("private note".to_owned()))
+            );
+            assert_eq!(
+                record.fields().get("details_availability"),
+                Some(&MemoryV2ArchiveScalarV1::Text("available".to_owned()))
+            );
+        } else {
+            assert!(
+                matches!(
+                    fact_id,
+                    "archive.privacy.fact.quarantined"
+                        | "archive.privacy.fact.retention-expired"
+                        | "archive.privacy.fact.missing-current"
+                ),
+                "archive returned an unexpected feedback fact: {fact_id}"
+            );
+            redacted_records += 1;
+            assert_eq!(
+                record.fields().get("source"),
+                Some(&MemoryV2ArchiveScalarV1::Null)
+            );
+            assert_eq!(
+                record.fields().get("note"),
+                Some(&MemoryV2ArchiveScalarV1::Null)
+            );
+            assert_eq!(
+                record.fields().get("details_availability"),
+                Some(&MemoryV2ArchiveScalarV1::Text("legacy_redacted".to_owned()))
+            );
+        }
     }
+    assert_eq!(redacted_records, 3);
 }
