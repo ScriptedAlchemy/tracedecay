@@ -2266,6 +2266,7 @@ mod cadence;
 pub(in crate::daemon) mod callable_page_binding;
 mod classification;
 pub(crate) mod identity;
+pub(in crate::daemon) mod page_admission;
 pub(in crate::daemon) mod queries;
 pub(in crate::daemon) mod query_runtime;
 mod registry;
