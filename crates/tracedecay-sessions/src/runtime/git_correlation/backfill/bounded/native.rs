@@ -200,11 +200,7 @@ pub(super) fn produce(
             }
             match checkout {
                 Some(checkout) => {
-                    let to =
-                        classify_checkout_target(&repository, &checkout.to, &mut consulted_refs)?;
-                    if to != state {
-                        return Err(BoundedBackfillInterruption::SourceUnavailable);
-                    }
+                    validate_checkout_to(&repository, &checkout.to, &state, &mut consulted_refs)?;
                     emit_segment(
                         &repository,
                         &mut writer,
@@ -381,10 +377,7 @@ fn cross_entry_backwards(
     state_oid: &mut gix::ObjectId,
 ) -> Result<(), BoundedBackfillInterruption> {
     if let Some(checkout) = checkout {
-        let to = classify_checkout_target(repository, &checkout.to, consulted_refs)?;
-        if to != *state {
-            return Err(BoundedBackfillInterruption::SourceUnavailable);
-        }
+        validate_checkout_to(repository, &checkout.to, state, consulted_refs)?;
         *state = classify_checkout_target(repository, &checkout.from, consulted_refs)?;
     }
     *state_oid = entry.previous_oid;
@@ -528,6 +521,47 @@ fn classify_checkout_target(
     Ok(HeadState::LocalBranch(label.clone()))
 }
 
+fn validate_checkout_to(
+    repository: &gix::Repository,
+    target: &CheckoutTarget,
+    established: &HeadState,
+    consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
+) -> Result<(), BoundedBackfillInterruption> {
+    seal_checkout_target_refs(repository, target, consulted_refs)?;
+    match (established, target) {
+        (HeadState::LocalBranch(expected), CheckoutTarget(actual)) if expected == actual => Ok(()),
+        (HeadState::Detached, _) => Ok(()),
+        _ => Err(BoundedBackfillInterruption::SourceUnavailable),
+    }
+}
+
+fn seal_checkout_target_refs(
+    repository: &gix::Repository,
+    target: &CheckoutTarget,
+    consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
+) -> Result<(), BoundedBackfillInterruption> {
+    let label = &target.0;
+    if label.starts_with("refs/") {
+        if gix::refs::FullName::try_from(label.as_str()).is_ok() {
+            consult_exact_ref(repository, consulted_refs, label)?;
+        }
+        return Ok(());
+    }
+    for candidate in [
+        format!("refs/heads/{label}"),
+        format!("refs/tags/{label}"),
+        format!("refs/remotes/{label}"),
+    ] {
+        if gix::refs::FullName::try_from(candidate.as_str()).is_ok() {
+            consult_exact_ref(repository, consulted_refs, &candidate)?;
+        }
+    }
+    if gix::refs::FullName::try_from(label.as_str()).is_ok() {
+        consult_exact_ref(repository, consulted_refs, label)?;
+    }
+    Ok(())
+}
+
 fn consult_exact_ref(
     repository: &gix::Repository,
     consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
@@ -546,11 +580,16 @@ fn exact_ref_tip(
     repository: &gix::Repository,
     reference: &str,
 ) -> Result<Option<gix::ObjectId>, BoundedBackfillInterruption> {
+    let full_name = gix::refs::FullName::try_from(reference)
+        .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let reference = repository
-        .try_find_reference(reference)
+        .try_find_reference(&full_name)
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     reference
         .map(|reference| {
+            if reference.name() != full_name.as_ref() {
+                return Err(BoundedBackfillInterruption::SourceUnavailable);
+            }
             reference
                 .try_id()
                 .map(gix::Id::detach)
@@ -787,6 +826,16 @@ mod tests {
         let fixture = repository_fixture();
         git(fixture.path(), &["tag", "release"]);
         git(fixture.path(), &["checkout", "release"]);
+
+        assert_checkout_label_is_detached(&fixture, "release");
+    }
+
+    #[test]
+    fn deleted_tag_checkout_uses_established_detached_head_state() {
+        let fixture = repository_fixture();
+        git(fixture.path(), &["tag", "release"]);
+        git(fixture.path(), &["checkout", "release"]);
+        git(fixture.path(), &["tag", "-d", "release"]);
 
         assert_checkout_label_is_detached(&fixture, "release");
     }
