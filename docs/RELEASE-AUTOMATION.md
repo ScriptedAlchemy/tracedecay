@@ -65,10 +65,13 @@ fixture. They do not substitute for the installed host lifecycle journey.
 
 No SDK is currently a release artifact. The Rust SDK and every other Cargo
 workspace package are private (`publish = false`), and the binary release
-workflow packages no SDK clients. Do not dispatch the existing npm workflow
-until its unprivileged build derives catalog-to-client parity from the mounted
-HTTP operation authority and fails before the protected OIDC job whenever a
-concrete schema, generated client, or route is missing.
+workflow packages no SDK clients. The npm workflow keeps build authority
+separate from its protected OIDC job. Its unprivileged prerequisite regenerates
+the client exclusively from the canonical SDK executable-binding registry and
+verifies codegen parity before running typecheck, tests, a package dry-run, and
+real-daemon conformance. Missing schemas or mounted routes remain explicit
+unavailable entries in that registry; they are not compared against a separate
+manually maintained HTTP operation set.
 
 ## Normal Release Flow
 
