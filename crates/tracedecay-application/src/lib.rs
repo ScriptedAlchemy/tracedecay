@@ -252,7 +252,10 @@ pub use tracedecay_domain::framed_log::{
     read_bounded, replace_via_rename, sync_directory, sync_parent_directory, tighten_existing_file,
     truncate_file, validate_regular_or_missing, with_owned_temp_publish,
 };
-pub use wire::{ApplicationOwnerKind, ApplicationWireOperation};
+pub use wire::{
+    ApplicationOwnerKind, ApplicationWireOperation, ApplicationWireSchemaRegistryV1,
+    ApplicationWireSchemaV1,
+};
 pub use work::*;
 pub use work_catalog::*;
 pub use work_dispatch::*;
