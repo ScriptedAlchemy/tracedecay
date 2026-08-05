@@ -21,6 +21,7 @@ use super::*;
 struct FakeStore {
     calls: Mutex<Vec<LcmAuthorityOperation>>,
     status: Mutex<Option<LcmStatus>>,
+    compact_requests: Mutex<Vec<LcmCompressionRequest>>,
 }
 
 impl FakeStore {
@@ -47,16 +48,36 @@ impl LcmDaemonStore for FakeStore {
         })
     }
 
-    fn preflight(&self, _request: LcmPreflightRequest) -> StoreFuture<'_, LcmPreflightResponse> {
+    fn compact(&self, request: LcmCompressionRequest) -> StoreFuture<'_, LcmCompressionResponse> {
         if let Ok(mut calls) = self.calls.lock() {
             calls.push(LcmAuthorityOperation::Compact);
         }
+        if let Ok(mut requests) = self.compact_requests.lock() {
+            requests.push(request);
+        }
         Box::pin(async {
-            Ok(LcmPreflightResponse {
+            Ok(LcmCompressionResponse {
                 status: "ok".to_owned(),
-                should_compress: false,
-                reason: "below_threshold".to_owned(),
+                reason: "compressed".to_owned(),
+                summary_nodes_created: 1,
+                summary_nodes: Vec::new(),
                 replay_messages: Vec::new(),
+                replay_token_estimate: 0,
+                replay_over_budget: false,
+                compression_attempts: 1,
+                fallback_used: false,
+                context_recovery_hint: None,
+                retry_status: None,
+                frontier: tracedecay_sessions::runtime::lcm::LcmLifecycleState {
+                    provider: "claude".to_owned(),
+                    conversation_id: "session.lcm-test".to_owned(),
+                    current_session_id: "session.lcm-test".to_owned(),
+                    current_frontier_store_id: None,
+                    last_finalized_session_id: None,
+                    last_finalized_frontier_store_id: None,
+                    maintenance_debt: Vec::new(),
+                },
+                summary_request: None,
             })
         })
     }
@@ -75,6 +96,26 @@ impl LcmDaemonStore for FakeStore {
         }
         Box::pin(async { Ok(serde_json::json!({"status": "healthy", "findings": []})) })
     }
+}
+
+struct FakeCanonicalSource {
+    source: CanonicalCompactionSource,
+}
+
+impl LcmCanonicalCompactionSourcePort for FakeCanonicalSource {
+    fn hydrate(&self, _provider: &str, _session_id: &str) -> CanonicalSourceFuture<'_> {
+        let source = self.source.clone();
+        Box::pin(async move { CanonicalCompactionSourceOutcome::Ready(source) })
+    }
+}
+
+async fn table_row_count(database: &RegisteredGlobalDb, table: &'static str) -> i64 {
+    let snapshot = database.read_snapshot().await.unwrap();
+    let mut rows = snapshot
+        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+        .await
+        .unwrap();
+    rows.next().await.unwrap().unwrap().get(0).unwrap()
 }
 
 fn request_context(
@@ -435,7 +476,7 @@ async fn expired_deadline_stops_before_store_effect() {
 }
 
 #[tokio::test]
-async fn pressure_only_event_ingests_then_reports_missing_native_payload() {
+async fn pressure_only_event_is_read_only_and_reports_missing_native_payload() {
     let store = Arc::new(FakeStore::default());
     let authority = DaemonLcmAuthority::with_store(store.clone());
     let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
@@ -465,9 +506,108 @@ async fn pressure_only_event_ingests_then_reports_missing_native_payload() {
             reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
         }
     );
-    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
+    assert!(store.calls().is_empty());
     assert!(response.payload.is_none());
+    assert!(response.receipt.committed_state.is_none());
+}
+
+#[tokio::test]
+async fn claude_post_compact_hydrates_then_publishes_once_atomically() {
+    let store = Arc::new(FakeStore::default());
+    let source = CanonicalCompactionSource {
+        messages: vec![serde_json::json!({
+            "id": "message.claude.1",
+            "role": "user",
+            "content": "redacted canonical content"
+        })],
+        anchors: vec![RetrievalAnchorId::new("anchor.claude.1").unwrap()],
+        snapshot_state: canonical_sha256(&"snapshot-and-relations").unwrap(),
+    };
+    let authority = DaemonLcmAuthority::with_store(store.clone())
+        .with_canonical_source(Arc::new(FakeCanonicalSource { source }));
+    let (context, binding, cancellation) = request_context_for_target(
+        LcmAuthorityOperation::Compact,
+        true,
+        UtcMicros(i64::MAX - 1),
+        target("claude", Some("session.lcm-test")),
+    );
+    let command = LcmCompactionCommand {
+        preflight: preflight("claude"),
+        evidence: LcmCompressionEvidence::ClaudeNativeSummary {
+            protocol: LcmHostProtocol::ClaudeCodePostCompact {
+                protocol_revision: "claude.postcompact.v1".to_owned(),
+                event_digest: canonical_sha256(&"claude-post-compact-event").unwrap(),
+            },
+            summary_text: "native compact summary".to_owned(),
+        },
+    };
+
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("claude", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(command),
+        })
+        .await;
+
+    assert_eq!(response.outcome, LcmAuthorityOutcome::Ready);
+    assert_eq!(store.calls(), vec![LcmAuthorityOperation::Compact]);
+    let requests = store.compact_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 1);
+    assert!(matches!(
+        requests[0].summarizer,
+        LcmSummarizerMode::Provided { ref summary_text, ref route }
+            if summary_text == "native compact summary"
+                && route.as_deref() == Some("claude_native_postcompact")
+    ));
     assert!(response.receipt.committed_state.is_some());
+    assert!(matches!(
+        response.payload,
+        Some(LcmAuthorityPayload::Compaction(_))
+    ));
+}
+
+#[tokio::test]
+async fn claude_summary_with_unknown_protocol_revision_is_read_only() {
+    let store = Arc::new(FakeStore::default());
+    let authority = DaemonLcmAuthority::with_store(store.clone());
+    let (context, binding, cancellation) = request_context_for_target(
+        LcmAuthorityOperation::Compact,
+        true,
+        UtcMicros(i64::MAX - 1),
+        target("claude", Some("session.lcm-test")),
+    );
+
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("claude", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(LcmCompactionCommand {
+                preflight: preflight("claude"),
+                evidence: LcmCompressionEvidence::ClaudeNativeSummary {
+                    protocol: LcmHostProtocol::ClaudeCodePostCompact {
+                        protocol_revision: "claude.postcompact.unknown".to_owned(),
+                        event_digest: canonical_sha256(&"unknown-revision-event").unwrap(),
+                    },
+                    summary_text: "native summary".to_owned(),
+                },
+            }),
+        })
+        .await;
+
+    assert_eq!(
+        response.outcome,
+        LcmAuthorityOutcome::Unavailable {
+            reason: LcmAuthorityUnavailableReason::HostProtocolUnavailable
+        }
+    );
+    assert!(store.calls().is_empty());
+    assert!(response.receipt.committed_state.is_none());
 }
 
 #[tokio::test]
@@ -565,6 +705,149 @@ async fn registered_authority_restart_reads_committed_hermes_turn() {
 }
 
 #[tokio::test]
+async fn native_compaction_failure_rolls_back_raw_content_and_summary_relations() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+        directory.path(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.profile_database_arc();
+    let transaction = database.begin_write_transaction().await.unwrap();
+    transaction
+        .execute_batch(
+            "CREATE TRIGGER fail_lcm_atomic_summary_publication
+             BEFORE INSERT ON lcm_summary_nodes
+             BEGIN
+               SELECT RAISE(ABORT, 'injected summary publication failure');
+             END;",
+        )
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+
+    let source = CanonicalCompactionSource {
+        messages: vec![
+            serde_json::json!({"id": "message.rollback.1", "role": "user", "content": "first canonical source"}),
+            serde_json::json!({"id": "message.rollback.2", "role": "assistant", "content": "second canonical source"}),
+        ],
+        anchors: vec![
+            RetrievalAnchorId::new("anchor.rollback.1").unwrap(),
+            RetrievalAnchorId::new("anchor.rollback.2").unwrap(),
+        ],
+        snapshot_state: canonical_sha256(&"rollback-snapshot").unwrap(),
+    };
+    let authority = DaemonLcmAuthority::registered(Arc::clone(&database))
+        .with_canonical_source(Arc::new(FakeCanonicalSource { source }));
+    let mut request = preflight("claude");
+    request.current_tokens = Some(10_000);
+    request.threshold_tokens = Some(1);
+    request.max_source_messages = Some(2);
+    let (context, binding, cancellation) = request_context_for_target(
+        LcmAuthorityOperation::Compact,
+        true,
+        UtcMicros(i64::MAX - 1),
+        target("claude", Some("session.lcm-test")),
+    );
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("claude", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(LcmCompactionCommand {
+                preflight: request,
+                evidence: LcmCompressionEvidence::ClaudeNativeSummary {
+                    protocol: LcmHostProtocol::ClaudeCodePostCompact {
+                        protocol_revision: "claude.postcompact.v1".to_owned(),
+                        event_digest: canonical_sha256(&"rollback-event").unwrap(),
+                    },
+                    summary_text: "native summary that must roll back".to_owned(),
+                },
+            }),
+        })
+        .await;
+
+    assert!(matches!(
+        response.outcome,
+        LcmAuthorityOutcome::Failed { .. }
+    ));
+    assert!(response.receipt.committed_state.is_none());
+    for table in [
+        "lcm_raw_messages",
+        "lcm_summary_nodes",
+        "lcm_summary_sources",
+        "lcm_lifecycle_state",
+        "session_summary_nodes",
+        "session_summary_sources",
+    ] {
+        assert_eq!(
+            table_row_count(&database, table).await,
+            0,
+            "{table} exposed partial compaction state"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsupported_pressure_preflight_does_not_create_session_or_raw_messages() {
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
+        directory.path(),
+    )
+    .await
+    .unwrap();
+    let database = runtime.profile_database_arc();
+    let authority = DaemonLcmAuthority::registered(Arc::clone(&database));
+    let mut request = preflight("cursor");
+    request.messages = vec![serde_json::json!({
+        "id": "message.must-not-persist",
+        "role": "user",
+        "content": "unsupported payload"
+    })];
+    let (context, binding, cancellation) = request_context(LcmAuthorityOperation::Compact, true);
+    let response = authority
+        .execute(LcmAuthorityInvocation {
+            context,
+            binding,
+            target: target("cursor", Some("session.lcm-test")),
+            cancellation,
+            request: LcmAuthorityRequest::Compact(LcmCompactionCommand {
+                preflight: request,
+                evidence: LcmCompressionEvidence::PressureOnly {
+                    protocol: LcmHostProtocol::CursorPreCompact {
+                        protocol_revision: "cursor.precompact.v1".to_owned(),
+                        event_digest: canonical_sha256(&"read-only-pressure").unwrap(),
+                    },
+                },
+            }),
+        })
+        .await;
+
+    assert_eq!(
+        response.outcome,
+        LcmAuthorityOutcome::Unavailable {
+            reason: LcmAuthorityUnavailableReason::HostPayloadUnavailable
+        }
+    );
+    assert!(response.receipt.committed_state.is_none());
+    for table in [
+        "lcm_raw_messages",
+        "lcm_summary_nodes",
+        "lcm_summary_sources",
+        "lcm_lifecycle_state",
+        "session_summary_nodes",
+        "session_summary_sources",
+    ] {
+        assert_eq!(
+            table_row_count(&database, table).await,
+            0,
+            "{table} was mutated by unsupported pressure evidence"
+        );
+    }
+}
+
+#[tokio::test]
 async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard() {
     let directory = tempfile::tempdir().unwrap();
     let runtime = tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime::profile(
@@ -581,7 +864,7 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
         SessionRootId::new("root.profile.lcm-test").unwrap(),
     );
     let mounted =
-        mount_registered_lcm_authority(database.clone(), profile_identity, &shard).unwrap();
+        mount_registered_lcm_authority(database.clone(), profile_identity, &shard, None).unwrap();
     let first = mounted
         .execute(LcmAuthorityRequest::Status(LcmStatusQuery {
             provider: "claude".to_owned(),
@@ -611,5 +894,5 @@ async fn mounted_authority_rejects_identity_that_does_not_own_registered_shard()
             BranchId::new("branch.wrong-owner").unwrap(),
         ),
     );
-    assert!(mount_registered_lcm_authority(database, project_identity, &shard).is_none());
+    assert!(mount_registered_lcm_authority(database, project_identity, &shard, None).is_none());
 }

@@ -34,9 +34,9 @@ pub(crate) use v2::protected_session_id_for_native as hook_v2_protected_session_
 pub(crate) use v2::publish_daemon_bindings as publish_hook_v2_bindings;
 
 pub use claude::{
-    claude_session_context_for_event, evaluate_hook_decision, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
-    hook_stop,
+    claude_session_context_for_event, evaluate_hook_decision, hook_claude_post_compact,
+    hook_claude_post_tool_use, hook_claude_session_start, hook_claude_subagent_start,
+    hook_pre_tool_use, hook_prompt_submit, hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,

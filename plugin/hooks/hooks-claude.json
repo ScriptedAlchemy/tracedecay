@@ -54,6 +54,19 @@
         ]
       }
     ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRACEDECAY_BIN__",
+            "args": [
+              "hook-claude-post-compact"
+            ]
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|MultiEdit|Write|NotebookEdit|Grep|Glob|Read|Bash",

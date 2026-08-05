@@ -921,6 +921,7 @@ impl McpServer {
                 accounting_db: self.accounting_db.as_deref(),
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
+                dashboard_lcm_retrieval: self.project_session_retrieval_service.clone(),
                 profile_root: self.profile_root.as_deref(),
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),

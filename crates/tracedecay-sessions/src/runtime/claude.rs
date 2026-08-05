@@ -134,6 +134,20 @@ impl ClaudeSource {
         }
     }
 
+    /// Whether a host-supplied exact transcript path resolves inside Claude's
+    /// canonical projects directory.
+    pub fn owns_transcript_path(&self, path: &Path) -> bool {
+        let Ok(root) = std::fs::canonicalize(&self.projects_dir) else {
+            return false;
+        };
+        std::fs::canonicalize(path).ok().is_some_and(|path| {
+            path.starts_with(root)
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext == std::ffi::OsStr::new("jsonl"))
+        })
+    }
+
     /// Restricts ingestion to transcript rows that cannot be attributed to any
     /// registered project. `session_id` bounds a live hook ingest; `None`
     /// performs a historical sweep.

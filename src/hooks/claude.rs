@@ -234,6 +234,38 @@ pub async fn hook_claude_subagent_start() -> i32 {
     0
 }
 
+/// Claude Code `PostCompact` hook handler.
+///
+/// `compact_summary` is emitted by Claude after native compaction. The daemon
+/// authenticates that exact event, catches the transcript up through the
+/// canonical observation/redaction path, and publishes the summary and its
+/// frozen source relations in one LCM transaction.
+pub async fn hook_claude_post_compact() -> i32 {
+    let event = read_hook_event!();
+    let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
+    let root = event_project_root_with_identity(&parsed).await;
+    let hook_telemetry = record_hook_invoked_parsed(
+        root.as_deref(),
+        HintAgent::Claude,
+        "PostCompact",
+        &event,
+        &parsed,
+    );
+    let args = serde_json::json!({
+        "action": "claude_compact",
+        "provider": "claude",
+        "user_scope": root.is_none(),
+        "event_json": event,
+    });
+    if let Err(error) =
+        super::daemon_hook_action(root.as_deref(), args, Some(&hook_telemetry)).await
+    {
+        eprintln!("[tracedecay] Claude PostCompact daemon call failed: {error}");
+    }
+    println!("{}", serde_json::json!({}));
+    0
+}
+
 /// Builds the compact `SubagentStart` `additionalContext` for a Claude event, or
 /// `None` when root detection fails (no project to steer toward). The status
 /// line is resolved the same registry-aware way as `SessionStart` so a

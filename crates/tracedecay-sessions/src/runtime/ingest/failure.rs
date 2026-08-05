@@ -429,6 +429,7 @@ pub fn classify_claude_observation_failure(
         Ingest::MissingParsedRecord => permanent("observation_parsed_record_missing"),
         Ingest::InvalidFrameState => permanent("observation_frame_state_invalid"),
         Ingest::NonContiguousCoverage => permanent("observation_scanner_coverage_gap"),
+        Ingest::UntrustedTranscriptPath => permanent("observation_transcript_path_untrusted"),
         Ingest::SourceFailures {
             first_reason_code,
             first_retryable,

@@ -258,6 +258,7 @@ fn claude_bundle_hooks_wire_the_expected_lifecycle_events() {
         ("UserPromptSubmit", "hook-prompt-submit", None),
         ("Stop", "hook-stop", None),
         ("SessionStart", "hook-claude-session-start", None),
+        ("PostCompact", "hook-claude-post-compact", None),
         (
             "PostToolUse",
             "hook-claude-post-tool-use",

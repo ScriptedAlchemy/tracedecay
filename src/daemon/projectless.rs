@@ -206,6 +206,29 @@ pub(super) async fn projectless_tools_call_response(
                 Arc::clone(&user_session_db),
             )
             .await;
+        let profile_retrieval_root = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
+            .and_then(|root| root.with_profile_runtime_shard(profile_identity));
+        let profile_retrieval = profile_retrieval_root
+            .clone()
+            .and_then(|root| {
+                crate::mcp::server::DaemonSessionRetrievalService::new_registered(
+                    Arc::clone(&user_session_db),
+                    Arc::clone(&user_session_db),
+                    root,
+                    Some(refresh_wake.clone()),
+                )
+            })
+            .map(|service| {
+                Arc::new(service) as Arc<dyn crate::mcp::tools::SessionRetrievalServicePort>
+            });
+        let profile_lcm = profile_retrieval_root.as_ref().and_then(|root| {
+            crate::daemon::lcm_authority::mount_registered_lcm_authority(
+                Arc::clone(&user_session_db),
+                root.identity().clone(),
+                root.expected_runtime_shard()?,
+                profile_retrieval.clone(),
+            )
+        });
         return match crate::mcp::tools::handle_projectless_hook_runtime(
             arguments,
             &client_identity.profile_root,
@@ -213,7 +236,9 @@ pub(super) async fn projectless_tools_call_response(
             global_db.as_ref(),
             crate::mcp::tools::SessionAuthorities::new(None, Some(&user_session_db))
                 .with_profile_identity(Some(profile_identity))
-                .with_registered_databases(None, Some(&user_session_db)),
+                .with_registered_databases(None, Some(&user_session_db))
+                .with_retrieval_services(None, profile_retrieval.as_deref())
+                .with_lcm_authorities(None, profile_lcm.as_deref()),
             host_admission_broker,
         )
         .await
@@ -348,14 +373,8 @@ async fn projectless_user_lcm_tools_call_response(
         .await;
     let profile_root = crate::mcp::server::DaemonSessionRetrievalRoot::profile()
         .and_then(|root| root.with_profile_runtime_shard(profile_identity));
-    let lcm_authority = profile_root.as_ref().and_then(|root| {
-        crate::daemon::lcm_authority::mount_registered_lcm_authority(
-            Arc::clone(&user_session_db),
-            root.identity().clone(),
-            root.expected_runtime_shard()?,
-        )
-    });
     let retrieval_service = profile_root
+        .clone()
         .and_then(|root| {
             crate::mcp::server::DaemonSessionRetrievalService::new_registered(
                 Arc::clone(&user_session_db),
@@ -367,6 +386,14 @@ async fn projectless_user_lcm_tools_call_response(
         .map(|service| {
             Arc::new(service) as Arc<dyn crate::mcp::tools::SessionRetrievalServicePort>
         });
+    let lcm_authority = profile_root.as_ref().and_then(|root| {
+        crate::daemon::lcm_authority::mount_registered_lcm_authority(
+            Arc::clone(&user_session_db),
+            root.identity().clone(),
+            root.expected_runtime_shard()?,
+            retrieval_service.clone(),
+        )
+    });
     let result = crate::mcp::tools::handle_user_lcm_tool_with_authorities(
         tool_name,
         arguments.clone(),

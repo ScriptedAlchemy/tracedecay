@@ -21,6 +21,42 @@ fn projectless_runtime_rejects_project_database_actions() {
         "ingest_transcript",
         &json!({ "user_scope": true }),
     ));
+    assert!(!projectless_action_allowed(
+        "claude_compact",
+        &json!({ "user_scope": false }),
+    ));
+    assert!(projectless_action_allowed(
+        "claude_compact",
+        &json!({ "user_scope": true }),
+    ));
+}
+
+#[test]
+fn claude_compaction_requires_native_event_before_ingest() {
+    let args = json!({
+        "event_json": serde_json::to_string(&json!({
+            "hook_event_name": "PreCompact",
+            "trigger": "manual",
+            "session_id": "session-1",
+            "transcript_path": "/tmp/session-1.jsonl",
+            "compact_summary": "summary"
+        })).unwrap()
+    });
+
+    assert!(claude_compact_ingest_args(&args, false).is_err());
+}
+
+#[test]
+fn incomplete_claude_transcript_is_typed_unavailable() {
+    let outcome = incomplete_claude_compaction_source(&json!({
+        "messages_upserted": 7,
+        "deferred_sources": 1
+    }));
+
+    assert_eq!(outcome["status"], "unavailable");
+    assert_eq!(outcome["reason"], "canonical_transcript_incomplete");
+    assert_eq!(outcome["messages_upserted"], 7);
+    assert_eq!(outcome["deferred_sources"], 1);
 }
 
 #[test]

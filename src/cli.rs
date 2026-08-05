@@ -349,6 +349,9 @@ pub enum Commands {
     /// Claude Code PostToolUse hook handler for incremental sync (called by Claude Code)
     #[command(name = "hook-claude-post-tool-use", hide = true)]
     HookClaudePostToolUse,
+    /// Claude Code PostCompact hook handler for native compaction summaries.
+    #[command(name = "hook-claude-post-compact", hide = true)]
+    HookClaudePostCompact,
     /// Claude Code SubagentStart hook handler (called by Claude Code, not by users directly)
     #[command(name = "hook-claude-subagent-start", hide = true)]
     HookClaudeSubagentStart,
