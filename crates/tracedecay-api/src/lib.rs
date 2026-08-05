@@ -242,19 +242,22 @@ pub enum HttpAdapterError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
     use super::http::invalid_request_problem;
     use super::{
-        CanonicalInvocationResult, HttpApplicationOperation, HttpApplicationOwnerKind,
-        HttpSseEvent, application_router,
+        CanonicalInvocationResult, HttpApplicationControls, HttpApplicationOperation,
+        HttpApplicationOwnerKind, HttpSseEvent, application_router,
     };
     use tracedecay_application::{
-        ApplicationProblem, ApplicationProblemEnvelope, RequestId, ResultContractRef,
-        RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
+        ApplicationProblem, ApplicationProblemEnvelope, CancellationSignal, Deadline, RequestId,
+        ResultContractRef, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
     };
+    use tracedecay_domain::UtcMicros;
     use tracedecay_tool_catalog::{BindingId, SchemaId};
 
     #[test]
@@ -338,6 +341,73 @@ mod tests {
                 .expect("router response");
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn public_feedback_routes_dispatch_every_http_catalog_operation() {
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let owner_observed = Arc::clone(&observed);
+        let app = application_router(move |request: super::HttpApplicationRequest| {
+            let observed = Arc::clone(&owner_observed);
+            async move {
+                observed
+                    .lock()
+                    .expect("feedback operation observations")
+                    .push(request.operation);
+                CanonicalInvocationResult::<serde_json::Value>::new(
+                    BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                        .expect("binding"),
+                    Err(ApplicationProblemEnvelope::new(
+                        ResultContractRef::new(
+                            SchemaId::new("schema.test.result").expect("schema"),
+                            1,
+                        )
+                        .expect("contract"),
+                        request.request_id,
+                        ApplicationProblem::unavailable(
+                            SafeDiagnostic::new("test.unavailable", "Unavailable")
+                                .expect("diagnostic"),
+                        ),
+                    )),
+                )
+            }
+        });
+        let controls = HttpApplicationControls {
+            deadline: Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            cancellation: CancellationSignal::active("cancel.http.feedback").expect("cancellation"),
+        };
+        let routes = [
+            (
+                "/feedback/diagnostics",
+                HttpApplicationOperation::FeedbackDiagnostics,
+            ),
+            ("/feedback/get", HttpApplicationOperation::FeedbackGet),
+            ("/feedback/expand", HttpApplicationOperation::FeedbackExpand),
+            ("/feedback/list", HttpApplicationOperation::FeedbackList),
+            ("/feedback/impact", HttpApplicationOperation::FeedbackImpact),
+            (
+                "/feedback/advisory_cycle",
+                HttpApplicationOperation::FeedbackAdvisoryCycle,
+            ),
+        ];
+
+        for (index, (path, _)) in routes.iter().enumerate() {
+            let mut request = Request::post(*path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("HTTP request");
+            request.extensions_mut().insert(
+                RequestId::new(format!("request.http.feedback.{index}")).expect("request id"),
+            );
+            request.extensions_mut().insert(controls.clone());
+            let response = app.clone().oneshot(request).await.expect("router response");
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        }
+
+        assert_eq!(
+            *observed.lock().expect("feedback operation observations"),
+            routes.map(|(_, operation)| operation)
+        );
     }
 
     #[test]
