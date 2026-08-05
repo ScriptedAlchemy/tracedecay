@@ -7,7 +7,7 @@
 <p align="center"><strong>Fewer tokens &bull; fewer tool calls &bull; local by default</strong></p>
 
 <p align="center">
-  <a href="https://crates.io/crates/tracedecay"><img src="https://img.shields.io/crates/v/tracedecay.svg" alt="crates.io"></a>
+  <a href="https://github.com/ScriptedAlchemy/tracedecay/releases/latest"><img src="https://img.shields.io/github/v/release/ScriptedAlchemy/tracedecay" alt="GitHub release"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.85+-orange.svg" alt="Rust"></a>
   <img src="https://img.shields.io/badge/macOS-supported-blue.svg" alt="macOS">
@@ -32,22 +32,16 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 ## Install
 
 ```bash
-# macOS
-brew install ScriptedAlchemy/tap/tracedecay
+# Linux and Apple silicon macOS
+curl -fsSL https://github.com/ScriptedAlchemy/tracedecay/releases/latest/download/install.sh | bash
 
-# Windows
-scoop bucket add tracedecay https://github.com/ScriptedAlchemy/scoop-bucket
-scoop install tracedecay
-
-# Any platform with Rust
-cargo install tracedecay
-
-# Smaller language tiers
-cargo install tracedecay --features medium
-cargo install tracedecay --no-default-features
+# Windows: download the x86_64 Windows archive from the latest release,
+# extract tracedecay.exe, and place it on PATH.
 ```
 
-Prebuilt Linux, macOS, and Windows archives are available on the [latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
+The installer defaults to `~/.local/bin`. Set `TRACEDECAY_INSTALL_DIR` to
+choose another directory. Prebuilt archives are available on the
+[latest release](https://github.com/ScriptedAlchemy/tracedecay/releases/latest).
 
 ## Quick Start
 
@@ -218,8 +212,8 @@ Common fixes:
 Building from a source checkout requires Node.js 22+ and npm in addition to
 Rust: `dashboard/app-dist/` is generated output and is not committed, so
 `build.rs` runs `npm ci` and `npm run build` in `dashboard/` before embedding
-the UI. Published crates ship a prebuilt `app-dist`, so `cargo install
-tracedecay` needs no Node toolchain.
+the UI. Release users should install the prebuilt, checksummed GitHub archive;
+workspace Cargo packages are private.
 
 ```bash
 cargo build --release

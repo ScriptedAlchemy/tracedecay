@@ -1,0 +1,84 @@
+name: Release Please
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Open release PR or create GitHub release
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Open release PR or create GitHub release
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          target-branch: master
+
+      - name: Checkout release PR
+        if: steps.release.outputs.prs_created == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      - name: Update release PR lockfile
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          RELEASE_PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          RELEASE_PR_BRANCH=$(
+            jq --exit-status --raw-output \
+              '.headBranchName | select(type == "string" and length > 0)' \
+              <<<"$RELEASE_PR_JSON"
+          )
+          release_version=$(tr -d '[:space:]' < version.txt)
+          if [[ -z "$release_version" ]]; then
+            echo "Release version is empty" >&2
+            exit 1
+          fi
+          cargo update -p tracedecay --precise "$release_version"
+
+          if git diff --quiet -- Cargo.lock; then
+            exit 0
+          fi
+
+          unexpected_paths=$(git diff --name-only -- . ':(exclude)Cargo.lock')
+          if [[ -n "$unexpected_paths" ]]; then
+            echo "Cargo metadata changed unexpected paths:" >&2
+            echo "$unexpected_paths" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore(release): update root lockfile"
+          git push origin "HEAD:$RELEASE_PR_BRANCH"
+
+      - name: Checkout master
+        if: always()
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Check GitHub release version drift
+        if: always()
+        run: scripts/check-release-drift.sh
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}

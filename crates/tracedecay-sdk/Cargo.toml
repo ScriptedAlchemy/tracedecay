@@ -1,6 +1,7 @@
 [package]
 name = "tracedecay-sdk"
 version = "0.1.0"
+publish = false
 edition.workspace = true
 autobins = false
 license = "MIT"

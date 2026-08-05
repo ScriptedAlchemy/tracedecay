@@ -5,6 +5,11 @@ on:
     paths:
       - ".github/workflows/sdk-conformance.yml"
       - ".github/workflows/sdk-publish.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-beta.yml"
+      - ".github/workflows/release-please.yml"
+      - ".github/workflows/release-pr-integrity.yml"
+      - ".github/release-targets.json"
       - "crates/tracedecay-api/**"
       - "crates/tracedecay-application/**"
       - "crates/tracedecay-domain/**"
@@ -14,6 +19,11 @@ on:
       - "scripts/check-sdk-codegen.sh"
       - "scripts/check-sdk-publish-workflow.py"
       - "scripts/test-check-sdk-publish-workflow.py"
+      - "scripts/package-release-archive.py"
+      - "scripts/test-package-release-archive.py"
+      - "scripts/plan-release-recovery.py"
+      - "scripts/test-plan-release-recovery.py"
+      - "tests/release_safety_test.sh"
       - "src/application_surface.rs"
   push:
     branches: [master]
@@ -45,13 +55,20 @@ jobs:
           test "$actual" = "$expected"
           tar xzf "$archive" actionlint
       - name: actionlint
-        run: ./actionlint .github/workflows/sdk-publish.yml .github/workflows/sdk-conformance.yml .github/workflows/release.yml .github/workflows/release-beta.yml .github/workflows/release-plz.yml
+        run: >-
+          ./actionlint
+          .github/workflows/sdk-publish.yml
+          .github/workflows/sdk-conformance.yml
+          .github/workflows/release.yml
+          .github/workflows/release-beta.yml
+          .github/workflows/release-please.yml
+          .github/workflows/release-pr-integrity.yml
   packages:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -69,11 +86,11 @@ jobs:
   production-router:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-      - uses: actions/setup-node@v5
+        uses: taiki-e/install-action@acdba816b0980ba6b63f1109f89a046e15fc301a # nextest
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
