@@ -797,12 +797,12 @@ impl DaemonWorkRuntimeRegistrar {
             || authority.policy_digest() != &grant.digest
         {
             return Err(TraceDecayError::Config {
-                message: "Work runtime authority does not match its registered grant".to_owned(),
+                message: "Workflow authority does not match its registered grant".to_owned(),
             });
         }
         let authority_digest =
             canonical_sha256(&authority).map_err(|error| TraceDecayError::Config {
-                message: format!("Work runtime authority digest failed: {error}"),
+                message: format!("Workflow authority digest failed: {error}"),
             })?;
         self.service
             .project_runtimes

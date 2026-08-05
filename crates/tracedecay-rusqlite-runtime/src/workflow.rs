@@ -21,7 +21,7 @@ mod schema;
 
 pub use schema::{WORKFLOW_SCHEMA_V1, install_workflow_schema};
 
-/// Workflow persistence on the registered Work writer.
+/// Workflow persistence on the registered writer.
 #[derive(Clone)]
 pub struct WorkflowSqliteAuthority {
     storage: ExactSqlHandle,

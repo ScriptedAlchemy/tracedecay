@@ -1091,7 +1091,7 @@ pub(super) async fn register_project_open_production_owners(
         )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Work runtime registration failed: {error}"),
+            message: format!("project-open Workflow authority registration failed: {error}"),
         })?;
     if !invocation
         .work_runtime_registrar()
@@ -1106,8 +1106,9 @@ pub(super) async fn register_project_open_production_owners(
         .await
     {
         return Err(TraceDecayError::Config {
-            message: "project-open Work runtime authority registration did not match the admitted project"
-                .to_owned(),
+            message:
+                "project-open Workflow authority registration did not match the admitted project"
+                    .to_owned(),
         });
     }
     tracing::info!(
