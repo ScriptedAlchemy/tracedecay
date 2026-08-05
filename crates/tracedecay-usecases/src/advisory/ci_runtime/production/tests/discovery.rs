@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -152,254 +152,26 @@ fn context(scope: &FeedbackScopeV1, expires_at: UtcMicros) -> RequestContext {
     .unwrap()
 }
 
-struct CountingDiscoveryClient {
-    calls: Arc<AtomicUsize>,
-}
-
-impl ProductionCiDiscoveryReadPortV1 for CountingDiscoveryClient {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _head_sha: &'a str,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _run_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _check_suite_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-}
-
-struct PendingDiscoveryClient {
-    calls: Arc<AtomicUsize>,
+struct PendingRead {
+    polled: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
 }
 
-impl ProductionCiDiscoveryReadPortV1 for PendingDiscoveryClient {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _head_sha: &'a str,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        struct PendingRead(Arc<AtomicUsize>);
-        impl Future for PendingRead {
-            type Output = GitHubCiTransportOutcomeV1;
+impl Future for PendingRead {
+    type Output = GitHubCiTransportOutcomeV1;
 
-            fn poll(
-                self: std::pin::Pin<&mut Self>,
-                _context: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Self::Output> {
-                std::task::Poll::Pending
-            }
-        }
-        impl Drop for PendingRead {
-            fn drop(&mut self) {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
-        }
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(PendingRead(Arc::clone(&self.dropped)))
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _run_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _check_suite_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        self.polled.fetch_add(1, Ordering::SeqCst);
+        std::task::Poll::Pending
     }
 }
 
-struct PagedDiscoveryClient {
-    workflow_run_pages: Vec<Vec<u8>>,
-    requested_pages: Mutex<Vec<u32>>,
-}
-
-impl ProductionCiDiscoveryReadPortV1 for PagedDiscoveryClient {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _head_sha: &'a str,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.requested_pages.lock().unwrap().push(page);
-        let outcome = usize::try_from(page.saturating_sub(1))
-            .ok()
-            .and_then(|index| self.workflow_run_pages.get(index))
-            .cloned()
-            .map_or(
-                GitHubCiTransportOutcomeV1::Unavailable,
-                GitHubCiTransportOutcomeV1::Response,
-            );
-        Box::pin(async move { outcome })
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _run_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _check_suite_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-}
-
-struct PagedWorkflowJobDiscoveryClient {
-    workflow_job_pages: Vec<Vec<u8>>,
-    requested_pages: Mutex<Vec<u32>>,
-}
-
-impl ProductionCiDiscoveryReadPortV1 for PagedWorkflowJobDiscoveryClient {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _head_sha: &'a str,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _run_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.requested_pages.lock().unwrap().push(page);
-        let outcome = usize::try_from(page.saturating_sub(1))
-            .ok()
-            .and_then(|index| self.workflow_job_pages.get(index))
-            .cloned()
-            .map_or(
-                GitHubCiTransportOutcomeV1::Unavailable,
-                GitHubCiTransportOutcomeV1::Response,
-            );
-        Box::pin(async move { outcome })
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _check_suite_id: u64,
-        _page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable })
-    }
-}
-
-struct ConfiguredDiscoveryClient {
-    record: GitHubCiProviderRecordV1,
-    requests: Mutex<Vec<&'static str>>,
-}
-
-impl ProductionCiDiscoveryReadPortV1 for ConfiguredDiscoveryClient {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _head_sha: &'a str,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.requests.lock().unwrap().push("workflow-runs");
-        let outcome = (page == 1)
-            .then(|| {
-                serde_json::to_vec(&serde_json::json!({
-                    "total_count": 1,
-                    "workflow_runs": [self.record.workflow_run.clone()],
-                }))
-                .ok()
-                .map_or(
-                    GitHubCiTransportOutcomeV1::Unavailable,
-                    GitHubCiTransportOutcomeV1::Response,
-                )
-            })
-            .unwrap_or(GitHubCiTransportOutcomeV1::Unavailable);
-        Box::pin(async move { outcome })
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _run_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.requests.lock().unwrap().push("workflow-jobs");
-        let outcome = (page == 1)
-            .then(|| {
-                serde_json::to_vec(&serde_json::json!({
-                    "total_count": 1,
-                    "jobs": [self.record.workflow_job.clone()],
-                }))
-                .ok()
-                .map_or(
-                    GitHubCiTransportOutcomeV1::Unavailable,
-                    GitHubCiTransportOutcomeV1::Response,
-                )
-            })
-            .unwrap_or(GitHubCiTransportOutcomeV1::Unavailable);
-        Box::pin(async move { outcome })
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        _context: &'a RequestContext,
-        _check_suite_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.requests.lock().unwrap().push("check-runs");
-        let outcome = (page == 1)
-            .then(|| {
-                serde_json::to_vec(&serde_json::json!({
-                    "total_count": 1,
-                    "check_runs": [self.record.check_run.clone()],
-                }))
-                .ok()
-                .map_or(
-                    GitHubCiTransportOutcomeV1::Unavailable,
-                    GitHubCiTransportOutcomeV1::Response,
-                )
-            })
-            .unwrap_or(GitHubCiTransportOutcomeV1::Unavailable);
-        Box::pin(async move { outcome })
+impl Drop for PendingRead {
+    fn drop(&mut self) {
+        self.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -408,24 +180,18 @@ async fn denied_context_performs_zero_ci_discovery_reads() {
     let fixture =
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = CountingDiscoveryClient {
-        calls: Arc::clone(&calls),
-    };
 
     assert_eq!(
-        discover_production_ci_failure_request_with_v1(
+        discover_production_ci_failure_request_v1(
             &context(&scope, UtcMicros(2)),
             &config(&fixture),
             &scope,
-            &client,
             MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
             &CancellationToken::new(),
         )
         .await,
         ProductionCiFailureDiscoveryOutcomeV1::Denied
     );
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -433,29 +199,28 @@ async fn total_ci_discovery_deadline_drops_inflight_read_without_continuation() 
     let fixture =
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
-    let calls = Arc::new(AtomicUsize::new(0));
+    let polled = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
-    let client = PendingDiscoveryClient {
-        calls: Arc::clone(&calls),
+    let read = PendingRead {
+        polled: Arc::clone(&polled),
         dropped: Arc::clone(&dropped),
     };
+    let deadline = UtcMicros(now_micros().0.saturating_add(10_000));
+    let context =
+        context(&scope, UtcMicros(i64::MAX)).with_deadline(Deadline::new(deadline).unwrap());
     let started = Instant::now();
-    let outcome = discover_production_ci_failure_request_with_v1(
-        &context(&scope, UtcMicros(i64::MAX)),
-        &config(&fixture),
-        &scope,
-        &client,
-        MonotonicDeadline::at(started + Duration::from_millis(10)),
-        &CancellationToken::new(),
-    )
-    .await;
+    let outcome =
+        bounded_ci_discovery_read(&context, Box::pin(read), &CancellationToken::new()).await;
 
-    assert_eq!(outcome, ProductionCiFailureDiscoveryOutcomeV1::Unavailable);
+    assert_eq!(
+        outcome,
+        Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+    );
     assert!(started.elapsed() < Duration::from_secs(1));
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(polled.load(Ordering::SeqCst) > 0);
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     tokio::time::sleep(Duration::from_millis(25)).await;
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -463,36 +228,36 @@ async fn ci_discovery_cancellation_drops_inflight_read_without_continuation() {
     let fixture =
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
-    let calls = Arc::new(AtomicUsize::new(0));
+    let polled = Arc::new(AtomicUsize::new(0));
     let dropped = Arc::new(AtomicUsize::new(0));
-    let client = PendingDiscoveryClient {
-        calls: Arc::clone(&calls),
+    let read = PendingRead {
+        polled: Arc::clone(&polled),
         dropped: Arc::clone(&dropped),
     };
     let cancellation = CancellationToken::new();
     let cancel = cancellation.clone();
-    let cancel_after_read = Arc::clone(&calls);
+    let cancel_after_read = Arc::clone(&polled);
     tokio::spawn(async move {
         while cancel_after_read.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
         }
         cancel.cancel();
     });
-    let outcome = discover_production_ci_failure_request_with_v1(
+    let outcome = bounded_ci_discovery_read(
         &context(&scope, UtcMicros(i64::MAX)),
-        &config(&fixture),
-        &scope,
-        &client,
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
+        Box::pin(read),
         &cancellation,
     )
     .await;
 
-    assert_eq!(outcome, ProductionCiFailureDiscoveryOutcomeV1::Unavailable);
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        outcome,
+        Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
+    );
+    assert!(polled.load(Ordering::SeqCst) > 0);
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     tokio::task::yield_now().await;
-    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -500,60 +265,17 @@ async fn stale_ci_access_remains_stale_without_a_network_read() {
     let fixture =
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
     let scope = scope(&fixture);
-    let calls = Arc::new(AtomicUsize::new(0));
-    let client = CountingDiscoveryClient {
-        calls: Arc::clone(&calls),
-    };
 
-    let outcome = discover_production_ci_failure_request_with_v1(
+    let outcome = discover_production_ci_failure_request_v1(
         &context(&scope, UtcMicros(i64::MAX)),
         &config_with_source(&fixture, Arc::new(StaleSourceAccess)),
         &scope,
-        &client,
         MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
         &CancellationToken::new(),
     )
     .await;
 
     assert_eq!(outcome, ProductionCiFailureDiscoveryOutcomeV1::Stale);
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-}
-
-#[tokio::test]
-async fn configured_ci_discovery_reads_workflow_jobs_in_both_consensus_scans() {
-    let fixture =
-        crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
-    let scope = scope(&fixture);
-    let client = ConfiguredDiscoveryClient {
-        record: fixture.ci_provider_record.clone(),
-        requests: Mutex::new(Vec::new()),
-    };
-
-    let outcome = discover_production_ci_failure_request_with_v1(
-        &context(&scope, UtcMicros(i64::MAX)),
-        &config(&fixture),
-        &scope,
-        &client,
-        MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-        &CancellationToken::new(),
-    )
-    .await;
-
-    assert_eq!(
-        outcome.request().map(|request| &request.run),
-        Some(&fixture.ci.run)
-    );
-    assert_eq!(
-        *client.requests.lock().unwrap(),
-        vec![
-            "workflow-runs",
-            "workflow-jobs",
-            "check-runs",
-            "workflow-runs",
-            "workflow-jobs",
-            "check-runs",
-        ]
-    );
 }
 
 #[test]
@@ -989,117 +711,52 @@ fn workflow_job_check_run_url_is_the_exact_check_identity() {
     );
 }
 
-#[tokio::test]
-async fn discovery_collects_every_bounded_page_in_order() {
+#[test]
+fn discovery_appends_every_bounded_page_in_order() {
     let fixture =
         crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
-    let scope = scope(&fixture);
     let first = fixture.ci_provider_record.workflow_run.clone();
     let mut second = first.clone();
     second.id += 1;
-    let client = PagedDiscoveryClient {
-        workflow_run_pages: vec![
-            serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "workflow_runs": [first],
-            }))
-            .unwrap(),
-            serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "workflow_runs": [second],
-            }))
-            .unwrap(),
-        ],
-        requested_pages: Mutex::new(Vec::new()),
-    };
+    let expected = [first.id, second.id];
+    let mut records = Vec::new();
+    let mut expected_total = None;
 
-    let records = collect_workflow_runs(
-        &context(&scope, UtcMicros(i64::MAX)),
-        &config(&fixture),
-        &scope,
-        &client,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-
+    assert!(
+        !append_discovery_page(&mut records, &mut expected_total, 2, vec![first], |run| run
+            .id)
+        .unwrap()
+    );
+    assert!(
+        append_discovery_page(&mut records, &mut expected_total, 2, vec![second], |run| {
+            run.id
+        })
+        .unwrap()
+    );
     assert_eq!(records.len(), 2);
-    assert_eq!(*client.requested_pages.lock().unwrap(), vec![1, 2]);
-}
-
-#[tokio::test]
-async fn discovery_collects_every_bounded_workflow_job_page_in_order() {
-    let fixture =
-        crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
-    let scope = scope(&fixture);
-    let first = fixture.ci_provider_record.workflow_job.clone();
-    let mut second = first.clone();
-    second.id += 1;
-    let client = PagedWorkflowJobDiscoveryClient {
-        workflow_job_pages: vec![
-            serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "jobs": [first],
-            }))
-            .unwrap(),
-            serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "jobs": [second],
-            }))
-            .unwrap(),
-        ],
-        requested_pages: Mutex::new(Vec::new()),
-    };
-
-    let records = collect_workflow_jobs(
-        &context(&scope, UtcMicros(i64::MAX)),
-        &config(&fixture),
-        &scope,
-        &client,
-        fixture.ci_provider_record.workflow_run.id,
-        &CancellationToken::new(),
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(records.len(), 2);
-    assert_eq!(*client.requested_pages.lock().unwrap(), vec![1, 2]);
-}
-
-#[tokio::test]
-async fn source_revocation_stops_before_the_next_page() {
-    let fixture =
-        crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
-    let scope = scope(&fixture);
-    let first = fixture.ci_provider_record.workflow_run.clone();
-    let source = SequencedSourceAccess::revoke_at(3);
-    let config = config_with_source(&fixture, source.clone());
-    let client = PagedDiscoveryClient {
-        workflow_run_pages: vec![
-            serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "workflow_runs": [first.clone()],
-            }))
-            .unwrap(),
-            serde_json::to_vec(&serde_json::json!({
-                "total_count": 2,
-                "workflow_runs": [first],
-            }))
-            .unwrap(),
-        ],
-        requested_pages: Mutex::new(Vec::new()),
-    };
-
     assert_eq!(
-        collect_workflow_runs(
-            &context(&scope, UtcMicros(i64::MAX)),
-            &config,
-            &scope,
-            &client,
-            &CancellationToken::new(),
-        )
-        .await,
+        records.iter().map(|run| run.id).collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn source_revocation_denies_the_next_authorization() {
+    let fixture =
+        crate::advisory::fixtures::load_pr13_source_backed_composite_fixture_v1().unwrap();
+    let scope = scope(&fixture);
+    let source = SequencedSourceAccess::revoke_at(2);
+    let config = config_with_source(&fixture, source);
+    let context = context(&scope, UtcMicros(i64::MAX));
+    let cancellation = CancellationToken::new();
+
+    assert!(
+        bounded_ci_source_authorization(&context, &config, &scope, &cancellation)
+            .await
+            .is_ok()
+    );
+    assert_eq!(
+        bounded_ci_source_authorization(&context, &config, &scope, &cancellation).await,
         Err(ProductionCiFailureDiscoveryOutcomeV1::Denied)
     );
-    assert_eq!(*client.requested_pages.lock().unwrap(), vec![1]);
 }

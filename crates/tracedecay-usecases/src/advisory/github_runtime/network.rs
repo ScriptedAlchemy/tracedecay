@@ -821,6 +821,7 @@ impl GitHubReadOnlyClientV1 {
             .timeout(config.request_timeout)
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.socket_timeout)
+            .hickory_dns(true)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .ok()?;
@@ -1294,6 +1295,7 @@ impl GitHubCiReadOnlyClientV1 {
             .timeout(config.request_timeout)
             .connect_timeout(config.connect_timeout)
             .read_timeout(config.socket_timeout)
+            .hickory_dns(true)
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .ok()?;
@@ -1911,6 +1913,54 @@ mod tests {
     const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const THREAD_CAPTURE: &str =
         include_str!("../fixtures/pr13_branch_pr/review_thread.graphql.json");
+
+    #[test]
+    fn github_dns_resolution_never_uses_the_blocking_pool() {
+        let spawned_runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_threads = Arc::clone(&spawned_runtime_threads);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .on_thread_start(move || {
+                observed_threads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = GitHubReadOnlyClientV1::new(
+                GitHubRepositoryTargetV1 {
+                    owner: "ScriptedAlchemy".to_owned(),
+                    repository: "tracedecay".to_owned(),
+                    pull_request_number: 421,
+                    pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+                },
+                GitHubReadOnlyCredentialV1::anonymous(),
+                GitHubHttpReadConfigV1 {
+                    rest_base_uri: "https://tracedecay-dns.invalid".to_owned(),
+                    graphql_uri: "https://tracedecay-dns.invalid/graphql".to_owned(),
+                    request_timeout: Duration::from_millis(50),
+                    connect_timeout: Duration::from_millis(50),
+                    socket_timeout: Duration::from_millis(50),
+                },
+            )
+            .unwrap();
+            assert!(matches!(
+                client
+                    .get(
+                        "https://tracedecay-dns.invalid/repos/ScriptedAlchemy/tracedecay/pulls/421",
+                        None,
+                        GitHubReadPermissionV1::PullRequests,
+                    )
+                    .await,
+                HttpResponseV1::Unavailable
+            ));
+        });
+
+        assert_eq!(
+            spawned_runtime_threads.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "GitHub DNS must be asynchronously cancellable, not detached getaddrinfo work"
+        );
+    }
 
     #[derive(Clone, Copy)]
     enum FixtureCredentialAuthorityModeV1 {

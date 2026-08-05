@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
@@ -46,12 +45,12 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::{
     AdvisoryHookOrchestrationPortV1, AdvisoryHookOrchestrationRequestV1,
-    AdvisoryHookOrchestrationTriggerV1, BoundedAdvisoryHookOrchestratorV1,
-    DaemonAdvisoryCycleInvocationFuture, DaemonAdvisoryCycleInvocationOwner,
-    DaemonAdvisoryCycleInvocationPort, DaemonAdvisoryCycleInvocationRequest,
-    DaemonAdvisoryRuntimeRegistrationError, DaemonContextScoutRuntimeRegistrationError,
-    DaemonFeedbackRuntimeRegistrationError, DaemonInvocationState,
-    DaemonPrimitiveRuntimeRegistrationError, advisory_cycle_invocation_result,
+    AdvisoryHookOrchestrationTriggerV1, DaemonAdvisoryCycleInvocationFuture,
+    DaemonAdvisoryCycleInvocationOwner, DaemonAdvisoryCycleInvocationPort,
+    DaemonAdvisoryCycleInvocationRequest, DaemonAdvisoryRuntimeRegistrationError,
+    DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
+    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
+    DeferredAdvisoryHookOrchestratorV1, advisory_cycle_invocation_result,
 };
 use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
@@ -1349,6 +1348,7 @@ pub(super) async fn register_project_open_dependent_owners(
             })?;
         let setup_project_root = advisory_project_root.clone();
         let setup_cancellation = deferred.cancellation();
+        let advisory_worker_owner = Arc::clone(&deferred);
         let setup = async move {
             register_production_advisory_owner(
                 &advisory_invocation,
@@ -1366,6 +1366,7 @@ pub(super) async fn register_project_open_dependent_owners(
                 advisory_scout_configuration,
                 admitted_root_uri,
                 indexed_files,
+                advisory_worker_owner,
                 setup_cancellation,
             )
             .await
@@ -1784,6 +1785,7 @@ async fn register_production_advisory_owner(
     scout_configuration: crate::application::configuration::ConfigurationCurrentStateV1,
     root_uri: String,
     indexed_files: Vec<String>,
+    advisory_worker_owner: Arc<DeferredAdvisoryHookOrchestratorV1>,
     setup_cancellation: CancellationToken,
 ) -> Result<crate::daemon::project_open_advisory::PreparedAdvisoryRuntimeV1> {
     let scout_configuration = ContextScoutConfigurationPinV1::from_current(&scout_configuration)
@@ -2000,8 +2002,9 @@ async fn register_production_advisory_owner(
             .await;
         }
     };
-    let orchestrator =
-        BoundedAdvisoryHookOrchestratorV1::new(1, work).ok_or_else(|| TraceDecayError::Config {
+    let orchestrator = advisory_worker_owner
+        .new_bounded_runtime(1, work)
+        .ok_or_else(|| TraceDecayError::Config {
             message: "project-open advisory Hook orchestration capacity is invalid".to_owned(),
         })?;
     let orchestrator: Arc<dyn AdvisoryHookOrchestrationPortV1> = orchestrator;
@@ -2696,22 +2699,25 @@ fn resolve_production_github_identity(
         // Keep the advisory target bound to the admitted feedback head.
         return None;
     }
-    let merge_base = Command::new(crate::git::git_program())
-        .args([
-            "-C",
-            &project_root.to_string_lossy(),
-            "merge-base",
-            base.as_str(),
-            head.as_str(),
-        ])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok())
-        .map(|value| value.trim().to_owned())
-        .filter(|value| {
-            matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })?;
+    let repository = gix::open(project_root).ok()?;
+    let base_commit = repository
+        .rev_parse_single(base.as_str())
+        .ok()?
+        .object()
+        .ok()?
+        .peel_to_commit()
+        .ok()?;
+    let head_commit = repository
+        .rev_parse_single(head.as_str())
+        .ok()?
+        .object()
+        .ok()?
+        .peel_to_commit()
+        .ok()?;
+    let merge_base = repository
+        .merge_base(base_commit.id, head_commit.id)
+        .ok()?
+        .to_string();
     let identity = GitHubReviewProviderIdentityV1 {
         provider: ProviderId::new("provider.github").ok()?,
         repository_owner: target.owner.clone(),

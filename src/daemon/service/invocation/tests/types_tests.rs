@@ -126,7 +126,8 @@ async fn advisory_hook_orchestration_backpressures_without_waiting() {
         let release = Arc::clone(&work_release);
         async move { release.notified().await }
     };
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, work).unwrap();
+    let owner = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(1));
+    let runtime = owner.new_bounded_runtime(1, work).unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
     let completed = Arc::new(tokio::sync::Notify::new());
@@ -186,15 +187,17 @@ async fn advisory_hook_orchestration_runs_feedback_work_without_scout_lifecycle(
     let work_ran_synchronously = Arc::clone(&ran_synchronously);
     let ran = Arc::new(tokio::sync::Notify::new());
     let work_ran = Arc::clone(&ran);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
-        let ran = Arc::clone(&work_ran);
-        let ran_synchronously = Arc::clone(&work_ran_synchronously);
-        async move {
-            ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
-            ran.notify_one()
-        }
-    })
-    .unwrap();
+    let owner = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(1));
+    let runtime = owner
+        .new_bounded_runtime(1, move |_| {
+            let ran = Arc::clone(&work_ran);
+            let ran_synchronously = Arc::clone(&work_ran_synchronously);
+            async move {
+                ran_synchronously.store(true, std::sync::atomic::Ordering::Release);
+                ran.notify_one()
+            }
+        })
+        .unwrap();
     let runtime: Arc<dyn AdvisoryHookOrchestrationPortV1> = runtime;
     advisory_hook_orchestration_registry()
         .lock()
@@ -232,15 +235,17 @@ async fn advisory_hook_orchestration_coalesces_duplicate_work_and_completes_ever
     let work_release = Arc::clone(&release);
     let work_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_work_calls = Arc::clone(&work_calls);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
-        let release = Arc::clone(&work_release);
-        let work_calls = Arc::clone(&observed_work_calls);
-        async move {
-            work_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            release.notified().await;
-        }
-    })
-    .unwrap();
+    let owner = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(1));
+    let runtime = owner
+        .new_bounded_runtime(1, move |_| {
+            let release = Arc::clone(&work_release);
+            let work_calls = Arc::clone(&observed_work_calls);
+            async move {
+                work_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                release.notified().await;
+            }
+        })
+        .unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let completed = Arc::new(tokio::sync::Notify::new());
     let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
@@ -294,13 +299,15 @@ async fn advisory_hook_orchestration_coalesces_duplicate_work_and_completes_ever
 async fn advisory_hook_orchestration_bounds_coalesced_completion_waiters() {
     let release = Arc::new(tokio::sync::Notify::new());
     let work_release = Arc::clone(&release);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
-        let release = Arc::clone(&work_release);
-        async move {
-            release.notified().await;
-        }
-    })
-    .unwrap();
+    let owner = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(1));
+    let runtime = owner
+        .new_bounded_runtime(1, move |_| {
+            let release = Arc::clone(&work_release);
+            async move {
+                release.notified().await;
+            }
+        })
+        .unwrap();
     let completion = Arc::new(|| {}) as Arc<dyn Fn() + Send + Sync>;
     let request = |completion| {
         let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
@@ -363,10 +370,12 @@ async fn dropping_advisory_hook_orchestrator_cancels_daemon_owned_work_without_f
 
     let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let observed_work_drop = Arc::clone(&work_dropped);
-    let runtime = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| PendingWork {
-        dropped: Arc::clone(&observed_work_drop),
-    })
-    .unwrap();
+    let owner = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(1));
+    let runtime = owner
+        .new_bounded_runtime(1, move |_| PendingWork {
+            dropped: Arc::clone(&observed_work_drop),
+        })
+        .unwrap();
     let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let observed_completions = Arc::clone(&completions);
     let mut request = AdvisoryHookOrchestrationRequestV1::from_envelope(
@@ -404,6 +413,64 @@ async fn dropping_advisory_hook_orchestrator_cancels_daemon_owned_work_without_f
 }
 
 #[tokio::test]
+async fn retained_advisory_owner_cancellation_joins_daemon_owned_work() {
+    struct PendingWork {
+        dropped: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl std::future::Future for PendingWork {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for PendingWork {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let deferred = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(10));
+    let work_dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_work_drop = Arc::clone(&work_dropped);
+    let runtime = deferred
+        .new_bounded_runtime(1, move |_| PendingWork {
+            dropped: Arc::clone(&observed_work_drop),
+        })
+        .expect("bounded runtime");
+    assert!(deferred.mark_ready(runtime.clone(), UtcMicros(11)));
+    let request = AdvisoryHookOrchestrationRequestV1::from_envelope(
+        hook_envelope(HookEventV2::SavedEdit {
+            file_id: [7; 16],
+            changed_range_count: 1,
+        }),
+        &hook_binding(),
+        Some(hook_lifecycle()),
+        1,
+        false,
+    )
+    .expect("admitted saved edit");
+    assert_eq!(
+        runtime.admit(request),
+        AdvisoryHookOrchestrationAdmissionV1::Enqueued
+    );
+    tokio::task::yield_now().await;
+
+    deferred.cancel_and_join_setup().await;
+
+    assert!(
+        work_dropped.load(std::sync::atomic::Ordering::Acquire),
+        "project-runtime cancellation must join every admitted advisory worker"
+    );
+}
+
+#[tokio::test]
 async fn deferred_advisory_owner_reports_stable_warming_ready_and_unavailable_states() {
     let warming = DeferredAdvisoryHookOrchestratorV1::new(UtcMicros(10));
     let request = AdvisoryHookOrchestrationRequestV1::from_envelope(
@@ -435,11 +502,12 @@ async fn deferred_advisory_owner_reports_stable_warming_ready_and_unavailable_st
 
     let worker_ran = Arc::new(tokio::sync::Notify::new());
     let observed_worker = Arc::clone(&worker_ran);
-    let ready = BoundedAdvisoryHookOrchestratorV1::new(1, move |_| {
-        let worker_ran = Arc::clone(&observed_worker);
-        async move { worker_ran.notify_one() }
-    })
-    .unwrap();
+    let ready = warming
+        .new_bounded_runtime(1, move |_| {
+            let worker_ran = Arc::clone(&observed_worker);
+            async move { worker_ran.notify_one() }
+        })
+        .unwrap();
     assert!(warming.mark_ready(ready, UtcMicros(20)));
     assert_eq!(
         warming.readiness(),

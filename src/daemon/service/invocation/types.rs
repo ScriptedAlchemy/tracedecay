@@ -77,15 +77,109 @@ type AdvisoryHookOrchestrationInFlightV1 =
     StdMutex<BTreeMap<AdvisoryHookOrchestrationKeyV1, Vec<AdvisoryHookOrchestrationCompletionV1>>>;
 pub(in crate::daemon::service) const MAX_COALESCED_ADVISORY_HOOK_COMPLETIONS: usize = 32;
 
+struct AdvisoryHookTaskRegistryStateV1 {
+    accepting: bool,
+    tasks: tokio::task::JoinSet<()>,
+}
+
+impl Default for AdvisoryHookTaskRegistryStateV1 {
+    fn default() -> Self {
+        Self {
+            accepting: true,
+            tasks: tokio::task::JoinSet::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct AdvisoryHookTaskRegistryV1 {
+    state: StdMutex<AdvisoryHookTaskRegistryStateV1>,
+    cancellation: crate::application::context::CancellationToken,
+}
+
+impl AdvisoryHookTaskRegistryV1 {
+    fn cancellation(&self) -> crate::application::context::CancellationToken {
+        self.cancellation.clone()
+    }
+
+    fn spawn<F>(&self, task: F) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return false;
+        };
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.accepting || self.cancellation.is_cancelled() {
+            return false;
+        }
+        while let Some(result) = state.tasks.try_join_next() {
+            report_advisory_hook_task_result(result);
+        }
+        state.tasks.spawn_on(task, &handle);
+        true
+    }
+
+    fn cancel(&self) {
+        self.cancellation.cancel();
+        if let Ok(mut state) = self.state.lock() {
+            state.accepting = false;
+        }
+    }
+
+    async fn cancel_and_join(&self) {
+        self.cancellation.cancel();
+        let mut tasks = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.accepting = false;
+            std::mem::take(&mut state.tasks)
+        };
+        while let Some(result) = tasks.join_next().await {
+            report_advisory_hook_task_result(result);
+        }
+    }
+}
+
+impl Drop for AdvisoryHookTaskRegistryV1 {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        let state = self
+            .state
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        state.tasks.abort_all();
+    }
+}
+
+fn report_advisory_hook_task_result(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        tracing::error!(
+            event = "advisory_hook_orchestration_worker_failed",
+            error = %error,
+            "daemon-owned advisory work did not terminate cleanly"
+        );
+    }
+}
+
 pub(crate) struct BoundedAdvisoryHookOrchestratorV1 {
     permits: Arc<Semaphore>,
     work: Arc<AdvisoryHookOrchestrationWorkV1>,
     in_flight: Arc<AdvisoryHookOrchestrationInFlightV1>,
-    cancellation: crate::application::context::CancellationToken,
+    tasks: Arc<AdvisoryHookTaskRegistryV1>,
 }
 
 impl BoundedAdvisoryHookOrchestratorV1 {
-    pub(crate) fn new<F, Fut>(max_concurrent: usize, work: F) -> Option<Arc<Self>>
+    fn new<F, Fut>(
+        max_concurrent: usize,
+        work: F,
+        tasks: Arc<AdvisoryHookTaskRegistryV1>,
+    ) -> Option<Arc<Self>>
     where
         F: Fn(AdvisoryHookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = ()> + Send + 'static,
@@ -97,7 +191,7 @@ impl BoundedAdvisoryHookOrchestratorV1 {
                 permits: Arc::new(Semaphore::new(max_concurrent)),
                 work,
                 in_flight: Arc::new(StdMutex::new(BTreeMap::new())),
-                cancellation: crate::application::context::CancellationToken::new(),
+                tasks,
             })
         })
     }
@@ -108,9 +202,10 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
         &self,
         mut request: AdvisoryHookOrchestrationRequestV1,
     ) -> AdvisoryHookOrchestrationAdmissionV1 {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        let cancellation = self.tasks.cancellation();
+        if cancellation.is_cancelled() {
             return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
-        };
+        }
         let envelope = request.hook.envelope();
         let key = (envelope.project_id, envelope.worktree_id, envelope.event_id);
         let completion = request.completion.take();
@@ -135,11 +230,21 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
         };
         let work = Arc::clone(&self.work);
         let in_flight = Arc::clone(&self.in_flight);
-        let cancellation = self.cancellation.clone();
-        handle.spawn(async move {
-            let completed = tokio::select! {
+        let (start, started) = tokio::sync::oneshot::channel();
+        let task = async move {
+            let admitted = tokio::select! {
+                biased;
                 () = cancellation.cancelled() => false,
-                () = (work)(request) => true,
+                result = started => result.is_ok(),
+            };
+            let completed = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => false,
+                () = async {
+                    if admitted {
+                        (work)(request).await;
+                    }
+                } => admitted,
             };
             let completions = in_flight
                 .lock()
@@ -158,14 +263,24 @@ impl AdvisoryHookOrchestrationPortV1 for BoundedAdvisoryHookOrchestratorV1 {
                 ),
             }
             drop(permit);
-        });
+        };
+        if !self.tasks.spawn(task) {
+            self.in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&key);
+            return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+        }
+        if start.send(()).is_err() {
+            return AdvisoryHookOrchestrationAdmissionV1::Unavailable;
+        }
         AdvisoryHookOrchestrationAdmissionV1::Enqueued
     }
 }
 
 impl Drop for BoundedAdvisoryHookOrchestratorV1 {
     fn drop(&mut self) {
-        self.cancellation.cancel();
+        self.tasks.cancel();
     }
 }
 
@@ -219,6 +334,7 @@ pub(crate) struct DeferredAdvisoryHookOrchestratorV1 {
     setup_settled: AtomicBool,
     setup_settled_notify: tokio::sync::Notify,
     cancellation: crate::application::context::CancellationToken,
+    tasks: Arc<AdvisoryHookTaskRegistryV1>,
 }
 
 impl DeferredAdvisoryHookOrchestratorV1 {
@@ -231,7 +347,20 @@ impl DeferredAdvisoryHookOrchestratorV1 {
             setup_settled: AtomicBool::new(false),
             setup_settled_notify: tokio::sync::Notify::new(),
             cancellation: crate::application::context::CancellationToken::new(),
+            tasks: Arc::new(AdvisoryHookTaskRegistryV1::default()),
         })
+    }
+
+    pub(crate) fn new_bounded_runtime<F, Fut>(
+        &self,
+        max_concurrent: usize,
+        work: F,
+    ) -> Option<Arc<BoundedAdvisoryHookOrchestratorV1>>
+    where
+        F: Fn(AdvisoryHookOrchestrationRequestV1) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        BoundedAdvisoryHookOrchestratorV1::new(max_concurrent, work, Arc::clone(&self.tasks))
     }
 
     pub(crate) fn claim_setup(&self) -> bool {
@@ -301,6 +430,7 @@ impl DeferredAdvisoryHookOrchestratorV1 {
     pub(crate) async fn cancel_and_join_setup(&self) {
         self.cancel();
         self.join_setup().await;
+        self.tasks.cancel_and_join().await;
     }
 
     pub(crate) fn readiness(&self) -> AdvisoryRuntimeReadinessV1 {
@@ -375,6 +505,7 @@ impl DeferredAdvisoryHookOrchestratorV1 {
 
     pub(crate) fn cancel(&self) {
         self.cancellation.cancel();
+        self.tasks.cancel();
         let finished_at = now_micros();
         let mut state = self
             .state

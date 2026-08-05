@@ -220,8 +220,7 @@ pub(in crate::daemon) use types::observe_accepted_feedback_cycle_terminal;
 pub(crate) use types::{
     AdvisoryHookOrchestrationAdmissionV1, AdvisoryHookOrchestrationPortV1,
     AdvisoryHookOrchestrationRequestV1, AdvisoryHookOrchestrationTriggerV1,
-    AdvisoryRuntimeReadinessV1, AdvisoryRuntimeUnavailableReasonV1,
-    BoundedAdvisoryHookOrchestratorV1, DaemonLspInvocationOwner,
+    AdvisoryRuntimeReadinessV1, AdvisoryRuntimeUnavailableReasonV1, DaemonLspInvocationOwner,
     DeferredAdvisoryHookOrchestratorV1, admit_registered_advisory_hook_orchestration,
 };
 // `pub(super)` on these shapes, in their original flat-file home, meant

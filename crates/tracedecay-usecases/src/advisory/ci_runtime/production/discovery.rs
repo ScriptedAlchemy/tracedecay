@@ -83,58 +83,6 @@ pub(super) struct GitHubActionsCheckRunsPageV1 {
     check_runs: Vec<GitHubActionsCheckRunV1>,
 }
 
-pub(super) trait ProductionCiDiscoveryReadPortV1: Send + Sync {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        head_sha: &'a str,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        run_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
-
-    fn read_check_runs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        check_suite_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1>;
-}
-
-impl ProductionCiDiscoveryReadPortV1 for GitHubCiReadOnlyClientV1 {
-    fn read_workflow_runs_for_head<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        head_sha: &'a str,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.read_workflow_runs_for_head(context, head_sha, page)
-    }
-
-    fn read_workflow_jobs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        run_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.read_workflow_jobs(context, run_id, page)
-    }
-
-    fn read_check_runs<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        check_suite_id: u64,
-        page: u32,
-    ) -> FeedbackPortFuture<'a, GitHubCiTransportOutcomeV1> {
-        self.read_check_runs(context, check_suite_id, page)
-    }
-}
-
 pub async fn discover_production_ci_failure_request_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
@@ -156,35 +104,11 @@ pub async fn discover_production_ci_failure_request_v1(
     else {
         return ProductionCiFailureDiscoveryOutcomeV1::Unavailable;
     };
-    discover_production_ci_failure_request_with_v1(
+    let first = discover_production_ci_failure_request_scan_v1(
         &context,
         config,
         scope,
         &client,
-        deadline,
-        cancellation,
-    )
-    .await
-}
-
-pub(super) async fn discover_production_ci_failure_request_with_v1(
-    context: &RequestContext,
-    config: &ProductionCiProviderConfigV1,
-    scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
-    deadline: MonotonicDeadline,
-    cancellation: &CancellationToken,
-) -> ProductionCiFailureDiscoveryOutcomeV1 {
-    let Some((bounded_context, _)) = bounded_ci_discovery_inputs(context, &config.http, deadline)
-    else {
-        return ProductionCiFailureDiscoveryOutcomeV1::Unavailable;
-    };
-    let context = &bounded_context;
-    let first = discover_production_ci_failure_request_scan_v1(
-        context,
-        config,
-        scope,
-        client,
         cancellation,
     )
     .await;
@@ -192,15 +116,15 @@ pub(super) async fn discover_production_ci_failure_request_with_v1(
         return first;
     }
     if let Err(outcome) =
-        bounded_ci_source_authorization(context, config, scope, cancellation).await
+        bounded_ci_source_authorization(&context, config, scope, cancellation).await
     {
         return outcome;
     }
     let second = discover_production_ci_failure_request_scan_v1(
-        context,
+        &context,
         config,
         scope,
-        client,
+        &client,
         cancellation,
     )
     .await;
@@ -233,7 +157,7 @@ pub(super) async fn discover_production_ci_failure_request_scan_v1(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
     cancellation: &CancellationToken,
 ) -> ProductionCiFailureDiscoveryOutcomeV1 {
     if !context_admitted_for_ci_discovery(context, scope) {
@@ -330,7 +254,7 @@ pub(super) async fn collect_workflow_runs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
     cancellation: &CancellationToken,
 ) -> Result<Vec<GitHubActionsWorkflowRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
     let mut records = Vec::new();
@@ -369,7 +293,7 @@ pub(super) async fn collect_workflow_jobs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
     run_id: u64,
     cancellation: &CancellationToken,
 ) -> Result<Vec<GitHubActionsWorkflowJobV1>, ProductionCiFailureDiscoveryOutcomeV1> {
@@ -405,7 +329,7 @@ pub(super) async fn collect_check_runs(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
-    client: &dyn ProductionCiDiscoveryReadPortV1,
+    client: &GitHubCiReadOnlyClientV1,
     check_suite_id: u64,
     cancellation: &CancellationToken,
 ) -> Result<Vec<GitHubActionsCheckRunV1>, ProductionCiFailureDiscoveryOutcomeV1> {
@@ -437,7 +361,7 @@ pub(super) async fn collect_check_runs(
     Err(ProductionCiFailureDiscoveryOutcomeV1::Unavailable)
 }
 
-async fn bounded_ci_discovery_read<T>(
+pub(super) async fn bounded_ci_discovery_read<T>(
     context: &RequestContext,
     read: FeedbackPortFuture<'_, T>,
     cancellation: &CancellationToken,
@@ -458,7 +382,7 @@ async fn bounded_ci_discovery_read<T>(
     }
 }
 
-async fn bounded_ci_source_authorization(
+pub(super) async fn bounded_ci_source_authorization(
     context: &RequestContext,
     config: &ProductionCiProviderConfigV1,
     scope: &FeedbackScopeV1,
