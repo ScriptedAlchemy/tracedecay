@@ -178,9 +178,27 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
-        lifecycle: LifecycleClass::Stateless,
+        lifecycle: if read_only {
+            LifecycleClass::Stateless
+        } else {
+            LifecycleClass::Resumable
+        },
         streaming: StreamingContract::Unsupported,
-        cancellation: CancellationContract::cooperative(vec![CancellationPoint::BeforeAdmission])?,
+        cancellation: if read_only {
+            CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ])?
+        } else {
+            CancellationContract::cooperative(vec![
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeEffect,
+                CancellationPoint::EffectInFlight,
+                CancellationPoint::Reconciling,
+                CancellationPoint::AfterCommit,
+            ])?
+        },
         deadline: DeadlineContract::new(
             30_000,
             if read_only {
@@ -249,17 +267,22 @@ fn schema_ref(id: String) -> Result<SchemaRef, CatalogValidationError> {
 
 #[cfg(test)]
 mod tests {
-    use super::workflow_executable_binding_registry;
+    use tracedecay_tool_catalog::{
+        CancellationPoint, DeadlineBehavior, EffectClass, IdempotencyContract, LifecycleClass,
+        ReceiptContract, ReconciliationContract, TerminalState,
+    };
+
+    use super::{workflow_executable_binding_registry, workflow_manifest};
 
     #[test]
     fn workflow_registry_advertises_every_mounted_application_route() {
         let registry = workflow_executable_binding_registry().unwrap();
-        assert_eq!(registry.iter().count(), 10);
+        assert_eq!(registry.iter().count(), 8);
         let advertised = registry
             .iter()
             .filter_map(|availability| availability.binding())
             .collect::<Vec<_>>();
-        assert_eq!(advertised.len(), 10);
+        assert_eq!(advertised.len(), 8);
         for binding in advertised {
             let tracedecay_tool_catalog::RouteExposureV1::Public { route_path, .. } =
                 binding.exposure()
@@ -267,6 +290,73 @@ mod tests {
                 panic!("mounted Workflow operation must have a public route");
             };
             assert!(route_path.starts_with("/application/workflow/"));
+        }
+    }
+
+    #[test]
+    fn workflow_mutations_declare_durable_effect_semantics() {
+        for operation in ["register_definition", "handoff_issue", "handoff_redeem"] {
+            let manifest = workflow_manifest(operation).unwrap();
+            assert_eq!(manifest.effect(), EffectClass::Administrative);
+            assert_eq!(manifest.lifecycle(), LifecycleClass::Resumable);
+            assert_eq!(manifest.idempotency(), IdempotencyContract::Required);
+            assert_eq!(manifest.reconciliation(), ReconciliationContract::Required);
+            assert_eq!(manifest.receipt(), ReceiptContract::DurableEffect);
+            assert_eq!(
+                manifest.deadline().behavior(),
+                DeadlineBehavior::ReturnEffectReceipt
+            );
+            assert!(
+                manifest
+                    .terminal_states()
+                    .contains(TerminalState::EffectUnknown)
+            );
+            for point in [
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeEffect,
+                CancellationPoint::EffectInFlight,
+                CancellationPoint::Reconciling,
+                CancellationPoint::AfterCommit,
+            ] {
+                assert!(manifest.cancellation().observes(point));
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_queries_declare_read_semantics() {
+        for operation in [
+            "validate_definition",
+            "get_definition",
+            "list_definitions",
+            "definition_history",
+            "diff_definition",
+        ] {
+            let manifest = workflow_manifest(operation).unwrap();
+            assert_eq!(manifest.effect(), EffectClass::Read);
+            assert_eq!(manifest.lifecycle(), LifecycleClass::Stateless);
+            assert_eq!(manifest.idempotency(), IdempotencyContract::NotRequired);
+            assert_eq!(
+                manifest.reconciliation(),
+                ReconciliationContract::NotRequired
+            );
+            assert_eq!(manifest.receipt(), ReceiptContract::Operation);
+            assert_eq!(
+                manifest.deadline().behavior(),
+                DeadlineBehavior::ReturnOperationReceipt
+            );
+            assert!(
+                !manifest
+                    .terminal_states()
+                    .contains(TerminalState::EffectUnknown)
+            );
+            for point in [
+                CancellationPoint::BeforeAdmission,
+                CancellationPoint::BeforeRead,
+                CancellationPoint::DuringRead,
+            ] {
+                assert!(manifest.cancellation().observes(point));
+            }
         }
     }
 }
