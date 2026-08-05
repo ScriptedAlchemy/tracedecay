@@ -8,12 +8,17 @@ pub(super) enum ShutdownState {
 }
 
 impl ProjectRuntimeRegistryV1 {
+    pub(crate) fn begin_shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.signal_reservation_changed();
+    }
+
     /// Shut every project runtime down and leave the registry empty.
     ///
     /// Routers become unavailable before feedback owners drop, Work providers
     /// are joined, and process-wide semantic handles are unregistered.
     pub(crate) async fn shut_down_all(&self) {
-        self.closed.store(true, Ordering::Release);
+        self.begin_shutdown();
         let mut shutdown_complete = self.shutdown_complete.subscribe();
         if !self.shutdown_started.swap(true, Ordering::AcqRel) {
             let registry = self.clone();

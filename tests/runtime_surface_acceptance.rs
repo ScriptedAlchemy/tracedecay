@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
@@ -194,7 +195,7 @@ async fn git_runtime_fixture() -> RuntimeFixture {
     }
     std::fs::write(
         project.join("src/main.rs"),
-        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// PR12 transport parity\n",
+        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// Runtime surface parity\n",
     )
     .expect("write staged Git change");
     git(&project, &["add", "src/main.rs"]);
@@ -244,6 +245,18 @@ fn git_stdout(project: &Path, args: &[&str]) -> String {
         .to_owned()
 }
 
+static LSP_CONTROL_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn lsp_control() -> (Deadline, CancellationSignal) {
+    let sequence = LSP_CONTROL_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    (
+        Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(5_000_000)))
+            .expect("LSP gateway deadline"),
+        CancellationSignal::active(format!("cancel.lsp-gateway.{sequence}"))
+            .expect("LSP gateway cancellation"),
+    )
+}
+
 async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
     // Semantic requests are answered asynchronously: while an operation is in
     // flight the gateway writes no frame at all, so silence means "not yet"
@@ -252,16 +265,18 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
     // cold start — sysroot load and crate graph build — cannot beat.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     while std::time::Instant::now() < deadline {
+        let (operation_deadline, cancellation) = lsp_control();
         match session
-            .poll_daemon_frame()
+            .poll_daemon_frame(operation_deadline, cancellation)
             .await
             .expect("poll daemon LSP frame")
         {
             FramePoll::Frame(frame) => {
                 let value: Value =
                     serde_json::from_slice(frame.as_slice()).expect("daemon LSP JSON");
+                let (operation_deadline, cancellation) = lsp_control();
                 session
-                    .acknowledge_daemon_frame()
+                    .acknowledge_daemon_frame(operation_deadline, cancellation)
                     .await
                     .expect("acknowledge daemon LSP frame");
                 if value.get("id").and_then(Value::as_u64) == Some(response_id) {
@@ -276,9 +291,10 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
 }
 
 async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
+    let (deadline, cancellation) = lsp_control();
     assert_eq!(
         session
-            .try_send_client_frame(&value.to_string())
+            .try_send_client_frame(&value.to_string(), deadline, cancellation)
             .await
             .expect("send daemon LSP frame"),
         FrameSend::Sent
@@ -292,8 +308,9 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         "method": "shutdown",
         "params": {},
     });
+    let (deadline, cancellation) = lsp_control();
     match session
-        .try_send_client_frame(&shutdown_request.to_string())
+        .try_send_client_frame(&shutdown_request.to_string(), deadline, cancellation)
         .await
         .expect("send daemon LSP shutdown frame")
     {
@@ -308,8 +325,9 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         "method": "exit",
         "params": {},
     });
+    let (deadline, cancellation) = lsp_control();
     match session
-        .try_send_client_frame(&exit_notification.to_string())
+        .try_send_client_frame(&exit_notification.to_string(), deadline, cancellation)
         .await
         .expect("send daemon LSP exit frame")
     {
@@ -318,8 +336,9 @@ async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
         FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
     }
     for _ in 0..100 {
+        let (deadline, cancellation) = lsp_control();
         match session
-            .poll_daemon_frame()
+            .poll_daemon_frame(deadline, cancellation)
             .await
             .expect("poll closed daemon LSP session")
         {
@@ -1590,6 +1609,115 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn workflow_json_preserves_a_typed_application_problem_envelope() {
+    let environment = TempDir::new().expect("workflow CLI environment");
+    let request_path = environment.path().join("invalid-handoff.json");
+    std::fs::write(&request_path, r#"{"unexpected":true}"#)
+        .expect("write invalid typed Workflow request");
+    let output = common::tracedecay_command_with_home(environment.path())
+        .args([
+            "workflow",
+            "handoff-redeem",
+            "--request-file",
+            request_path.to_str().expect("UTF-8 request path"),
+            "--project",
+            environment.path().to_str().expect("UTF-8 project path"),
+            "--json",
+        ])
+        .output()
+        .expect("invoke Workflow CLI");
+
+    assert!(
+        output.status.success(),
+        "typed application problems are successful CLI transport responses: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("Workflow JSON stdout");
+    assert_eq!(stdout.lines().count(), 1);
+    let problem: Value = serde_json::from_str(stdout.trim_end()).expect("typed Workflow problem");
+    assert_eq!(
+        problem["contract"]["schema_id"],
+        "schema.workflow.handoff_redeem.result"
+    );
+    assert_eq!(problem["contract"]["schema_revision"], 1);
+    assert_eq!(problem["problem"]["kind"], "invalid_request");
+    assert_eq!(
+        problem["problem"]["code"], "invalid_workflow_request",
+        "Workflow --json must not flatten typed problems into Config stderr"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stdio_bridge_exits_successfully_after_client_shutdown_and_exit() {
+    let fixture = lsp_runtime_fixture().await;
+    let root_uri = url::Url::from_directory_path(&fixture.project)
+        .expect("project root URI")
+        .to_string();
+    let frames = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] }
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": {}
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": {}
+        }),
+    ];
+    let mut command = common::tracedecay_command_with_home(fixture.home());
+    command
+        .current_dir(&fixture.project)
+        .args([
+            "lsp",
+            "bridge",
+            "--stdio",
+            "--project",
+            fixture.project.to_str().expect("UTF-8 project path"),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut bridge =
+        common::TestChildProcess::new(command.spawn().expect("spawn stdio LSP bridge"));
+    {
+        let stdin = bridge.stdin_mut().expect("bridge stdin");
+        for frame in frames {
+            let payload = frame.to_string();
+            write!(stdin, "Content-Length: {}\r\n\r\n{payload}", payload.len())
+                .expect("write LSP frame");
+        }
+        stdin.flush().expect("flush LSP frames");
+    }
+    let output = bridge
+        .wait_with_output(std::time::Duration::from_secs(20))
+        .expect("stdio LSP bridge exit");
+
+    assert!(
+        output.status.success(),
+        "graceful LSP exit must not fail explicit bridge detach: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = lsp_runtime_fixture().await;
     let root_uri = url::Url::from_directory_path(&fixture.project)
@@ -1600,11 +1728,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         .to_string();
     let source = std::fs::read_to_string(fixture.project.join("src/auth/login.rs"))
         .expect("checked-in fixture source");
+    let (deadline, cancellation) = lsp_control();
     let mut session = DaemonLspSessionClient::open(
         fixture.client.clone(),
         "3.17",
         Some(root_uri.clone()),
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open production daemon LSP session");
@@ -2130,11 +2261,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         );
     }
 
+    let (deadline, cancellation) = lsp_control();
     let mut incompatible = DaemonLspSessionClient::open(
         fixture.client.clone(),
         "3.17",
         Some(root_uri.clone()),
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open incompatible-version daemon LSP session");
@@ -2212,11 +2346,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     .expect("cross-scope daemon handshake");
     let other_client =
         DaemonInvocationClient::for_current(other_handshake).expect("cross-scope daemon client");
+    let (deadline, cancellation) = lsp_control();
     let mut cross_scope = DaemonLspSessionClient::open(
         other_client,
         "3.17",
         Some(other_root_uri.clone()),
         Vec::new(),
+        deadline,
+        cancellation,
     )
     .await
     .expect("open cross-scope daemon LSP session");
@@ -2279,8 +2416,9 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     }
     shutdown_lsp(&mut cross_scope, 603).await;
 
+    let (deadline, cancellation) = lsp_control();
     session
-        .reconnect()
+        .reconnect(deadline, cancellation)
         .await
         .expect("reconnect production LSP session");
     send_lsp(

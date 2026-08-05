@@ -1,14 +1,23 @@
 use std::path::{Path, PathBuf};
 
+use futures_util::StreamExt;
 use serde_json::Value;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, interval};
+use tokio_util::codec::FramedRead;
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{DaemonInvocationClient, DaemonLspSessionClient};
+use tracedecay_application::{CancellationSignal, Deadline, InvocationError};
 use tracedecay_lsp::analyzer::{adapters as lsp_adapters, broker as lsp_broker};
-use tracedecay_lsp::{ContentLengthCodec, FramePoll, FrameSend};
+use tracedecay_lsp::{
+    ContentLengthCodec, DEFAULT_LSP_REQUEST_DEADLINE_MS, FramePoll, FrameSend,
+    ProcessLocalRequestSequence,
+};
 
 use crate::cli::LspAction;
+
+static LSP_BRIDGE_CONTROL_SEQUENCE: ProcessLocalRequestSequence =
+    ProcessLocalRequestSequence::starting_at(1);
 
 pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::Result<()> {
     match action {
@@ -33,11 +42,9 @@ pub(crate) async fn handle_lsp_action(action: LspAction) -> tracedecay::errors::
 /// opens a project store, starts an analyzer, or connects the host to an
 /// arbitrary daemon socket.
 async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::Result<()> {
-    let mut stdin = tokio::io::stdin();
-    let mut codec = ContentLengthCodec::new();
-    let mut read_buffer = [0_u8; 8 * 1024];
+    let mut stdin = FramedRead::new(tokio::io::stdin(), ContentLengthCodec::new());
     let initialize = if project_root.is_none() {
-        Some(read_initialize_binding(&mut stdin, &mut codec, &mut read_buffer).await?)
+        Some(read_initialize_binding(&mut stdin).await?)
     } else {
         None
     };
@@ -50,6 +57,7 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::
         .ok_or_else(|| bridge_config_error("LSP initialize did not identify a workspace root"))?;
     let handshake = DaemonHandshake::for_current_client(Some(project_root), None, false, false)?;
     let invocation = DaemonInvocationClient::for_current(handshake)?;
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
     let mut session = DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),
@@ -60,56 +68,72 @@ async fn run_stdio_bridge(project_root: Option<PathBuf>) -> tracedecay::errors::
             .as_ref()
             .map(|binding| binding.workspace_folders.clone())
             .unwrap_or_default(),
+        deadline,
+        cancellation,
     )
-    .await?;
+    .await
+    .map_err(lsp_invocation_error)?;
     let mut stdout = tokio::io::stdout();
     let mut pending_client_frame = initialize.map(|binding| binding.frame);
     let mut poll_timer = interval(Duration::from_millis(25));
 
-    loop {
-        // Keep each pump fair: a queued daemon burst must not starve host input.
-        if flush_daemon_frame(&mut session, &mut stdout).await? {
-            return Ok(());
-        }
+    let bridge_result = async {
+        loop {
+            // Keep each pump fair: a queued daemon burst must not starve host input.
+            if flush_daemon_frame(&mut session, &mut stdout).await? {
+                return Ok(());
+            }
 
-        if pending_client_frame.is_none()
-            && let Some(frame) = codec
-                .next_frame()
-                .map_err(|error| bridge_error("decode", error))?
-        {
-            let frame = String::from_utf8(frame).map_err(|_| {
-                tracedecay::errors::TraceDecayError::Config {
-                    message: "LSP bridge received a non-UTF-8 JSON-RPC payload".to_owned(),
+            if let Some(frame) = pending_client_frame.as_deref() {
+                match send_client_frame_with_reconnect(&mut session, frame).await? {
+                    FrameSend::Sent => {
+                        pending_client_frame = None;
+                        continue;
+                    }
+                    FrameSend::Backpressured => {}
+                    FrameSend::Closed => return Ok(()),
                 }
-            })?;
-            pending_client_frame = Some(frame);
-        }
+            }
 
-        if let Some(frame) = pending_client_frame.as_deref() {
-            match send_client_frame_with_reconnect(&mut session, frame).await? {
-                FrameSend::Sent => {
-                    pending_client_frame = None;
-                    continue;
+            tokio::select! {
+                frame = stdin.next(), if pending_client_frame.is_none() => {
+                    let Some(frame) = frame else {
+                        return Ok(());
+                    };
+                    let frame = frame.map_err(|error| bridge_error("decode", error))?;
+                    pending_client_frame = Some(String::from_utf8(frame).map_err(|_| {
+                        bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
+                    })?);
                 }
-                FrameSend::Backpressured => {}
-                FrameSend::Closed => return Ok(()),
+                _ = poll_timer.tick() => {}
             }
         }
+    }
+    .await;
+    let detach_result = detach_stdio_bridge(&mut session).await;
+    finish_stdio_bridge(bridge_result, detach_result)
+}
 
-        tokio::select! {
-            read = stdin.read(&mut read_buffer), if pending_client_frame.is_none() => {
-                let read = read?;
-                if read == 0 {
-                    let _ = session.detach().await;
-                    codec
-                        .finish()
-                        .map_err(|error| bridge_error("decode", error))?;
-                    return Ok(());
-                }
-                codec.push(&read_buffer[..read]);
-            }
-            _ = poll_timer.tick() => {}
-        }
+async fn detach_stdio_bridge(
+    session: &mut DaemonLspSessionClient,
+) -> tracedecay::errors::Result<()> {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    session
+        .detach(deadline, cancellation)
+        .await
+        .map_err(lsp_invocation_error)
+}
+
+fn finish_stdio_bridge(
+    bridge_result: tracedecay::errors::Result<()>,
+    detach_result: tracedecay::errors::Result<()>,
+) -> tracedecay::errors::Result<()> {
+    match (bridge_result, detach_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(bridge_error), Err(detach_error)) => Err(bridge_config_error(format!(
+            "LSP bridge failed: {bridge_error}; explicit detach failed: {detach_error}"
+        ))),
     }
 }
 
@@ -120,32 +144,21 @@ struct InitializeBinding {
     frame: String,
 }
 
-async fn read_initialize_binding<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    codec: &mut ContentLengthCodec,
-    read_buffer: &mut [u8],
+async fn read_initialize_binding<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut FramedRead<R, ContentLengthCodec>,
 ) -> tracedecay::errors::Result<InitializeBinding> {
-    loop {
-        if let Some(frame) = codec
-            .next_frame()
-            .map_err(|error| bridge_error("decode", error))?
-        {
-            let frame = String::from_utf8(frame).map_err(|_| {
-                bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload")
-            })?;
-            return initialize_binding(&frame);
-        }
-        let read = reader.read(read_buffer).await?;
-        if read == 0 {
-            codec
-                .finish()
-                .map_err(|error| bridge_error("decode", error))?;
-            return Err(bridge_config_error(
+    let frame = reader
+        .next()
+        .await
+        .ok_or_else(|| {
+            bridge_config_error(
                 "lsp bridge without --project requires initialize as its first frame",
-            ));
-        }
-        codec.push(&read_buffer[..read]);
-    }
+            )
+        })?
+        .map_err(|error| bridge_error("decode", error))?;
+    let frame = String::from_utf8(frame)
+        .map_err(|_| bridge_config_error("LSP bridge received a non-UTF-8 JSON-RPC payload"))?;
+    initialize_binding(&frame)
 }
 
 fn initialize_binding(frame: &str) -> tracedecay::errors::Result<InitializeBinding> {
@@ -315,36 +328,99 @@ async fn send_client_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
     frame: &str,
 ) -> tracedecay::errors::Result<FrameSend> {
-    match session.try_send_client_frame(frame).await {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    match session
+        .try_send_client_frame(frame, deadline, cancellation)
+        .await
+    {
         Ok(outcome) => Ok(outcome),
-        Err(_) => {
-            session.reconnect().await?;
-            session.try_send_client_frame(frame).await
+        Err(InvocationError::Unavailable) => {
+            reconnect_session(session).await?;
+            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+            session
+                .try_send_client_frame(frame, deadline, cancellation)
+                .await
+                .map_err(lsp_invocation_error)
         }
+        Err(error) => Err(lsp_invocation_error(error)),
     }
 }
 
 async fn poll_daemon_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
 ) -> tracedecay::errors::Result<FramePoll> {
-    match session.poll_daemon_frame().await {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    match session.poll_daemon_frame(deadline, cancellation).await {
         Ok(outcome) => Ok(outcome),
-        Err(_) => {
-            session.reconnect().await?;
-            session.poll_daemon_frame().await
+        Err(InvocationError::Unavailable) => {
+            reconnect_session(session).await?;
+            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+            session
+                .poll_daemon_frame(deadline, cancellation)
+                .await
+                .map_err(lsp_invocation_error)
         }
+        Err(error) => Err(lsp_invocation_error(error)),
     }
 }
 
 async fn acknowledge_daemon_frame_with_reconnect(
     session: &mut DaemonLspSessionClient,
 ) -> tracedecay::errors::Result<()> {
-    match session.acknowledge_daemon_frame().await {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    match session
+        .acknowledge_daemon_frame(deadline, cancellation)
+        .await
+    {
         Ok(()) => Ok(()),
-        Err(_) => {
-            session.reconnect().await?;
-            session.acknowledge_daemon_frame().await
+        Err(InvocationError::Unavailable) => {
+            reconnect_session(session).await?;
+            let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+            session
+                .acknowledge_daemon_frame(deadline, cancellation)
+                .await
+                .map_err(lsp_invocation_error)
         }
+        Err(error) => Err(lsp_invocation_error(error)),
+    }
+}
+
+async fn reconnect_session(session: &mut DaemonLspSessionClient) -> tracedecay::errors::Result<()> {
+    let (deadline, cancellation) = lsp_request_control().map_err(lsp_invocation_error)?;
+    session
+        .reconnect(deadline, cancellation)
+        .await
+        .map_err(lsp_invocation_error)
+}
+
+fn lsp_request_control() -> Result<(Deadline, CancellationSignal), InvocationError> {
+    let sequence = LSP_BRIDGE_CONTROL_SEQUENCE
+        .next_string("lsp-bridge.")
+        .map_err(|_| InvocationError::Unavailable)?;
+    let budget_micros = i64::try_from(DEFAULT_LSP_REQUEST_DEADLINE_MS)
+        .map_err(|_| InvocationError::Unavailable)?
+        .saturating_mul(1_000);
+    let expires_at = tracedecay_application::clock::now_micros()
+        .0
+        .saturating_add(budget_micros);
+    let deadline =
+        Deadline::new(tracedecay_domain::UtcMicros(expires_at)).map_err(InvocationError::from)?;
+    let cancellation = CancellationSignal::active(format!("cancellation.{sequence}"))
+        .map_err(InvocationError::from)?;
+    Ok((deadline, cancellation))
+}
+
+fn lsp_invocation_error(error: InvocationError) -> tracedecay::errors::TraceDecayError {
+    let message = match error {
+        InvocationError::Cancelled => "LSP gateway request was cancelled",
+        InvocationError::DeadlineExceeded => "LSP gateway request deadline elapsed",
+        InvocationError::Denied => "LSP gateway request was not authorized",
+        InvocationError::InvalidRequest => "LSP gateway request was invalid",
+        InvocationError::Conflict => "LSP gateway request conflicted with current state",
+        InvocationError::Unavailable => "LSP gateway authority is unavailable",
+    };
+    tracedecay::errors::TraceDecayError::Config {
+        message: message.to_owned(),
     }
 }
 
@@ -412,7 +488,31 @@ fn print_lsp_servers_table(adapters: &[lsp_adapters::LspAdapterDefinition]) {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::initialize_binding;
+    use super::{bridge_config_error, finish_stdio_bridge, initialize_binding};
+
+    #[test]
+    fn bridge_completion_propagates_explicit_detach_failure() {
+        let error = finish_stdio_bridge(
+            Ok(()),
+            Err(bridge_config_error("bounded detach was unavailable")),
+        )
+        .expect_err("detach failure must fail normal bridge completion");
+
+        assert!(error.to_string().contains("bounded detach was unavailable"));
+    }
+
+    #[test]
+    fn bridge_failure_preserves_explicit_detach_failure() {
+        let error = finish_stdio_bridge(
+            Err(bridge_config_error("stdout closed")),
+            Err(bridge_config_error("bounded detach timed out")),
+        )
+        .expect_err("both failures must remain visible");
+        let message = error.to_string();
+
+        assert!(message.contains("stdout closed"), "{message}");
+        assert!(message.contains("bounded detach timed out"), "{message}");
+    }
 
     #[test]
     fn initialize_root_is_canonicalized_and_bound_into_forwarded_frame() {
