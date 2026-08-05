@@ -728,6 +728,12 @@ fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
     );
     let applied = owned_bytes(&cli, &receipt, &originals);
     assert_ne!(applied, before_apply);
+    assert!(
+        applied
+            .values()
+            .any(|bytes| bytes.ends_with(b"\nfeedback-route:next\n")),
+        "feedback activation replaced the exact applied target bytes"
+    );
 
     fs::write(&config_path, corrupt_config).unwrap();
     let refused_restore = cli.run(&[
