@@ -9,3 +9,7 @@ pub use transaction::{
     NativeIntegrationAuthorizationPort, NativeIntegrationMechanics, NativeIntegrationProbeV1,
     NativeIntegrationTransactionCoordinator,
 };
+
+#[cfg(test)]
+#[path = "transaction_tests.rs"]
+mod tests;
