@@ -16,10 +16,16 @@ use tracedecay_application::{
     RetryDirective, SafeDiagnostic,
 };
 use tracedecay_tool_catalog::{
-    BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId, ProfileId, SchemaId, ScopeDimension,
+    BindingSurface, CancellationContract, CapabilityId, CatalogSnapshotV1, DeadlineContract,
+    FeatureId, PaginationContract, ProfileId, ReceiptContract, SchemaId, ScopeDimension,
+    TerminalStateContract,
 };
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
+
+mod manifest;
+
+pub use manifest::{HttpManifestContract, HttpManifestContractError};
 
 pub(crate) const MAX_HTTP_APPLICATION_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_HTTP_PAGE_SIZE: u32 = 10;
@@ -484,6 +490,11 @@ pub struct HttpRouteDocumentV1 {
     pub request_schema_revision: u32,
     pub result_schema: String,
     pub result_schema_revision: u32,
+    pub cancellation: CancellationContract,
+    pub deadline: DeadlineContract,
+    pub pagination: Option<PaginationContract>,
+    pub receipt: ReceiptContract,
+    pub terminal_states: TerminalStateContract,
 }
 
 /// Generate authorized HTTP route documentation. Hidden profile, scope,
@@ -524,6 +535,11 @@ pub fn http_route_documents(
             request_schema_revision: capability.request_schema().revision(),
             result_schema: capability.result_schema().schema_id().as_str().to_owned(),
             result_schema_revision: capability.result_schema().revision(),
+            cancellation: capability.cancellation().clone(),
+            deadline: capability.deadline().clone(),
+            pagination: capability.pagination().cloned(),
+            receipt: capability.receipt(),
+            terminal_states: capability.terminal_states().clone(),
         });
     }
     documents.sort_by(|left, right| left.path.cmp(&right.path));

@@ -12,10 +12,12 @@
 #![forbid(unsafe_code)]
 
 pub mod configuration;
+pub mod delivery;
 pub mod doctor;
 pub mod feedback;
 mod http;
 pub mod multi_root;
+pub mod operation;
 pub mod read_model;
 pub mod remediation;
 pub mod remote;
@@ -34,9 +36,10 @@ use tracedecay_tool_catalog::BindingId;
 
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
-    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
-    application_problem_response, application_router, configuration_application_router,
-    feedback_application_router, http_route_documents,
+    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpManifestContract,
+    HttpManifestContractError, HttpRouteDocumentV1, application_problem_response,
+    application_router, configuration_application_router, feedback_application_router,
+    http_route_documents,
 };
 pub use multi_root::{
     MultiRootApplicationOwner, MultiRootHttpOperation, MultiRootHttpRequest,
