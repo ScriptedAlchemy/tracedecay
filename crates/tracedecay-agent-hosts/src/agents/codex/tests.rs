@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 /// The repo-local `hooks-codex.json` ships only an empty `hooks` object.
 /// Rendering the global bundle must fill the object from `CODEX_MANAGED_HOOKS`
@@ -580,35 +581,76 @@ fn native_cache_content_drift_and_binary_relocation_require_refresh() {
 }
 
 #[test]
-fn redeploy_retires_owned_discovery_files_and_preserves_foreign_bytes() {
-    const RETIRED_FIND_IMPACT_SKILL: &str = r#"---
-name: tracedecay-find-impact
-description: 'Use to find the blast radius of a change, including impacted symbols, files, and the tests to run.'
----
+fn every_published_retired_discovery_identity_converges_on_redeploy() {
+    #[derive(serde::Deserialize)]
+    struct PublishedRetiredEntrypoint {
+        path: String,
+        digest: String,
+        releases: Vec<String>,
+        contents: String,
+    }
 
-# Find impact
+    let variants = serde_json::from_str::<Vec<PublishedRetiredEntrypoint>>(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../tests/fixtures/host_integrations/codex_retired_entrypoints.json"
+    )))
+    .unwrap();
+    assert_eq!(variants.len(), 30);
 
-Use to find a change's blast radius: impacted symbols, files, and tests to run.
+    for variant in variants {
+        let observed_digest = hex::encode(Sha256::digest(variant.contents.as_bytes()));
+        assert_eq!(observed_digest, variant.digest);
+        assert!(
+            retired_entrypoints::has_exact_identity(&variant.path, variant.contents.as_bytes()),
+            "published identity missing for {} from {:?}",
+            variant.path,
+            variant.releases
+        );
 
-Use `tracedecay:assessing-impact`.
+        let home = tempfile::tempdir().unwrap();
+        write_exact_native_activation(home.path(), TEST_BIN);
+        let ctx = install_ctx(home.path());
+        let retired = codex_plugin_install_dir(home.path()).join(&variant.path);
+        std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
+        std::fs::write(&retired, variant.contents).unwrap();
+        assert!(matches!(
+            CodexIntegration
+                .preflight_non_interactive_install(&ctx)
+                .unwrap(),
+            NonInteractiveInstallOutcome::DeferredUserAction(_)
+        ));
 
-- **Target:** the symbol, file, or change to analyze. If none is given, use the current working-tree diff.
-- Read-only: shallow `max_depth` first. Identify impact; do not run tests.
+        install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
+        assert!(!retired.exists(), "retained {}", variant.path);
+        assert!(matches!(
+            CodexIntegration
+                .preflight_non_interactive_install(&ctx)
+                .unwrap(),
+            NonInteractiveInstallOutcome::Ready
+        ));
+    }
+}
 
-Output: impacted symbols + files, the test set to run, and any hub/coupling risk.
-"#;
-
+#[test]
+fn redeploy_preserves_foreign_discovery_and_support_bytes() {
     let home = tempfile::tempdir().unwrap();
     write_exact_native_activation(home.path(), TEST_BIN);
     let ctx = install_ctx(home.path());
     let source = codex_plugin_install_dir(home.path());
-    let retired = source.join("skills/tracedecay-find-impact/SKILL.md");
-    std::fs::create_dir_all(retired.parent().unwrap()).unwrap();
-    std::fs::write(&retired, RETIRED_FIND_IMPACT_SKILL).unwrap();
-    let operator_support = retired.parent().unwrap().join("operator-notes.txt");
+    let operator_skill = source.join("skills/operator-owned/SKILL.md");
+    std::fs::create_dir_all(operator_skill.parent().unwrap()).unwrap();
+    let operator_skill_bytes = b"---\nname: operator-owned\ndescription: Use the TraceDecay MCP safely\n---\n\nCall `tracedecay_context` for indexed code.\n";
+    std::fs::write(&operator_skill, operator_skill_bytes).unwrap();
+    let modified_retired = source.join("skills/tracedecay-find-impact/SKILL.md");
+    std::fs::create_dir_all(modified_retired.parent().unwrap()).unwrap();
+    let modified_retired_bytes =
+        b"---\nname: tracedecay-find-impact\ndescription: Operator-modified workflow\n---\n";
+    std::fs::write(&modified_retired, modified_retired_bytes).unwrap();
+    let support_root = source.join("skills/operator-owned");
+    let operator_support = support_root.join("operator-notes.txt");
     let operator_support_bytes = b"preserve operator TraceDecay MCP support bytes";
     std::fs::write(&operator_support, operator_support_bytes).unwrap();
-    let reference = retired.parent().unwrap().join("reference.md");
+    let reference = support_root.join("reference.md");
     let reference_bytes = b"Operator reference for tracedecay_message_search";
     std::fs::write(&reference, reference_bytes).unwrap();
     let helper = source.join("hooks/helper.py");
@@ -622,26 +664,20 @@ Output: impacted symbols + files, the test set to run, and any hub/coupling risk
     ));
 
     install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
-    assert!(!retired.exists());
+    assert_eq!(
+        std::fs::read(&operator_skill).unwrap(),
+        operator_skill_bytes
+    );
+    assert_eq!(
+        std::fs::read(&modified_retired).unwrap(),
+        modified_retired_bytes
+    );
     assert_eq!(
         std::fs::read(&operator_support).unwrap(),
         operator_support_bytes
     );
     assert_eq!(std::fs::read(&reference).unwrap(), reference_bytes);
     assert_eq!(std::fs::read(&helper).unwrap(), helper_bytes);
-    assert!(matches!(
-        CodexIntegration
-            .preflight_non_interactive_install(&ctx)
-            .unwrap(),
-        NonInteractiveInstallOutcome::Ready
-    ));
-
-    let foreign = source.join("skills/operator-owned/SKILL.md");
-    std::fs::create_dir_all(foreign.parent().unwrap()).unwrap();
-    let foreign_bytes = b"---\nname: operator-owned\ndescription: Use the TraceDecay MCP safely\n---\n\nCall `tracedecay_context` for indexed code.\n";
-    std::fs::write(&foreign, foreign_bytes).unwrap();
-    install_codex_personal_bootstrap(home.path(), TEST_BIN).unwrap();
-    assert_eq!(std::fs::read(foreign).unwrap(), foreign_bytes);
     assert!(matches!(
         CodexIntegration
             .preflight_non_interactive_install(&ctx)

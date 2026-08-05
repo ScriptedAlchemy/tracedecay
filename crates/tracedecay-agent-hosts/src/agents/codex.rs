@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use tracedecay_domain::canonical_sha256;
 
 use crate::errors::{Result, TraceDecayError};
@@ -24,88 +23,7 @@ use super::{
 /// reads this host-native state but never writes it.
 const CODEX_PLUGIN_ACTIVATION_KEY_PREFIX: &str = "tracedecay@";
 
-/// Exact identities of auto-discovered Codex skills retired from previously
-/// shipped plugin bundles. Cleanup is deliberately closed over these
-/// path-and-content pairs: a name, frontmatter field, or TraceDecay tool
-/// reference is not ownership evidence.
-const CODEX_RETIRED_ENTRYPOINT_IDENTITIES: &[(&str, &str)] = &[
-    (
-        "skills/curating-project-memory/SKILL.md",
-        "06eeb9b654516e880bd9f4e2a4887b5e4b89f0542068de58ebe5a4a71344cc5c",
-    ),
-    (
-        "skills/recalling-project-memory/SKILL.md",
-        "27373ccba172c2577c7c870f26c39ec3b1e7681794d54c30daee8163ab394741",
-    ),
-    (
-        "skills/recalling-session-context/SKILL.md",
-        "9831eadc387bc7830f5886932ab4b9d59eedae0df6dd151e715f86af4160624d",
-    ),
-    (
-        "skills/retrieving-cached-context/SKILL.md",
-        "fb1b2fa3e50d7f6e5a472259ed37c1e8135e29ced0ebb3e3cbb3bb2c5eab7300",
-    ),
-    (
-        "skills/retrieving-project-memory/SKILL.md",
-        "e3a2fd2d24836e9319e8e177d4eebb06f15d8253d42d85bfd8b911fb27b488d5",
-    ),
-    (
-        "skills/storing-project-memory/SKILL.md",
-        "0ac3f8a41bb88c61bcac0121aebe1b8ff239adfaee4ccaeb9904850c66521bfd",
-    ),
-    (
-        "skills/tracedecay-audit-safety/SKILL.md",
-        "d31189e7edcd510ddf574b8a0406f8f87b95fed980bc833911b946d3389d9985",
-    ),
-    (
-        "skills/tracedecay-check-health/SKILL.md",
-        "34ce491ee8ff4d5a887b4d9ddad7589734f548221d7014e4585aff3c07025537",
-    ),
-    (
-        "skills/tracedecay-clean-dead-code/SKILL.md",
-        "e45b29417511f335a395d10985e646c4eb8ce104f772148418c95cbb62304d7f",
-    ),
-    (
-        "skills/tracedecay-compare-branches/SKILL.md",
-        "4540d196228e8cebfcd6211fe616fefa664ad7f0347fe6cdef575b1643509d74",
-    ),
-    (
-        "skills/tracedecay-curate-memory/SKILL.md",
-        "6b05eec049940a25f28eb0186853fb0b95747707750c2e3cbaa04643213b6fee",
-    ),
-    (
-        "skills/tracedecay-draft-commit/SKILL.md",
-        "9a17774f196d2840a14824144273cc1981d5ef01a72f254fa3a270df493ada52",
-    ),
-    (
-        "skills/tracedecay-find-impact/SKILL.md",
-        "184540ec2da7673dd535868f659fb2eff48bcd07abc5f651aa1272795a2bf640",
-    ),
-    (
-        "skills/tracedecay-fix-build/SKILL.md",
-        "64a876ea2615f1b940116bf3570d4cf722a03af06bdcf1faf716601eb72f9739",
-    ),
-    (
-        "skills/tracedecay-map-architecture/SKILL.md",
-        "6bf5800ace17a547bc6d2e7c2112a1140923f9890102c653c35c4659f6ea0fef",
-    ),
-    (
-        "skills/tracedecay-port-code/SKILL.md",
-        "08c5b95fb3ca8abdb2a077645a4c97a805518f1ca98d15d4a90751801097a546",
-    ),
-    (
-        "skills/tracedecay-recall-memory/SKILL.md",
-        "6481a0780a031108e2a8084d7da926d06d524f8ab7f3b1428ae8f7c236cfd4a4",
-    ),
-    (
-        "skills/tracedecay-review-diff/SKILL.md",
-        "f977e9bd0dec65569905a7c360bd232c6652e1644d870ad15fe48b80d70e71cf",
-    ),
-    (
-        "skills/tracedecay-test-changes/SKILL.md",
-        "04481d6cd6c110efddd8db93129767003443ef57687d6e6dd775186b437bb85b",
-    ),
-];
+mod retired_entrypoints;
 
 /// `OpenAI` Codex CLI agent.
 pub struct CodexIntegration;
@@ -1553,7 +1471,7 @@ fn remove_codex_retired_autodiscovered_files(install_dir: &Path) -> Result<()> {
             let Ok(contents) = std::fs::read(&file) else {
                 continue;
             };
-            if !codex_retired_entrypoint_has_exact_identity(&relative, &contents) {
+            if !retired_entrypoints::has_exact_identity(&relative, &contents) {
                 continue;
             }
             super::safe_remove_host_file(&file).map_err(|error| TraceDecayError::Config {
@@ -1571,15 +1489,6 @@ fn remove_codex_retired_autodiscovered_files(install_dir: &Path) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-fn codex_retired_entrypoint_has_exact_identity(relative: &str, contents: &[u8]) -> bool {
-    let digest = hex::encode(Sha256::digest(contents));
-    CODEX_RETIRED_ENTRYPOINT_IDENTITIES
-        .iter()
-        .any(|(owned_relative, owned_digest)| {
-            relative == *owned_relative && digest == *owned_digest
-        })
 }
 
 fn remove_codex_managed_skill_overlay(install_dir: &Path) {
