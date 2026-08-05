@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::feedback::{
     FeedbackCycleId, FeedbackCycleResultV1, FeedbackFindingId, FeedbackFindingV1, FeedbackResultId,
@@ -40,12 +41,13 @@ pub const FEEDBACK_LIST_CAPABILITY_ID_V1: &str = "capability.application.feedbac
 pub const FEEDBACK_LIST_USE_CASE_ID_V1: &str = "use-case.application.feedback.list";
 
 const MAX_FEEDBACK_HANDLE_BYTES_V1: usize = 256;
+const MAX_FEEDBACK_DOCUMENT_URI_BYTES_V1: usize = 4_096;
 
 pub type FeedbackReadPortFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
 
 /// Opaque daemon-minted handle accepted by the first feedback read invocation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackHandleRequestV1 {
     pub request_handle: String,
@@ -64,6 +66,28 @@ impl FeedbackHandleRequestV1 {
             });
         }
         Ok(Self { request_handle })
+    }
+}
+
+/// Saved document selected for one explicit advisory feedback cycle.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackAdvisoryCycleRequestV1 {
+    pub document_uri: String,
+}
+
+impl FeedbackAdvisoryCycleRequestV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.document_uri.is_empty()
+            || self.document_uri.trim() != self.document_uri
+            || self.document_uri.len() > MAX_FEEDBACK_DOCUMENT_URI_BYTES_V1
+            || self.document_uri.chars().any(char::is_control)
+        {
+            return Err(ApplicationContractError::InvalidIdentifier {
+                field: "feedback document URI",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -129,7 +153,7 @@ impl FeedbackListRequestV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackFindingReadV1 {
     pub result_id: FeedbackResultId,
@@ -144,26 +168,26 @@ pub struct FeedbackFindingReadV1 {
     pub expand_handle: Option<OpaqueCursor>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackDiagnosticsReadResultV1 {
     pub cycle: FeedbackCycleResultV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackGetResultV1 {
     pub finding: FeedbackFindingReadV1,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackExpandResultV1 {
     pub finding: FeedbackFindingReadV1,
     pub expansion: AnchorExpandResult,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackListResultV1 {
     pub findings: Vec<FeedbackFindingReadV1>,

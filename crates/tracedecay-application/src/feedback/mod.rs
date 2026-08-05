@@ -37,7 +37,7 @@ pub use read::{
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
     FEEDBACK_GET_CAPABILITY_ID_V1, FEEDBACK_GET_USE_CASE_ID_V1, FEEDBACK_LIST_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackDiagnosticsReadRequestV1,
+    FEEDBACK_LIST_USE_CASE_ID_V1, FeedbackAdvisoryCycleRequestV1, FeedbackDiagnosticsReadRequestV1,
     FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1, FeedbackExpandResultV1,
     FeedbackFindingReadV1, FeedbackGetRequestV1, FeedbackGetResultV1, FeedbackHandleRequestV1,
     FeedbackListRequestV1, FeedbackListResultV1, FeedbackReadOperationsV1, FeedbackReadPort,

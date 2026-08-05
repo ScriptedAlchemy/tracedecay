@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 use tracedecay_policy::authorization::SourceAuthorizationEvaluator;
@@ -22,6 +23,13 @@ use super::{RetrievalPortOutcome, RetrievalRequestMeta};
 pub const MAX_TEST_PRIMITIVE_FILES: usize = 256;
 pub const MAX_TEST_PRIMITIVE_DEPTH: usize = 10;
 pub const MAX_TEST_FILTER_BYTES: usize = 1_024;
+
+/// Body accepted by the recent managed-test-results surface.
+///
+/// Pagination remains an invocation control shared by CLI, MCP, and HTTP.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TestResultsRequestV1 {}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

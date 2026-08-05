@@ -8,6 +8,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::feedback::{
     FeedbackDiagnosticsReadRequestV1, FeedbackDiagnosticsReadResultV1, FeedbackExpandRequestV1,
@@ -192,7 +193,7 @@ pub enum FeedbackCanonicalProjectionKindV1 {
     AffectedTests,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalFeedbackImpactProjectionV1 {
     pub result_id: FeedbackResultId,
@@ -203,7 +204,7 @@ pub struct CanonicalFeedbackImpactProjectionV1 {
     pub state: Option<FeedbackImpactStateV1>,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CanonicalAffectedTestsProjectionV1 {
     pub result_id: FeedbackResultId,

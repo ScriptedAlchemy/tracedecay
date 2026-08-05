@@ -62,5 +62,5 @@ pub use test_attribution::{
     MAX_TEST_PRIMITIVE_DEPTH, MAX_TEST_PRIMITIVE_FILES, RankedAffectedTestV1, TestMapCoverageV1,
     TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitiveOperations, TestPrimitivePort,
     TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
-    TestPrimitiveService, TestReferenceV1, UncoveredSourceV1,
+    TestPrimitiveService, TestReferenceV1, TestResultsRequestV1, UncoveredSourceV1,
 };
