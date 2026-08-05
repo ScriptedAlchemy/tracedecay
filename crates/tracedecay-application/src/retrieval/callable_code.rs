@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkId, EphemeralSanitizedQueryViewV1, ExactTechnicalTermKindV1,
@@ -21,7 +22,7 @@ pub const MAX_SOURCE_METADATA_FILES: usize = 256;
 
 /// One immutable code-index generation inside the authorized single root.
 /// The path prefix narrows a query but never establishes project identity.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeQueryScope {
     pub generation: CodeGenerationId,
@@ -58,7 +59,7 @@ impl CodeQueryScope {
 /// Generation-bound page returned by every callable code query. Coverage,
 /// omissions, scoring, and terminal state remain in the enclosing
 /// [`crate::result::RetrievalEvidence`].
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeQueryPage<T> {
     pub generation: CodeGenerationId,
@@ -108,7 +109,7 @@ impl<T> CodeQueryPage<T> {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeOccurrenceRecord {
     pub file: FileOccurrenceId,
@@ -118,7 +119,7 @@ pub struct CodeOccurrenceRecord {
     pub span: SourceSpan,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactOccurrenceRecord {
     pub occurrence: CodeOccurrenceRecord,
@@ -126,7 +127,7 @@ pub struct ExactOccurrenceRecord {
     pub matched_literal: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LexicalOccurrenceRecord {
     pub occurrence: CodeOccurrenceRecord,
@@ -135,7 +136,7 @@ pub struct LexicalOccurrenceRecord {
     pub matched_terms: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceMetadataRecord {
     pub file: FileOccurrenceId,
@@ -145,7 +146,7 @@ pub struct SourceMetadataRecord {
     pub byte_size: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeFacetDimension {
     Kind,
@@ -153,7 +154,7 @@ pub enum CodeFacetDimension {
     Path,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeFacetRecord {
     pub dimension: CodeFacetDimension,
@@ -161,7 +162,7 @@ pub struct CodeFacetRecord {
     pub count: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTimelineRecord {
     pub generation: CodeGenerationId,
@@ -170,7 +171,7 @@ pub struct CodeTimelineRecord {
     pub symbol_count: u64,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactOccurrenceRequest {
     pub literal: String,
@@ -230,7 +231,9 @@ impl PhraseSearchRequest {
 }
 
 /// Typed code fields accepted by the generation-owned lexical authority.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CodeLexicalField {
     SymbolName,
@@ -242,7 +245,7 @@ pub enum CodeLexicalField {
     Subtoken,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeLexicalFieldFilter {
     pub field: CodeLexicalField,
@@ -256,7 +259,7 @@ pub struct CodeSymbolSearchRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QualifiedNameRequest {
     pub qualified_name: String,
@@ -264,7 +267,7 @@ pub struct QualifiedNameRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeSignatureRequest {
     pub returns: Option<String>,
@@ -274,7 +277,7 @@ pub struct CodeSignatureRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeImplementationsRequest {
     pub selector: ImplementationSelector,
@@ -282,7 +285,7 @@ pub struct CodeImplementationsRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeHierarchyRequest {
     pub node_id: String,
@@ -291,7 +294,7 @@ pub struct CodeHierarchyRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeRelationRequest {
     pub node_id: String,
@@ -301,7 +304,7 @@ pub struct CodeRelationRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeImpactRequest {
     pub node_id: String,
@@ -310,7 +313,7 @@ pub struct CodeImpactRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleApiRequest {
     pub path: String,
@@ -318,7 +321,7 @@ pub struct ModuleApiRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceMetadataRequest {
     pub files: Vec<FileOccurrenceId>,
@@ -326,7 +329,7 @@ pub struct SourceMetadataRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeFacetRequest {
     pub dimension: CodeFacetDimension,
@@ -334,14 +337,14 @@ pub struct CodeFacetRequest {
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeTimelineRequest {
     pub scope: CodeQueryScope,
     pub meta: RetrievalRequestMeta,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CodeNavigationRequest {
     pub node_id: String,

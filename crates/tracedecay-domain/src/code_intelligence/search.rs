@@ -13,6 +13,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::research::id::{ManifestDigest, PrivacyDomainId, SanitizationReceiptId};
@@ -242,7 +243,9 @@ impl CodeSearchChunkAnchorV1 {
 /// The classification of one whole exact technical term (Plan 25/Plan 15
 /// exact tier). Whole exact terms and language-profiled subtokens are
 /// distinct fields.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ExactTechnicalTermKindV1 {
     WholeSymbol,
@@ -945,7 +948,9 @@ pub enum EmbeddingPrecisionV1 {
 ///
 /// This identity is shared by projection stores and semantic retrieval
 /// adapters; neither layer may define a lookalike generation key.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(transparent)]
 pub struct VectorGenerationIdV1(ManifestDigest);
 
@@ -1123,7 +1128,9 @@ impl AdmittedEmbeddingProjectionKeyV1 {
 /// This is intentionally distinct from [`EmbeddingProjectionKeyV1`]:
 /// changing an index implementation or its parameters must rebuild only the
 /// derived search structure and query caches, never the vector projection.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticSearchIndexKindV1 {
     ExactFlat,
@@ -1139,7 +1146,9 @@ pub struct SemanticSearchIndexProfileV1 {
 }
 
 /// Independent immutable identity of a derived semantic search structure.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticSearchIndexKeyV1 {
     pub kind: SemanticSearchIndexKindV1,
@@ -1188,7 +1197,9 @@ impl SemanticSearchIndexKeyV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionKeyV1 {
     pub kind: ProjectionKindV1,
@@ -1197,7 +1208,9 @@ pub struct ProjectionKeyV1 {
 }
 
 /// The projection families query/semantic recognize.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionKindV1 {
     Lexical,

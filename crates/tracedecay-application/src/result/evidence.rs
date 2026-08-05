@@ -1,5 +1,6 @@
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use tracedecay_domain::{
     CodeGenerationId, ComponentVersion, ManifestDigest, RetrievalAnchorId, TemporalModeV1,
@@ -17,6 +18,8 @@ application_identifier!(
     @no_schema
     EvidenceIdentity => ("evidence identity", 512),
     ScoreId => ("score id", 512),
+);
+application_identifier!(
     // Existing authenticated query cursors bind typed scope, access, key,
     // participant, and watermark identity. Keep the application envelope
     // bounded without forcing a second compact cursor scheme.

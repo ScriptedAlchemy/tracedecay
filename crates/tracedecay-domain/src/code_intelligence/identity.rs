@@ -46,6 +46,12 @@ validated_string_newtype!(
     DomainError,
     validate_code_identity;
     CodeSearchChunkId,
+);
+
+validated_string_newtype!(
+    plain,
+    DomainError,
+    validate_code_identity;
     LanguageId,
     LanguageDescriptorRevision,
     GrammarRevision,

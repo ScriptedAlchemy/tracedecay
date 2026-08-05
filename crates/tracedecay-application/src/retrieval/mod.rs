@@ -1,6 +1,7 @@
 mod callable_code;
 mod callable_code_catalog;
 mod callable_code_service;
+mod callable_code_wire;
 pub mod catalog;
 pub mod grep_analysis;
 mod ports;
@@ -29,6 +30,13 @@ pub use callable_code_service::{
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, CallableCodeQueryFuture, CallableCodeQueryPort,
     CallableCodeQueryService, UNPINNED_LATEST_GENERATION_SENTINEL,
+};
+pub use callable_code_wire::{
+    CallableCodeSurfaceMeta, CodeCalleesSurfaceRequest, CodeCallersSurfaceRequest,
+    CodeExactOccurrenceSurfaceRequest, CodeFacetSurfaceRequest, CodeImplementationsSurfaceRequest,
+    CodeNavigationSurfaceRequest, CodePhraseSearchSurfaceRequest,
+    CodeSignatureSearchSurfaceRequest, CodeSymbolSearchSurfaceRequest, CodeTimelineSurfaceRequest,
+    CodeTypeHierarchySurfaceRequest,
 };
 pub use ports::{
     AffectedTestsRetrievalPort, AnchorHydrationPort, GraphImpactRetrievalPort, GraphRetrievalPort,

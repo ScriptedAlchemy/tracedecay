@@ -147,14 +147,14 @@ pub trait Pr12OperationalPrimitivePort: Send + Sync {
     ) -> Pr12OperationalPrimitiveFuture<'a>;
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct QualifiedNamePrimitiveRequest {
     pub qualified_name: String,
     pub page: tracedecay_application::PageRequest,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct QualifiedNamePrimitiveResult {
     pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
@@ -162,7 +162,7 @@ pub struct QualifiedNamePrimitiveResult {
     pub next_cursor: Option<OpaqueCursor>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallChainPrimitiveRequest {
     #[serde(alias = "from_id")]
@@ -177,33 +177,33 @@ const fn default_call_chain_depth() -> u32 {
     8
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallChainPrimitiveResult {
     pub node_ids: Vec<String>,
     pub edge_kinds: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileDependentsPrimitiveRequest {
     pub file: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileDependentsPrimitiveResult {
     pub file: String,
     pub dependent_files: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceBodyPrimitiveRequest {
     pub node_id: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceBodyPrimitiveResult {
     pub node_id: String,
@@ -213,39 +213,39 @@ pub struct SourceBodyPrimitiveResult {
     pub body: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceOutlinePrimitiveRequest {
     pub file: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SourceOutlinePrimitiveResult {
     pub file: String,
     pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleApiPrimitiveRequest {
     pub path: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ModuleApiPrimitiveResult {
     pub path: String,
     pub symbols: Vec<tracedecay_application::retrieval::SymbolPrimitiveRecord>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileMetadataPrimitiveRequest {
     pub files: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileMetadataRecord {
     pub file: String,
@@ -254,7 +254,7 @@ pub struct FileMetadataRecord {
     pub byte_size: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileMetadataPrimitiveResult {
     pub files: Vec<FileMetadataRecord>,

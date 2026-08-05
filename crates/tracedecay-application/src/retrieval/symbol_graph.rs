@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{EphemeralSanitizedQueryViewV1, UtcMicros};
 
@@ -18,7 +19,7 @@ pub const MAX_SYMBOL_GRAPH_FILTERS: usize = 32;
 /// Optional narrowing inside the immutable project/repository/worktree scope
 /// carried by [`RequestContext`]. A path prefix never establishes identity or
 /// authorization.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolGraphScope {
     pub path_prefix: Option<String>,
@@ -38,7 +39,7 @@ impl SymbolGraphScope {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolPrimitiveRecord {
     pub node_id: String,
@@ -57,7 +58,7 @@ pub struct SymbolPrimitiveRecord {
     pub score: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolRelationRecord {
     pub symbol: SymbolPrimitiveRecord,
@@ -67,7 +68,7 @@ pub struct SymbolRelationRecord {
     pub depth: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct TypeHierarchyRecord {
     pub symbol: SymbolPrimitiveRecord,
@@ -76,7 +77,7 @@ pub struct TypeHierarchyRecord {
     pub depth: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PrimitiveSupportGap {
     pub provider: Option<String>,
@@ -84,7 +85,7 @@ pub struct PrimitiveSupportGap {
     pub reason: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum PrimitiveFailureKind {
     InvalidRequest,
@@ -93,7 +94,7 @@ pub enum PrimitiveFailureKind {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PrimitiveFailure {
     pub kind: PrimitiveFailureKind,
@@ -143,7 +144,7 @@ impl PrimitiveSupportGap {
 
 /// Bounded semantic result shared by the compatibility surfaces. Rendering,
 /// transport envelopes, and MCP content blocks remain outside this contract.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SymbolGraphPage<T> {
     pub items: Vec<T>,
@@ -183,7 +184,7 @@ impl SymbolSearchPrimitiveRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExactSymbolRequest {
     pub name: String,
@@ -199,7 +200,7 @@ impl ExactSymbolRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignatureSearchRequest {
     pub returns: Option<String>,
@@ -216,14 +217,14 @@ impl SignatureSearchRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "selector")]
 pub enum ImplementationSelector {
     Trait { name: String },
     Method { name: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ImplementationsRequest {
     pub selector: ImplementationSelector,
@@ -238,7 +239,7 @@ impl ImplementationsRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TypeHierarchyRequest {
     pub node_id: String,
@@ -254,7 +255,7 @@ impl TypeHierarchyRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GraphRelationRequest {
     pub node_id: String,
@@ -271,7 +272,7 @@ impl GraphRelationRequest {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GraphImpactPrimitiveRequest {
     pub node_id: String,
