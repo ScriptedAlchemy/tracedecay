@@ -16,40 +16,45 @@
  *                      replaced them with, so a compacted region is visible as
  *                      a boundary rather than silently absent from the
  *                      transcript.
- *   the page           `limit`/`offset`/`order` are server pagination. What is
- *                      on screen is a page of a transcript, and the header says
- *                      which page — a truncated read is never presented as the
- *                      whole session.
+ *   the page           the daemon's opaque temporal cursor selects each page;
+ *                      `offset` is only the browser's page-position label. A
+ *                      truncated read is never presented as the whole session.
  *
  * A message whose `content` is null is not an empty message: the store holds
  * the turn but not its body (offloaded or dropped by retention). That is said
  * outright rather than rendered as a blank line.
  */
-import { useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { z } from "zod";
 import {
   LcmSessionPayloadV1Schema,
   type LcmMessageV1,
-  type LcmSessionPayloadV1,
   type LcmSummaryNodeV1,
-} from '../../contracts/generated.ts';
-import { useEnvelope } from '../../data/query/useEnvelope.ts';
-import { InspectorPanel } from '../../ui/archetypes/ExplorerSplit.tsx';
-import { ReadSection, envelopeReadState } from '../../ui/ReadSection.tsx';
-import { StateChip } from '../../ui/StateChip';
-import { Legend, Meter, Readout } from '../../ui/instrument.tsx';
-import { formatStamp, splitCount } from '../../ui/format.ts';
+} from "../../contracts/generated.ts";
+import { useEnvelope } from "../../data/query/useEnvelope.ts";
+import { InspectorPanel } from "../../ui/archetypes/ExplorerSplit.tsx";
+import { ReadSection, envelopeReadState } from "../../ui/ReadSection.tsx";
+import { StateChip } from "../../ui/StateChip";
+import { Legend, Meter, Readout } from "../../ui/instrument.tsx";
+import { formatStamp, splitCount } from "../../ui/format.ts";
 
 /** One page of transcript. The plan's server-page default; the route caps at
  * 1000 and this stays well inside it so an inspector open never pulls a whole
  * corpus into the browser. */
 const PAGE_SIZE = 100;
+const LcmSessionCursorPayloadV1Schema = LcmSessionPayloadV1Schema.extend({
+  next_cursor: z.string().nullable(),
+});
+type LcmSessionCursorPayloadV1 = z.infer<
+  typeof LcmSessionCursorPayloadV1Schema
+>;
 
 /** The pager's visible bezel. It stays 24px tall — it annotates a message
  * range rather than heading the panel — and `.td-hit` on the button around it
  * supplies the 44px target. */
 const PAGER_BEZEL =
-  'inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary group-hover:text-text-primary';
+  "inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary group-hover:text-text-primary";
 
 export function SessionInspector({
   sessionId,
@@ -59,12 +64,14 @@ export function SessionInspector({
   onClose: () => void;
 }) {
   const [offset, setOffset] = useState(0);
-  const [order, setOrder] = useState<'asc' | 'desc'>('asc');
+  const [cursor, setCursor] = useState<string | null>(null);
+  const cursors = useRef(new Map<number, string | null>([[0, null]]));
+  const [order, setOrder] = useState<"asc" | "desc">("asc");
   /**
    * The page a reader asked for, held until it arrives on screen.
    *
    * It lives up here because the transcript below does not survive the trip: a
-   * new `limit`/`offset` is a new query, so the read boundary swings to its
+   * new temporal cursor is a new query, so the read boundary swings to its
    * loading state and unmounts the whole page of rows — including the control
    * that was just activated. Focus goes to the document, and a keyboard user is
    * returned to the top of the app with no indication that anything moved. A
@@ -73,27 +80,28 @@ export function SessionInspector({
    */
   const [pagedTo, setPagedTo] = useState<number | null>(null);
   const session = useEnvelope(
-    ['lcm', 'session', sessionId, offset, order],
-    `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}`,
-    LcmSessionPayloadV1Schema,
+    ["lcm", "session", sessionId, offset, cursor, order],
+    `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}${cursor == null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`,
+    LcmSessionCursorPayloadV1Schema,
   );
 
   return (
     <InspectorPanel title="Session transcript" onClose={onClose}>
       <div className="flex flex-col gap-3">
-        <p className="td-value break-all text-3xs text-text-muted">{sessionId}</p>
+        <p className="td-value break-all text-3xs text-text-muted">
+          {sessionId}
+        </p>
         <ReadSection
           title="Transcript"
           chrome="centered"
           state={envelopeReadState(session.isPending, session.data, {
-            loading: 'reading transcript',
-            transport: 'transcript could not be read',
+            loading: "reading transcript",
+            transport: "transcript could not be read",
           })}
         >
           {(envelope) => {
             const payload = envelope.payload;
-            return (
-            payload.exists === false ? (
+            return payload.exists === false ? (
               <StateChip
                 kind="unknown"
                 detail="the session store holds no transcript under this id"
@@ -105,16 +113,20 @@ export function SessionInspector({
                 onOrderChange={(next) => {
                   setOrder(next);
                   setOffset(0);
+                  setCursor(null);
+                  cursors.current = new Map([[0, null]]);
                   setPagedTo(0);
                 }}
-                onOffsetChange={(next) => {
+                onPageChange={(next, nextCursor) => {
+                  cursors.current.set(next, nextCursor);
                   setOffset(next);
+                  setCursor(nextCursor);
                   setPagedTo(next);
                 }}
+                cursorForOffset={(next) => cursors.current.get(next) ?? null}
                 pagedTo={pagedTo}
                 onArrived={() => setPagedTo(null)}
               />
-            )
             );
           }}
         </ReadSection>
@@ -127,14 +139,16 @@ function SessionBody({
   payload,
   order,
   onOrderChange,
-  onOffsetChange,
+  onPageChange,
+  cursorForOffset,
   pagedTo,
   onArrived,
 }: {
-  payload: LcmSessionPayloadV1;
-  order: 'asc' | 'desc';
-  onOrderChange: (order: 'asc' | 'desc') => void;
-  onOffsetChange: (offset: number) => void;
+  payload: LcmSessionCursorPayloadV1;
+  order: "asc" | "desc";
+  onOrderChange: (order: "asc" | "desc") => void;
+  onPageChange: (offset: number, cursor: string | null) => void;
+  cursorForOffset: (offset: number) => string | null;
   pagedTo: number | null;
   onArrived: () => void;
 }) {
@@ -146,11 +160,15 @@ function SessionBody({
         payload={payload}
         order={order}
         onOrderChange={onOrderChange}
-        onOffsetChange={onOffsetChange}
+        onPageChange={onPageChange}
+        cursorForOffset={cursorForOffset}
         pagedTo={pagedTo}
         onArrived={onArrived}
       />
-      <p className="td-value break-all text-3xs text-text-muted" title={payload.path}>
+      <p
+        className="td-value break-all text-3xs text-text-muted"
+        title={payload.path}
+      >
         {payload.storage_scope} · {payload.path}
       </p>
     </div>
@@ -167,7 +185,7 @@ function SessionBody({
  * the source-token count is zero, because a ratio against a zero denominator is
  * not a small number, it is not a number.
  */
-function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
+function SessionCounts({ payload }: { payload: LcmSessionCursorPayloadV1 }) {
   const { counts } = payload;
   const compaction =
     counts.source_token_count > 0
@@ -198,13 +216,13 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
       </div>
       {compaction != null ? (
         <p className="text-3xs leading-snug text-text-muted">
-          Summaries hold {(compaction * 100).toFixed(1)}% of the source tokens they replaced —
-          derived from the two counts above, not a stored ratio.
+          Summaries hold {(compaction * 100).toFixed(1)}% of the source tokens
+          they replaced — derived from the two counts above, not a stored ratio.
         </p>
       ) : (
         <p className="text-3xs leading-snug text-text-muted">
-          No source tokens are recorded against this session&apos;s summaries, so no compaction
-          ratio exists to report.
+          No source tokens are recorded against this session&apos;s summaries,
+          so no compaction ratio exists to report.
         </p>
       )}
     </div>
@@ -213,14 +231,19 @@ function SessionCounts({ payload }: { payload: LcmSessionPayloadV1 }) {
 
 /** The compactor's cuts. Each node states the depth it sits at, the category
  * and source type it was built from, and the exact token exchange it made. */
-function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
+function CompactionBoundaries({
+  payload,
+}: {
+  payload: LcmSessionCursorPayloadV1;
+}) {
   const nodes = payload.summary_nodes;
   return (
     <div className="flex flex-col gap-1.5">
       <Legend
         trailing={
           <span className="shrink-0 text-3xs text-text-muted tabular">
-            {nodes.length} of {payload.counts.summary_node_count.toLocaleString()}
+            {nodes.length} of{" "}
+            {payload.counts.summary_node_count.toLocaleString()}
           </span>
         }
       >
@@ -228,11 +251,15 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
       </Legend>
       {nodes.length === 0 ? (
         <StateChip
-          kind={payload.counts.summary_node_count === 0 ? 'complete_zero_findings' : 'partial'}
+          kind={
+            payload.counts.summary_node_count === 0
+              ? "complete_zero_findings"
+              : "partial"
+          }
           detail={
             payload.counts.summary_node_count === 0
-              ? 'the compactor has not cut this session'
-              : 'this page carried no summary nodes'
+              ? "the compactor has not cut this session"
+              : "this page carried no summary nodes"
           }
         />
       ) : (
@@ -261,7 +288,10 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
 }
 
 function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
-  const retained = node.source_token_count > 0 ? node.token_count / node.source_token_count : null;
+  const retained =
+    node.source_token_count > 0
+      ? node.token_count / node.source_token_count
+      : null;
   return (
     <li
       className="flex flex-col gap-1 border-b border-edge-subtle px-2 py-1.5 last:border-b-0"
@@ -269,10 +299,18 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
       data-summary-depth={node.depth}
     >
       <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="td-legend shrink-0 text-text-secondary">depth {node.depth}</span>
-        <span className="min-w-0 truncate text-3xs text-text-primary">{node.category}</span>
-        <span className="td-value ml-auto shrink-0 text-3xs text-text-muted" data-cell="numeric">
-          {node.token_count.toLocaleString()} ← {node.source_token_count.toLocaleString()}
+        <span className="td-legend shrink-0 text-text-secondary">
+          depth {node.depth}
+        </span>
+        <span className="min-w-0 truncate text-3xs text-text-primary">
+          {node.category}
+        </span>
+        <span
+          className="td-value ml-auto shrink-0 text-3xs text-text-muted"
+          data-cell="numeric"
+        >
+          {node.token_count.toLocaleString()} ←{" "}
+          {node.source_token_count.toLocaleString()}
         </span>
       </span>
       {retained != null ? (
@@ -283,11 +321,15 @@ function SummaryNodeRow({ node }: { node: LcmSummaryNodeV1 }) {
       </span>
       <span className="text-3xs text-text-muted">
         {node.source_type} · built {formatStamp(node.created_at)}
-        {node.latest_at != null ? ` · latest ${formatStamp(node.latest_at)}` : ''}
+        {node.latest_at != null
+          ? ` · latest ${formatStamp(node.latest_at)}`
+          : ""}
       </span>
       {/* The producer's own instruction for recovering what this node replaced.
-        * Rendered verbatim: the browser does not construct an expansion. */}
-      <span className="td-value break-all text-3xs text-text-muted">{node.expand_hint}</span>
+       * Rendered verbatim: the browser does not construct an expansion. */}
+      <span className="td-value break-all text-3xs text-text-muted">
+        {node.expand_hint}
+      </span>
     </li>
   );
 }
@@ -297,14 +339,16 @@ function RawMessages({
   payload,
   order,
   onOrderChange,
-  onOffsetChange,
+  onPageChange,
+  cursorForOffset,
   pagedTo,
   onArrived,
 }: {
-  payload: LcmSessionPayloadV1;
-  order: 'asc' | 'desc';
-  onOrderChange: (order: 'asc' | 'desc') => void;
-  onOffsetChange: (offset: number) => void;
+  payload: LcmSessionCursorPayloadV1;
+  order: "asc" | "desc";
+  onOrderChange: (order: "asc" | "desc") => void;
+  onPageChange: (offset: number, cursor: string | null) => void;
+  cursorForOffset: (offset: number) => string | null;
   pagedTo: number | null;
   onArrived: () => void;
 }) {
@@ -337,11 +381,11 @@ function RawMessages({
           <button
             type="button"
             className="td-hit group shrink-0"
-            onClick={() => onOrderChange(order === 'asc' ? 'desc' : 'asc')}
+            onClick={() => onOrderChange(order === "asc" ? "desc" : "asc")}
             // The order itself leads, because it is this control's visible
             // label: an accessible name that omits the visible text leaves a
             // speech-control user with nothing they can say (WCAG 2.5.3).
-            aria-label={`Order ${payload.order} — switch to ${order === 'asc' ? 'newest first' : 'oldest first'}`}
+            aria-label={`Order ${payload.order} — switch to ${order === "asc" ? "newest first" : "oldest first"}`}
           >
             <span className="border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary group-hover:text-text-primary">
               {payload.order}
@@ -353,30 +397,34 @@ function RawMessages({
       </Legend>
 
       {/* Loaded range, whole-session total, ordering, and whether another page
-        * exists — all four, because any one of them alone lets a page read as
-        * the transcript.
-        *
-        * A status region, so paging announces where the reader now is instead
-        * of silently replacing the rows under them; `tabIndex={-1}` so the
-        * focus repair above can land here without adding a tab stop. */}
+       * exists — all four, because any one of them alone lets a page read as
+       * the transcript.
+       *
+       * A status region, so paging announces where the reader now is instead
+       * of silently replacing the rows under them; `tabIndex={-1}` so the
+       * focus repair above can land here without adding a tab stop. */}
       <p
         ref={range}
         role="status"
         tabIndex={-1}
         className="text-3xs text-text-muted tabular"
       >
-        {first}–{last} of {payload.counts.message_count.toLocaleString()} · {payload.order} order ·
-        page size {limit}
-        {payload.has_more_messages ? ' · more pages follow' : ' · last page'}
+        {first}–{last} of {payload.counts.message_count.toLocaleString()} ·{" "}
+        {payload.order} order · page size {limit}
+        {payload.has_more_messages ? " · more pages follow" : " · last page"}
       </p>
 
       {messages.length === 0 ? (
         <StateChip
-          kind={payload.counts.message_count === 0 ? 'complete_zero_findings' : 'partial'}
+          kind={
+            payload.counts.message_count === 0
+              ? "complete_zero_findings"
+              : "partial"
+          }
           detail={
             payload.counts.message_count === 0
-              ? 'the store holds no turns for this session'
-              : 'this offset is past the end of the transcript'
+              ? "the store holds no turns for this session"
+              : "this offset is past the end of the transcript"
           }
         />
       ) : (
@@ -398,7 +446,10 @@ function RawMessages({
           type="button"
           className="td-hit group disabled:opacity-40"
           disabled={offset === 0}
-          onClick={() => onOffsetChange(Math.max(0, offset - PAGE_SIZE))}
+          onClick={() => {
+            const previous = Math.max(0, offset - PAGE_SIZE);
+            onPageChange(previous, cursorForOffset(previous));
+          }}
         >
           <span className={PAGER_BEZEL}>
             <ChevronLeft aria-hidden size={11} />
@@ -408,8 +459,8 @@ function RawMessages({
         <button
           type="button"
           className="td-hit group disabled:opacity-40"
-          disabled={!payload.has_more_messages}
-          onClick={() => onOffsetChange(offset + PAGE_SIZE)}
+          disabled={!payload.has_more_messages || payload.next_cursor == null}
+          onClick={() => onPageChange(offset + PAGE_SIZE, payload.next_cursor)}
         >
           <span className={PAGER_BEZEL}>
             Next page
@@ -427,7 +478,7 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
     <li
       className="flex flex-col gap-1 border-b border-edge-subtle px-2 py-1.5 last:border-b-0"
       data-message={message.message_id}
-      data-message-role={message.role ?? 'unrecorded'}
+      data-message-role={message.role ?? "unrecorded"}
     >
       <span className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         {message.ordinal != null ? (
@@ -439,7 +490,7 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
           </span>
         ) : null}
         <span className="td-legend shrink-0 text-text-secondary">
-          {message.role ?? 'role unrecorded'}
+          {message.role ?? "role unrecorded"}
         </span>
         {message.tool_name ? (
           <span className="td-value min-w-0 truncate text-3xs text-text-primary">
@@ -447,14 +498,17 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
           </span>
         ) : null}
         <span className="ml-auto shrink-0 text-3xs text-text-muted tabular">
-          {message.timestamp != null ? formatStamp(message.timestamp) : 'no timestamp'}
+          {message.timestamp != null
+            ? formatStamp(message.timestamp)
+            : "no timestamp"}
         </span>
       </span>
       {message.content == null ? (
         // The turn exists; its body does not. Retention offloaded or dropped
         // it, and an empty line here would read as an empty message.
         <span className="text-3xs italic text-text-muted">
-          body not held by the store{message.storage_kind ? ` (${message.storage_kind})` : ''}
+          body not held by the store
+          {message.storage_kind ? ` (${message.storage_kind})` : ""}
         </span>
       ) : (
         <span className="line-clamp-4 whitespace-pre-wrap break-words text-3xs leading-snug text-text-secondary">
@@ -467,11 +521,13 @@ function MessageRow({ message }: { message: LcmMessageV1 }) {
           <span>{message.storage_kind}</span>
         ) : null}
         {message.token_estimate != null ? (
-          <span className="tabular">~{message.token_estimate.toLocaleString()} tokens</span>
+          <span className="tabular">
+            ~{message.token_estimate.toLocaleString()} tokens
+          </span>
         ) : null}
         {compacted > 0 ? (
           <span>
-            in {compacted} {compacted === 1 ? 'summary' : 'summaries'}
+            in {compacted} {compacted === 1 ? "summary" : "summaries"}
           </span>
         ) : null}
         {message.pinned ? <span>pinned</span> : null}

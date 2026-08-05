@@ -89,8 +89,9 @@ mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
 pub use lcm_api::{
-    DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmReadFutureV1,
-    DashboardLcmReadOutcomeV1, DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
+    DashboardLcmCanonicalMessageV1, DashboardLcmCanonicalPageV1, DashboardLcmCanonicalStatsV1,
+    DashboardLcmCanonicalSummaryV1, DashboardLcmReadFutureV1, DashboardLcmReadOutcomeV1,
+    DashboardLcmReadPortV1, DashboardLcmReadRequestV1,
 };
 mod loom_api;
 mod memory_analysis;
@@ -651,7 +652,11 @@ pub async fn build_selected_project_state(
             project_graph_resolver: active.project_graph_resolver.clone(),
             registered_project_session_db: None,
             registered_savings_db: active.savings_db.clone(),
-            lcm_read_authority: None,
+            // The daemon adapter is project-bound and validates this selected
+            // state's exact project id on every read. Reusing the port can
+            // therefore return typed unavailable, but can never alias the
+            // active project's transcript authority.
+            lcm_read_authority: active.lcm_read_authority.clone(),
             automation_scheduler_reconciler: None,
             automation_writer: Arc::clone(&active.automation_writer),
             // Doctor authority is bound to the active project's exact scope.
@@ -1729,6 +1734,7 @@ mod authority_tests {
     impl DashboardLcmReadPortV1 for FakeDashboardLcmRead {
         fn read(
             &self,
+            _project_id: Option<&str>,
             _request: DashboardLcmReadRequestV1,
         ) -> crate::lcm_api::DashboardLcmReadFutureV1<'_> {
             Box::pin(async move {
@@ -1744,7 +1750,13 @@ mod authority_tests {
                         metadata_json: None,
                         tool_names: None,
                     }],
+                    summary_nodes: Vec::new(),
+                    stats: DashboardLcmCanonicalStatsV1 {
+                        message_count: 1,
+                        ..DashboardLcmCanonicalStatsV1::default()
+                    },
                     has_more: false,
+                    next_cursor: None,
                 })
             })
         }
