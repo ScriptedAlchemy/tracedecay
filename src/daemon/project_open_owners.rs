@@ -3166,8 +3166,9 @@ mod tests {
         .expect("Scout owner")
     }
 
-    fn configured_model_evidence() -> crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeV1
-    {
+    fn configured_model_evidence(
+        marker: u8,
+    ) -> crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeV1 {
         use crate::agents::context_scout_v2::{
             ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
             ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
@@ -3202,7 +3203,8 @@ mod tests {
             Some(typed_id::<RefId>("refs/heads/main")),
         )
         .unwrap();
-        let generation = typed_id::<CodeGenerationId>("generation.scout.configured-model.current");
+        let generation =
+            typed_id::<CodeGenerationId>(&format!("generation.scout.configured-model.{marker}"));
         ContextScoutEvidenceEnvelopeV1::claim(
             FeedbackScopeV1 {
                 project_id: scope.project_id.clone(),
@@ -3257,9 +3259,9 @@ mod tests {
                         completeness: CoverageCompleteness::Complete,
                     }],
                 },
-                anchors: vec![typed_id::<RetrievalAnchorId>(
-                    "anchor.scout.configured-model",
-                )],
+                anchors: vec![typed_id::<RetrievalAnchorId>(&format!(
+                    "anchor.scout.configured-model.{marker}"
+                ))],
             }],
             UtcMicros(2),
         )
@@ -3268,6 +3270,20 @@ mod tests {
 
     fn configured_model_input(
         configuration_revision: [u8; 32],
+    ) -> crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
+        configured_model_input_at(
+            configuration_revision,
+            10,
+            UtcMicros(10),
+            crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
+        )
+    }
+
+    fn configured_model_input_at(
+        configuration_revision: [u8; 32],
+        marker: u8,
+        now: UtcMicros,
+        delivery_window: crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1,
     ) -> crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
         crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
             address: crate::agents::context_scout_v2::ContextScoutAddressV1 {
@@ -3280,20 +3296,19 @@ mod tests {
                 logical_message_id: [7; 16],
                 project_id: [8; 16],
             },
-            input_watermark: [9; 32],
+            input_watermark: [marker; 32],
             configuration_revision,
-            envelope_id: [10; 16],
-            now: UtcMicros(10),
-            delivery_window:
-                crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
+            envelope_id: [marker; 16],
+            now,
+            delivery_window,
             delivered_dedupe_keys: BTreeSet::new(),
             candidates: vec![crate::agents::context_scout_v2::ContextScoutCandidateV1 {
-                dedupe_key: [11; 32],
+                dedupe_key: [marker; 32],
                 category: crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
                 relevance_score: 10,
                 suggestion_text: "Use the admitted evidence.".to_owned(),
-                evidence: configured_model_evidence(),
-                expires_at: UtcMicros(100),
+                evidence: configured_model_evidence(marker),
+                expires_at: UtcMicros(now.0.saturating_add(60 * 1_000_000)),
             }],
         }
     }
@@ -3495,6 +3510,185 @@ mod tests {
             );
             assert!(entry.model_receipt.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn project_open_edit_stop_and_explicit_feedback_preserve_privacy_and_supersession() {
+        use crate::agents::context_scout_v2::{
+            ContextScoutDeliveryReceiptV1, ContextScoutDeliveryWindowV1,
+            ContextScoutDurableStoreOutcomeV1, ContextScoutFeedbackKindV1, ContextScoutFeedbackV1,
+            ContextScoutOutcomeV1, ContextScoutRuntimeOutcomeV1, context_scout_delivery_receipt_id,
+        };
+
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let profile_root = temporary.path().join("profile");
+        let dashboard_root = temporary.path().join("dashboard");
+        std::fs::create_dir_all(&profile_root).expect("create profile");
+        std::fs::create_dir_all(&dashboard_root).expect("create dashboard root");
+        let pin = configured_model_pin();
+        let control = pin.control();
+        let owner = test_scout_owner(&temporary, "edit-stop-feedback").await;
+        install_project_open_context_scout_configuration(
+            owner.as_ref(),
+            pin,
+            &profile_root,
+            &dashboard_root,
+        )
+        .await
+        .expect("install project-open Scout configuration");
+        let now = UtcMicros(
+            i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("system clock")
+                    .as_micros(),
+            )
+            .expect("microsecond clock"),
+        );
+
+        let first_edit = configured_model_input_at(
+            control.configuration_revision,
+            20,
+            now,
+            ContextScoutDeliveryWindowV1::NextBoundary,
+        );
+        let ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry: first,
+            store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+        } = owner
+            .prepare_configured(
+                &first_edit,
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first saved edit")
+        else {
+            panic!("first saved edit must enqueue");
+        };
+
+        let second_edit = configured_model_input_at(
+            control.configuration_revision,
+            21,
+            UtcMicros(now.0 + 1),
+            ContextScoutDeliveryWindowV1::NextBoundary,
+        );
+        let ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry: second,
+            store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+        } = owner
+            .prepare_configured(
+                &second_edit,
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("superseding saved edit")
+        else {
+            panic!("second saved edit must supersede the first");
+        };
+        assert!(matches!(
+            owner.cancel(first.work).await,
+            Err(crate::agents::context_scout_v2::ContextScoutErrorV1::StaleWork)
+        ));
+
+        let stop = configured_model_input_at(
+            control.configuration_revision,
+            22,
+            UtcMicros(now.0 + 2),
+            ContextScoutDeliveryWindowV1::Immediate,
+        );
+        let ContextScoutRuntimeOutcomeV1::Enqueued {
+            entry: stopped,
+            store_outcome: ContextScoutDurableStoreOutcomeV1::Stored,
+        } = owner
+            .prepare_configured(
+                &stop,
+                MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("stop boundary")
+        else {
+            panic!("stop boundary must supersede delayed edit guidance");
+        };
+        assert_ne!(second.work, stopped.work);
+
+        let hook = tracedecay_hooks::HookEventEnvelopeV2 {
+            schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+            event_id: [60; 16],
+            producer: tracedecay_hooks::HookHostV1::Codex,
+            protected_session_id: stop.address.protected_session_id,
+            project_id: stop.address.project_id,
+            repository_id: [61; 16],
+            worktree_id: [62; 16],
+            worktree_epoch: 1,
+            binding_token: [63; 32],
+            ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+            observed_at: UtcMicros(now.0 + 3),
+            event: tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::TurnComplete,
+            },
+        };
+        let (guidance, claim) = owner
+            .claim_ready_guidance_exact(
+                &hook,
+                stop.address,
+                stop.input_watermark,
+                1,
+                UtcMicros(now.0 + 3),
+            )
+            .await
+            .expect("exact stop guidance claim");
+        assert_eq!(claim.entry, *stopped);
+        assert_eq!(guidance.text, "Use the admitted evidence.");
+        assert_eq!(
+            claim.entry.envelope.candidate.evidence.redaction,
+            crate::agents::context_scout_v2::ContextScoutRedactionReceiptV1::MetadataOnly {
+                disclosure: tracedecay_application::DisclosureClass::Evidence,
+            }
+        );
+
+        let receipt = ContextScoutDeliveryReceiptV1 {
+            receipt_id: context_scout_delivery_receipt_id(
+                hook.event_id,
+                claim.entry.envelope.envelope_id,
+            ),
+            envelope_id: claim.entry.envelope.envelope_id,
+            delivered_at: UtcMicros(now.0 + 4),
+            outcome: ContextScoutOutcomeV1::Displayed,
+        };
+        assert_eq!(
+            owner.record_delivery(&claim, &receipt).await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        let before_feedback = owner
+            .recent_exact(stop.address, 8)
+            .await
+            .expect("recent delivery");
+        assert!(before_feedback.deliveries[0].feedback.is_none());
+
+        let feedback = ContextScoutFeedbackV1 {
+            receipt_id: receipt.receipt_id,
+            kind: ContextScoutFeedbackKindV1::ExplicitlyAccepted,
+        };
+        assert_eq!(
+            owner
+                .record_feedback_exact(stop.address, &receipt, feedback)
+                .await,
+            ContextScoutDurableStoreOutcomeV1::Stored
+        );
+        let recent = owner
+            .recent_exact(stop.address, 8)
+            .await
+            .expect("explicit feedback receipt");
+        assert_eq!(recent.pending.len(), 0);
+        assert_eq!(recent.deliveries.len(), 1);
+        assert_eq!(recent.deliveries[0].feedback, Some(feedback));
+        let serialized = serde_json::to_string(&recent).expect("serialize bounded recent state");
+        assert!(!serialized.contains("raw source"));
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("secret-token"));
     }
 
     #[tokio::test]
