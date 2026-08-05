@@ -152,60 +152,6 @@ pub(crate) fn publish_daemon_bindings(
     Ok(())
 }
 
-/// Publishes a structurally valid daemon binding for an isolated hook-adapter
-/// test. Production publication remains [`publish_daemon_bindings`]; tests use
-/// this narrow helper to exercise the same file subscriber and bounded daemon
-/// admission path without opening a project graph.
-#[cfg(test)]
-pub(crate) fn publish_test_binding(
-    project_root: &Path,
-    host: HookHostV1,
-) -> Result<(), tracedecay_hooks::HookConfigurationPublicationError> {
-    let layout = super::store_layout::layout(project_root)
-        .ok_or(tracedecay_hooks::HookConfigurationPublicationError::Unavailable)?;
-    std::fs::create_dir_all(&layout.data_root)
-        .map_err(|_| tracedecay_hooks::HookConfigurationPublicationError::Unavailable)?;
-    let now = now_utc();
-    let capabilities = [
-        tracedecay_hooks::HookEventFamily::SessionBoundary,
-        tracedecay_hooks::HookEventFamily::PromptBoundary,
-        tracedecay_hooks::HookEventFamily::ToolLifecycle,
-        tracedecay_hooks::HookEventFamily::SavedEdit,
-        tracedecay_hooks::HookEventFamily::TestLifecycle,
-    ]
-    .into_iter()
-    .map(|family| tracedecay_hooks::HookCapabilityV1 {
-        family,
-        support: tracedecay_hooks::stock_event_support(host, family),
-    })
-    .collect();
-    let snapshot = HookConfigurationSnapshotV1 {
-        schema_version: tracedecay_hooks::HOOK_CONFIGURATION_SCHEMA_VERSION,
-        revision: 1,
-        published_at: now,
-        expires_at: UtcMicros(now.0.saturating_add(60 * 1_000_000)),
-        binding: HookScopeBindingV1 {
-            host,
-            project_id: [1; 16],
-            repository_id: [2; 16],
-            worktree_id: [3; 16],
-            worktree_epoch: 1,
-            binding_token: [4; 32],
-            capabilities,
-        },
-    };
-    let writer = tracedecay_hooks::HookConfigurationFileWriterV1::new(
-        tracedecay_hooks::hook_configuration_path(&layout.data_root, host),
-    );
-    match tracedecay_hooks::HookConfigurationPublisherV1::new(writer).publish(snapshot)? {
-        tracedecay_hooks::HookConfigurationPublicationOutcomeV1::Published
-        | tracedecay_hooks::HookConfigurationPublicationOutcomeV1::Duplicate => Ok(()),
-        tracedecay_hooks::HookConfigurationPublicationOutcomeV1::StaleRejected => {
-            Err(tracedecay_hooks::HookConfigurationPublicationError::Unavailable)
-        }
-    }
-}
-
 fn binding_identity_from_scope(
     scope: &ResolvedScope,
     binding_revision: u64,
@@ -234,6 +180,8 @@ struct NativeIdentityFields {
     session_id: Option<String>,
     conversation_id: Option<String>,
     generation_id: Option<String>,
+    #[serde(alias = "filePath")]
+    file_path: Option<String>,
     prompt_id: Option<String>,
     turn_id: Option<String>,
     #[serde(alias = "toolUseID")]
@@ -245,6 +193,8 @@ struct NativeIdentityFields {
     edits: Option<Vec<serde_json::Value>>,
     properties: Option<NativeIdentityProperties>,
     input: Option<NativeIdentityInput>,
+    tool_input: Option<NativeIdentityToolInput>,
+    output: Option<NativeIdentityOutput>,
     extra: Option<NativeIdentityExtra>,
     route: Option<NativeIdentityRoute>,
     receipt: Option<NativeIdentityReceipt>,
@@ -254,6 +204,7 @@ struct NativeIdentityFields {
 struct NativeIdentityProperties {
     #[serde(alias = "sessionID")]
     session_id: Option<String>,
+    file: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -265,9 +216,31 @@ struct NativeIdentityInput {
 }
 
 #[derive(Default, Deserialize)]
+struct NativeIdentityToolInput {
+    #[serde(alias = "filePath")]
+    file_path: Option<String>,
+    path: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityOutput {
+    metadata: Option<NativeIdentityOutputMetadata>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityOutputMetadata {
+    files: Option<Vec<NativeIdentityOutputFile>>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityOutputFile {
+    #[serde(alias = "filePath")]
+    file_path: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
 struct NativeIdentityExtra {
     tool_call_id: Option<String>,
-    turn_id: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -281,20 +254,23 @@ struct NativeIdentityReceipt {
 }
 
 /// Provider-native lifecycle identity that may cross the local hook/daemon
-/// boundary. Both values come from checked-in host fields; paths, payloads,
-/// and derived placeholder identities are deliberately unrepresentable.
+/// boundary. Session and call values come from checked-in host fields; the
+/// event ID binds them to the exact content-free envelope admitted alongside
+/// them. Paths and payloads remain unrepresentable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeContextScoutLifecycleV1 {
     pub(crate) session_id: SessionId,
     pub(crate) call_id: ObservationId,
+    pub(crate) event_id: [u8; 16],
 }
 
 impl NativeContextScoutLifecycleV1 {
-    pub(crate) fn new(session_id: &str, call_id: &str) -> Option<Self> {
+    pub(crate) fn new(session_id: &str, call_id: &str, event_id: [u8; 16]) -> Option<Self> {
         Some(Self {
             session_id: SessionId::new(session_id.to_owned()).ok()?,
             call_id: ObservationId::new(call_id.to_owned()).ok()?,
+            event_id,
         })
     }
 
@@ -304,7 +280,7 @@ impl NativeContextScoutLifecycleV1 {
             HookHostV1::KimiCode | HookHostV1::OpenCode
         ) && protected_session_id_for_native(self.session_id.as_str())
             == envelope.protected_session_id
-            && hash16(self.call_id.as_str().as_bytes()) == envelope.event_id
+            && self.event_id == envelope.event_id
             && matches!(
                 envelope.event,
                 tracedecay_hooks::HookEventV2::SavedEdit { .. }
@@ -351,11 +327,6 @@ impl NativeIdentityFields {
                     .and_then(|extra| extra.tool_call_id.as_deref())
             })
             .or_else(|| {
-                self.extra
-                    .as_ref()
-                    .and_then(|extra| extra.turn_id.as_deref())
-            })
-            .or_else(|| {
                 self.receipt
                     .as_ref()
                     .and_then(|receipt| receipt.tool_call_id.as_deref())
@@ -387,14 +358,37 @@ impl NativeIdentityFields {
                     .and_then(|receipt| receipt.tool_call_id.as_deref())
             })
     }
+
+    fn file_path(&self) -> Option<&str> {
+        self.file_path
+            .as_deref()
+            .or_else(|| self.properties.as_ref()?.file.as_deref())
+            .or_else(|| {
+                let tool_input = self.tool_input.as_ref()?;
+                tool_input
+                    .file_path
+                    .as_deref()
+                    .or(tool_input.path.as_deref())
+            })
+            .or_else(|| {
+                let files = self.output.as_ref()?.metadata.as_ref()?.files.as_ref()?;
+                (files.len() == 1)
+                    .then(|| files[0].file_path.as_deref())
+                    .flatten()
+            })
+            .filter(|path| !path.is_empty())
+    }
 }
 
 fn native_context_scout_lifecycle(
     host: HookHostV1,
     fields: &NativeIdentityFields,
+    event_id: [u8; 16],
 ) -> Option<NativeContextScoutLifecycleV1> {
     matches!(host, HookHostV1::KimiCode | HookHostV1::OpenCode)
-        .then(|| NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?))
+        .then(|| {
+            NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?, event_id)
+        })
         .flatten()
 }
 
@@ -474,7 +468,9 @@ async fn dispatch_profile_scoped(
         Err(_) => return unavailable(),
     };
     let fields = serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
-    let Some(material) = native_material(&fields, decoded.family(), now_utc()) else {
+    let Some(material) =
+        native_material(&fields, decoded.family(), event_json.as_bytes(), now_utc())
+    else {
         return unavailable();
     };
     let Some((_, timeout)) = admission_window_after_elapsed(elapsed_us(started)) else {
@@ -604,9 +600,15 @@ fn prepare_bound_hook(
     let native_fields =
         serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
     let native_session_id = native_fields.session_id().map(str::to_owned);
-    let native_lifecycle = native_context_scout_lifecycle(host, &native_fields);
     let material = native_material(&native_fields, decoded.family(), event_json.as_bytes(), now)?;
+    let native_lifecycle = native_context_scout_lifecycle(host, &native_fields, material.event_id);
     let envelope = decoded.into_envelope(binding, material).ok()?;
+    let envelope =
+        match replay_envelope_if_pending(&layout.data_root, host, binding, &envelope, now) {
+            PendingEnvelopeV1::Missing => envelope,
+            PendingEnvelopeV1::Exact(queued) => queued,
+            PendingEnvelopeV1::Unavailable => return None,
+        };
     Some(PreparedBoundHook {
         host,
         layout,
@@ -808,8 +810,43 @@ fn append_for_replay(
     match spool.append(envelope.clone(), binding, now) {
         Ok(_) => SpoolAppendOutcomeV1::Accepted,
         Err(HookSpoolError::SpoolFull) => SpoolAppendOutcomeV1::Full,
-        Err(HookSpoolError::ResetRequired { .. }) => SpoolAppendOutcomeV1::ResetRequired,
         Err(_) => SpoolAppendOutcomeV1::Unavailable,
+    }
+}
+
+/// Reuse a timed-out attempt's exact envelope before retrying daemon admission.
+/// The spool contains only typed, protected material; provider paths and
+/// payloads are neither retained nor compared here.
+#[derive(Debug, PartialEq, Eq)]
+enum PendingEnvelopeV1 {
+    Missing,
+    Exact(HookEventEnvelopeV2),
+    Unavailable,
+}
+
+fn replay_envelope_if_pending(
+    data_root: &Path,
+    host: HookHostV1,
+    binding: &HookScopeBindingV1,
+    retry: &HookEventEnvelopeV2,
+    now: UtcMicros,
+) -> PendingEnvelopeV1 {
+    let root = data_root.join("hook-v2-spool").join(host.hook_key());
+    let Ok((spool, _)) = HookSpoolV1::open(root, HookSpoolConfigV1::stock(host), now) else {
+        return PendingEnvelopeV1::Unavailable;
+    };
+    let Some(queued) = spool.pending_envelope(retry.event_id) else {
+        return PendingEnvelopeV1::Missing;
+    };
+    if queued.validate(binding).is_err() {
+        return PendingEnvelopeV1::Unavailable;
+    }
+    let mut retry_identity = retry.clone();
+    retry_identity.observed_at = queued.observed_at;
+    if queued == retry_identity {
+        PendingEnvelopeV1::Exact(queued)
+    } else {
+        PendingEnvelopeV1::Unavailable
     }
 }
 
@@ -843,7 +880,11 @@ fn native_material(
         observed_at,
         tool_id: (family == tracedecay_hooks::HookEventFamily::ToolLifecycle).then_some(event_id),
         effect_receipt_id: fields.call_id().map(|value| hash16(value.as_bytes())),
-        file_id: (family == tracedecay_hooks::HookEventFamily::SavedEdit).then_some(event_id),
+        file_id: (family == tracedecay_hooks::HookEventFamily::SavedEdit).then(|| {
+            fields
+                .file_path()
+                .map_or(event_id, |file_path| hash16(file_path.as_bytes()))
+        }),
         changed_range_count: fields
             .edits
             .as_ref()
@@ -888,6 +929,7 @@ fn native_event_digest(
     digest_material.extend_from_slice(material);
     hash16(&digest_material)
 }
+
 fn hash16(bytes: &[u8]) -> [u8; 16] {
     let digest = Sha256::digest(bytes);
     let mut output = [0; 16];

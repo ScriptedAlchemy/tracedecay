@@ -574,6 +574,7 @@ fn read_bounded(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, HookAdmi
 mod tests {
     use super::*;
     use crate::{HOOK_EVENT_SCHEMA_VERSION, HookBoundaryV1, HookEventV2, HookOrderingV1};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestDir(PathBuf);
@@ -686,30 +687,50 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_ledger_open_is_serialized_until_the_first_owner_drops() {
-        let root = TestDir::new("ledger-lock");
+    fn writer_lock_contends_and_releases_across_processes() {
+        const MODE_ENV: &str = "TRACEDECAY_HOOK_ADMISSION_LOCK_PROBE";
+        const ROOT_ENV: &str = "TRACEDECAY_HOOK_ADMISSION_LOCK_ROOT";
+        if let Ok(mode) = std::env::var(MODE_ENV) {
+            let root = PathBuf::from(std::env::var_os(ROOT_ENV).expect("child lock root"));
+            match mode.as_str() {
+                "contended" => assert!(matches!(
+                    HookAdmissionLedgerV1::open(
+                        &root,
+                        HookHostV1::ClaudeCode,
+                        HookAdmissionLedgerLimitsV1::stock(),
+                        UtcMicros(2),
+                    ),
+                    Err(HookAdmissionLedgerError::Busy)
+                )),
+                "released" => {
+                    HookAdmissionLedgerV1::open(
+                        &root,
+                        HookHostV1::ClaudeCode,
+                        HookAdmissionLedgerLimitsV1::stock(),
+                        UtcMicros(3),
+                    )
+                    .expect("OS releases the ledger lock when its owner exits");
+                }
+                other => panic!("unknown child lock probe mode: {other}"),
+            }
+            return;
+        }
+
+        let root = TestDir::new("process-lock");
         let first = open(root.path(), UtcMicros(1));
-
-        assert!(matches!(
-            HookAdmissionLedgerV1::open(
-                root.path(),
-                HookHostV1::ClaudeCode,
-                HookAdmissionLedgerLimitsV1::stock(),
-                UtcMicros(2),
-            ),
-            Err(HookAdmissionLedgerError::Busy)
-        ));
-
+        let test_name =
+            "admission_ledger::tests::writer_lock_contends_and_releases_across_processes";
+        let run_child = |mode: &str| {
+            Command::new(std::env::current_exe().expect("current test binary"))
+                .args(["--exact", test_name, "--nocapture"])
+                .env(MODE_ENV, mode)
+                .env(ROOT_ENV, root.path())
+                .status()
+                .expect("run admission lock probe child")
+        };
+        assert!(run_child("contended").success());
         drop(first);
-        assert!(
-            HookAdmissionLedgerV1::open(
-                root.path(),
-                HookHostV1::ClaudeCode,
-                HookAdmissionLedgerLimitsV1::stock(),
-                UtcMicros(3),
-            )
-            .is_ok()
-        );
+        assert!(run_child("released").success());
     }
 
     #[test]
