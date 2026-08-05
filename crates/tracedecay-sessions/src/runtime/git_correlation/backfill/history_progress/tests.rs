@@ -8,6 +8,7 @@ use crate::runtime::git_correlation::ensure_git_correlation_schema;
 fn progress(key: GitHistoryProgressKey) -> GitHistoryProgressRow {
     GitHistoryProgressRow {
         key,
+        activity_timestamp: 201,
         provider: "codex".to_string(),
         session_id: "session-1".to_string(),
         project_path: "/repo/linked".to_string(),
@@ -82,10 +83,7 @@ fn consulted_ref_seal_is_byte_exact_canonical_and_rejects_bad_entries() {
 async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
     let path = directory.path().join("sessions.db");
-    let key = GitHistoryProgressKey {
-        activity_timestamp: 201,
-        source_rowid: 7,
-    };
+    let key = GitHistoryProgressKey { source_rowid: 7 };
     let initial = progress(key);
     {
         let conn = TestConnection::open(&path);
@@ -213,16 +211,36 @@ async fn progress_survives_reopen_and_cas_enforces_two_pass_source_seal() {
 }
 
 #[tokio::test]
+async fn stable_source_key_preserves_the_older_active_candidate() {
+    let directory = tempfile::tempdir().expect("temporary sessions database");
+    let conn = TestConnection::open(&directory.path().join("sessions.db"));
+    ensure_git_correlation_schema(&conn)
+        .await
+        .expect("fresh schema");
+    let key = GitHistoryProgressKey { source_rowid: 7 };
+    let older = progress(key);
+    assert!(insert_progress(&conn, &older).await.unwrap());
+
+    let mut newer = older.clone();
+    newer.activity_timestamp = 301;
+    newer.window_end = 300;
+    newer.segment_end = 300;
+    assert!(!insert_progress(&conn, &newer).await.unwrap());
+    assert_eq!(
+        read_oldest_progress(&conn).await.unwrap(),
+        Some(older.clone())
+    );
+    assert_eq!(read_progress(&conn, key).await.unwrap(), Some(older));
+}
+
+#[tokio::test]
 async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state() {
     let directory = tempfile::tempdir().expect("temporary sessions database");
     let conn = TestConnection::open(&directory.path().join("sessions.db"));
     ensure_git_correlation_schema(&conn)
         .await
         .expect("fresh schema");
-    let key = GitHistoryProgressKey {
-        activity_timestamp: 201,
-        source_rowid: 7,
-    };
+    let key = GitHistoryProgressKey { source_rowid: 7 };
     insert_progress(&conn, &progress(key)).await.unwrap();
     upsert_segment(&conn, &segment(key)).await.unwrap();
     for oid in ["cccccccc", "bbbbbbbb"] {
@@ -271,10 +289,7 @@ async fn exact_reset_cascades_children_and_transaction_rollback_leaves_no_state(
     );
     assert!(insert_seen(&conn, &seen).await.is_err());
 
-    let rolled_back_key = GitHistoryProgressKey {
-        activity_timestamp: 202,
-        source_rowid: 8,
-    };
+    let rolled_back_key = GitHistoryProgressKey { source_rowid: 8 };
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
