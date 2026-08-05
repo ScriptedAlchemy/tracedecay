@@ -14,7 +14,7 @@ contract fixtures are implementation evidence, not an inventory to recreate.
 An evaluator required by a production journey but not callable from that
 journey is a gap; a renamed or deleted scaffold is not.
 
-PR17 extends that existing kernel only where the executable work loop needs a
+The executable-work loop extends that existing kernel only where it needs a
 decision: task-shape and decomposition assessment, provider/model/effort
 recommendation, deterministic fallback, and evidence-driven replanning.
 
@@ -24,7 +24,7 @@ The rewrite retains pure evaluators for hint eligibility/delivery, retrieval
 selection, capability and Git routing, analyzer routing, local/live
 correlation, diagnostics and curation, admission recommendation, memory
 proposal, experiment replay, conflict arbitration, and external-source/sink
-authorization. PR17 adds task-shape, calibrated sizing, decomposition,
+authorization. The work loop adds task-shape, calibrated sizing, decomposition,
 topology, provider/model/effort, independent-review, exploration, fallback,
 and live-replan decisions to those callable production paths; it removes no
 evaluator or decision state.
@@ -33,7 +33,7 @@ Exact, recorded, and current-best-effort replay remain distinct. Current-best-
 effort names every substitution; recorded display does not pretend to rerun,
 and exact replay fails when a required immutable input is unavailable.
 
-## PR17 user outcome
+## User outcome
 
 When a user creates work, TraceDecay can explain why a proposed decomposition
 and provider route fit the available evidence, identify exclusions and
@@ -62,7 +62,7 @@ provider, or changes the graph.
    rejects it.
 
 This path uses the existing policy decision/revision/digest identity consumed
-by application results and runtime admission. PR17 adds no parallel policy
+by application results and runtime admission. This adds no parallel policy
 registry, scoring service, or configuration source.
 
 ## Required behavior
@@ -136,14 +136,14 @@ policy phase without its production caller.
 
 ## Replacement and deletion
 
-- Remove any PR17 route, score, fallback, or replan decision duplicated in a
+- Remove any route, score, fallback, or replan decision duplicated in a
   surface, provider adapter, dashboard, graph projector, or runtime handler.
-- Remove policy-only PR17 milestones and declaration-parity gates.
+- Remove policy-only milestones and declaration-parity gates.
 - Do not retain a shadow evaluator or hidden provider default for compatibility.
 
 ## Direct acceptance
 
-The PR17 journey must prove that a user can create versioned work, retrieve
+The direct journey must prove that a user can create versioned work, retrieve
 authorized exact evidence, receive an explained recommendation, explicitly
 accept the proposal, admit one supported real provider step, inspect its
 recorded route and outcome, and receive a justified replan that changes
@@ -163,10 +163,7 @@ when evidence agrees, disagreement is preserved and explained without
 frontier substitution, and stale or partial state on either source remains
 independently visible rather than becoming a merged current result.
 
-## Not in PR17
+## Excluded mechanisms
 
-- Public SDK name/schema stabilization belongs to PR18.
-- Performance tuning belongs to PR20 after the production loop emits real
-  stage, coverage, budget, and outcome evidence.
 - A custom policy VM, workflow DSL, online-learning service, or autonomous
   policy/configuration mutation is not part of V2.

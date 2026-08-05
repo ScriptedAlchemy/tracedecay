@@ -39,53 +39,23 @@ fallback writable database.
 
 ## Completed foundation
 
-PR4 delivered:
-
-- canonical V2 domain and store boundaries;
-- daemon-owned `GlobalDb` connection and transaction authority;
-- atomic transcript batch, projection, cursor, and offset updates;
-- restart catch-up, replay, and fail-closed project/user-store resolution;
-- project-wide session/LCM storage shared across branches and worktrees;
-- RAII rollback for database changes and external payload files;
-- direct Claude, Cursor, Cline-like, concurrency, recovery, and Windows tests.
-
-PR5 delivered:
-
-- the production Claude parser through mandatory structured sanitization;
-- path-independent observation, source, cursor, receipt, and payload contracts;
-- atomic observation, receipt, cursor, projection-enqueue, and checkpoint state;
-- deterministic projection into the existing searchable V1 session/message view;
-- bounded replay, restart, duplicate, collision, partial-input, cancellation,
-  stale-authority, migration, consolidation, and crash/retry coverage;
-- a checked-in executed production benchmark with 30 measured repetitions and a
-  verified exact no-op replay that performs no writes or durable work.
-
-PR6 delivered:
-
-- one complete host-neutral catalog and provider observation path for the
-  supported Claude, Codex, Cursor, Hermes, Kiro, and Cline-family sources;
-- bounded checksummed daemon host admission for non-replayable events, fair
-  bounded scheduling for replayable sources, and typed failure/backpressure;
-- atomic projection with staged bounded rebuild, provider-native identity and
-  relation preservation, typed hook telemetry, and executable native host
+- canonical domain/store boundaries and one daemon-owned connection,
+  transaction, registry, and routing authority;
+- atomic transcript batches, projections, cursors, offsets, observations,
+  receipts, and checkpoints with rollback on database or external-payload
+  failure;
+- path-independent source identities and mandatory structured sanitization for
+  every supported Claude, Codex, Cursor, Hermes, Kiro, and Cline-family source;
+- bounded checksummed host admission, fair replayable-source scheduling, typed
+  backpressure, provider-native identity/relations, and executable native host
   fixtures;
-- an executable multi-provider benchmark harness and historical Linux
-  measurement recorded by commit `05da230e`.
-
-PR7 delivered the canonical project/profile memory and fact path, evidence and
-provenance, corrections and trust, curation, migration, deletion lineage, and
-runtime hardening, retained by direct behavioral cargo tests (performance
-baseline remains provisional/pending). PR8 delivered the shared
-Session/LCM temporal-retrieval kernel, explicit refresh, stable temporal
-pagination, summary lineage, and compatibility delegation. The active slice is
-documented in [NEXT.md](NEXT.md).
-
-**Delivered stabilization checkpoint (2026-07-27).** These are completed
-sub-slices of the active delivery band, not acceptance of PR9–PR14:
-
-- daemon shutdown cancellation now reaches startup transcript discovery,
-  provider ingest, projection drain, and code-index reconciliation, and
-  cancelled startup ingest does not run finalization or downstream backfill;
+- project-wide memory facts and session/LCM storage shared across branches and
+  linked worktrees, with no branch-owned fact store;
+- the shared temporal retrieval kernel, explicit refresh, stable pagination,
+  canonical summary lineage, and exact final-store hydration;
+- daemon shutdown cancellation through host transcript discovery, provider
+  ingest, projection drain, and code-index reconciliation, without running
+  finalization or derivative refresh after cancellation;
 - configuration startup materializes defaults only in a newly created final
   snapshot; a non-final persisted snapshot returns `ResetRequired`, and the
   production configuration client performs exact-project mutations,
@@ -103,22 +73,16 @@ sub-slices of the active delivery band, not acceptance of PR9–PR14:
   daemon-hosted Settings mutation is directly tested, and its focused backend
   suite executes the diagnostics and workspace routes recorded below.
 
-The same day also landed focused repairs for scope drift, temporal migration
-atomicity, runtime authority fixtures/cleanup, host install coverage, generated
-contracts, source-contract reachability, and dead-code result bounds. Those
-clusters reduce known failures; they are not evidence of a completed full
-suite.
+These foundations do not by themselves establish completion of the active
+product journeys or the full verification suite.
 
 **Open operational evidence (owner recorded, 2026-07-27).**
 
 - Doctor currently reports
   `authority_audit_unavailable`, and Cursor Core has a component-ownership
-  conflict. Plan 09 owns Doctor composition; Plan 27 and the PR12/PR13
-  integration slice own host lifecycle/ownership repair. The Plan 27 host
-  capability/lifecycle reachability guards closed on 2026-07-29 (recorded in
-  [`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) and
-  [Plan 27](27-cross-host-agent-plugin-bundles.md)) do not close this Cursor
-  Core ownership conflict, which remains open.
+  conflict. Plan 09 owns Doctor composition and Plan 27 owns
+  host lifecycle/ownership repair. The host capability/lifecycle reachability
+  fixes do not close this Cursor Core ownership conflict, which remains open.
 - Semantic search is disabled by an invalid configuration snapshot. Plan 20
   owns final-snapshot validity and explicit reset/recreation; Plan 31 owns
   semantic activation.
@@ -128,12 +92,11 @@ suite.
   the active incremental-indexing slice own cadence/freshness diagnosis; the
   new serve-during-refresh behavior does not close that issue.
 - Repository tests and normal CI remain incomplete or failing. Focused local
-  success does not establish PR9–PR14 acceptance, and unexecuted, skipped,
+  success does not establish product acceptance, and unexecuted, skipped,
   empty-filter, or partial coverage must remain unresolved.
-- Historical deleted-test and vacuous-verification incidents are summarized in
-  `GAP-LEDGER-PR8-PR14.md`. Restored test names, counts, commit groupings, and
-  CI chronology are historical evidence rather than roadmap requirements. The
-  remaining product-relevant gap is direct generation rebuild after reopen.
+- Historical deleted-test and vacuous-verification incidents do not define
+  roadmap requirements. The product-relevant gap is direct generation rebuild
+  after reopen.
 
 Completed-slice names are historical implementation evidence, not instructions
 to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
@@ -185,7 +148,7 @@ acceptance gates:
   `ProjectId` or `UserProfileId`; paths, labels, CWD, and collection membership
   never substitute for identity or widen scope.
 - Actual remote or network boundaries authenticate the caller and authority.
-  PR16 additionally fences every mutable shard to one current daemon writer.
+  Every mutable remote shard is fenced to one current daemon writer.
 - Destructive Git, host-registration, and protected-configuration operations
   require an explicit preview/confirmation, stale-state compare-and-swap, a
   durable result, and rollback or forward recovery appropriate to the real
@@ -207,7 +170,7 @@ records the rejected mechanism, the reason, and the retained replacement:
    `tracedecay-rusqlite-runtime` path and daemon-owned SQLite authority replace
    it; future remote work composes over that authority rather than reviving a
    libSQL runtime.
-2. **Octocrab, `backon`, and `graphql-parser` are rejected for PR13.** They add
+2. **Octocrab, `backon`, and `graphql-parser` are rejected here.** They add
    provider-client, retry, and parser abstractions that the one narrow
    read-only GitHub/CI path does not need. Existing `ureq`, shared narrow typed
    Serde DTOs, one compile-time static audited GraphQL query, and explicit
@@ -272,7 +235,7 @@ Quoted text is user speech; plan/design consequences are labeled separately.
 2. **Vite and bundler-ADR ceremony are rejected.** The exact instruction was
    "use rsbuild. no adr. just pick rsbuild." Rsbuild is settled; do not reopen a
    Vite comparison or write an ADR to restate the choice.
-3. **The pre-PR14 dashboard is rejected as an implementation base.** The user
+3. **The retired dashboard is rejected as an implementation base.** The user
    said to "gut the existing dashboard" for a fresh, industry-leading
    implementation. Retained API compatibility is not permission to restore its
    frontend composition or visual language.
