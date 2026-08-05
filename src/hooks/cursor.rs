@@ -531,12 +531,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_start_admits_and_returns_the_resolved_workspace_identity() {
+    async fn session_start_without_event_identity_only_returns_workspace_identity() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         bind_v2_project(&project_root, "proj_cursor_start_admission");
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([accepted_admission()]);
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
         let event = serde_json::json!({
             "hook_event_name": "sessionStart",
             "conversation_id": "cursor-start-session",
@@ -555,7 +555,10 @@ mod tests {
             response["env"]["TRACEDECAY_PROJECT_ROOT"],
             project_root.to_string_lossy().as_ref()
         );
-        assert_v2_admission(&daemon, &project_root, "cursor-start-session");
+        assert!(
+            daemon.calls().is_empty(),
+            "session start without a provider event key must not reach admission"
+        );
     }
 
     #[tokio::test]
@@ -613,12 +616,12 @@ mod tests {
             "workspace_roots": [project_root],
         })
         .to_string();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([unavailable_admission()]);
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
         let response = cursor_session_start_response(&start).await;
         assert_eq!(
             daemon.calls().len(),
-            1,
-            "start must not read or update local session state"
+            0,
+            "start without provider event identity must not reach daemon admission"
         );
         let response: Value = serde_json::from_str(&response).unwrap();
         assert_eq!(response["additional_context"], "");

@@ -757,6 +757,33 @@ fn hermes_adapter_fixture_preserves_native_terminal_identity() {
 }
 
 #[test]
+fn hermes_session_end_uses_provider_turn_identity() {
+    let fixture =
+        include_str!("../../../crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json");
+    let material = native_material(
+        fixture,
+        tracedecay_hooks::HookEventFamily::SessionBoundary,
+        UtcMicros(49),
+    )
+    .unwrap();
+
+    assert_eq!(material.event_id, hash16(b"<TURN_ID>"));
+    assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
+}
+
+#[test]
+fn native_material_rejects_callbacks_without_provider_event_identity() {
+    assert!(
+        native_material(
+            r#"{"session_id":"session-without-event-identity"}"#,
+            tracedecay_hooks::HookEventFamily::SessionBoundary,
+            UtcMicros(51),
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
         "../../../tests/fixtures/packaged_host_events/opencode/baseline.json"

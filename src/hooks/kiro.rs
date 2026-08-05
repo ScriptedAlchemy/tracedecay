@@ -250,7 +250,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn prompt_submit_admits_the_native_boundary_within_hook_budget() {
+    async fn prompt_submit_without_provider_event_identity_remains_unavailable() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
@@ -262,17 +262,7 @@ mod tests {
             },
         )
         .unwrap();
-        crate::hooks::v2::publish_test_binding(&project_root, tracedecay_hooks::HookHostV1::Kiro)
-            .unwrap();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-            "action": "hook_v2_admit",
-            "status": "accepted",
-            "disposition": tracedecay_hooks::HookTransportDispositionV1::Accepted,
-            "orchestration": null,
-            "ready_guidance": null,
-            "feedback_notice": null,
-            "reason": null,
-        })]);
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([]);
         let event = serde_json::json!({
             "hook_event_name": "userPromptSubmit",
             "session_id": "kiro-prompt-session",
@@ -285,53 +275,11 @@ mod tests {
         assert_eq!(kiro_prompt_submit_response(&event).await, None);
         assert!(
             started.elapsed() < std::time::Duration::from_millis(100),
-            "native prompt admission exceeded the bounded hook path"
+            "unsupported prompt classification exceeded the bounded hook path"
         );
-        let calls = daemon.calls();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0.as_deref(), Some(project_root.as_path()));
-        assert_eq!(calls[0].1["action"], "hook_v2_admit");
-        assert_eq!(calls[0].1["native_session_id"], "kiro-prompt-session");
-        assert_eq!(
-            calls[0].1["envelope"]["producer"],
-            serde_json::json!(tracedecay_hooks::HookHostV1::Kiro)
+        assert!(
+            daemon.calls().is_empty(),
+            "a documented callback without replay-safe identity must not reach daemon admission"
         );
-    }
-
-    #[tokio::test]
-    async fn unavailable_prompt_admission_returns_empty_without_local_catch_up() {
-        let _profile = crate::config::PinnedUserDataDir::new();
-        let project = tempfile::tempdir().unwrap();
-        let project_root = project.path().canonicalize().unwrap();
-        crate::storage::write_enrollment_marker(
-            &project_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: "proj_kiro_prompt_unavailable".to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        crate::hooks::v2::publish_test_binding(&project_root, tracedecay_hooks::HookHostV1::Kiro)
-            .unwrap();
-        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
-            "action": "hook_v2_admit",
-            "status": "unavailable",
-        })]);
-        let event = serde_json::json!({
-            "hook_event_name": "userPromptSubmit",
-            "session_id": "kiro-prompt-unavailable",
-            "cwd": project_root,
-            "prompt": "find the active symbol",
-        })
-        .to_string();
-
-        assert_eq!(kiro_prompt_submit_response(&event).await, None);
-        let calls = daemon.calls();
-        assert_eq!(
-            calls.len(),
-            1,
-            "unavailable V2 admission must not ingest or recall"
-        );
-        assert_eq!(calls[0].1["action"], "hook_v2_admit");
     }
 }

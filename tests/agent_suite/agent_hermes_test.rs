@@ -34,6 +34,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(manifest.contains("provides_hooks:"));
     assert!(manifest.contains("pre_llm_call"));
     assert!(manifest.contains("post_tool_call"));
+    assert!(manifest.contains("on_session_end"));
     assert!(manifest.contains("provides_commands:"));
     assert!(manifest.contains("/tracedecay_status"));
 
@@ -44,6 +45,7 @@ fn test_hermes_user_install_writes_single_plugin() {
     assert!(init_py.contains("register_tool = getattr(ctx, \"register_tool\", None)"));
     assert!(init_py.contains("ctx.register_hook(\"pre_llm_call\""));
     assert!(init_py.contains("ctx.register_hook(\"post_tool_call\""));
+    assert!(init_py.contains("ctx.register_hook(\"on_session_end\""));
     assert!(init_py.contains("getattr(ctx, \"register_command\", None)"));
     assert!(init_py.contains("getattr(ctx, \"register_skill\", None)"));
     assert!(init_py.contains("register_skill(skill_name, skill_path)"));
@@ -152,7 +154,7 @@ fn test_hermes_plugin_init_snapshot_matches_embedded_asset() {
     hasher.update(body.as_bytes());
     assert_eq!(
         hex::encode(hasher.finalize()),
-        "389dd3e460527324e47e73ceaef3660e0c1b378a2a264d739fcf55a0749eb560",
+        "407051805305822432a438bb3fa721f7da17f671d34112c74d20294603e9eaaf",
         "templates/plugin_init.py payload hash changed — verify the edit is intentional and update this snapshot"
     );
 }

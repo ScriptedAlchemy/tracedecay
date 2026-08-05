@@ -188,8 +188,9 @@ pub fn decode_native_hook_event(
     let signal = match host {
         NativeHostIdentityV1::ClaudeCode => decode_claude(&raw)?,
         NativeHostIdentityV1::Codex => decode_codex(&raw)?,
-        NativeHostIdentityV1::CursorDesktop | NativeHostIdentityV1::CursorCloud => {
-            decode_cursor(&raw)?
+        NativeHostIdentityV1::CursorDesktop => decode_cursor(&raw)?,
+        NativeHostIdentityV1::CursorCloud => {
+            return Err(NativeHookDecodeError::UnsupportedNativeEvent);
         }
         NativeHostIdentityV1::Hermes => decode_hermes(&raw)?,
         NativeHostIdentityV1::Kiro => decode_kiro(&raw)?,
@@ -777,11 +778,6 @@ mod tests {
                 include_bytes!("../fixtures/host_events/kimi/post-tool-use-edit.json"),
                 NativeHookSignalV1::SavedEdit,
             ),
-            (
-                NativeHostIdentityV1::KimiCode,
-                include_bytes!("../fixtures/host_events/kimi/stop.json"),
-                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete),
-            ),
         ];
 
         for (host, payload, signal) in captures {
@@ -857,24 +853,37 @@ mod tests {
     #[test]
     fn kiro_documented_unverified_events_are_rejected_instead_of_emulated() {
         let kiro = include_str!("../fixtures/host_events/kiro.json");
-        assert_eq!(
-            decode_native_hook_event(
-                NativeHostIdentityV1::Kiro,
-                fixture_request(kiro, "prompt_boundary").as_slice()
-            )
-            .unwrap()
-            .signal,
-            NativeHookSignalV1::PromptBoundary
-        );
-        for identity in ["saved_edit", "stop"] {
+        for identity in ["prompt_boundary", "saved_edit", "stop"] {
             assert_eq!(
                 decode_native_hook_event(
                     NativeHostIdentityV1::Kiro,
                     fixture_request(kiro, identity).as_slice()
                 ),
-                Err(NativeHookDecodeError::UnsupportedNativeEvent)
+                if identity == "prompt_boundary" {
+                    Err(NativeHookDecodeError::UnsupportedNativeFamily)
+                } else {
+                    Err(NativeHookDecodeError::UnsupportedNativeEvent)
+                }
             );
         }
+    }
+
+    #[test]
+    fn callbacks_without_exact_native_identity_remain_unavailable() {
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::KimiCode,
+                include_bytes!("../fixtures/host_events/kimi/stop.json"),
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeFamily)
+        );
+        assert_eq!(
+            decode_native_hook_event(
+                NativeHostIdentityV1::CursorCloud,
+                include_bytes!("../fixtures/host_events/cursor/after-file-edit.json"),
+            ),
+            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+        );
     }
 
     #[test]
