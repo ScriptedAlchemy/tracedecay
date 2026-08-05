@@ -33,9 +33,10 @@ pub use detect::{
     CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, DetectionConfidenceV1,
     LCM_PAYLOAD_SANITIZER_VERSION_V1, LcmPayloadSanitizationV1, MemoryFactSanitizationV1,
     PrivacyDetectorV1, SanitizationActionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
-    SanitizedPayloadVerificationError, bind_sanitized_lcm_payload_text, sanitize_code_source_bytes,
-    sanitize_lcm_payload_text, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
-    serialize_verified_json_payload, verify_sanitized_json_payload,
+    SanitizedPayloadVerificationError, bind_sanitized_lcm_payload_text,
+    quarantine_lcm_payload_text, sanitize_code_source_bytes, sanitize_lcm_payload_text,
+    sanitize_memory_fact_payload, sanitize_provider_metadata_text, serialize_verified_json_payload,
+    verify_sanitized_json_payload,
 };
 pub use lcm::{
     LcmSensitiveRedactionPolicyV1, LcmSensitiveRedactionV1, redact_lcm_sensitive_payload,

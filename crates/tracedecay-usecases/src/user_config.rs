@@ -108,28 +108,6 @@ pub struct UserConfig {
     #[serde(default = "default_true")]
     pub memory_injection_enabled: bool,
 
-    /// Whether LCM raw-message ingest redacts sensitive values (API keys,
-    /// bearer tokens, password assignments, private keys) before persisting
-    /// transcript payloads.
-    ///
-    /// Off by default because redaction is irreversible: LCM raw payloads are
-    /// the lossless archive that summaries and expansions drill back into, and
-    /// a redacted payload cannot be restored. An owner who prefers secret
-    /// safety over losslessness sets this to `true`.
-    ///
-    /// This is the profile-level default. A per-message
-    /// `lcm_ingest.sensitive_patterns_enabled` metadata key still overrides it
-    /// in either direction for a single message.
-    #[serde(default)]
-    pub lcm_sensitive_redaction_enabled: bool,
-
-    /// Which redactors run when [`Self::lcm_sensitive_redaction_enabled`] is
-    /// on. Empty means the built-in set (`api_key`, `bearer_token`,
-    /// `password_assignment`, `private_key`); `all` or `default` selects every
-    /// built-in redactor.
-    #[serde(default)]
-    pub lcm_sensitive_redaction_patterns: Vec<String>,
-
     /// Unknown user config keys preserved for forward compatibility.
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, toml::Value>,

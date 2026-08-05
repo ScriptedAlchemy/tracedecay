@@ -453,11 +453,16 @@ pub fn validate_payload_ref(payload_ref: &str) -> Result<&str, LcmError> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LcmError {
+    ProfileResetRequired {
+        found_version: Option<i64>,
+        required_version: i64,
+    },
     InvalidPayloadRef,
     PayloadNotFound,
     PayloadNotOwnedBySession,
     PayloadMissing,
     PayloadGcd,
+    PayloadLocked,
     PayloadIntegrityMismatch,
     StillReferenced,
     SummaryNodeNotFound,
@@ -495,11 +500,27 @@ pub enum LcmError {
 impl std::fmt::Display for LcmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ProfileResetRequired {
+                found_version,
+                required_version,
+            } => match found_version {
+                Some(found_version) => write!(
+                    f,
+                    "LCM profile schema {found_version} is incompatible with required schema \
+                     {required_version}; reset the profile"
+                ),
+                None => write!(
+                    f,
+                    "unversioned LCM profile data is incompatible with required schema \
+                     {required_version}; reset the profile"
+                ),
+            },
             Self::InvalidPayloadRef => write!(f, "invalid payload ref"),
             Self::PayloadNotFound => write!(f, "payload not found"),
             Self::PayloadNotOwnedBySession => write!(f, "payload not owned by session"),
             Self::PayloadMissing => write!(f, "payload file missing"),
             Self::PayloadGcd => write!(f, "payload already garbage collected"),
+            Self::PayloadLocked => write!(f, "payload is locked by quarantine policy"),
             Self::PayloadIntegrityMismatch => write!(f, "payload integrity mismatch"),
             Self::StillReferenced => write!(f, "payload still referenced"),
             Self::SummaryNodeNotFound => write!(f, "summary node not found"),
