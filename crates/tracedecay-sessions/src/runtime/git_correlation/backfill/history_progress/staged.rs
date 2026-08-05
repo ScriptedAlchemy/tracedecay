@@ -2,7 +2,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Row, params};
 
 use super::{GitCorrelationError, GitHistoryProgressKey};
 
-pub(super) const MAX_STAGED_PAGE_ROWS: usize = 128;
+pub(in super::super) const MAX_STAGED_PAGE_ROWS: usize = 128;
 
 pub(super) async fn install_schema(
     conn: &(impl Executor + ?Sized),
@@ -36,7 +36,7 @@ pub(super) async fn install_schema(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GitHistoryStagedSpanRow {
+pub(in super::super) struct GitHistoryStagedSpanRow {
     pub key: GitHistoryProgressKey,
     pub segment_ordinal: u64,
     pub boundary: u8,
@@ -45,7 +45,7 @@ pub(super) struct GitHistoryStagedSpanRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GitHistoryStagedCommitRow {
+pub(in super::super) struct GitHistoryStagedCommitRow {
     pub key: GitHistoryProgressKey,
     pub segment_ordinal: u64,
     pub oid: String,
@@ -53,10 +53,11 @@ pub(super) struct GitHistoryStagedCommitRow {
     pub committed_at: i64,
 }
 
-pub(super) async fn upsert_staged_span(
+pub(in super::super) async fn upsert_staged_span(
     conn: &(impl Executor + ?Sized),
     span: &GitHistoryStagedSpanRow,
 ) -> Result<bool, GitCorrelationError> {
+    let boundary = checked_boundary(span.boundary)?;
     let changed = conn
         .execute(
             "INSERT INTO git_history_index_staged_spans (
@@ -71,7 +72,7 @@ pub(super) async fn upsert_staged_span(
             params![
                 span.key.source_rowid,
                 span.segment_ordinal,
-                span.boundary,
+                boundary,
                 span.branch.as_deref(),
                 span.timestamp,
             ],
@@ -80,7 +81,7 @@ pub(super) async fn upsert_staged_span(
     Ok(changed == 1)
 }
 
-pub(super) async fn upsert_staged_commit(
+pub(in super::super) async fn upsert_staged_commit(
     conn: &(impl Executor + ?Sized),
     commit: &GitHistoryStagedCommitRow,
 ) -> Result<bool, GitCorrelationError> {
@@ -107,7 +108,7 @@ pub(super) async fn upsert_staged_commit(
     Ok(changed == 1)
 }
 
-pub(super) async fn read_staged_span_page(
+pub(in super::super) async fn read_staged_span_page(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,
     limit: usize,
@@ -130,7 +131,7 @@ pub(super) async fn read_staged_span_page(
     Ok(spans)
 }
 
-pub(super) async fn read_staged_commit_page(
+pub(in super::super) async fn read_staged_commit_page(
     conn: &(impl QueryExecutor + ?Sized),
     key: GitHistoryProgressKey,
     limit: usize,
@@ -153,10 +154,11 @@ pub(super) async fn read_staged_commit_page(
     Ok(commits)
 }
 
-pub(super) async fn delete_staged_span(
+pub(in super::super) async fn delete_staged_span(
     conn: &(impl Executor + ?Sized),
     span: &GitHistoryStagedSpanRow,
 ) -> Result<bool, GitCorrelationError> {
+    let boundary = checked_boundary(span.boundary)?;
     Ok(conn
         .execute(
             "DELETE FROM git_history_index_staged_spans
@@ -168,7 +170,7 @@ pub(super) async fn delete_staged_span(
             params![
                 span.key.source_rowid,
                 span.segment_ordinal,
-                span.boundary,
+                boundary,
                 span.branch.as_deref(),
                 span.timestamp,
             ],
@@ -177,7 +179,7 @@ pub(super) async fn delete_staged_span(
         == 1)
 }
 
-pub(super) async fn delete_staged_commit(
+pub(in super::super) async fn delete_staged_commit(
     conn: &(impl Executor + ?Sized),
     commit: &GitHistoryStagedCommitRow,
 ) -> Result<bool, GitCorrelationError> {
@@ -214,13 +216,33 @@ fn checked_limit(limit: usize) -> Result<i64, GitCorrelationError> {
     })
 }
 
+fn checked_boundary(boundary: u8) -> Result<i64, GitCorrelationError> {
+    match boundary {
+        0 | 1 => Ok(i64::from(boundary)),
+        other => Err(GitCorrelationError::InvalidArgument(format!(
+            "git history staged span boundary must be 0 or 1, got {other}"
+        ))),
+    }
+}
+
 fn staged_span_from_row(row: &Row) -> Result<GitHistoryStagedSpanRow, GitCorrelationError> {
+    let stored_boundary: i64 = row.get(2)?;
+    let boundary = u8::try_from(stored_boundary).map_err(|_| {
+        GitCorrelationError::Db(format!(
+            "invalid git history staged span boundary `{stored_boundary}`"
+        ))
+    })?;
+    if boundary > 1 {
+        return Err(GitCorrelationError::Db(format!(
+            "invalid git history staged span boundary `{stored_boundary}`"
+        )));
+    }
     Ok(GitHistoryStagedSpanRow {
         key: GitHistoryProgressKey {
             source_rowid: row.get(0)?,
         },
         segment_ordinal: row.get(1)?,
-        boundary: row.get(2)?,
+        boundary,
         branch: row.get(3)?,
         timestamp: row.get(4)?,
     })
