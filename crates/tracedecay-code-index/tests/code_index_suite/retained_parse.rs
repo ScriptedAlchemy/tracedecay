@@ -39,13 +39,13 @@ fn identity_at(
     }
 }
 
-fn normalize_extraction(mut result: ExtractionResult) -> ExtractionResult {
+fn normalize_extraction(mut result: ExtractionResult) -> serde_json::Value {
     for node in &mut result.nodes {
         node.updated_at = 0;
     }
     result.duration_ms = 0;
     result.sanitize();
-    result
+    serde_json::to_value(result).expect("normalized extraction serializes")
 }
 
 #[test]
