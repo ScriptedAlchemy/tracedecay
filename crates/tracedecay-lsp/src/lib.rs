@@ -113,6 +113,7 @@ pub use overlay::{
 pub use protocol::{
     DEFAULT_LSP_REQUEST_DEADLINE_MS, DaemonLspProtocolSession, DaemonLspProtocolTransport,
     MAX_QUEUED_OUTBOUND_BYTES, MAX_QUEUED_OUTBOUND_MESSAGES, ProtocolDispatch,
+    TRACEDECAY_RENAME_CANDIDATE_METHOD,
 };
 pub use provider::{
     AnalyzerCancellationPort, AnalyzerEvent, AnalyzerSemanticAdapter, AnalyzerState,

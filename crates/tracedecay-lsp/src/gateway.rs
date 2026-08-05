@@ -296,6 +296,7 @@ pub enum GatewayMethod {
     TextDocumentPrepareTypeHierarchy,
     TypeHierarchySupertypes,
     TypeHierarchySubtypes,
+    TraceDecayRenameCandidate,
     TextDocumentPrepareRename,
     TextDocumentRename,
     TextDocumentCodeAction,
@@ -325,6 +326,7 @@ impl GatewayMethod {
             Self::TextDocumentPrepareTypeHierarchy => "textDocument/prepareTypeHierarchy",
             Self::TypeHierarchySupertypes => "typeHierarchy/supertypes",
             Self::TypeHierarchySubtypes => "typeHierarchy/subtypes",
+            Self::TraceDecayRenameCandidate => "tracedecay/textDocument/renameCandidate",
             Self::TextDocumentPrepareRename => "textDocument/prepareRename",
             Self::TextDocumentRename => "textDocument/rename",
             Self::TextDocumentCodeAction => "textDocument/codeAction",
@@ -599,7 +601,7 @@ impl SemanticRequest {
             Self::PrepareTypeHierarchy { .. } => GatewayMethod::TextDocumentPrepareTypeHierarchy,
             Self::TypeHierarchySupertypes { .. } => GatewayMethod::TypeHierarchySupertypes,
             Self::TypeHierarchySubtypes { .. } => GatewayMethod::TypeHierarchySubtypes,
-            Self::RenameCandidate { .. } => GatewayMethod::TextDocumentPrepareRename,
+            Self::RenameCandidate { .. } => GatewayMethod::TraceDecayRenameCandidate,
         }
     }
 

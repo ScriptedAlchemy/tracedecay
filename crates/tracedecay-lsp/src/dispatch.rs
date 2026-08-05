@@ -7,7 +7,10 @@ use crate::context::{
 };
 use crate::diagnostics::LspPosition;
 use crate::gateway::{FeedbackCyclePort, SemanticProviderPort, SemanticRequest};
-use crate::protocol::{DaemonLspProtocolSession, TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD};
+use crate::protocol::{
+    DaemonLspProtocolSession, TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD,
+    TRACEDECAY_RENAME_CANDIDATE_METHOD,
+};
 use crate::provider::DiagnosticSnapshotPort;
 use crate::rpc::{
     RpcFailure, deferred_method_reason, document_position, document_uri, error_response,
@@ -48,6 +51,7 @@ pub(crate) enum LspClientMethod {
     TraceDecayContextExpand,
     TraceDecaySubscribe,
     TraceDecayNativeDiagnostics,
+    TraceDecayRenameCandidate,
     Unknown(String),
 }
 
@@ -84,6 +88,7 @@ impl LspClientMethod {
             TRACEDECAY_CONTEXT_EXPAND_METHOD => Self::TraceDecayContextExpand,
             TRACEDECAY_SUBSCRIBE_METHOD => Self::TraceDecaySubscribe,
             TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD => Self::TraceDecayNativeDiagnostics,
+            TRACEDECAY_RENAME_CANDIDATE_METHOD => Self::TraceDecayRenameCandidate,
             other => Self::Unknown(other.to_owned()),
         }
     }
@@ -408,6 +413,18 @@ fn dispatch_request<P, S, D>(
         }
         LspClientMethod::TypeHierarchySubtypes => {
             start_type_semantic(session, response_id, &params, now_ms, false);
+        }
+        LspClientMethod::TraceDecayRenameCandidate => {
+            start_position_semantic(
+                session,
+                response_id,
+                &params,
+                now_ms,
+                |document_uri, position| SemanticRequest::RenameCandidate {
+                    document_uri,
+                    position,
+                },
+            );
         }
         LspClientMethod::TraceDecayContext => {
             session.handle_context_request(response_id, &params, now_ms);

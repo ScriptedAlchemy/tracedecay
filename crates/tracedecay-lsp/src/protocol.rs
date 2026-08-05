@@ -72,6 +72,7 @@ pub const DEFAULT_LSP_REQUEST_DEADLINE_MS: u64 = 5_000;
 pub const MAX_QUEUED_OUTBOUND_BYTES: usize = 1024 * 1024;
 pub const MAX_QUEUED_OUTBOUND_MESSAGES: usize = 64;
 pub(crate) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
+pub const TRACEDECAY_RENAME_CANDIDATE_METHOD: &str = "tracedecay/textDocument/renameCandidate";
 
 mod context_controller;
 mod diagnostics_controller;

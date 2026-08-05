@@ -208,14 +208,30 @@ pub(super) fn initialize(session: &mut DaemonLspProtocolSession<Feedback, Semant
 fn initialization_is_single_root_and_deferred_methods_are_typed_unavailable() {
     let mut session = session();
     initialize(&mut session);
-    session.handle_payload(
-        br#"{"jsonrpc":"2.0","id":2,"method":"textDocument/rename","params":{}}"#,
-        2,
-    );
+    for (id, method) in [
+        (2, "textDocument/prepareRename"),
+        (3, "textDocument/rename"),
+    ] {
+        session.handle_payload(
+            &serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": {},
+            }))
+            .unwrap(),
+            id,
+        );
+    }
     let output = session.drain_outbound();
-    let response: Value = serde_json::from_slice(&output[0]).unwrap();
-    assert_eq!(response["error"]["code"], -32601);
-    assert_eq!(response["error"]["data"]["reason"], "explicitlyUnavailable");
+    assert_eq!(output.len(), 2);
+    for response in output {
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["error"]["code"], -32601);
+        assert_eq!(response["error"]["data"]["reason"], "explicitlyUnavailable");
+        assert_ne!(response["method"], "workspace/applyEdit");
+        assert!(response.get("result").is_none());
+    }
 }
 
 #[derive(Clone, Default)]
@@ -275,6 +291,34 @@ impl SemanticProviderPort for RoutingSemantics {
                 },
             },
         }])
+    }
+
+    fn rename_candidate(
+        &self,
+        root: &AdmittedRoot,
+        document_uri: &str,
+        _position: LspPosition,
+    ) -> SemanticProviderOutcome<crate::RenameCandidateResult> {
+        self.routed_scope_digests
+            .lock()
+            .expect("capture routed root")
+            .push(root.scope_digest().expect("authorized root").clone());
+        SemanticProviderOutcome::Complete(crate::RenameCandidateResult::Available(
+            crate::RenameCandidate {
+                document_uri: document_uri.to_owned(),
+                range: LspRange {
+                    start: LspPosition {
+                        line: 3,
+                        character: 4,
+                    },
+                    end: LspPosition {
+                        line: 3,
+                        character: 12,
+                    },
+                },
+                placeholder: "old_name".to_owned(),
+            },
+        ))
     }
 }
 
@@ -366,8 +410,12 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
         br#"{"jsonrpc":"2.0","id":5,"method":"textDocument/diagnostic","params":{"textDocument":{"uri":"file:///left/src/lib.rs"}}}"#,
         5,
     );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":6,"method":"tracedecay/textDocument/renameCandidate","params":{"textDocument":{"uri":"file:///right/src/lib.rs"},"position":{"line":3,"character":5}}}"#,
+        6,
+    );
     let responses = session.drain_outbound();
-    assert_eq!(responses.len(), 4);
+    assert_eq!(responses.len(), 5);
     let workspace_response: Value = serde_json::from_slice(&responses[2]).unwrap();
     assert_eq!(
         workspace_response["result"]
@@ -381,19 +429,28 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
     assert!(result_id.contains(&"c".repeat(64)));
     assert!(result_id.contains(&"a".repeat(64)));
     assert!(result_id.contains("root=0"));
+    let rename_response: Value = serde_json::from_slice(&responses[4]).unwrap();
+    assert_eq!(rename_response["result"]["status"], "available");
+    assert_eq!(
+        rename_response["result"]["documentUri"],
+        "file:///right/src/lib.rs"
+    );
+    assert_eq!(rename_response["result"]["placeholder"], "old_name");
+    assert_eq!(rename_response["result"]["range"]["start"]["line"], 3);
     assert_eq!(
         *routed.lock().expect("read routed roots"),
         vec![
             left_digest.clone(),
             right_digest.clone(),
-            left_digest,
+            left_digest.clone(),
+            right_digest.clone(),
             right_digest,
         ]
     );
 
     session.handle_payload(
-        br#"{"jsonrpc":"2.0","id":6,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///escape.rs"},"position":{"line":0,"character":0}}}"#,
-        6,
+        br#"{"jsonrpc":"2.0","id":7,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///escape.rs"},"position":{"line":0,"character":0}}}"#,
+        7,
     );
     let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
     assert_eq!(response["error"]["data"]["reason"], "outsideAdmittedRoot");
