@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +27,8 @@ use crate::global_db::RegisteredGlobalDb;
 
 type WorkStorage = tracedecay_rusqlite_runtime::work::WorkSqliteStorage;
 type WorkflowAuthority = tracedecay_rusqlite_runtime::workflow::WorkflowSqliteAuthority;
+
+const WORKFLOW_SETTLEMENT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(test)]
 static CRASH_AFTER_SETTLEMENT_BEFORE_CHECKPOINT: AtomicBool = AtomicBool::new(false);
@@ -219,26 +221,64 @@ pub(crate) async fn execute_canonical_workflow(
             }
         }
 
-        for running in active {
-            let attempt = if fail_fast {
-                let attempt = cancel_child(runtime, &running).await?;
-                attach_terminal_evidence(database, context, &request, &running.child, &attempt)?;
-                attempt
-            } else {
-                settle_child(database, runtime, context, &request, running).await?
-            };
-            fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicy::FailFast)
-                && !matches!(
-                    attempt.terminal(),
-                    Some(WorkTerminalEvidenceV1::Succeeded { .. })
-                );
-            #[cfg(test)]
-            if CRASH_AFTER_SETTLEMENT_BEFORE_CHECKPOINT.swap(false, Ordering::AcqRel) {
-                return Err(child_unavailable(
-                    "injected crash after Work settlement before Workflow checkpoint",
-                ));
+        while !active.is_empty() {
+            let mut index = 0;
+            let mut settled = false;
+            while index < active.len() {
+                let attempt = if fail_fast {
+                    let running = active.remove(index);
+                    let attempt = cancel_child(runtime, &running).await?;
+                    attach_terminal_evidence(
+                        database,
+                        context,
+                        &request,
+                        &running.child,
+                        &attempt,
+                    )?;
+                    Some(attempt)
+                } else {
+                    let identity = active[index].identity.clone();
+                    let lease = active[index].lease.clone();
+                    let attempt = runtime
+                        .try_finish(&identity, &lease, now())
+                        .await
+                        .map_err(work_error)?;
+                    match attempt {
+                        Some(attempt) => {
+                            let running = active.remove(index);
+                            attach_terminal_evidence(
+                                database,
+                                context,
+                                &request,
+                                &running.child,
+                                &attempt,
+                            )?;
+                            Some(attempt)
+                        }
+                        None => None,
+                    }
+                };
+                let Some(attempt) = attempt else {
+                    index += 1;
+                    continue;
+                };
+                settled = true;
+                fail_fast |= matches!(plan.failure_policy, WorkflowFailurePolicy::FailFast)
+                    && !matches!(
+                        attempt.terminal(),
+                        Some(WorkTerminalEvidenceV1::Succeeded { .. })
+                    );
+                #[cfg(test)]
+                if CRASH_AFTER_SETTLEMENT_BEFORE_CHECKPOINT.swap(false, Ordering::AcqRel) {
+                    return Err(child_unavailable(
+                        "injected crash after Work settlement before Workflow checkpoint",
+                    ));
+                }
+                terminal_attempts.push(attempt);
             }
-            terminal_attempts.push(attempt);
+            if !settled {
+                tokio::time::sleep(WORKFLOW_SETTLEMENT_POLL_INTERVAL).await;
+            }
         }
         if fail_fast {
             break;
