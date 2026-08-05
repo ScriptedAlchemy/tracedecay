@@ -497,7 +497,7 @@ fn lost_issue_response_replays_the_exact_committed_terminal() {
 #[test]
 fn lost_redeem_response_replays_success_instead_of_token_replay() {
     let store = RegisteredWorkflowStore::start("workflow-effect-redeem-replay");
-    let authority = authority(&store);
+    let workflow_authority = authority(&store);
     let scope = handoff_scope();
     let secret = "r".repeat(48);
     let grant = TaskHandoffGrant::new(
@@ -507,7 +507,7 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
         UtcMicros(60_000_010),
     )
     .unwrap();
-    TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
+    TaskHandoffAuthorityPort::issue(&workflow_authority, &grant).unwrap();
     let identity = effect_identity(
         WorkflowEffectOperationV1::HandoffRedeem,
         "actor.workflow.target",
@@ -521,7 +521,7 @@ fn lost_redeem_response_replays_success_instead_of_token_replay() {
     );
 
     let first = WorkflowEffectAuthorityPortV1::execute_effect(
-        &authority,
+        &workflow_authority,
         &identity,
         &prepared,
         UtcMicros(21),
@@ -594,7 +594,7 @@ fn rejected_effect_replays_the_exact_problem_without_reapplying() {
 #[test]
 fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
     let store = RegisteredWorkflowStore::start("workflow-effect-in-flight");
-    let authority = authority(&store);
+    let workflow_authority = authority(&store);
     let identity = effect_identity(
         WorkflowEffectOperationV1::RegisterDefinition,
         "actor.workflow.source",
@@ -605,7 +605,8 @@ fn restart_reconciles_a_reserved_in_flight_effect_before_mutation() {
         definition(1, "operation.prepare.v1"),
     );
     let reserved =
-        WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &identity, &prepared).unwrap();
+        WorkflowEffectAuthorityPortV1::reserve_effect(&workflow_authority, &identity, &prepared)
+            .unwrap();
     assert_eq!(reserved.state(), WorkflowEffectJournalStateV1::BeforeEffect);
     store.inspect(|connection| {
         connection
@@ -730,7 +731,7 @@ fn prepared_input_cannot_mutate_under_another_inputs_receipt() {
 #[test]
 fn restart_uses_the_reserved_preparation_and_timestamps() {
     let store = RegisteredWorkflowStore::start("workflow-effect-reserved-preparation");
-    let authority = authority(&store);
+    let workflow_authority = authority(&store);
     let identity = effect_identity_at(
         WorkflowEffectOperationV1::HandoffIssue,
         "actor.workflow.source",
@@ -749,7 +750,8 @@ fn restart_uses_the_reserved_preparation_and_timestamps() {
         identity.input_digest().clone(),
         original_grant.clone(),
     );
-    WorkflowEffectAuthorityPortV1::reserve_effect(&authority, &identity, &original).unwrap();
+    WorkflowEffectAuthorityPortV1::reserve_effect(&workflow_authority, &identity, &original)
+        .unwrap();
     store.inspect(|connection| {
         connection
             .execute(
