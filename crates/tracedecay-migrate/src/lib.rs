@@ -9,18 +9,17 @@
 //!   opportunistic.
 //! - [`inventory`] carries the planning vocabulary a preflight scan produces.
 //! The one-shot crate split moved the rest of the migration subsystem here as
-//! well — the preflight scanners ([`inventory`]), legacy Hermes import
-//! ([`hermes`]), profile backup ([`profile_backup`]), and registry
-//! reconstruction ([`registry`]). Those modules acquire leases, open stores,
-//! and drive the rusqlite runtime, so they reach the runtime kernel through
-//! [`root_seam`], which the landing repoints at `tracedecay-runtime-core`.
+//! well — the preflight scanners ([`inventory`]), profile backup
+//! ([`profile_backup`]), and registry reconstruction ([`registry`]). Those
+//! modules acquire leases, open stores, and drive the rusqlite runtime, so they
+//! reach the runtime kernel through [`root_seam`], which the landing repoints
+//! at `tracedecay-runtime-core`.
 //!
 //! The root `tracedecay` crate re-exports every module under its original
 //! `crate::migrate::*` path, so this extraction changes no caller path.
 
 pub mod durability;
 pub mod final_v2;
-pub mod hermes;
 pub mod inventory;
 pub mod profile_backup;
 mod profile_identity;

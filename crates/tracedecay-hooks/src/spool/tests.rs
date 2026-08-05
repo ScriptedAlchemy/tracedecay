@@ -103,6 +103,129 @@ fn checksum_is_real_sha256() {
 }
 
 #[test]
+fn nonfinal_meta_version_requires_explicit_reset_with_exact_provenance() {
+    let root = TestDir::new("reset-meta-version");
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    let mut meta = spool.meta.clone();
+    meta.version = SPOOL_META_VERSION.saturating_add(1);
+    drop(spool);
+    write_meta(&root.0, &meta).unwrap();
+
+    assert_eq!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap_err(),
+        HookSpoolError::ResetRequired {
+            reason: HookSpoolResetReasonV1::MetadataVersion {
+                found: SPOOL_META_VERSION.saturating_add(1),
+                expected: SPOOL_META_VERSION,
+            },
+        }
+    );
+}
+
+#[test]
+fn nonfinal_meta_shape_requires_explicit_reset() {
+    let root = TestDir::new("reset-meta-shape");
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    drop(spool);
+    let mut meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(meta_path(&root.0)).unwrap()).unwrap();
+    meta.as_object_mut()
+        .unwrap()
+        .insert("retired_cursor".to_owned(), serde_json::json!(7));
+    fs::write(meta_path(&root.0), serde_json::to_vec(&meta).unwrap()).unwrap();
+
+    assert_eq!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap_err(),
+        HookSpoolError::ResetRequired {
+            reason: HookSpoolResetReasonV1::MetadataShape,
+        }
+    );
+}
+
+#[test]
+fn nonfinal_frame_header_requires_explicit_reset_with_exact_provenance() {
+    let root = TestDir::new("reset-frame");
+    let payload = canonical_json_bytes(&envelope(1, 9)).unwrap();
+    let mut frame = encode_frame(1, UtcMicros(10), [9; 32], &payload).unwrap();
+    frame[4..8].copy_from_slice(b"TDH1");
+    frame[8..10].copy_from_slice(&2u16.to_le_bytes());
+    fs::write(records_path(&root.0), frame).unwrap();
+
+    assert_eq!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap_err(),
+        HookSpoolError::ResetRequired {
+            reason: HookSpoolResetReasonV1::FrameFormat {
+                found_magic: *b"TDH1",
+                found_version: 2,
+                expected_magic: *SPOOL_MAGIC,
+                expected_version: SPOOL_FORMAT_VERSION,
+            },
+        }
+    );
+}
+
+#[test]
+fn nonfinal_envelope_shape_in_final_frame_requires_explicit_reset() {
+    let root = TestDir::new("reset-envelope-shape");
+    let mut payload = serde_json::to_value(envelope(1, 9)).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .insert("authorization_epoch".to_owned(), serde_json::json!(41));
+    let payload = serde_json::to_vec(&payload).unwrap();
+    let frame = encode_frame(1, UtcMicros(10), [9; 32], &payload).unwrap();
+    fs::write(records_path(&root.0), frame).unwrap();
+
+    assert_eq!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap_err(),
+        HookSpoolError::ResetRequired {
+            reason: HookSpoolResetReasonV1::EnvelopeShape,
+        }
+    );
+}
+
+#[test]
+fn nonfinal_envelope_version_requires_explicit_reset_with_exact_provenance() {
+    let root = TestDir::new("reset-envelope-version");
+    let mut payload = serde_json::to_value(envelope(1, 9)).unwrap();
+    payload["schema_version"] =
+        serde_json::json!(crate::HOOK_EVENT_SCHEMA_VERSION.saturating_add(1));
+    let payload = serde_json::to_vec(&payload).unwrap();
+    let frame = encode_frame(1, UtcMicros(10), [9; 32], &payload).unwrap();
+    fs::write(records_path(&root.0), frame).unwrap();
+
+    assert_eq!(
+        HookSpoolV1::open(&root.0, config(), UtcMicros(20)).unwrap_err(),
+        HookSpoolError::ResetRequired {
+            reason: HookSpoolResetReasonV1::EnvelopeVersion {
+                found: crate::HOOK_EVENT_SCHEMA_VERSION.saturating_add(1),
+                expected: crate::HOOK_EVENT_SCHEMA_VERSION,
+            },
+        }
+    );
+}
+
+#[test]
+fn explicit_reset_recreates_nonfinal_spool_without_decoding_it() {
+    let root = TestDir::new("explicit-reset");
+    let (spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+    drop(spool);
+    fs::write(
+        meta_path(&root.0),
+        b"{\"version\":999,\"opaque\":\"not decoded\"}",
+    )
+    .unwrap();
+    fs::write(records_path(&root.0), b"nonfinal records").unwrap();
+    fs::write(replay_cursor_path(&root.0), b"nonfinal cursor").unwrap();
+
+    HookSpoolV1::reset(&root.0, config(), UtcMicros(20)).unwrap();
+
+    let (_, report) = HookSpoolV1::open(&root.0, config(), UtcMicros(30)).unwrap();
+    assert_eq!(report.pending_records, 0);
+    assert_eq!(report.next_sequence, 1);
+}
+
+#[test]
 fn append_ack_compact_and_reopen_are_exact() {
     let root = TestDir::new("ack");
     let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();

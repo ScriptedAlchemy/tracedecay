@@ -33,9 +33,53 @@ const WRAPPER_ENTRY_JS: &str = include_str!("../../../../../dashboard/hermes-wra
 /// Placeholder line in `plugin_api.py` rewritten with the installed binary.
 const BIN_PLACEHOLDER: &str = "DEPLOYED_TRACEDECAY_BIN = None";
 
-/// Returns true when `plugin_dir` contains a generated dashboard wrapper.
-pub(super) fn is_deployed(plugin_dir: &Path) -> bool {
-    plugin_dir.join("dashboard/manifest.json").is_file()
+pub(super) fn is_current(plugin_dir: &Path) -> bool {
+    [
+        "dashboard/manifest.json",
+        "dashboard/plugin_api.py",
+        "dashboard/dist/index.js",
+    ]
+    .into_iter()
+    .all(|relative| plugin_dir.join(relative).is_file())
+        && [
+            "dashboard/dist/holographic.js",
+            "dashboard/dist/lcm.js",
+            "dashboard/dist/graph.js",
+            "dashboard/dist/savings.js",
+            "dashboard/dist/style.css",
+        ]
+        .into_iter()
+        .all(|relative| !plugin_dir.join(relative).exists())
+}
+
+pub(super) fn is_absent(plugin_dir: &Path) -> bool {
+    managed_paths(plugin_dir)
+        .into_iter()
+        .all(|path| !path.exists())
+}
+
+pub(super) fn matches_policy(plugin_dir: &Path, enabled: bool) -> bool {
+    if enabled {
+        is_current(plugin_dir)
+    } else {
+        is_absent(plugin_dir)
+    }
+}
+
+pub(super) fn managed_paths(plugin_dir: &Path) -> Vec<std::path::PathBuf> {
+    [
+        "dashboard/manifest.json",
+        "dashboard/plugin_api.py",
+        "dashboard/dist/index.js",
+        "dashboard/dist/holographic.js",
+        "dashboard/dist/lcm.js",
+        "dashboard/dist/graph.js",
+        "dashboard/dist/savings.js",
+        "dashboard/dist/style.css",
+    ]
+    .into_iter()
+    .map(|relative| plugin_dir.join(relative))
+    .collect()
 }
 
 /// Applies the install-time dashboard wrapper policy for a generated Hermes plugin.
@@ -52,22 +96,6 @@ pub(super) fn apply_install_policy(
     } else {
         uninstall(plugin_dir)
     }
-}
-
-/// Refreshes a dashboard wrapper only when the previous install had one.
-///
-/// `tracedecay update-plugin` must preserve a `--no-dashboard` install as
-/// dashboard-free while still rebaking wrapper assets and the binary path
-/// for installs where the dashboard page already exists.
-pub(super) fn refresh_if_previously_deployed(
-    plugin_dir: &Path,
-    tracedecay_bin: &str,
-    previously_deployed: bool,
-) -> Result<()> {
-    if previously_deployed {
-        deploy(plugin_dir, tracedecay_bin)?;
-    }
-    Ok(())
 }
 
 /// Deploys the dashboard wrapper into `<plugin_dir>/dashboard/`.
@@ -301,7 +329,7 @@ mod tests {
 
         apply_install_policy(&plugin_dir, "/bin/tracedecay", true).unwrap();
 
-        assert!(is_deployed(&plugin_dir));
+        assert!(is_current(&plugin_dir));
         let dist_dir = plugin_dir.join("dashboard/dist");
         assert_mountable_dashboard_entry(&text(&dist_dir.join("index.js")));
         for retired in [
@@ -387,28 +415,5 @@ mod tests {
         let after = file_contents(&plugin_dir.join("dashboard"));
 
         assert_eq!(after, before);
-    }
-
-    #[test]
-    fn refresh_preserves_no_dashboard_installs() {
-        let temp = TempDir::new().unwrap();
-        let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-
-        refresh_if_previously_deployed(&plugin_dir, "/bin/tracedecay", false).unwrap();
-
-        assert!(!plugin_dir.join("dashboard").exists());
-    }
-
-    #[test]
-    fn refresh_updates_previously_deployed_wrapper() {
-        let temp = TempDir::new().unwrap();
-        let plugin_dir = temp.path().join(".hermes/plugins/tracedecay");
-        apply_install_policy(&plugin_dir, "/old/bin/tracedecay", true).unwrap();
-
-        refresh_if_previously_deployed(&plugin_dir, "/new/bin/tracedecay", true).unwrap();
-
-        let api = text(&plugin_dir.join("dashboard/plugin_api.py"));
-        assert!(api.contains("/new/bin/tracedecay"));
-        assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
     }
 }
