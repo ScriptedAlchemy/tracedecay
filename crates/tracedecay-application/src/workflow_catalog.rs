@@ -195,8 +195,6 @@ fn workflow_manifest(operation: &str) -> Result<CapabilityManifestV1, CatalogVal
                 CancellationPoint::BeforeAdmission,
                 CancellationPoint::BeforeEffect,
                 CancellationPoint::EffectInFlight,
-                CancellationPoint::Reconciling,
-                CancellationPoint::AfterCommit,
             ])?
         },
         deadline: DeadlineContract::new(
@@ -315,8 +313,6 @@ mod tests {
                 CancellationPoint::BeforeAdmission,
                 CancellationPoint::BeforeEffect,
                 CancellationPoint::EffectInFlight,
-                CancellationPoint::Reconciling,
-                CancellationPoint::AfterCommit,
             ] {
                 assert!(manifest.cancellation().observes(point));
             }

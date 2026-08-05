@@ -156,12 +156,7 @@ where
         context: &RequestContext,
         definition: WorkflowDefinition,
     ) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
-        if definition.project_id() != &context.scope().project_id {
-            return Err(WorkflowCoordinationError::ScopeMismatch);
-        }
-        definition
-            .validate()
-            .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+        let definition = prepare_workflow_definition_registration(context, definition)?;
         match self.authority.insert(&definition) {
             Ok(()) => Ok(definition),
             Err(WorkflowDefinitionAuthorityError::AlreadyExists) => {
@@ -252,6 +247,19 @@ where
             catalog_changed: from.pinned_catalog_digest() != to.pinned_catalog_digest(),
         })
     }
+}
+
+pub fn prepare_workflow_definition_registration(
+    context: &RequestContext,
+    definition: WorkflowDefinition,
+) -> Result<WorkflowDefinition, WorkflowCoordinationError> {
+    if definition.project_id() != &context.scope().project_id {
+        return Err(WorkflowCoordinationError::ScopeMismatch);
+    }
+    definition
+        .validate()
+        .map_err(|_| WorkflowCoordinationError::InvalidDefinition)?;
+    Ok(definition)
 }
 
 fn coordination_authority_error(
@@ -648,18 +656,7 @@ where
         token: &TaskHandoffToken,
         issued_at: UtcMicros,
     ) -> Result<TaskHandoffGrant, TaskHandoffError> {
-        if !handoff_scope_matches_context(context, &scope)
-            || context.actor() != scope.from_actor_id()
-        {
-            return Err(TaskHandoffError::Unauthorized);
-        }
-        let expires_at = UtcMicros(
-            issued_at
-                .0
-                .checked_add(TASK_HANDOFF_LIFETIME_MICROS.0)
-                .ok_or(TaskHandoffError::InvalidExpiry)?,
-        );
-        let grant = TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at)?;
+        let grant = prepare_task_handoff_issue(context, scope, token, issued_at)?;
         self.authority
             .issue(&grant)
             .map_err(handoff_authority_error)?;
@@ -673,15 +670,10 @@ where
         expected_scope: &TaskHandoffScope,
         consumed_at: UtcMicros,
     ) -> Result<(), TaskHandoffError> {
-        expected_scope.validate()?;
-        if !handoff_scope_matches_context(context, expected_scope)
-            || context.actor() != expected_scope.to_actor_id()
-        {
-            return Err(TaskHandoffError::Unauthorized);
-        }
+        let token_digest = prepare_task_handoff_redeem(context, token, expected_scope)?;
         match self
             .authority
-            .consume(&token.digest()?, expected_scope, consumed_at)
+            .consume(&token_digest, expected_scope, consumed_at)
             .map_err(handoff_authority_error)?
         {
             TaskHandoffConsumeOutcome::Consumed => Ok(()),
@@ -691,6 +683,38 @@ where
             TaskHandoffConsumeOutcome::Replay => Err(TaskHandoffError::Replay),
         }
     }
+}
+
+pub fn prepare_task_handoff_issue(
+    context: &RequestContext,
+    scope: TaskHandoffScope,
+    token: &TaskHandoffToken,
+    issued_at: UtcMicros,
+) -> Result<TaskHandoffGrant, TaskHandoffError> {
+    if !handoff_scope_matches_context(context, &scope) || context.actor() != scope.from_actor_id() {
+        return Err(TaskHandoffError::Unauthorized);
+    }
+    let expires_at = UtcMicros(
+        issued_at
+            .0
+            .checked_add(TASK_HANDOFF_LIFETIME_MICROS.0)
+            .ok_or(TaskHandoffError::InvalidExpiry)?,
+    );
+    TaskHandoffGrant::new(scope, token.digest()?, issued_at, expires_at)
+}
+
+pub fn prepare_task_handoff_redeem(
+    context: &RequestContext,
+    token: &TaskHandoffToken,
+    expected_scope: &TaskHandoffScope,
+) -> Result<ManifestDigest, TaskHandoffError> {
+    expected_scope.validate()?;
+    if !handoff_scope_matches_context(context, expected_scope)
+        || context.actor() != expected_scope.to_actor_id()
+    {
+        return Err(TaskHandoffError::Unauthorized);
+    }
+    token.digest()
 }
 
 fn handoff_scope_matches_context(context: &RequestContext, scope: &TaskHandoffScope) -> bool {

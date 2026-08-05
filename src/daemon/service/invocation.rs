@@ -44,8 +44,13 @@ use tracedecay_application::{
     PageRequest, PageState, PolicyDecisionRef, PolicyEvaluationContextV1,
     PolicyEvaluatorCompositionV1, PolicyEvidenceHorizonV1, PreviewId, PreviewResult,
     ReconciliationState, RequestAdmission, RequestContext, RequestId, ResolvedScope,
-    RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffRedeemed, TaskHandoffToken,
-    TemporalState, WorkflowCoordinationError, callable_code_operations,
+    RetryDirective, SafeDiagnostic, TaskHandoffError, TaskHandoffGrant, TaskHandoffRedeemed,
+    TaskHandoffToken, TemporalState, WorkflowCoordinationError, WorkflowEffectAuthorityPortV1,
+    WorkflowEffectIdentityV1, WorkflowEffectOperationV1, WorkflowEffectOutcomeV1,
+    WorkflowEffectPreparedV1, WorkflowEffectProblemV1, WorkflowEffectReceiptContextV1,
+    WorkflowEffectSuccessV1, WorkflowEffectTerminalV1, callable_code_operations,
+    prepare_task_handoff_issue, prepare_task_handoff_redeem,
+    prepare_workflow_definition_registration,
 };
 use tracedecay_domain::configuration::{
     CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
