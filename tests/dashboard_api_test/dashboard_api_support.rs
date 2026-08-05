@@ -147,7 +147,7 @@ fn spawn_dashboard_server_with_runner(
                 project_graphs,
                 "127.0.0.1",
                 port,
-                dashboard::spa_router(),
+                dashboard::spa_router().expect("valid embedded dashboard assets"),
                 async move {
                     let _ = shutdown_rx.await;
                 },

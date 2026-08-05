@@ -23,13 +23,8 @@ pub(crate) fn register_runtime_ports() {
 /// servers. Keeping the asset router at the composition root preserves the
 /// root build script's `OUT_DIR` ownership.
 #[doc(hidden)]
-pub fn spa_router() -> axum::Router {
-    use axum::routing::get;
-
-    axum::Router::new()
-        .route("/", get(assets::app_index))
-        .route("/static/{*tail}", get(assets::app_static))
-        .fallback(get(assets::app_spa_fallback))
+pub fn spa_router() -> Result<axum::Router, tracedecay_api::delivery::EmbeddedAssetError> {
+    assets::router()
 }
 
 /// Installs the canonical root-owned registered schema port before dashboard

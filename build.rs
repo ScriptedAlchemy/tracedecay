@@ -16,9 +16,8 @@
 //!   from the churn: a dependency's build-script rerun recompiles its
 //!   dependents unconditionally.
 
-use std::hash::{Hash, Hasher};
 use std::process::Command;
-use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
+use std::{fmt::Write as _, fs, path::Path};
 
 #[path = "build-support/dashboard_cache.rs"]
 mod dashboard_cache;
@@ -110,41 +109,20 @@ fn build_and_embed_dashboard_app() {
     );
     // Generated manifest: one embedded entry per dist file.
     let mut code = String::from(
-        "pub struct AppAsset { pub path: &'static str, pub contents: &'static [u8], pub content_type: &'static str }\n",
+        "pub struct AppAsset { pub path: &'static str, pub contents: &'static [u8] }\n",
     );
-    let mut app_hasher = DefaultHasher::new();
     let _ = writeln!(code, "pub const APP_ASSETS: &[AppAsset] = &[");
     for relative in collect_files_relative(&app_dist) {
         if relative == ".source-stamp" {
             continue;
         }
         println!("cargo::rerun-if-changed=dashboard/app-dist/{relative}");
-        relative.hash(&mut app_hasher);
-        if let Ok(bytes) = fs::read(app_dist.join(&relative)) {
-            bytes.hash(&mut app_hasher);
-        }
-        let content_type = match relative.rsplit('.').next().unwrap_or("") {
-            "html" => "text/html; charset=utf-8",
-            "js" | "mjs" => "application/javascript",
-            "css" => "text/css",
-            "json" | "map" => "application/json",
-            "svg" => "image/svg+xml",
-            "png" => "image/png",
-            "ico" => "image/x-icon",
-            "woff2" => "font/woff2",
-            "woff" => "font/woff",
-            "ttf" => "font/ttf",
-            "txt" => "text/plain; charset=utf-8",
-            _ => "application/octet-stream",
-        };
         let _ = writeln!(
             code,
-            "    AppAsset {{ path: {relative:?}, contents: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/dashboard/app-dist/{relative}\")), content_type: {content_type:?} }},"
+            "    AppAsset {{ path: {relative:?}, contents: include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/dashboard/app-dist/{relative}\")) }},"
         );
     }
     code.push_str("];\n");
-    let app_stamp = format!("{:016x}", app_hasher.finish());
-    let _ = writeln!(code, "pub const APP_ASSET_STAMP: &str = {app_stamp:?};");
 
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
     let out = Path::new(&out_dir).join("dashboard_app_assets.rs");

@@ -304,7 +304,11 @@ pub(super) async fn handle_dashboard(
             )
             .await?;
 
-            let app = router(retained_cg.as_ref(), state, crate::dashboard::spa_router()).await?;
+            let spa_routes =
+                crate::dashboard::spa_router().map_err(|error| TraceDecayError::Config {
+                    message: format!("dashboard embedded assets are invalid: {error}"),
+                })?;
+            let app = router(retained_cg.as_ref(), state, spa_routes).await?;
             let (listener, addr) = bind_dashboard(&host, port).await?;
             let app = crate::dashboard::with_dashboard_http_admission(app, addr);
             let url = format!("http://{addr}/");

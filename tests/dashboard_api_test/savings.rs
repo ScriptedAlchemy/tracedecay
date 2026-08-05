@@ -519,7 +519,7 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
             dashboard::DashboardTestProjectGraphsV1::default(),
             "127.0.0.1",
             port,
-            dashboard::spa_router(),
+            dashboard::spa_router().expect("valid embedded dashboard assets"),
             std::future::pending(),
         )
         .await;
