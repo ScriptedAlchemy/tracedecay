@@ -1191,8 +1191,8 @@ fn report_cursor_session_ingest<'a>(
             "Cursor transcript ingest looks stalled: a transcript has {} un-ingested \
              byte(s) ({} byte(s) total across {} transcript(s)), exceeding the {} byte \
              per-transcript hook catch-up cap — it will not drain automatically and \
-             session recall is missing those turns. Run `tracedecay sessions ingest \
-             --project-path {}` to drain the backlog manually",
+             session recall is missing those turns. Run `tracedecay sessions import \
+             --project-path {}` to schedule bounded convergence",
             health.max_transcript_pending_bytes,
             health.pending_bytes,
             health.pending_transcripts,

@@ -61,27 +61,18 @@ pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
 ) -> tracedecay::errors::Result<()> {
     match action {
-        SessionsAction::Ingest {
-            provider,
+        SessionsAction::Import {
             project_id,
             project_path,
         } => {
             let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
-            if let Some(provider) = provider.as_deref() {
-                tracedecay::sessions::ProviderScope::parse_optional(Some(provider))
-                    .map_err(|message| tracedecay::errors::TraceDecayError::Config { message })?;
-            }
-            let stats = call_daemon_tool(
+            let outcome = call_daemon_tool(
                 &project_path,
                 "tracedecay_admin_cli",
-                json!({ "action": "sessions_ingest" }),
+                json!({ "action": "sessions_import" }),
             )
             .await?;
-            println!(
-                "ingested {} session(s), {} message(s)",
-                stats["sessions_upserted"].as_u64().unwrap_or(0),
-                stats["messages_upserted"].as_u64().unwrap_or(0)
-            );
+            print_session_sync_admission("session import", &outcome)?;
         }
         SessionsAction::Search(args) => {
             let project_id = args.project_id.clone();
@@ -119,14 +110,14 @@ pub(crate) async fn handle_sessions_action(
         SessionsAction::Refresh { action } => {
             handle_session_refresh_action(action).await?;
         }
-        SessionsAction::GitBackfill {
+        SessionsAction::GitSync {
             project_id,
             project_path,
             since,
             limit_sessions,
             dry_run,
         } => {
-            run_git_backfill(project_id, project_path, since, limit_sessions, dry_run).await?;
+            run_git_sync(project_id, project_path, since, limit_sessions, dry_run).await?;
         }
         SessionsAction::Unfinished {
             limit,
@@ -728,10 +719,10 @@ fn refresh_response_error(detail: &str) -> tracedecay::errors::TraceDecayError {
     }
 }
 
-/// Default lower bound for `git-backfill`: 90 days before now.
-const GIT_BACKFILL_DEFAULT_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
+/// Default lower bound for `git-sync`: 90 days before now.
+const GIT_SYNC_DEFAULT_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 
-async fn run_git_backfill(
+async fn run_git_sync(
     project_id: Option<String>,
     project_path: Option<String>,
     since: Option<String>,
@@ -739,12 +730,12 @@ async fn run_git_backfill(
     dry_run: bool,
 ) -> tracedecay::errors::Result<()> {
     let project_root = resolve_cli_project_root(None, project_id, project_path).await?;
-    let since_ts = resolve_backfill_since(since.as_deref())?;
-    let stats = call_daemon_tool(
+    let since_ts = resolve_git_sync_since(since.as_deref())?;
+    let outcome = call_daemon_tool(
         &project_root,
         "tracedecay_admin_cli",
         json!({
-            "action": "sessions_git_backfill",
+            "action": "sessions_git_sync",
             "since": since_ts,
             "limit_sessions": limit_sessions,
             "dry_run": dry_run,
@@ -753,29 +744,65 @@ async fn run_git_backfill(
     .await?;
 
     if dry_run {
-        println!("git-backfill (dry-run): no rows written");
+        println!("git-sync (dry-run): no rows will be written");
     }
-    println!("sessions scanned:    {}", stats["sessions_scanned"]);
-    println!("spans written:       {}", stats["spans_written"]);
-    println!("commits attributed:  {}", stats["commits_attributed"]);
-    println!(
-        "skipped:             {} (no-window {}, not-worktree {}, git-error {})",
-        stats["skipped_total"],
-        stats["skipped_no_window"],
-        stats["skipped_not_worktree"],
-        stats["skipped_git_error"]
-    );
+    print_session_sync_admission("session git sync", &outcome)?;
     Ok(())
+}
+
+fn print_session_sync_admission(
+    label: &str,
+    outcome: &serde_json::Value,
+) -> tracedecay::errors::Result<()> {
+    let status = outcome
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon {label} response omitted its typed status"),
+        })?;
+    match status {
+        "accepted" | "joined" | "complete" => {
+            let operation_id = outcome
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon {label} response reported {status} without an operation id"
+                    ),
+                })?;
+            println!("{label} {status} ({operation_id})");
+            Ok(())
+        }
+        "cancelled" | "deadline_exceeded" | "wrong_scope" => {
+            println!("{label} {status}");
+            Ok(())
+        }
+        "unavailable" => {
+            let reason = outcome
+                .get("reason_code")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "daemon {label} response reported unavailable without a reason code"
+                    ),
+                })?;
+            println!("{label} unavailable ({reason})");
+            Ok(())
+        }
+        unexpected => Err(tracedecay::errors::TraceDecayError::Config {
+            message: format!("daemon {label} response reported unknown status {unexpected:?}"),
+        }),
+    }
 }
 
 /// Resolves the `--since` argument (ISO-8601 or unix seconds) to a unix-second
 /// lower bound, defaulting to 90 days before now when unset.
-fn resolve_backfill_since(since: Option<&str>) -> tracedecay::errors::Result<i64> {
+fn resolve_git_sync_since(since: Option<&str>) -> tracedecay::errors::Result<i64> {
     let Some(raw) = since.map(str::trim).filter(|value| !value.is_empty()) else {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        return Ok((now - GIT_BACKFILL_DEFAULT_WINDOW_SECS).max(0));
+        return Ok((now - GIT_SYNC_DEFAULT_WINDOW_SECS).max(0));
     };
     if let Ok(unix) = raw.parse::<i64>() {
         if unix >= 0 {

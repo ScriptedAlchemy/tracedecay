@@ -5,15 +5,19 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tracedecay_application::session_sync::{
+    SessionGitSyncV1, SessionSyncCommandV1, SessionSyncOutcomeV1, SessionSyncRequestV1,
+    SessionSyncScopeV1, SessionSyncServicePort, SessionTranscriptImportV1,
+};
+use tracedecay_application::{CancellationSignal, Deadline, IdempotencyKey, RequestId, now_micros};
 
 use crate::errors::{Result, TraceDecayError};
-use crate::global_db::{AnalyticsEventQuery, RegisteredGlobalDb};
+use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
 
 use super::super::ToolResult;
 use super::json_result;
-
-const GIT_BACKFILL_ANALYTICS_LIMIT: usize = 500_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -21,8 +25,8 @@ enum AdminCliAction {
     CostSummary {
         range: String,
     },
-    SessionsIngest,
-    SessionsGitBackfill {
+    SessionsImport,
+    SessionsGitSync {
         since: i64,
         limit_sessions: usize,
         dry_run: bool,
@@ -84,10 +88,13 @@ struct AdminCliContext<'a> {
     accounting_db: Option<&'a RegisteredGlobalDb>,
     profile_root: Option<&'a Path>,
     project: Option<&'a TraceDecay>,
-    project_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
     registered_project_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
     registered_user_session_db: Option<&'a Arc<RegisteredGlobalDb>>,
     profile_identity: Option<&'a crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    session_sync: Option<&'a dyn SessionSyncServicePort>,
+    request_id: Option<RequestId>,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
 }
 
 impl<'a> AdminCliContext<'a> {
@@ -97,16 +104,23 @@ impl<'a> AdminCliContext<'a> {
         accounting_db: Option<&'a RegisteredGlobalDb>,
         profile_root: Option<&'a Path>,
         session_authorities: super::SessionAuthorities<'a>,
+        session_sync: Option<&'a dyn SessionSyncServicePort>,
+        request_id: Option<RequestId>,
+        deadline: Option<Deadline>,
+        cancellation: Option<CancellationSignal>,
     ) -> Self {
         Self {
             global_db,
             accounting_db,
             profile_root,
             project: Some(cg),
-            project_session_db: session_authorities.project,
             registered_project_session_db: session_authorities.project_registered,
             registered_user_session_db: session_authorities.profile_registered,
             profile_identity: session_authorities.profile_identity,
+            session_sync,
+            request_id,
+            deadline,
+            cancellation,
         }
     }
 
@@ -120,10 +134,13 @@ impl<'a> AdminCliContext<'a> {
             accounting_db,
             profile_root: Some(profile_root),
             project: None,
-            project_session_db: None,
             registered_project_session_db: None,
             registered_user_session_db: None,
             profile_identity: None,
+            session_sync: None,
+            request_id: None,
+            deadline: None,
+            cancellation: None,
         }
     }
 
@@ -149,24 +166,10 @@ impl<'a> AdminCliContext<'a> {
         self.project.map(TraceDecay::project_root)
     }
 
-    fn require_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
-        self.project_session_db
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon project session database is unavailable".to_string(),
-            })
-    }
-
     fn require_registered_project_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
         self.registered_project_session_db
             .ok_or_else(|| TraceDecayError::Config {
                 message: "daemon registered project session database is unavailable".to_string(),
-            })
-    }
-
-    fn require_registered_user_session_db(&self) -> Result<&'a Arc<RegisteredGlobalDb>> {
-        self.registered_user_session_db
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "daemon registered user session database is unavailable".to_string(),
             })
     }
 
@@ -187,6 +190,10 @@ pub(super) async fn handle_admin_cli(
     accounting_db: Option<&RegisteredGlobalDb>,
     profile_root: Option<&Path>,
     session_authorities: super::SessionAuthorities<'_>,
+    session_sync: Option<&dyn SessionSyncServicePort>,
+    request_id: Option<RequestId>,
+    deadline: Option<Deadline>,
+    cancellation: Option<CancellationSignal>,
 ) -> Result<ToolResult> {
     let action = parse_admin_cli_action(args)?;
     let global_db = global_db.ok_or_else(|| TraceDecayError::Config {
@@ -199,6 +206,10 @@ pub(super) async fn handle_admin_cli(
             accounting_db,
             profile_root,
             session_authorities,
+            session_sync,
+            request_id,
+            deadline,
+            cancellation,
         ),
         action,
     )
@@ -234,30 +245,25 @@ async fn dispatch_admin_cli(
         AdminCliAction::CostSummary { range } => {
             cost_summary(context.require_accounting_db()?, &range).await?
         }
-        AdminCliAction::SessionsIngest => {
-            sessions_ingest(
-                context.require_project()?,
-                context.global_db,
-                context.require_registered_project_session_db()?,
-                context.require_registered_user_session_db()?,
-                context.require_profile_identity()?,
+        AdminCliAction::SessionsImport => {
+            execute_session_sync(
+                &context,
+                SessionSyncCommandV1::ImportTranscripts(SessionTranscriptImportV1::all_hosts()),
             )
             .await?
         }
-        AdminCliAction::SessionsGitBackfill {
+        AdminCliAction::SessionsGitSync {
             since,
             limit_sessions,
             dry_run,
         } => {
-            sessions_git_backfill(
-                context.require_project()?,
-                context.require_accounting_db()?,
-                context.require_project_session_db()?,
-                since,
-                limit_sessions,
-                dry_run,
-            )
-            .await?
+            let options =
+                SessionGitSyncV1::new(since, limit_sessions, dry_run).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: error.to_string(),
+                    }
+                })?;
+            execute_session_sync(&context, SessionSyncCommandV1::SynchronizeGit(options)).await?
         }
         AdminCliAction::SessionsUnfinished { limit } => {
             sessions_unfinished(context.require_registered_project_session_db()?, limit).await?
@@ -572,114 +578,123 @@ async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Result<Val
     }))
 }
 
-async fn sessions_ingest(
-    cg: &TraceDecay,
-    registry_db: &Arc<RegisteredGlobalDb>,
-    registered_project_db: &Arc<RegisteredGlobalDb>,
-    registered_user_db: &Arc<RegisteredGlobalDb>,
-    profile_identity: &crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+async fn execute_session_sync(
+    context: &AdminCliContext<'_>,
+    command: SessionSyncCommandV1,
 ) -> Result<Value> {
-    let profile_root = profile_identity.profile_root();
-    let user_authority =
-        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(registered_user_db));
-    let registry_authority =
-        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(registry_db));
-    let user_outcome = crate::sessions::ingest_user_global_sources_for_provider_with_authorities(
-        profile_identity.brain_id(),
-        profile_identity.profile_id(),
-        &user_authority,
-        &registry_authority,
-        profile_root,
-        None,
-    )
-    .await;
-    let project_id = cg
+    let Some(service) = context.session_sync else {
+        return Ok(render_session_sync_outcome(
+            SessionSyncOutcomeV1::Unavailable {
+                reason_code: "session_sync_authority_unavailable",
+            },
+        ));
+    };
+    let project = context.require_project()?;
+    let identity = context.require_profile_identity()?;
+    let project_id = project
         .store_layout()
         .identity
         .project_id
         .as_deref()
-        .and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
-    let project_authority =
-        crate::store::GlobalDbSessionIngestAuthority::new(Arc::clone(registered_project_db));
-    let project_outcome = crate::sessions::ingest_project_sources_for_provider(
-        profile_identity.brain_id(),
-        profile_identity.profile_id(),
-        &project_authority,
-        cg.project_root(),
-        project_id,
-        None,
-        true,
-    )
-    .await;
-    if !user_outcome.is_success() || !project_outcome.is_success() {
-        let reason_codes = user_outcome
-            .failures
-            .iter()
-            .chain(&project_outcome.failures)
-            .map(|failure| failure.reason_code)
-            .collect::<Vec<_>>()
-            .join(",");
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "session ingest remained incomplete ({reason_codes}); retry after resolving the provider or store failure"
-            ),
-        });
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "daemon project identity is unavailable".to_string(),
+        })
+        .and_then(|value| {
+            tracedecay_domain::ProjectId::new(value).map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })
+        })?;
+    let mut digest = Sha256::new();
+    digest.update(b"tracedecay.session-sync.v1\0");
+    digest.update(project_id.as_str().as_bytes());
+    digest.update(identity.profile_id().as_str().as_bytes());
+    let request_id =
+        match context.request_id.clone() {
+            Some(request_id) => request_id,
+            None => RequestId::new(format!("session-sync.request.{}", now_micros().0)).map_err(
+                |error| TraceDecayError::Config {
+                    message: error.to_string(),
+                },
+            )?,
+        };
+    digest.update(request_id.as_str().as_bytes());
+    match command {
+        SessionSyncCommandV1::ImportTranscripts(_) => digest.update(b"import-transcripts"),
+        SessionSyncCommandV1::SynchronizeGit(options) => {
+            digest.update(b"synchronize-git");
+            digest.update(options.since_unix().to_be_bytes());
+            digest.update(options.max_sessions().to_be_bytes());
+            digest.update([u8::from(options.dry_run())]);
+        }
     }
-    let stats = user_outcome.stats.merge(project_outcome.stats);
-    Ok(json!({
-        "sessions_upserted": stats.sessions_upserted,
-        "messages_upserted": stats.messages_upserted,
-    }))
+    let stable_id = hex::encode(digest.finalize());
+    let operation_id = RequestId::new(format!("session-sync.{stable_id}")).map_err(|error| {
+        TraceDecayError::Config {
+            message: error.to_string(),
+        }
+    })?;
+    let idempotency_key =
+        IdempotencyKey::new(format!("session-sync.{stable_id}")).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
+    let deadline = match context.deadline.clone() {
+        Some(deadline) => deadline,
+        None => Deadline::new(tracedecay_domain::UtcMicros(
+            now_micros().0.saturating_add(30_000_000),
+        ))
+        .map_err(|error| TraceDecayError::Config {
+            message: error.to_string(),
+        })?,
+    };
+    let cancellation =
+        match context.cancellation.clone() {
+            Some(cancellation) => cancellation,
+            None => CancellationSignal::active(format!("session-sync.{stable_id}")).map_err(
+                |error| TraceDecayError::Config {
+                    message: error.to_string(),
+                },
+            )?,
+        };
+    let request = SessionSyncRequestV1::new(
+        operation_id,
+        idempotency_key,
+        SessionSyncScopeV1::new(project_id, identity.profile_id().clone()),
+        deadline,
+        cancellation,
+        command,
+    );
+    Ok(render_session_sync_outcome(service.execute(request).await))
 }
 
-async fn sessions_git_backfill(
-    cg: &TraceDecay,
-    global_db: &RegisteredGlobalDb,
-    session_db: &Arc<RegisteredGlobalDb>,
-    since: i64,
-    limit_sessions: usize,
-    dry_run: bool,
-) -> Result<Value> {
-    use crate::sessions::git_correlation::{
-        BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit,
-    };
-
-    let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
-    let analytics_events = global_db
-        .query_analytics_events(&AnalyticsEventQuery {
-            project_id: Some(project_id),
-            since: Some(since),
-            limit: GIT_BACKFILL_ANALYTICS_LIMIT,
-            ..Default::default()
-        })
-        .await
-        .unwrap_or_default();
-    let stats = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(session_db))
-        .run_backfill(
-            &analytics_events,
-            &SystemGit,
-            &BackfillOptions {
-                since,
-                limit_sessions,
-                merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
-                max_commits_per_repo: 5_000,
-                dry_run,
-            },
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("git backfill failed: {error}"),
-        })?;
-    Ok(json!({
-        "dry_run": dry_run,
-        "sessions_scanned": stats.sessions_scanned,
-        "spans_written": stats.spans_written,
-        "commits_attributed": stats.commits_attributed,
-        "skipped_no_window": stats.skipped_no_window,
-        "skipped_not_worktree": stats.skipped_not_worktree,
-        "skipped_git_error": stats.skipped_git_error,
-        "skipped_total": stats.skipped_total(),
-    }))
+fn render_session_sync_outcome(outcome: SessionSyncOutcomeV1) -> Value {
+    match outcome {
+        SessionSyncOutcomeV1::Accepted(receipt) => json!({
+            "status": "accepted",
+            "operation_id": receipt.operation_id,
+            "accepted_at": receipt.accepted_at,
+        }),
+        SessionSyncOutcomeV1::Joined(receipt) => json!({
+            "status": "joined",
+            "operation_id": receipt.operation_id,
+            "accepted_at": receipt.accepted_at,
+        }),
+        SessionSyncOutcomeV1::Complete(receipt) => json!({
+            "status": "complete",
+            "operation_id": receipt.admission.operation_id,
+            "termination": receipt.termination,
+            "stats": receipt.stats,
+            "failure_codes": receipt.failure_codes,
+            "completed_at": receipt.completed_at,
+        }),
+        SessionSyncOutcomeV1::Cancelled => json!({"status": "cancelled"}),
+        SessionSyncOutcomeV1::DeadlineExceeded => json!({"status": "deadline_exceeded"}),
+        SessionSyncOutcomeV1::WrongScope => json!({"status": "wrong_scope"}),
+        SessionSyncOutcomeV1::Unavailable { reason_code } => {
+            json!({"status": "unavailable", "reason_code": reason_code})
+        }
+    }
 }
 
 async fn sessions_unfinished(db: &Arc<RegisteredGlobalDb>, limit: usize) -> Result<Value> {
@@ -696,6 +711,12 @@ mod tests {
 
     #[test]
     fn parses_projectless_and_project_scoped_actions() {
+        assert!(matches!(
+            serde_json::from_value::<AdminCliAction>(json!({
+                "action": "sessions_import",
+            })),
+            Ok(AdminCliAction::SessionsImport)
+        ));
         assert!(matches!(
             serde_json::from_value::<AdminCliAction>(json!({
                 "action": "storage_report",
@@ -717,17 +738,42 @@ mod tests {
         ));
         assert!(matches!(
             serde_json::from_value::<AdminCliAction>(json!({
-                "action": "sessions_git_backfill",
+                "action": "sessions_git_sync",
                 "since": 1,
                 "limit_sessions": 50,
                 "dry_run": true,
             })),
-            Ok(AdminCliAction::SessionsGitBackfill { dry_run: true, .. })
+            Ok(AdminCliAction::SessionsGitSync { dry_run: true, .. })
         ));
     }
 
     #[test]
     fn rejects_unknown_admin_action() {
         assert!(serde_json::from_value::<AdminCliAction>(json!({ "action": "vacuum" })).is_err());
+        assert!(
+            serde_json::from_value::<AdminCliAction>(json!({"action": "sessions_ingest"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<AdminCliAction>(json!({
+                "action": "sessions_git_backfill",
+                "since": 1,
+                "limit_sessions": 50,
+                "dry_run": false,
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn missing_daemon_session_sync_owner_is_typed_unavailable() {
+        let rendered = render_session_sync_outcome(SessionSyncOutcomeV1::Unavailable {
+            reason_code: "session_sync_authority_unavailable",
+        });
+
+        assert_eq!(rendered["status"], "unavailable");
+        assert_eq!(
+            rendered["reason_code"],
+            "session_sync_authority_unavailable"
+        );
     }
 }

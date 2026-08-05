@@ -72,7 +72,7 @@ async fn status_can_omit_verbose_branch_diagnostics() {
 
 #[cfg(feature = "test-transport")]
 #[tokio::test]
-async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
+async fn status_stalled_session_ingest_warning_points_to_daemon_import() {
     let (cg, _env, dir) = setup_empty_project().await;
     let runtime = open_active_project_session_db(&cg).await;
     let transcript = dir.path().join("claude-backlog.jsonl");
@@ -118,7 +118,7 @@ async fn status_stalled_session_ingest_warning_points_to_manual_ingest() {
     let text = extract_text(&result.value);
     assert!(text.contains("session transcript ingest looks stalled"));
     assert!(text.contains("automatic catch-up warning threshold"));
-    assert!(text.contains("tracedecay sessions ingest --project-path"));
+    assert!(text.contains("tracedecay sessions import --project-path"));
     assert!(!text.contains("hook catch-up cap"));
     assert!(!text.contains("tracedecay doctor --agent cursor"));
 }

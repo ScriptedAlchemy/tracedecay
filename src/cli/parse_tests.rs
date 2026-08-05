@@ -1762,23 +1762,20 @@ fn branch_remove_requires_a_branch_name() {
 }
 
 #[test]
-fn parses_sessions_ingest_and_search_commands() {
-    let ingest =
-        Cli::try_parse_from(["tracedecay", "sessions", "ingest", "--provider", "cursor"]).unwrap();
-    match ingest.command {
+fn parses_sessions_import_and_search_commands() {
+    let import = Cli::try_parse_from(["tracedecay", "sessions", "import"]).unwrap();
+    match import.command {
         Some(Commands::Sessions {
             action:
-                SessionsAction::Ingest {
-                    provider,
+                SessionsAction::Import {
                     project_id,
                     project_path,
                 },
         }) => {
-            assert_eq!(provider.as_deref(), Some("cursor"));
             assert!(project_id.is_none());
             assert!(project_path.is_none());
         }
-        _ => panic!("expected sessions ingest command"),
+        _ => panic!("expected sessions import command"),
     }
 
     let search = Cli::try_parse_from([
@@ -1871,7 +1868,7 @@ fn parses_sessions_ingest_and_search_commands() {
 }
 
 #[test]
-fn sessions_help_keeps_ingest_as_legacy_source_admission_only() {
+fn sessions_help_describes_bounded_daemon_import() {
     let command = Cli::command();
     let sessions = command
         .find_subcommand("sessions")
@@ -1886,20 +1883,21 @@ fn sessions_help_keeps_ingest_as_legacy_source_admission_only() {
         .unwrap_or_default();
 
     for needle in [
-        "explicit legacy source-admission command",
-        "canonical observation ingest",
-        "leaves temporal projection to the durable scheduler",
+        "sessions import",
+        "bounded all-host source",
+        "daemon-owned canonical observation path",
+        "without waiting for historical convergence",
         "owns no parallel temporal writer",
         "never invoked by a read",
     ] {
         assert!(
             long_about.contains(needle),
-            "sessions help must retain the ingest cutover contract; missing {needle:?}"
+            "sessions help must retain the import authority contract; missing {needle:?}"
         );
     }
     assert!(
-        after_help.contains("deprecated ingest `--provider` option"),
-        "sessions help must identify the retained ingest compatibility option"
+        after_help.contains("sessions git-sync --dry-run"),
+        "sessions help must expose the durable git sync capability"
     );
 }
 
