@@ -18,14 +18,15 @@ fn build_http_application_router(project_id: &str, project_path: &Path) -> Resul
     let handshake =
         DaemonHandshake::for_current_client(Some(project_path.to_path_buf()), None, false, false)?;
     let client = crate::daemon_client::DaemonInvocationClient::for_current(handshake)?;
-    crate::application_surface::http_application_router(
+    let application = crate::application_surface::http_application_router(
         client,
         daemon_operation_event_authority(),
         project_id.clone(),
     )
     .map_err(|error| TraceDecayError::Config {
         message: format!("could not mount daemon HTTP application routes: {error}"),
-    })
+    })?;
+    Ok(tracedecay_api::delivery::http_delivery_router(application))
 }
 
 pub(super) fn install_http_application_cold_resolver(

@@ -60,12 +60,14 @@ impl DashboardApplicationRuntime for DashboardInvocationExecutorAdapter {
         &self,
         active_project_id: ProjectId,
     ) -> std::result::Result<DashboardApplicationRouters, String> {
-        let http = crate::application_surface::http_application_router_with_executor(
-            Arc::clone(&self.executor),
-            crate::application::operation_stream::OperationEventAuthority::default(),
-            active_project_id,
-        )
-        .map_err(|error| error.to_string())?;
+        let http = tracedecay_api::delivery::http_delivery_router(
+            crate::application_surface::http_application_router_with_executor(
+                Arc::clone(&self.executor),
+                crate::application::operation_stream::OperationEventAuthority::default(),
+                active_project_id,
+            )
+            .map_err(|error| error.to_string())?,
+        );
         let configuration =
             crate::application_surface::dashboard_configuration_application_router_with_executor(
                 Arc::clone(&self.executor),
