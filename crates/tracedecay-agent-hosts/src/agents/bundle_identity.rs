@@ -166,7 +166,7 @@ fn collect_discovered_files(root: &Path, path: &Path, paths: &mut Vec<String>) -
     Ok(())
 }
 
-fn is_auto_discovered_entrypoint(relative: &str) -> bool {
+pub(crate) fn is_auto_discovered_entrypoint(relative: &str) -> bool {
     let path = Path::new(relative);
     if relative.starts_with("skills/") {
         return path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md");

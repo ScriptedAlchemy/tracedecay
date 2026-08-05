@@ -593,8 +593,14 @@ fn redeploy_retires_owned_discovery_files_and_preserves_foreign_bytes() {
     )
     .unwrap();
     let operator_support = retired.parent().unwrap().join("operator-notes.txt");
-    let operator_support_bytes = b"preserve operator support bytes";
+    let operator_support_bytes = b"preserve operator TraceDecay MCP support bytes";
     std::fs::write(&operator_support, operator_support_bytes).unwrap();
+    let reference = retired.parent().unwrap().join("reference.md");
+    let reference_bytes = b"Operator reference for tracedecay_message_search";
+    std::fs::write(&reference, reference_bytes).unwrap();
+    let helper = source.join("hooks/helper.py");
+    let helper_bytes = b"# operator helper for tracedecay_lcm_describe\n";
+    std::fs::write(&helper, helper_bytes).unwrap();
     assert!(matches!(
         CodexIntegration
             .preflight_non_interactive_install(&ctx)
@@ -608,6 +614,8 @@ fn redeploy_retires_owned_discovery_files_and_preserves_foreign_bytes() {
         std::fs::read(&operator_support).unwrap(),
         operator_support_bytes
     );
+    assert_eq!(std::fs::read(&reference).unwrap(), reference_bytes);
+    assert_eq!(std::fs::read(&helper).unwrap(), helper_bytes);
     assert!(matches!(
         CodexIntegration
             .preflight_non_interactive_install(&ctx)

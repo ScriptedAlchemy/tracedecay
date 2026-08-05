@@ -48,8 +48,8 @@ use crate::ports::mcp_tools::advertised_tools;
 
 pub use antigravity::AntigravityIntegration;
 pub(crate) use bundle_identity::{
-    observed_bundle_content_digest, observed_bundle_discovery_matches,
-    rendered_bundle_content_digest,
+    is_auto_discovered_entrypoint, observed_bundle_content_digest,
+    observed_bundle_discovery_matches, rendered_bundle_content_digest,
 };
 pub use claude::ClaudeIntegration;
 pub use cline::ClineIntegration;
