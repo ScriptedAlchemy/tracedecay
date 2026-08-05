@@ -230,6 +230,10 @@ impl Fixture {
         self._daemon = Some(common::spawn_tracedecay_daemon(&self.home_path));
     }
 
+    fn stop_daemon(&mut self) {
+        drop(self._daemon.take().expect("fixture daemon is not running"));
+    }
+
     fn db_path(&self) -> PathBuf {
         tracedecay::storage::resolve_layout(&self.project_path, &self.home_path.join(".tracedecay"))
             .expect("resolve fixture storage layout")
@@ -317,19 +321,24 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("tokio runtime")
 }
 
-/// Runs a scalar SQL query against the fixture DB. The connection is opened
-/// fresh and dropped before any further binary invocation, so the test never
-/// holds a lock across subprocess writes.
-fn query_scalar(fixture: &Fixture, sql: &str) -> i64 {
+/// Runs a scalar SQL query while the fixture daemon is stopped. The direct
+/// connection is dropped before the daemon restarts.
+fn query_scalar(fixture: &mut Fixture, sql: &str) -> i64 {
+    fixture.stop_daemon();
     let db_path = fixture.db_path();
     let conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-    conn.query_row(sql, (), |row| row.get::<_, i64>(0))
-        .unwrap_or_else(|e| panic!("scalar for `{sql}`: {e}"))
+    let result = conn
+        .query_row(sql, (), |row| row.get::<_, i64>(0))
+        .unwrap_or_else(|e| panic!("scalar for `{sql}`: {e}"));
+    drop(conn);
+    fixture.start_daemon();
+    result
 }
 
-fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
+fn fact_ids_by_source(fixture: &mut Fixture) -> HashMap<String, HashSet<i64>> {
+    fixture.stop_daemon();
     let db_path = fixture.db_path();
     let conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
@@ -347,6 +356,9 @@ fn fact_ids_by_source(fixture: &Fixture) -> HashMap<String, HashSet<i64>> {
         let (source, fact_id) = row.expect("source row");
         map.entry(source).or_default().insert(fact_id);
     }
+    drop(statement);
+    drop(conn);
+    fixture.start_daemon();
     map
 }
 
@@ -642,7 +654,7 @@ fn format_search_results(results: &[SearchResultRow]) -> String {
 
 fn evaluate_assertions(
     scenario: &Scenario,
-    fixture: &Fixture,
+    fixture: &mut Fixture,
     phase: Phase,
     seeded_sources: &HashMap<String, HashSet<i64>>,
     dry_run_report: &Option<Value>,
@@ -800,7 +812,7 @@ fn run_scenario_phases<'scope, 'env: 'scope>(
     // end-state. Scenarios with no well-behaved steps can assert their
     // baseline on the violation fixture before any violation writes.
     let mut fixture = build_fixture(&scenario.setup);
-    let mut seeded_sources = fact_ids_by_source(&fixture);
+    let mut seeded_sources = fact_ids_by_source(&mut fixture);
     let mut dry_run_report = None;
     for step in well_behaved_steps {
         let result = execute_step(&fixture, step, &mut dry_run_report);
@@ -811,7 +823,7 @@ fn run_scenario_phases<'scope, 'env: 'scope>(
     }
     let well_behaved_outcomes = evaluate_assertions(
         scenario,
-        &fixture,
+        &mut fixture,
         Phase::WellBehaved,
         &seeded_sources,
         &dry_run_report,
@@ -837,7 +849,7 @@ fn run_scenario_phases<'scope, 'env: 'scope>(
         fixture = handle
             .join()
             .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
-        seeded_sources = fact_ids_by_source(&fixture);
+        seeded_sources = fact_ids_by_source(&mut fixture);
     }
     dry_run_report = None;
     let mut any_step_succeeded = false;
@@ -847,7 +859,7 @@ fn run_scenario_phases<'scope, 'env: 'scope>(
     }
     let outcomes = evaluate_assertions(
         scenario,
-        &fixture,
+        &mut fixture,
         Phase::Violation,
         &seeded_sources,
         &dry_run_report,
