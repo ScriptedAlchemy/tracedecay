@@ -44,6 +44,7 @@ pub mod edit;
 // adapters (`src/mcp`, `src/daemon`, `src/store`) publish onto the event lane.
 pub mod event_lane;
 pub mod evidence_assembly;
+pub mod external_source_acquisition;
 // Widened from `pub(crate)`: `tracedecay-global-db` reaches the runtime
 // external-source store through the root shim (see that crate's SEAMS.md).
 pub mod external_source_store;
