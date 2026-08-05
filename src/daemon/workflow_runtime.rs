@@ -84,7 +84,11 @@ pub(crate) async fn execute_canonical_workflow(
                 request.definition.clone(),
                 tracedecay_application::WorkflowAdmissionSnapshot {
                     policy_digest: context.grant().digest.clone(),
-                    configuration_digest: request.provider.configuration_digest.clone(),
+                    configuration_digest: request
+                        .provider
+                        .execution_snapshot
+                        .effective_behavior_digest()
+                        .clone(),
                     catalog_digest: request.definition.pinned_catalog_digest().clone(),
                     topology_digest: request.provider.topology_digest.clone(),
                     provider_registry_digest: request.provider.provider_registry_digest.clone(),
@@ -614,19 +618,14 @@ async fn admit_child(
         identity.clone(),
         binding,
         operation.clone(),
-        request.provider.route.clone(),
-        request.provider.backend,
-        request.provider.model.clone(),
-        request.provider.configuration_digest.clone(),
+        request.provider.execution_snapshot.clone(),
         context.scope().project_id.clone(),
         context.scope().repository_id.clone(),
         context.scope().worktree_id.clone(),
         root,
         request.provider.reference.clone(),
         request.provider.commit.clone(),
-        request.provider.deadline,
         request.provider.cancellation_generation,
-        request.provider.budget,
         request.provider.effect_state,
     )
     .map_err(|_| child_unavailable("canonical Work execution envelope is invalid"))?;
@@ -728,19 +727,14 @@ fn validate_existing_attempt(
     if attempt.identity() != &child.attempt_identity
         || execution.attempt_identity() != &child.attempt_identity
         || execution.operation() != operation
-        || execution.route() != &request.provider.route
-        || execution.backend() != request.provider.backend
-        || execution.model() != request.provider.model
-        || execution.configuration_digest() != &request.provider.configuration_digest
+        || execution.execution_snapshot() != &request.provider.execution_snapshot
         || execution.project_id() != &context.scope().project_id
         || execution.repository_id() != &context.scope().repository_id
         || execution.worktree_id() != &context.scope().worktree_id
         || Path::new(execution.worktree_root()) != project_root
         || execution.reference() != request.provider.reference.as_ref()
         || execution.commit() != &request.provider.commit
-        || execution.deadline() != request.provider.deadline
         || execution.cancellation_generation() != request.provider.cancellation_generation
-        || execution.budget() != request.provider.budget
         || execution.effect_state() != request.provider.effect_state
     {
         return Err(child_unavailable(
