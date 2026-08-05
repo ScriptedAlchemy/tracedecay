@@ -508,8 +508,10 @@ async fn unavailable_database_is_typed_instead_of_empty_success() {
     use std::os::unix::fs::symlink;
 
     let temp = tempfile::TempDir::new().unwrap();
+    let target = temp.path().join("outside.db");
+    Connection::open(&target).unwrap();
     let database = temp.path().join("opencode.db");
-    symlink(&database, &database).unwrap();
+    symlink(&target, &database).unwrap();
     let source =
         OpenCodeSource::with_database_for_project(database.clone(), temp.path().to_path_buf());
 
@@ -530,6 +532,41 @@ async fn unavailable_database_is_typed_instead_of_empty_success() {
             path,
             ..
         } if path == database
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn linked_database_sidecar_is_rejected_before_snapshotting() {
+    use std::os::unix::fs::symlink;
+
+    let (temp, project, database) = fixture();
+    let external = temp.path().join("external-wal");
+    fs::write(&external, b"foreign database bytes").unwrap();
+    let wal = database.with_file_name(format!(
+        "{}-wal",
+        database.file_name().unwrap().to_string_lossy()
+    ));
+    symlink(&external, &wal).unwrap();
+    let source = OpenCodeSource::with_database_for_project(database, project);
+
+    let error = capture_opencode_observations(
+        &MemoryHostAdmission::default(),
+        &source,
+        ObservationScopeV1::Profile,
+        None,
+        &ObservationCancellation::default(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        error,
+        crate::runtime::source::TranscriptIngestError::ScanIo {
+            operation: "stat OpenCode database",
+            path,
+            ..
+        } if path == wal
     ));
 }
 

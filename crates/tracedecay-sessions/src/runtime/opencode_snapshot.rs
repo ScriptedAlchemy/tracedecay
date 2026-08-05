@@ -102,7 +102,16 @@ fn measure_database_family(
         if !budget.try_charge_unit() {
             return Ok((None, budget));
         }
-        match std::fs::metadata(&member) {
+        match std::fs::symlink_metadata(&member) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(scan_error(
+                    "stat OpenCode database",
+                    &member,
+                    std::io::Error::other(
+                        "OpenCode database family members must not be symbolic links",
+                    ),
+                ));
+            }
             Ok(metadata) if metadata.is_file() => {
                 family_bytes = family_bytes.saturating_add(metadata.len());
             }

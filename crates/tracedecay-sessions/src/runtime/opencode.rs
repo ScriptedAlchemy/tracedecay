@@ -364,7 +364,8 @@ pub(crate) async fn capture_opencode_observations(
             }
         };
         let mut cursor = OpenCodePageCursor {
-            after_rowid: i64::try_from(durable_frontier.byte_offset).unwrap_or(i64::MAX),
+            after_rowid: i64::try_from(durable_frontier.byte_offset)
+                .map_err(|_| invalid_frame())?,
         };
         loop {
             if !scan_budget.checkpoint() {
@@ -404,7 +405,7 @@ pub(crate) async fn capture_opencode_observations(
             }
             if page_fully_processed && cursor != previous_cursor {
                 durable_frontier = ParseOffset {
-                    byte_offset: u64::try_from(cursor.after_rowid).unwrap_or(u64::MAX),
+                    byte_offset: u64::try_from(cursor.after_rowid).map_err(|_| invalid_frame())?,
                     mtime: durable_frontier.mtime.saturating_add(1),
                     file_id: snapshot.source_file_identity,
                 };
@@ -718,6 +719,8 @@ fn materialize_reference_page(
         ));
     };
     install_progress_handler(&connection, &source.source_path, &budget)?;
+    let max_native_json_bytes =
+        u64::try_from(MAX_NATIVE_JSON_BYTES).map_err(|_| invalid_frame())?;
     let before = budget.consumed_input_bytes();
     let mut records = Vec::with_capacity(references.len());
     let mut fully_processed = true;
@@ -728,7 +731,7 @@ fn materialize_reference_page(
         }
         if reference.part_count > MAX_PARTS_PER_MESSAGE
             || reference.measured_bytes > MAX_OPENCODE_RECORD_BYTES
-            || reference.max_field_bytes > u64::try_from(MAX_NATIVE_JSON_BYTES).unwrap_or(u64::MAX)
+            || reference.max_field_bytes > max_native_json_bytes
         {
             let _ = budget.try_charge_input(reference.measured_bytes);
             budget.mark_non_durable();
