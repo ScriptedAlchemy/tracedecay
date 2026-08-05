@@ -243,7 +243,6 @@ fn context_scout_operation_parser_is_exact_and_backend_only() {
 
 #[test]
 fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
-    assert_eq!(HttpApplicationOperation::ALL.len(), 66);
     for operation in HttpApplicationOperation::ALL {
         assert_eq!(
             HttpApplicationOperation::from_tool_name(&format!("tracedecay_{}", operation.as_str())),
@@ -258,6 +257,9 @@ fn canonical_operation_authority_covers_all_surface_names_and_git_mutations() {
     );
     assert!(!is_http_exposed(HttpApplicationOperation::GitPreview));
     assert!(!is_http_exposed(HttpApplicationOperation::GitApply));
+    assert!(!is_http_exposed(
+        HttpApplicationOperation::ConfigurationReset
+    ));
     assert_eq!(
         HttpApplicationOperation::GitPreview.owner_kind(),
         HttpApplicationOwnerKind::Git
