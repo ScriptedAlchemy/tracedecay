@@ -38,10 +38,6 @@
       ],
       "type": "object"
     },
-    "AccessRuleId": {
-      "description": "Strongly typed canonical identity: `AccessRuleId`.",
-      "type": "string"
-    },
     "ActorId": {
       "description": "Strongly typed canonical identity: `ActorId`.",
       "type": "string"
@@ -72,17 +68,324 @@
       ],
       "type": "object"
     },
+    "AnalyticsAgentUsageV1": {
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "sessions": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agent",
+        "sessions"
+      ],
+      "type": "object"
+    },
+    "AnalyticsAgentsPayloadV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "by_agent": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsAgentUsageV1"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "available",
+        "source",
+        "by_agent"
+      ],
+      "type": "object"
+    },
+    "AnalyticsDiagnosticsPayloadV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "by_event_kind": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsEventKindCountV1"
+          },
+          "type": "array"
+        },
+        "by_mcp_tool": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsToolCountV1"
+          },
+          "type": "array"
+        },
+        "by_outcome": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsOutcomeCountV1"
+          },
+          "type": "array"
+        },
+        "by_tool": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsToolCountV1"
+          },
+          "type": "array"
+        },
+        "event_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "events_per_hour": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "hook_call_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "hook_window": {
+          "$ref": "#/$defs/AnalyticsHookWindowV1"
+        },
+        "mcp_tool_call_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ratios": {
+          "$ref": "#/$defs/AnalyticsDiagnosticsRatiosV1"
+        },
+        "recent_events": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsRecentEventV1"
+          },
+          "type": "array"
+        },
+        "source": {
+          "type": "string"
+        },
+        "tool_call_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tracedecay_call_count": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "available",
+        "source",
+        "message_count",
+        "event_count",
+        "tool_call_count",
+        "mcp_tool_call_count",
+        "tracedecay_call_count",
+        "hook_call_count",
+        "events_per_hour",
+        "ratios",
+        "by_event_kind",
+        "by_tool",
+        "by_mcp_tool",
+        "by_outcome",
+        "hook_window",
+        "recent_events"
+      ],
+      "type": "object"
+    },
+    "AnalyticsDiagnosticsRatiosV1": {
+      "properties": {
+        "events_per_message": {
+          "format": "double",
+          "type": "number"
+        },
+        "hook_calls_per_message": {
+          "format": "double",
+          "type": "number"
+        },
+        "mcp_tool_calls_per_message": {
+          "format": "double",
+          "type": "number"
+        },
+        "tool_calls_per_message": {
+          "format": "double",
+          "type": "number"
+        }
+      },
+      "required": [
+        "events_per_message",
+        "tool_calls_per_message",
+        "mcp_tool_calls_per_message",
+        "hook_calls_per_message"
+      ],
+      "type": "object"
+    },
+    "AnalyticsEventKindCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "event_kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "event_kind",
+        "count"
+      ],
+      "type": "object"
+    },
+    "AnalyticsHintCategoryV1": {
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "emitted": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "followed": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ignored": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "suppressed": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "category",
+        "emitted",
+        "followed",
+        "ignored",
+        "suppressed"
+      ],
+      "type": "object"
+    },
+    "AnalyticsHintsPayloadV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "by_category": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsHintCategoryV1"
+          },
+          "type": "array"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "available",
+        "source",
+        "error",
+        "by_category"
+      ],
+      "type": "object"
+    },
+    "AnalyticsHookWindowV1": {
+      "properties": {
+        "newest_ts_unix_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "oldest_ts_unix_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "rows_included": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "rows_scanned": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "total_rows_known": {
+          "type": "boolean"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "window_rows": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "window_rows",
+        "rows_scanned",
+        "rows_included",
+        "truncated",
+        "total_rows_known",
+        "oldest_ts_unix_ms",
+        "newest_ts_unix_ms"
+      ],
+      "type": "object"
+    },
+    "AnalyticsOutcomeCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "outcome": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "outcome",
+        "count"
+      ],
+      "type": "object"
+    },
     "AnalyticsOverviewPayloadV1": {
       "properties": {
-        "agents": true,
+        "agents": {
+          "$ref": "#/$defs/AnalyticsAgentsPayloadV1"
+        },
         "available": {
           "type": "boolean"
         },
         "db": {
           "type": "string"
         },
-        "diagnostics": true,
-        "hints": true,
+        "diagnostics": {
+          "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
+        },
+        "hints": {
+          "$ref": "#/$defs/AnalyticsHintsPayloadV1"
+        },
         "observatory": {
           "anyOf": [
             {
@@ -96,7 +399,12 @@
         "scope": {
           "type": "string"
         },
-        "underused_tool_families": true,
+        "underused_tool_families": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsUnderusedFamilyV1"
+          },
+          "type": "array"
+        },
         "usage": {
           "$ref": "#/$defs/AnalyticsUsageSummaryV1"
         }
@@ -111,6 +419,105 @@
         "diagnostics",
         "underused_tool_families",
         "observatory"
+      ],
+      "type": "object"
+    },
+    "AnalyticsRecentEventV1": {
+      "properties": {
+        "event_kind": {
+          "type": "string"
+        },
+        "hook_name": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "timestamp": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tool_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "timestamp",
+        "event_kind",
+        "hook_name",
+        "tool_name",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "AnalyticsToolCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tool_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_name",
+        "count"
+      ],
+      "type": "object"
+    },
+    "AnalyticsUnderusedFamilyV1": {
+      "properties": {
+        "family": {
+          "type": "string"
+        },
+        "missed_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "relevant_events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "underused": {
+          "type": "boolean"
+        },
+        "usage_events": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "family",
+        "relevant_events",
+        "usage_events",
+        "missed_events",
+        "underused"
+      ],
+      "type": "object"
+    },
+    "AnalyticsUnderusedPayloadV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "db": {
+          "type": "string"
+        },
+        "families": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsUnderusedFamilyV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "available",
+        "db",
+        "families"
       ],
       "type": "object"
     },
@@ -204,46 +611,33 @@
       ],
       "type": "object"
     },
-    "AuthorityRef": {
-      "description": "Authoritative scope of a source binding. A mutable path, label, or host\nprofile cannot be represented as authority.",
-      "oneOf": [
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/$defs/ProjectId"
+    "AuthorizedRoot": {
+      "additionalProperties": false,
+      "description": "One exact application scope paired with its registered physical locator.\n\nThe scope remains the identity authority. The locator is retained only so\na later read or restart can reopen the exact registered root without an\nactive-graph or CWD fallback.",
+      "properties": {
+        "locator": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RegisteredRootLocatorV1"
             },
-            "kind": {
-              "const": "project",
-              "type": "string"
+            {
+              "type": "null"
             }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
+          ]
         },
-        {
-          "properties": {
-            "id": {
-              "$ref": "#/$defs/UserProfileId"
-            },
-            "kind": {
-              "const": "projectless_hermes",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "id"
-          ],
-          "type": "object"
+        "scope": {
+          "$ref": "#/$defs/ResolvedScope"
         }
-      ]
+      },
+      "required": [
+        "scope",
+        "locator"
+      ],
+      "type": "object"
     },
     "AuthorizedScopeSet": {
       "additionalProperties": false,
-      "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. Paths and mutable aliases never participate in this authority.",
+      "description": "Immutable canonical set of exact roots admitted by their existing request\ncontexts. A registered locator participates only as frozen reopening\nevidence; its paired [`ResolvedScope`] remains the root identity authority.",
       "properties": {
         "actor_id": {
           "$ref": "#/$defs/ActorId"
@@ -256,7 +650,7 @@
         },
         "roots": {
           "items": {
-            "$ref": "#/$defs/ResolvedScope"
+            "$ref": "#/$defs/AuthorizedRoot"
           },
           "type": "array"
         },
@@ -272,47 +666,6 @@
         "digest"
       ],
       "type": "object"
-    },
-    "AutomaticWorktreeGcV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "disabled",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "eligible_only",
-              "type": "string"
-            },
-            "maximum_per_run": {
-              "format": "uint16",
-              "maximum": 65535,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "minimum_idle_seconds": {
-              "format": "uint64",
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "kind",
-            "minimum_idle_seconds",
-            "maximum_per_run"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "AutomationPendingReviewCountV1": {
       "description": "One human-review queue: a count, or the reason there is no count.\n\nKept as a tagged reading rather than a bare number because these two queues\nare the entire human-approval step of the automation pipeline. A queue whose\nauthority is unmounted must not report `0`, which reads as \"checked, nothing\nwaiting\" — the precise false zero this shape exists to prevent.",
@@ -544,167 +897,6 @@
       ],
       "type": "object"
     },
-    "BranchCollisionPolicyV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "reject",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "append_monotonic_ordinal",
-              "type": "string"
-            },
-            "maximum_attempts": {
-              "format": "uint16",
-              "maximum": 65535,
-              "minimum": 1,
-              "type": "integer"
-            }
-          },
-          "required": [
-            "kind",
-            "maximum_attempts"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "BranchNameComponentV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "bytes": {
-              "format": "uint8",
-              "maximum": 255,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "kind": {
-              "const": "task_id_digest_prefix",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "bytes"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "repository_slug",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "work_class",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "monotonic_collision_ordinal",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "BranchNameSeparatorV1": {
-      "enum": [
-        "hyphen",
-        "underscore",
-        "slash"
-      ],
-      "type": "string"
-    },
-    "BranchNamingPolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "collision": {
-          "$ref": "#/$defs/BranchCollisionPolicyV1"
-        },
-        "components": {
-          "items": {
-            "$ref": "#/$defs/BranchNameComponentV1"
-          },
-          "type": "array"
-        },
-        "maximum_bytes": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "prefix": {
-          "$ref": "#/$defs/CanonicalGitRefPrefix"
-        },
-        "separator": {
-          "$ref": "#/$defs/BranchNameSeparatorV1"
-        }
-      },
-      "required": [
-        "prefix",
-        "components",
-        "separator",
-        "maximum_bytes",
-        "collision"
-      ],
-      "type": "object"
-    },
-    "BranchTopologyKindV1": {
-      "enum": [
-        "no_branches",
-        "unbranched",
-        "independent_branches",
-        "local_stack"
-      ],
-      "type": "string"
-    },
-    "BranchTopologyPolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "allowed": {
-          "items": {
-            "$ref": "#/$defs/BranchTopologyKindV1"
-          },
-          "type": "array",
-          "uniqueItems": true
-        }
-      },
-      "required": [
-        "allowed"
-      ],
-      "type": "object"
-    },
     "CallChainMeasurementV1": {
       "properties": {
         "directed": {
@@ -779,51 +971,6 @@
         "incoming_edge"
       ],
       "type": "object"
-    },
-    "CancellationObservation": {
-      "additionalProperties": false,
-      "properties": {
-        "observed_at": {
-          "$ref": "#/$defs/UtcMicros"
-        },
-        "stage": {
-          "$ref": "#/$defs/CancellationStage"
-        }
-      },
-      "required": [
-        "stage",
-        "observed_at"
-      ],
-      "type": "object"
-    },
-    "CancellationStage": {
-      "description": "Exact stage at which cancellation or deadline state was observed.",
-      "enum": [
-        "before_admission",
-        "before_read",
-        "during_read",
-        "before_effect",
-        "effect_in_flight",
-        "reconciling",
-        "after_commit"
-      ],
-      "type": "string"
-    },
-    "CanonicalGitRefNameV1": {
-      "description": "A validated full native Git ref name, such as `refs/heads/main`.",
-      "type": "string"
-    },
-    "CanonicalGitRefPrefix": {
-      "description": "A validated ref/branch prefix. Branch naming accepts a short branch prefix\n(for example `tracedecay/`) while protected-ref selectors use full\n`refs/.../` prefixes.",
-      "type": "string"
-    },
-    "CapabilityId": {
-      "description": "Strongly typed canonical identity: `CapabilityId`.",
-      "type": "string"
-    },
-    "ChangePlanId": {
-      "description": "Strongly typed canonical identity: `ChangePlanId`.",
-      "type": "string"
     },
     "CodeIndexFreshnessPayloadV1": {
       "properties": {
@@ -936,54 +1083,6 @@
         "coverage"
       ],
       "type": "object"
-    },
-    "ConfigurationIdempotencyKey": {
-      "description": "Strongly typed canonical identity: `ConfigurationIdempotencyKey`.",
-      "type": "string"
-    },
-    "ConfigurationProtectedApplySurfaceRequest": {
-      "additionalProperties": false,
-      "properties": {
-        "expected_base_revision_id": {
-          "$ref": "#/$defs/ConfigurationRevisionId"
-        },
-        "idempotency_key": {
-          "$ref": "#/$defs/ConfigurationIdempotencyKey"
-        },
-        "operation_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "plan_id": {
-          "$ref": "#/$defs/ChangePlanId"
-        }
-      },
-      "required": [
-        "plan_id",
-        "expected_base_revision_id",
-        "operation_digest",
-        "idempotency_key"
-      ],
-      "type": "object"
-    },
-    "ConfigurationProtectedPreviewSurfaceRequest": {
-      "additionalProperties": false,
-      "properties": {
-        "change": {
-          "$ref": "#/$defs/ProtectedChange"
-        },
-        "expected_revision": {
-          "$ref": "#/$defs/ConfigurationRevisionId"
-        }
-      },
-      "required": [
-        "change",
-        "expected_revision"
-      ],
-      "type": "object"
-    },
-    "ConfigurationRevisionId": {
-      "description": "Strongly typed canonical identity: `ConfigurationRevisionId`.",
-      "type": "string"
     },
     "CostsReadModelV1": {
       "properties": {
@@ -1104,40 +1203,6 @@
         "dependencies",
         "command_id",
         "occurred_at"
-      ],
-      "type": "object"
-    },
-    "CrossMergeModeV1": {
-      "enum": [
-        "disabled",
-        "manual_receipt_only",
-        "fast_forward_only",
-        "merge_commit",
-        "cherry_pick_exact_commits"
-      ],
-      "type": "string"
-    },
-    "CrossMergePolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "allow_cross_repository": {
-          "type": "boolean"
-        },
-        "allowed_modes": {
-          "items": {
-            "$ref": "#/$defs/CrossMergeModeV1"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "default_mode": {
-          "$ref": "#/$defs/CrossMergeModeV1"
-        }
-      },
-      "required": [
-        "allowed_modes",
-        "default_mode",
-        "allow_cross_repository"
       ],
       "type": "object"
     },
@@ -1294,46 +1359,6 @@
       ],
       "type": "object"
     },
-    "DashboardDoctorRemediationDescriptorV1": {
-      "description": "A typed description of what an owner-supplied remediation operation would do.\n\nThis is a *description*, not an effect. It never carries argv, a path, or an\ninline action, and resolving it performs no work.",
-      "properties": {
-        "action_confirmation": {
-          "$ref": "#/$defs/DoctorConfirmationRequirementV1"
-        },
-        "operation": {
-          "$ref": "#/$defs/DoctorOwningOperationRefV1"
-        },
-        "preview_available": {
-          "type": "boolean"
-        },
-        "summary": {
-          "type": "string"
-        },
-        "surface": {
-          "$ref": "#/$defs/DoctorOwningSurfaceV1"
-        },
-        "target": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DoctorRemediationTargetV1"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The dispatch target this route can construct from the finding alone.\n`None` means the owning surface must supply the target (a protected\nconfiguration apply needs the concrete key, value, and base revision),\nnot that the owner withholds the action — that is `legal_actions`."
-        }
-      },
-      "required": [
-        "operation",
-        "surface",
-        "preview_available",
-        "action_confirmation",
-        "summary",
-        "target"
-      ],
-      "type": "object"
-    },
     "DashboardDomainStateV1": {
       "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the PR14 backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty — the frontend\nrenders a distinct \"not yet available\" state — and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
       "oneOf": [
@@ -1429,6 +1454,716 @@
       ],
       "type": "object"
     },
+    "DashboardEnvelopeV110": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphSubgraphPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV111": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphPathPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV112": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryOverviewPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV113": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryStatusPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV114": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryFactDetailPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV115": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsOverviewPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV116": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsUsageSummaryV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV117": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsHintsPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV118": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsUnderusedPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV119": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalyticsDiagnosticsPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
     "DashboardEnvelopeV12": {
       "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
       "properties": {
@@ -1451,7 +2186,916 @@
           "type": "array"
         },
         "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExplorerSessionSizeV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV120": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SavingsOverviewPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV121": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmSessionPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV122": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmTimelinePayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV123": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmOverviewPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV124": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmSearchPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV125": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
           "$ref": "#/$defs/FeedbackObservationReadModelV1"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV13": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExplorerReadContextV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV14": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "$ref": "#/$defs/ProjectsPayloadV1"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV15": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "$ref": "#/$defs/ProjectContextPayloadV1"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV16": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphOverviewPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV17": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphSearchPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV18": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphNodePayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardEnvelopeV19": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphNeighborsPayloadV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "schema_revision": {
           "format": "uint32",
@@ -1648,19 +3292,6 @@
       "required": [
         "source",
         "watermark"
-      ],
-      "type": "object"
-    },
-    "Deadline": {
-      "additionalProperties": false,
-      "description": "One immutable deadline supplied by the caller or upstream admission layer.",
-      "properties": {
-        "expires_at": {
-          "$ref": "#/$defs/UtcMicros"
-        }
-      },
-      "required": [
-        "expires_at"
       ],
       "type": "object"
     },
@@ -2447,21 +4078,6 @@
       ],
       "type": "object"
     },
-    "DoctorConfirmationRequirementV1": {
-      "description": "Whether an owning operation requires an explicit human confirmation before it\nmay perform its admitted mutating effect.",
-      "oneOf": [
-        {
-          "const": "required",
-          "description": "An explicit confirmation is required before the action may run.",
-          "type": "string"
-        },
-        {
-          "const": "not_required",
-          "description": "No confirmation is required (still dispatched through the owner).",
-          "type": "string"
-        }
-      ]
-    },
     "DoctorCoverageCompletenessV1": {
       "description": "Whether Doctor observed all of a family's evidence sources.",
       "oneOf": [
@@ -2580,7 +4196,7 @@
           "type": "object"
         },
         {
-          "description": "No observed evidence; the family is carried as unavailable.",
+          "description": "Complete family coverage was unavailable. Storage may still carry\nfindings from resolved producers when an independent producer failed.",
           "properties": {
             "reason": {
               "$ref": "#/$defs/DoctorFamilyUnavailableReasonV1"
@@ -2615,7 +4231,7 @@
       "type": "object"
     },
     "DoctorFamilyUnavailableReasonV1": {
-      "description": "Why a finding family could not be consulted from an observed source.",
+      "description": "Why complete coverage of a finding family was unavailable.",
       "oneOf": [
         {
           "const": "unwired",
@@ -2649,7 +4265,7 @@
       "oneOf": [
         {
           "const": "advisory",
-          "description": "PR13 advisory/scout findings (GitHub review, CI localization,\nproximity, context scout) — `crate::advisory` / domain feedback.",
+          "description": "advisory/scout findings (GitHub review, CI localization,\nproximity, context scout) — `crate::advisory` / domain feedback.",
           "type": "string"
         },
         {
@@ -2664,7 +4280,7 @@
         },
         {
           "const": "storage",
-          "description": "Storage retention, size, and efficiency over Plan 26 observability read\nmodels (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, stale branch\nDBs, quarantined incident debris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
+          "description": "Storage retention, size, and efficiency over Plan 26 observability read\nmodels (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, quarantined\nincident debris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
           "type": "string"
         },
         {
@@ -2685,7 +4301,7 @@
       ]
     },
     "DoctorFindingV1": {
-      "description": "One canonical Doctor finding.\n\nA finding pins its diagnosis `family`, its evidence `state`, the typed\nevidence it composed, a coverage statement, and an optional reference to an\nowner-supplied remediation. Construction enforces the Plan 09 §PR14\ninvariants that keep unknown/partial evidence from collapsing into a healthy\nor clean result.",
+      "description": "One canonical Doctor finding.\n\nA finding pins its diagnosis `family`, its evidence `state`, the typed\nevidence it composed, and a coverage statement. Construction enforces the\ninvariants that keep unknown/partial evidence from collapsing into a\nhealthy or clean result.",
       "properties": {
         "coverage": {
           "$ref": "#/$defs/DoctorCoverageStatementV1"
@@ -2699,16 +4315,6 @@
         "family": {
           "$ref": "#/$defs/DoctorFindingFamilyV1"
         },
-        "remediation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/DoctorRemediationRefV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "state": {
           "$ref": "#/$defs/DoctorEvidenceStateV1"
         }
@@ -2717,13 +4323,12 @@
         "family",
         "state",
         "evidence",
-        "coverage",
-        "remediation"
+        "coverage"
       ],
       "type": "object"
     },
     "DoctorFindingsPayloadV1": {
-      "description": "The canonical Doctor report projection. `entries` retains the storage\nsubclass attached by the kernel; remediation descriptors are emitted only\nafter the kernel registry resolves the finding's owner-supplied reference.",
+      "description": "The canonical Doctor report projection for the read-only dashboard.",
       "properties": {
         "entries": {
           "items": {
@@ -2750,12 +4355,6 @@
         "note": {
           "type": "string"
         },
-        "remediations": {
-          "items": {
-            "$ref": "#/$defs/DashboardDoctorRemediationDescriptorV1"
-          },
-          "type": "array"
-        },
         "report_coverage": {
           "anyOf": [
             {
@@ -2771,531 +4370,10 @@
         "family_filter",
         "entries",
         "report_coverage",
-        "remediations",
         "known_families",
         "note"
       ],
       "type": "object"
-    },
-    "DoctorOwningOperationRefV1": {
-      "description": "Reference to the owning application operation that would perform a\nremediation (its capability or use-case identity). Doctor names the\noperation; it never embeds argv, a path, or an inline effect.",
-      "type": "string"
-    },
-    "DoctorOwningSurfaceV1": {
-      "description": "The application surface that owns dispatch of a remediation operation.\n\nThe kernel names the owner so a transport can route confirmation and dispatch\nto the correct surface; it never dispatches itself.",
-      "oneOf": [
-        {
-          "const": "configuration_control_plane",
-          "description": "The configuration control plane (Plan 20).",
-          "type": "string"
-        },
-        {
-          "const": "storage_runtime",
-          "description": "The storage retention/lifecycle runtime (Plan 38).",
-          "type": "string"
-        },
-        {
-          "const": "daemon_runtime",
-          "description": "The daemon/runtime supervisor.",
-          "type": "string"
-        },
-        {
-          "const": "host_integration",
-          "description": "The host/agent integration installer/repairer (Plan 27).",
-          "type": "string"
-        },
-        {
-          "const": "semantic_index_runtime",
-          "description": "The semantic/code index runtime (Plan 35 / semantic index).",
-          "type": "string"
-        }
-      ]
-    },
-    "DoctorRemediationApplyRequestV1": {
-      "additionalProperties": false,
-      "description": "Request DTO for a confirmed remediation apply. The executable supplies the\nowner-specific target type while the preview and idempotency contracts stay\ncanonical application values.",
-      "properties": {
-        "confirmed": {
-          "type": "boolean"
-        },
-        "idempotency_key": {
-          "type": "string"
-        },
-        "operation": {
-          "$ref": "#/$defs/DoctorOwningOperationRefV1"
-        },
-        "preview_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "target": {
-          "$ref": "#/$defs/DoctorRemediationTargetV1"
-        }
-      },
-      "required": [
-        "operation",
-        "target",
-        "preview_id",
-        "idempotency_key",
-        "confirmed"
-      ],
-      "type": "object"
-    },
-    "DoctorRemediationDispatchErrorV1": {
-      "enum": [
-        "unsupported",
-        "denied",
-        "invalid_reference",
-        "confirmation_required",
-        "owner_unavailable"
-      ],
-      "type": "string"
-    },
-    "DoctorRemediationKindV1": {
-      "description": "Preview-versus-action distinction for an owner-supplied remediation.\n\nDoctor never repairs; it references an owning application operation. A\npreview pins expected state without mutating; an action is the owning\noperation's admitted effect. Both are invoked through the owning operation,\nnever inline.",
-      "oneOf": [
-        {
-          "const": "preview",
-          "description": "A non-mutating preview owned by the responsible operation.",
-          "type": "string"
-        },
-        {
-          "const": "action",
-          "description": "An admitted mutating action owned by the responsible operation.",
-          "type": "string"
-        }
-      ]
-    },
-    "DoctorRemediationOperationPhaseV1": {
-      "enum": [
-        "previewed",
-        "running",
-        "completed",
-        "cancelled",
-        "timed_out",
-        "failed",
-        "partial",
-        "effect_unknown"
-      ],
-      "type": "string"
-    },
-    "DoctorRemediationOperationV1": {
-      "properties": {
-        "effect_receipt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EffectReceipt"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "execution": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OperationReceipt"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "operation_id": {
-          "$ref": "#/$defs/OperationId"
-        },
-        "owner_effect_receipt": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/EffectReceipt"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "owner_result_digest": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ManifestDigest"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "owning_operation": {
-          "$ref": "#/$defs/DoctorOwningOperationRefV1"
-        },
-        "phase": {
-          "$ref": "#/$defs/DoctorRemediationOperationPhaseV1"
-        },
-        "preview_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "verification": {
-          "$ref": "#/$defs/DoctorRemediationVerificationV1",
-          "default": {
-            "state": "pending"
-          }
-        }
-      },
-      "required": [
-        "operation_id",
-        "owning_operation",
-        "phase",
-        "preview_id",
-        "execution",
-        "effect_receipt",
-        "verification"
-      ],
-      "type": "object"
-    },
-    "DoctorRemediationPayloadV1": {
-      "description": "Wire payload for one remediation response.",
-      "oneOf": [
-        {
-          "properties": {
-            "operation": {
-              "$ref": "#/$defs/DoctorRemediationOperationV1"
-            },
-            "status": {
-              "const": "operation",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "reason": {
-              "$ref": "#/$defs/DoctorRemediationDispatchErrorV1"
-            },
-            "status": {
-              "const": "unavailable",
-              "type": "string"
-            }
-          },
-          "required": [
-            "status",
-            "reason"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "DoctorRemediationPreviewRequestV1": {
-      "additionalProperties": false,
-      "description": "Request DTO for a remediation preview. The executable supplies the\nowner-specific target type while this crate owns the stable outer shape.",
-      "properties": {
-        "operation": {
-          "$ref": "#/$defs/DoctorOwningOperationRefV1"
-        },
-        "target": {
-          "$ref": "#/$defs/DoctorRemediationTargetV1"
-        }
-      },
-      "required": [
-        "operation",
-        "target"
-      ],
-      "type": "object"
-    },
-    "DoctorRemediationRefV1": {
-      "description": "A reference to an owner-supplied remediation.\n\nDoctor never repairs directly; it names the owning application operation\nand whether a preview or action is offered. The caller invokes that owning\noperation through its normal admitted path.",
-      "properties": {
-        "kind": {
-          "$ref": "#/$defs/DoctorRemediationKindV1"
-        },
-        "owning_operation": {
-          "$ref": "#/$defs/DoctorOwningOperationRefV1"
-        }
-      },
-      "required": [
-        "owning_operation",
-        "kind"
-      ],
-      "type": "object"
-    },
-    "DoctorRemediationTargetV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "storage_retention_collect",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "storage_collect_orphan_store",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "storage_branch_gc",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "storage_quarantine_and_collect_debris",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "configuration_protected_preview",
-              "type": "string"
-            },
-            "target": {
-              "$ref": "#/$defs/ConfigurationProtectedPreviewSurfaceRequest"
-            }
-          },
-          "required": [
-            "owner_operation",
-            "target"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "configuration_protected_apply",
-              "type": "string"
-            },
-            "target": {
-              "$ref": "#/$defs/ConfigurationProtectedApplySurfaceRequest"
-            }
-          },
-          "required": [
-            "owner_operation",
-            "target"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "configuration_pin_authority",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "runtime_recover_daemon",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "host_repair_integration",
-              "type": "string"
-            },
-            "target": {
-              "properties": {
-                "components": {
-                  "items": {
-                    "$ref": "#/$defs/HostBundleComponentV1"
-                  },
-                  "type": "array"
-                },
-                "host": {
-                  "$ref": "#/$defs/HostKindV1"
-                }
-              },
-              "required": [
-                "host",
-                "components"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "owner_operation",
-            "target"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "owner_operation": {
-              "const": "code_index_remount",
-              "type": "string"
-            }
-          },
-          "required": [
-            "owner_operation"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "DoctorRemediationVerificationV1": {
-      "description": "Independent post-effect observation. Owner execution cannot set this state;\nonly the separately admitted observation callback can.",
-      "oneOf": [
-        {
-          "description": "A mutating owner effect has not yet been independently observed.",
-          "properties": {
-            "state": {
-              "const": "pending",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "A preview or a cancellation before any effect requires no recovery check.",
-          "properties": {
-            "state": {
-              "const": "not_required",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Current owner state proves the finding is recovered.",
-          "properties": {
-            "observation_digest": {
-              "$ref": "#/$defs/ManifestDigest"
-            },
-            "state": {
-              "const": "verified",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state",
-            "observation_digest"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Current owner state is usable but evidence or recovery remains incomplete.",
-          "properties": {
-            "observation_digest": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ManifestDigest"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "state": {
-              "const": "partial",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Current owner state proves the remediation did not recover the finding.",
-          "properties": {
-            "observation_digest": {
-              "anyOf": [
-                {
-                  "$ref": "#/$defs/ManifestDigest"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "state": {
-              "const": "failed",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Current authority denied the independent observation.",
-          "properties": {
-            "state": {
-              "const": "denied",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        },
-        {
-          "description": "Current owner state could not be observed.",
-          "properties": {
-            "state": {
-              "const": "unavailable",
-              "type": "string"
-            }
-          },
-          "required": [
-            "state"
-          ],
-          "type": "object"
-        }
-      ]
     },
     "DoctorReportCoverageV1": {
       "description": "The report-wide coverage statement: which families were consulted versus\nunavailable, plus an overall completeness and a bounded human statement.",
@@ -3357,11 +4435,6 @@
           "type": "string"
         },
         {
-          "const": "stale_branch_dbs",
-          "description": "Branch-scoped databases whose git refs are gone and are awaiting\nlifecycle removal.",
-          "type": "string"
-        },
-        {
           "const": "incident_debris_present",
           "description": "Quarantined recovery/corruption artifacts are present and awaiting\ncollection.",
           "type": "string"
@@ -3377,115 +4450,6 @@
           "type": "string"
         }
       ]
-    },
-    "EffectClass": {
-      "description": "The stable effect classification of one application operation.\n\nGit index writes remain separate classes so policy cannot accidentally\nsubstitute one index mutation for another.",
-      "enum": [
-        "read",
-        "preview",
-        "source_edit",
-        "git_index_stage",
-        "git_index_unstage",
-        "git_index_commit",
-        "configuration_write",
-        "administrative"
-      ],
-      "type": "string"
-    },
-    "EffectReceipt": {
-      "additionalProperties": false,
-      "description": "Durable effect proof. It records identities and receipts, never credentials\nor arbitrary command text.",
-      "properties": {
-        "actor": {
-          "$ref": "#/$defs/ActorId"
-        },
-        "catalog_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "committed_state": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ManifestDigest"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "configuration_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "effect_class": {
-          "$ref": "#/$defs/EffectClass"
-        },
-        "expected_state": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "external_proof": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/RetrievalAnchorId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "idempotency_key": {
-          "type": "string"
-        },
-        "input_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "operation": {
-          "$ref": "#/$defs/UseCaseId"
-        },
-        "outcome": {
-          "$ref": "#/$defs/EffectTermination"
-        },
-        "policy_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "privacy_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        },
-        "request_id": {
-          "type": "string"
-        },
-        "scope": {
-          "$ref": "#/$defs/ResolvedScope"
-        }
-      },
-      "required": [
-        "operation",
-        "request_id",
-        "actor",
-        "scope",
-        "effect_class",
-        "idempotency_key",
-        "input_digest",
-        "expected_state",
-        "policy_digest",
-        "configuration_digest",
-        "catalog_digest",
-        "privacy_digest",
-        "outcome",
-        "committed_state",
-        "external_proof"
-      ],
-      "type": "object"
-    },
-    "EffectTermination": {
-      "description": "Durable effect receipt terminal state.",
-      "enum": [
-        "completed",
-        "cancelled",
-        "timed_out",
-        "failed",
-        "partial",
-        "effect_unknown"
-      ],
-      "type": "string"
     },
     "EnvironmentSettingsPayloadV1": {
       "properties": {
@@ -4314,13 +5278,6 @@
       ],
       "type": "object"
     },
-    "GitHubStackedPullRequestPolicyV1": {
-      "enum": [
-        "disabled",
-        "probe_private_preview"
-      ],
-      "type": "string"
-    },
     "GraphCappedV1": {
       "properties": {
         "edges": {
@@ -4813,52 +5770,6 @@
       ],
       "type": "object"
     },
-    "GraphScopeRecord": {
-      "properties": {
-        "branch_name": {
-          "type": "string"
-        },
-        "db_relpath": {
-          "type": "string"
-        },
-        "graph_scope_id": {
-          "type": "string"
-        },
-        "last_synced_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "parent_scope_id": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "store_id": {
-          "type": "string"
-        },
-        "writable": {
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "graph_scope_id",
-        "project_id",
-        "store_id",
-        "branch_name",
-        "db_relpath",
-        "parent_scope_id",
-        "last_synced_at",
-        "writable"
-      ],
-      "type": "object"
-    },
     "GraphSearchPayloadV1": {
       "properties": {
         "count": {
@@ -4995,39 +5906,6 @@
       ],
       "type": "object"
     },
-    "HistoryRewritePolicyV1": {
-      "enum": [
-        "forbid_force_and_rebase"
-      ],
-      "type": "string"
-    },
-    "HostBundleComponentV1": {
-      "enum": [
-        "core",
-        "agent",
-        "context_mcp",
-        "operator_mcp"
-      ],
-      "type": "string"
-    },
-    "HostKindV1": {
-      "description": "Canonical stock host surfaces shared by catalog, packaging, delivery, and\nconformance consumers. A host surface is not itself evidence that the PR6\nobservation-capture capability is fixture-backed.",
-      "enum": [
-        "claude_code",
-        "cursor_desktop",
-        "cursor_cloud",
-        "codex",
-        "hermes",
-        "kiro",
-        "cline_family",
-        "cline",
-        "roo_code",
-        "kilo",
-        "kimi_code",
-        "open_code"
-      ],
-      "type": "string"
-    },
     "IncomingCallEdgeV1": {
       "properties": {
         "kind": {
@@ -5056,8 +5934,104 @@
       ],
       "type": "object"
     },
+    "LcmCompressionSummaryV1": {
+      "properties": {
+        "node_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ratio": {
+          "format": "double",
+          "type": "number"
+        },
+        "source_token_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_count": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source_token_count",
+        "token_count",
+        "ratio",
+        "node_count"
+      ],
+      "type": "object"
+    },
+    "LcmDepthCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "depth": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "depth",
+        "count"
+      ],
+      "type": "object"
+    },
+    "LcmLatestSessionV1": {
+      "properties": {
+        "last_store_id": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_timestamp": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "message_count",
+        "last_store_id",
+        "last_timestamp"
+      ],
+      "type": "object"
+    },
+    "LcmMatchesV1": {
+      "properties": {
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/LcmMessageV1"
+          },
+          "type": "array"
+        },
+        "summary_nodes": {
+          "items": {
+            "$ref": "#/$defs/LcmSummaryNodeV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "messages",
+        "summary_nodes"
+      ],
+      "type": "object"
+    },
     "LcmMessageV1": {
-      "additionalProperties": true,
       "properties": {
         "content": {
           "type": [
@@ -5097,6 +6071,13 @@
         "session_id": {
           "type": "string"
         },
+        "snippet": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "source": {
           "type": [
             "string",
@@ -5117,7 +6098,9 @@
           ]
         },
         "summary_node_ids": {
-          "items": true,
+          "items": {
+            "type": "string"
+          },
           "type": "array"
         },
         "timestamp": {
@@ -5155,7 +6138,263 @@
         "metadata_json",
         "tool_name",
         "pinned",
-        "summary_node_ids"
+        "summary_node_ids",
+        "snippet"
+      ],
+      "type": "object"
+    },
+    "LcmOverviewPayloadV1": {
+      "properties": {
+        "exists": {
+          "type": "boolean"
+        },
+        "latest_sessions": {
+          "items": {
+            "$ref": "#/$defs/LcmLatestSessionV1"
+          },
+          "type": "array"
+        },
+        "latest_summary_nodes": {
+          "items": {
+            "$ref": "#/$defs/LcmSummaryNodeV1"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "matches": {
+          "$ref": "#/$defs/LcmMatchesV1"
+        },
+        "overview": {
+          "$ref": "#/$defs/LcmOverviewStatsV1"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "storage_scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "storage_scope",
+        "exists",
+        "overview",
+        "latest_sessions",
+        "latest_summary_nodes",
+        "matches",
+        "query",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "LcmOverviewStatsV1": {
+      "properties": {
+        "compression": {
+          "$ref": "#/$defs/LcmCompressionSummaryV1"
+        },
+        "depth_counts": {
+          "items": {
+            "$ref": "#/$defs/LcmDepthCountV1"
+          },
+          "type": "array"
+        },
+        "max_summary_depth": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "messages_total": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "role_counts": {
+          "items": {
+            "$ref": "#/$defs/LcmRoleCountV1"
+          },
+          "type": "array"
+        },
+        "sessions_total": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source_counts": {
+          "items": {
+            "$ref": "#/$defs/LcmSourceCountV1"
+          },
+          "type": "array"
+        },
+        "summary_node_sessions_total": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary_nodes_total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages_total",
+        "sessions_total",
+        "summary_nodes_total",
+        "summary_node_sessions_total",
+        "max_summary_depth",
+        "role_counts",
+        "source_counts",
+        "depth_counts",
+        "compression"
+      ],
+      "type": "object"
+    },
+    "LcmRoleCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "count"
+      ],
+      "type": "object"
+    },
+    "LcmSearchEngineDetailV1": {
+      "properties": {
+        "messages": {
+          "type": "string"
+        },
+        "summary_nodes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "messages",
+        "summary_nodes"
+      ],
+      "type": "object"
+    },
+    "LcmSearchFiltersV1": {
+      "properties": {
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "since": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "until": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "role",
+        "source",
+        "session_id",
+        "since",
+        "until"
+      ],
+      "type": "object"
+    },
+    "LcmSearchPayloadV1": {
+      "properties": {
+        "engine": {
+          "type": "string"
+        },
+        "engine_detail": {
+          "$ref": "#/$defs/LcmSearchEngineDetailV1"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "filters": {
+          "$ref": "#/$defs/LcmSearchFiltersV1"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "matches": {
+          "$ref": "#/$defs/LcmMatchesV1"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "storage_scope": {
+          "type": "string"
+        },
+        "total": {
+          "$ref": "#/$defs/LcmSearchTotalsV1"
+        }
+      },
+      "required": [
+        "path",
+        "storage_scope",
+        "exists",
+        "query",
+        "limit",
+        "offset",
+        "engine",
+        "engine_detail",
+        "total",
+        "filters",
+        "matches"
+      ],
+      "type": "object"
+    },
+    "LcmSearchTotalsV1": {
+      "properties": {
+        "messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary_nodes": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "messages",
+        "summary_nodes"
       ],
       "type": "object"
     },
@@ -5258,8 +6497,23 @@
       ],
       "type": "object"
     },
+    "LcmSourceCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "count"
+      ],
+      "type": "object"
+    },
     "LcmSummaryNodeV1": {
-      "additionalProperties": true,
       "properties": {
         "category": {
           "type": "string"
@@ -5285,8 +6539,23 @@
         "node_id": {
           "type": "string"
         },
+        "recency": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "session_id": {
           "type": "string"
+        },
+        "snippet": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "source_token_count": {
           "format": "int64",
@@ -5314,7 +6583,9 @@
         "latest_at",
         "created_at",
         "expand_hint",
-        "summary"
+        "summary",
+        "recency",
+        "snippet"
       ],
       "type": "object"
     },
@@ -5376,6 +6647,25 @@
       ],
       "type": "object"
     },
+    "LcmTimelineNodeBucketV1": {
+      "properties": {
+        "bucket": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bucket",
+        "count"
+      ],
+      "type": "object"
+    },
     "LcmTimelinePayloadV1": {
       "properties": {
         "bucket": {
@@ -5403,8 +6693,7 @@
         },
         "node_buckets": {
           "items": {
-            "additionalProperties": true,
-            "type": "object"
+            "$ref": "#/$defs/LcmTimelineNodeBucketV1"
           },
           "type": "array"
         },
@@ -5421,8 +6710,7 @@
           "type": "string"
         },
         "undated": {
-          "additionalProperties": true,
-          "type": "object"
+          "$ref": "#/$defs/LcmTimelineUndatedV1"
         }
       },
       "required": [
@@ -5438,9 +6726,22 @@
       ],
       "type": "object"
     },
-    "LocatorDigest": {
-      "description": "Strongly typed algorithm-tagged integrity digest: `LocatorDigest`.",
-      "type": "string"
+    "LcmTimelineUndatedV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_estimate": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "count",
+        "token_estimate"
+      ],
+      "type": "object"
     },
     "LoomBranchSpanV1": {
       "properties": {
@@ -7183,7 +8484,7 @@
     },
     "MultiRootScopeSetCasRequestV1": {
       "additionalProperties": false,
-      "description": "Canonical external selector for creating or updating an authorized scope\nset. Callers select registered projects only; filesystem roots, CWD hints,\nactor ids, and grants are resolved and minted by the daemon.",
+      "description": "Canonical external selector for creating or updating an authorized scope\nset. Every member names one exact registered root; project-only selection\ncannot silently widen to an active or first-mounted graph.",
       "properties": {
         "expected_revision": {
           "anyOf": [
@@ -7195,9 +8496,9 @@
             }
           ]
         },
-        "project_ids": {
+        "roots": {
           "items": {
-            "$ref": "#/$defs/ProjectId"
+            "$ref": "#/$defs/RegisteredRootSelectorV1"
           },
           "type": "array"
         },
@@ -7208,7 +8509,7 @@
       "required": [
         "scope_set_id",
         "expected_revision",
-        "project_ids"
+        "roots"
       ],
       "type": "object"
     },
@@ -7369,89 +8670,6 @@
       ],
       "type": "object"
     },
-    "OperationBudgetUsage": {
-      "additionalProperties": false,
-      "description": "Bounded work accounting supplied by an owning port or transaction.",
-      "properties": {
-        "bytes_consumed": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "elapsed_micros": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "units_consumed": {
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "units_consumed",
-        "bytes_consumed",
-        "elapsed_micros"
-      ],
-      "type": "object"
-    },
-    "OperationId": {
-      "description": "Stable operation identity. The originating authorized request owns the\nidentity; paths, labels, and client-selected payloads never participate.",
-      "type": "string"
-    },
-    "OperationReceipt": {
-      "additionalProperties": false,
-      "description": "Canonical operation evidence. An admitted failure remains represented here\nrather than being replaced by a transport exception.",
-      "properties": {
-        "budget": {
-          "$ref": "#/$defs/OperationBudgetUsage"
-        },
-        "cancellation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/CancellationObservation"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "effective_deadline": {
-          "$ref": "#/$defs/Deadline"
-        },
-        "ended_at": {
-          "$ref": "#/$defs/UtcMicros"
-        },
-        "started_at": {
-          "$ref": "#/$defs/UtcMicros"
-        },
-        "termination": {
-          "$ref": "#/$defs/OperationTermination"
-        }
-      },
-      "required": [
-        "started_at",
-        "ended_at",
-        "effective_deadline",
-        "cancellation",
-        "budget",
-        "termination"
-      ],
-      "type": "object"
-    },
-    "OperationTermination": {
-      "description": "Terminal state after an operation has been admitted.",
-      "enum": [
-        "completed",
-        "cancelled",
-        "timed_out",
-        "failed",
-        "partial",
-        "effect_unknown"
-      ],
-      "type": "string"
-    },
     "Plan26CoverageV1": {
       "enum": [
         "known",
@@ -7550,19 +8768,12 @@
         },
         "status": {
           "type": "string"
-        },
-        "stores": {
-          "items": {
-            "$ref": "#/$defs/ProjectStoreContext"
-          },
-          "type": "array"
         }
       },
       "required": [
         "status",
         "project",
-        "aliases",
-        "stores"
+        "aliases"
       ],
       "type": "object"
     },
@@ -7644,11 +8855,6 @@
             "null"
           ]
         },
-        "graph_scope_count": {
-          "format": "uint",
-          "minimum": 0,
-          "type": "integer"
-        },
         "is_active": {
           "type": [
             "boolean",
@@ -7686,7 +8892,6 @@
         "default_branch",
         "branches",
         "store_count",
-        "graph_scope_count",
         "artifact_count",
         "alias_count",
         "last_seen_at"
@@ -7870,31 +9075,6 @@
       ],
       "type": "object"
     },
-    "ProjectStoreContext": {
-      "properties": {
-        "artifacts": {
-          "items": {
-            "$ref": "#/$defs/StoreArtifactRecord"
-          },
-          "type": "array"
-        },
-        "graph_scopes": {
-          "items": {
-            "$ref": "#/$defs/GraphScopeRecord"
-          },
-          "type": "array"
-        },
-        "store": {
-          "$ref": "#/$defs/StoreInstanceRecord"
-        }
-      },
-      "required": [
-        "store",
-        "graph_scopes",
-        "artifacts"
-      ],
-      "type": "object"
-    },
     "ProjectionGenerationId": {
       "description": "Strongly typed canonical identity: `ProjectionGenerationId`.",
       "type": "string"
@@ -7975,194 +9155,6 @@
       "description": "Strongly typed canonical identity: `ProposalId`.",
       "type": "string"
     },
-    "ProtectedChange": {
-      "description": "The protected configuration operation set. Ordinary scalar mutations are\nintentionally absent; they activate directly after validation.",
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "bind_source",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/$defs/ScopeSourceBinding"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "rebind_source",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/$defs/ScopeSourceBinding"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "unbind_source",
-              "type": "string"
-            },
-            "value": {
-              "properties": {
-                "binding_id": {
-                  "$ref": "#/$defs/SourceBindingId"
-                }
-              },
-              "required": [
-                "binding_id"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "upsert_access_rule",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/$defs/ScopeAccessRule"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "remove_access_rule",
-              "type": "string"
-            },
-            "value": {
-              "properties": {
-                "rule_id": {
-                  "$ref": "#/$defs/AccessRuleId"
-                }
-              },
-              "required": [
-                "rule_id"
-              ],
-              "type": "object"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "replace_work_topology_policy",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/$defs/WorkTopologyPolicyV1"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "ProtectedRefDispositionV1": {
-      "enum": [
-        "reject",
-        "require_human_approval_and_independent_review"
-      ],
-      "type": "string"
-    },
-    "ProtectedRefRuleV1": {
-      "additionalProperties": false,
-      "properties": {
-        "disposition": {
-          "$ref": "#/$defs/ProtectedRefDispositionV1"
-        },
-        "selector": {
-          "$ref": "#/$defs/ProtectedRefSelectorV1"
-        }
-      },
-      "required": [
-        "selector",
-        "disposition"
-      ],
-      "type": "object"
-    },
-    "ProtectedRefSelectorV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "native_default_branch",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "exact",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/$defs/CanonicalGitRefNameV1"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "prefix",
-              "type": "string"
-            },
-            "value": {
-              "$ref": "#/$defs/CanonicalGitRefPrefix"
-            }
-          },
-          "required": [
-            "kind",
-            "value"
-          ],
-          "type": "object"
-        }
-      ]
-    },
     "PublicCodeProject": {
       "properties": {
         "canonical_root": {
@@ -8224,6 +9216,44 @@
       "description": "Strongly typed canonical identity: `RefId`.",
       "type": "string"
     },
+    "RegisteredRootLocatorV1": {
+      "additionalProperties": false,
+      "description": "Exact registered root locator retained with an authorized scope.\n\n`canonical_root` is routing evidence for the already-resolved\n[`ResolvedScope`]. It cannot replace or manufacture that scope identity.",
+      "properties": {
+        "canonical_root": {
+          "type": "string"
+        },
+        "profile": {
+          "$ref": "#/$defs/SharedProfileStoreLocatorV1"
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        }
+      },
+      "required": [
+        "project_id",
+        "profile",
+        "canonical_root"
+      ],
+      "type": "object"
+    },
+    "RegisteredRootSelectorV1": {
+      "additionalProperties": false,
+      "description": "Exact registered-root selector accepted by scope-set CAS.",
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "root"
+      ],
+      "type": "object"
+    },
     "ReplanDependenciesCommand": {
       "additionalProperties": false,
       "properties": {
@@ -8263,70 +9293,6 @@
       "description": "Strongly typed canonical identity: `RepositoryId`.",
       "type": "string"
     },
-    "RepositoryPlacementScopeV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "all_authorized",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "allowlist",
-              "type": "string"
-            },
-            "repositories": {
-              "items": {
-                "$ref": "#/$defs/RepositoryId"
-              },
-              "type": "array",
-              "uniqueItems": true
-            }
-          },
-          "required": [
-            "kind",
-            "repositories"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "RequiredCheckExpectationV1": {
-      "enum": [
-        "successful_terminal"
-      ],
-      "type": "string"
-    },
-    "RequiredCheckV1": {
-      "additionalProperties": false,
-      "properties": {
-        "capability_id": {
-          "$ref": "#/$defs/CapabilityId"
-        },
-        "expectation": {
-          "$ref": "#/$defs/RequiredCheckExpectationV1"
-        },
-        "maximum_age_seconds": {
-          "format": "uint32",
-          "minimum": 1,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "capability_id",
-        "expectation",
-        "maximum_age_seconds"
-      ],
-      "type": "object"
-    },
     "ResolvedScope": {
       "additionalProperties": false,
       "description": "The resolved PR11 scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
@@ -8363,10 +9329,6 @@
       ],
       "type": "object"
     },
-    "RetrievalAnchorId": {
-      "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
-      "type": "string"
-    },
     "ReviewProposalCommand": {
       "additionalProperties": false,
       "properties": {
@@ -8402,7 +9364,7 @@
       "type": "object"
     },
     "ReviewProposalDispositionV1": {
-      "description": "A proposal review records a non-accepting disposition. Acceptance remains a\nseparate command so callers cannot accidentally collapse review into\napproval.",
+      "description": "A proposal review records a non-accepting disposition.",
       "enum": [
         "rejected",
         "superseded"
@@ -8422,82 +9384,6 @@
       "required": [
         "review",
         "disposition"
-      ],
-      "type": "object"
-    },
-    "ReviewRequirementV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "none",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "count": {
-              "format": "uint16",
-              "maximum": 65535,
-              "minimum": 1,
-              "type": "integer"
-            },
-            "kind": {
-              "const": "independent_review_count",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "count"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "code_owner_and_independent_review",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "ReviewTopologyKindV1": {
-      "enum": [
-        "no_review",
-        "independent_review",
-        "standard_pull_requests",
-        "git_hub_stacked_pull_requests"
-      ],
-      "type": "string"
-    },
-    "ReviewTopologyPolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "allowed": {
-          "items": {
-            "$ref": "#/$defs/ReviewTopologyKindV1"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "github_stacked_prs": {
-          "$ref": "#/$defs/GitHubStackedPullRequestPolicyV1"
-        }
-      },
-      "required": [
-        "allowed",
-        "github_stacked_prs"
       ],
       "type": "object"
     },
@@ -8559,13 +9445,6 @@
         "outcome"
       ],
       "type": "object"
-    },
-    "RuleEffect": {
-      "enum": [
-        "allow",
-        "deny"
-      ],
-      "type": "string"
     },
     "RunId": {
       "description": "Strongly typed canonical identity: `RunId`.",
@@ -9104,106 +9983,6 @@
       ],
       "type": "object"
     },
-    "ScopeAccessRule": {
-      "additionalProperties": false,
-      "description": "Restrictive policy input. An allow never grants capabilities absent from\nthe independently authorized capability set passed to the resolver.",
-      "properties": {
-        "authority": {
-          "$ref": "#/$defs/AuthorityRef"
-        },
-        "capabilities": {
-          "items": {
-            "$ref": "#/$defs/CapabilityId"
-          },
-          "type": "array",
-          "uniqueItems": true
-        },
-        "effect": {
-          "$ref": "#/$defs/RuleEffect"
-        },
-        "expires_at": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/UtcMicros"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "rule_id": {
-          "$ref": "#/$defs/AccessRuleId"
-        },
-        "subject": {
-          "$ref": "#/$defs/ScopeAccessSubjectV1"
-        }
-      },
-      "required": [
-        "rule_id",
-        "subject",
-        "authority",
-        "capabilities",
-        "effect",
-        "expires_at"
-      ],
-      "type": "object"
-    },
-    "ScopeAccessSubjectV1": {
-      "additionalProperties": false,
-      "description": "Typed rule selectors. Unset dimensions match all values at that dimension,\nbut at least one dimension must be constrained. Free-form paths, labels,\ncollection names, and branch names are deliberately absent.",
-      "properties": {
-        "actor": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ActorId"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "operation": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ScopeControlOperationV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "source_kind": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/SourceKindV1"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "required": [
-        "actor",
-        "operation",
-        "source_kind"
-      ],
-      "type": "object"
-    },
-    "ScopeControlOperationV1": {
-      "enum": [
-        "read",
-        "source_bind",
-        "source_rebind",
-        "source_unbind",
-        "access_rule_upsert",
-        "access_rule_remove",
-        "set_default_collection",
-        "replace_topology_policy",
-        "rollback"
-      ],
-      "type": "string"
-    },
     "ScopeOutcome_for_Array_of_AnyValue": {
       "description": "Truthful outcome for one authorized root or an aggregate over roots.\n\n`Denied` and `Unavailable` carry no value and therefore cannot be confused\nwith a successful empty result.",
       "oneOf": [
@@ -9397,31 +10176,6 @@
       "minimum": 1,
       "type": "integer"
     },
-    "ScopeSourceBinding": {
-      "additionalProperties": false,
-      "description": "A source-to-authority binding. It stores only the source kind, a redacted\nlocator digest, and the pre-resolved authority reference.",
-      "properties": {
-        "authority": {
-          "$ref": "#/$defs/AuthorityRef"
-        },
-        "binding_id": {
-          "$ref": "#/$defs/SourceBindingId"
-        },
-        "source_kind": {
-          "$ref": "#/$defs/SourceKindV1"
-        },
-        "source_locator_digest": {
-          "$ref": "#/$defs/LocatorDigest"
-        }
-      },
-      "required": [
-        "binding_id",
-        "source_kind",
-        "source_locator_digest",
-        "authority"
-      ],
-      "type": "object"
-    },
     "ScopeUnavailableReasonV1": {
       "description": "Typed explanation for a root that could not return usable data.",
       "enum": [
@@ -9430,23 +10184,6 @@
         "store_unavailable"
       ],
       "type": "string"
-    },
-    "SensitiveFilesystemLocatorV1": {
-      "additionalProperties": false,
-      "description": "Reference-only filesystem locator. The raw path is sealed outside this\ncontract; only the privacy-bound locator digest and sealed-value digest are\nrepresentable here.",
-      "properties": {
-        "locator_digest": {
-          "$ref": "#/$defs/LocatorDigest"
-        },
-        "sealed_value_digest": {
-          "$ref": "#/$defs/ManifestDigest"
-        }
-      },
-      "required": [
-        "locator_digest",
-        "sealed_value_digest"
-      ],
-      "type": "object"
     },
     "SettingsAvailabilityV1": {
       "properties": {
@@ -9514,6 +10251,23 @@
       ],
       "type": "object"
     },
+    "SharedProfileStoreLocatorV1": {
+      "additionalProperties": false,
+      "description": "Shared physical profile-store locator supplied by the profile authority.\n\nThe typed profile and store IDs select this locator. It never derives an\nidentity from a path, CWD, active graph, or mutable project alias.",
+      "properties": {
+        "profile_id": {
+          "$ref": "#/$defs/UserProfileId"
+        },
+        "store_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "profile_id",
+        "store_id"
+      ],
+      "type": "object"
+    },
     "SignificantTableGrowthSampleV1": {
       "description": "One significant table-growth sample exposed to the dashboard.",
       "properties": {
@@ -9554,21 +10308,6 @@
       ],
       "type": "object"
     },
-    "SourceBindingId": {
-      "description": "Strongly typed canonical identity: `SourceBindingId`.",
-      "type": "string"
-    },
-    "SourceKindV1": {
-      "enum": [
-        "claude",
-        "codex",
-        "cursor",
-        "git_hub",
-        "hermes",
-        "kiro"
-      ],
-      "type": "string"
-    },
     "StorageByteSizeV1": {
       "description": "A byte size measurement. A newtype keeps sizes from being confused with\ncounts, ratios, or timestamps in the read models and producers.",
       "format": "uint64",
@@ -9605,7 +10344,6 @@
       "description": "Whether one Plan 38 producer had enough source evidence to report a real\nresult. This is source coverage, not a health grade: `Real` can describe a\nclean observation or a problem finding.",
       "enum": [
         "real",
-        "unset",
         "partial",
         "unsupported"
       ],
@@ -9645,12 +10383,6 @@
         "note": {
           "type": "string"
         },
-        "remediations": {
-          "items": {
-            "$ref": "#/$defs/DashboardDoctorRemediationDescriptorV1"
-          },
-          "type": "array"
-        },
         "report_coverage": {
           "anyOf": [
             {
@@ -9666,7 +10398,6 @@
         "family_filter",
         "entries",
         "report_coverage",
-        "remediations",
         "known_families",
         "note",
         "kind_statuses"
@@ -9856,48 +10587,6 @@
         }
       ]
     },
-    "StoreArtifactRecord": {
-      "properties": {
-        "artifact_kind": {
-          "type": "string"
-        },
-        "relpath": {
-          "type": "string"
-        },
-        "schema_version": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "size_bytes": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "store_id": {
-          "type": "string"
-        },
-        "updated_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "store_id",
-        "artifact_kind",
-        "relpath",
-        "size_bytes",
-        "schema_version",
-        "updated_at"
-      ],
-      "type": "object"
-    },
     "StoreBudgetDimensionV1": {
       "description": "The budget-evaluation dimension, sourced from owner configuration.",
       "oneOf": [
@@ -10038,61 +10727,6 @@
           "type": "object"
         }
       ]
-    },
-    "StoreInstanceRecord": {
-      "properties": {
-        "created_at": {
-          "format": "int64",
-          "type": "integer"
-        },
-        "last_verified_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "last_write_at": {
-          "format": "int64",
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "manifest_relpath": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "project_id": {
-          "type": "string"
-        },
-        "storage_mode": {
-          "type": "string"
-        },
-        "store_id": {
-          "type": "string"
-        },
-        "store_kind": {
-          "type": "string"
-        },
-        "store_relpath": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "store_id",
-        "project_id",
-        "store_kind",
-        "storage_mode",
-        "store_relpath",
-        "manifest_relpath",
-        "created_at",
-        "last_verified_at",
-        "last_write_at"
-      ],
-      "type": "object"
     },
     "StoreKeyV1": {
       "description": "Logical name of one owner-profile store (for example `sessions.db`,\n`graph.db`, or `branches/feature-x`). Never an absolute on-disk path.",
@@ -11127,91 +11761,6 @@
       ],
       "type": "object"
     },
-    "TopologyConcurrencyPolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "maximum_active_per_repository": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "maximum_global_active": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "maximum_parallel_per_task": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "maximum_stack_depth": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "maximum_active_per_repository",
-        "maximum_parallel_per_task",
-        "maximum_global_active",
-        "maximum_stack_depth"
-      ],
-      "type": "object"
-    },
-    "TopologyEscalationPolicyV1": {
-      "enum": [
-        "reject",
-        "require_explicit_human_approval",
-        "require_human_approval_and_independent_review"
-      ],
-      "type": "string"
-    },
-    "TopologyGatePolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "cleanliness": {
-          "$ref": "#/$defs/WorktreeCleanlinessRequirementV1"
-        },
-        "maximum_preflight_age_seconds": {
-          "format": "uint32",
-          "minimum": 1,
-          "type": "integer"
-        },
-        "require_fresh_preflight": {
-          "type": "boolean"
-        },
-        "review": {
-          "$ref": "#/$defs/ReviewRequirementV1"
-        },
-        "tests": {
-          "items": {
-            "$ref": "#/$defs/RequiredCheckV1"
-          },
-          "type": "array"
-        }
-      },
-      "required": [
-        "cleanliness",
-        "tests",
-        "review",
-        "require_fresh_preflight",
-        "maximum_preflight_age_seconds"
-      ],
-      "type": "object"
-    },
-    "TopologyNotificationLevelV1": {
-      "enum": [
-        "critical_only",
-        "lifecycle",
-        "verbose"
-      ],
-      "type": "string"
-    },
     "TurnsSummaryV1": {
       "properties": {
         "available": {
@@ -11273,10 +11822,6 @@
         "cost_basis"
       ],
       "type": "object"
-    },
-    "UseCaseId": {
-      "description": "Stable, canonical catalog identity for `UseCaseId`.",
-      "type": "string"
     },
     "UserProfileId": {
       "description": "Strongly typed canonical identity: `UserProfileId`.",
@@ -11706,220 +12251,27 @@
       ],
       "type": "object"
     },
-    "WorkTopologyPolicyV1": {
-      "additionalProperties": false,
-      "description": "Complete V1 policy. Partial values are intentionally impossible: callers\nmust provide the entire policy and validation rejects adapter-local defaults.",
-      "properties": {
-        "branch_naming": {
-          "$ref": "#/$defs/BranchNamingPolicyV1"
-        },
-        "branch_topology": {
-          "$ref": "#/$defs/BranchTopologyPolicyV1"
-        },
-        "concurrency": {
-          "$ref": "#/$defs/TopologyConcurrencyPolicyV1"
-        },
-        "cross_merge": {
-          "$ref": "#/$defs/CrossMergePolicyV1"
-        },
-        "escalation": {
-          "$ref": "#/$defs/TopologyEscalationPolicyV1"
-        },
-        "gates": {
-          "$ref": "#/$defs/TopologyGatePolicyV1"
-        },
-        "history_rewrite": {
-          "$ref": "#/$defs/HistoryRewritePolicyV1"
-        },
-        "notifications": {
-          "$ref": "#/$defs/TopologyNotificationLevelV1"
-        },
-        "placement": {
-          "$ref": "#/$defs/WorktreePlacementModeV1"
-        },
-        "protected_refs": {
-          "items": {
-            "$ref": "#/$defs/ProtectedRefRuleV1"
-          },
-          "type": "array"
-        },
-        "retention": {
-          "$ref": "#/$defs/WorktreeRetentionPolicyV1"
-        },
-        "review_topology": {
-          "$ref": "#/$defs/ReviewTopologyPolicyV1"
-        },
-        "roots": {
-          "items": {
-            "$ref": "#/$defs/WorktreeRootPolicyV1"
-          },
-          "type": "array"
-        },
-        "schema_version": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "schema_version",
-        "placement",
-        "roots",
-        "branch_topology",
-        "review_topology",
-        "branch_naming",
-        "concurrency",
-        "cross_merge",
-        "gates",
-        "protected_refs",
-        "history_rewrite",
-        "escalation",
-        "retention",
-        "notifications"
-      ],
-      "type": "object"
-    },
-    "WorktreeCleanlinessRequirementV1": {
-      "enum": [
-        "require_clean",
-        "allow_untracked_only_for_preflight",
-        "read_only_preflight_only"
-      ],
-      "type": "string"
-    },
     "WorktreeId": {
       "description": "Strongly typed canonical identity: `WorktreeId`.",
       "type": "string"
-    },
-    "WorktreePlacementModeV1": {
-      "oneOf": [
-        {
-          "properties": {
-            "kind": {
-              "const": "existing_worktree_only",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "sibling_of_primary_checkout",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "repository_local_root",
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "kind": {
-              "const": "configured_root",
-              "type": "string"
-            },
-            "root_id": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "root_id"
-          ],
-          "type": "object"
-        }
-      ]
-    },
-    "WorktreeRetentionPolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "abandoned_retention_seconds": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "automatic_gc": {
-          "$ref": "#/$defs/AutomaticWorktreeGcV1"
-        },
-        "maximum_retained_per_repository": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "terminal_retention_seconds": {
-          "format": "uint64",
-          "minimum": 1,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "terminal_retention_seconds",
-        "abandoned_retention_seconds",
-        "maximum_retained_per_repository",
-        "automatic_gc"
-      ],
-      "type": "object"
-    },
-    "WorktreeRootPolicyV1": {
-      "additionalProperties": false,
-      "properties": {
-        "locator": {
-          "$ref": "#/$defs/SensitiveFilesystemLocatorV1"
-        },
-        "maximum_active_worktrees": {
-          "format": "uint16",
-          "maximum": 65535,
-          "minimum": 1,
-          "type": "integer"
-        },
-        "repository_scope": {
-          "$ref": "#/$defs/RepositoryPlacementScopeV1"
-        },
-        "root_id": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "root_id",
-        "locator",
-        "repository_scope",
-        "maximum_active_worktrees"
-      ],
-      "type": "object"
     }
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "analytics_diagnostics": {
+      "$ref": "#/$defs/DashboardEnvelopeV119"
+    },
+    "analytics_hints": {
+      "$ref": "#/$defs/DashboardEnvelopeV117"
+    },
     "analytics_overview": {
-      "$ref": "#/$defs/AnalyticsOverviewPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV115"
+    },
+    "analytics_underused": {
+      "$ref": "#/$defs/DashboardEnvelopeV118"
+    },
+    "analytics_usage": {
+      "$ref": "#/$defs/DashboardEnvelopeV116"
     },
     "automation_scheduler_status": {
       "$ref": "#/$defs/AutomationSchedulerStatusV1",
@@ -11937,15 +12289,6 @@
     "doctor_findings": {
       "$ref": "#/$defs/DoctorFindingsPayloadV1"
     },
-    "doctor_remediation": {
-      "$ref": "#/$defs/DoctorRemediationPayloadV1"
-    },
-    "doctor_remediation_apply_request": {
-      "$ref": "#/$defs/DoctorRemediationApplyRequestV1"
-    },
-    "doctor_remediation_preview_request": {
-      "$ref": "#/$defs/DoctorRemediationPreviewRequestV1"
-    },
     "envelope": {
       "$ref": "#/$defs/DashboardEnvelopeV1"
     },
@@ -11953,13 +12296,13 @@
       "$ref": "#/$defs/ExplorerQueryRunV1"
     },
     "explorer_read_context": {
-      "$ref": "#/$defs/ExplorerReadContextV1"
+      "$ref": "#/$defs/DashboardEnvelopeV13"
     },
     "explorer_session_size": {
-      "$ref": "#/$defs/ExplorerSessionSizeV1"
+      "$ref": "#/$defs/DashboardEnvelopeV12"
     },
     "feedback_status": {
-      "$ref": "#/$defs/DashboardEnvelopeV12"
+      "$ref": "#/$defs/DashboardEnvelopeV125"
     },
     "graph_call_chain": {
       "$ref": "#/$defs/StructureReadV1"
@@ -11968,49 +12311,55 @@
       "$ref": "#/$defs/StructureReadV13"
     },
     "graph_neighbors": {
-      "$ref": "#/$defs/GraphNeighborsPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV19"
     },
     "graph_node": {
-      "$ref": "#/$defs/GraphNodePayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV18"
     },
     "graph_node_sessions": {
       "$ref": "#/$defs/StructureReadV15"
     },
     "graph_overview": {
-      "$ref": "#/$defs/GraphOverviewPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV16"
     },
     "graph_path": {
-      "$ref": "#/$defs/GraphPathPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV111"
     },
     "graph_search": {
-      "$ref": "#/$defs/GraphSearchPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV17"
     },
     "graph_strata": {
       "$ref": "#/$defs/StructureReadV12"
     },
     "graph_subgraph": {
-      "$ref": "#/$defs/GraphSubgraphPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV110"
     },
     "graph_test_map": {
       "$ref": "#/$defs/StructureReadV14"
     },
+    "lcm_overview": {
+      "$ref": "#/$defs/DashboardEnvelopeV123"
+    },
+    "lcm_search": {
+      "$ref": "#/$defs/DashboardEnvelopeV124"
+    },
     "lcm_session": {
-      "$ref": "#/$defs/LcmSessionPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV121"
     },
     "lcm_timeline": {
-      "$ref": "#/$defs/LcmTimelinePayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV122"
     },
     "loom_temporal": {
       "$ref": "#/$defs/LoomTemporalPayloadV1"
     },
     "memory_fact_detail": {
-      "$ref": "#/$defs/MemoryFactDetailPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV114"
     },
     "memory_overview": {
-      "$ref": "#/$defs/MemoryOverviewPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV112"
     },
     "memory_status": {
-      "$ref": "#/$defs/MemoryStatusPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV113"
     },
     "multi_root_capability": {
       "$ref": "#/$defs/MultiRootCapabilityV1"
@@ -12044,13 +12393,13 @@
       "$ref": "#/$defs/ObservatoryReadModelV1"
     },
     "project_context": {
-      "$ref": "#/$defs/ProjectContextPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV15"
     },
     "projects": {
-      "$ref": "#/$defs/ProjectsPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV14"
     },
     "savings_overview": {
-      "$ref": "#/$defs/SavingsOverviewPayloadV1"
+      "$ref": "#/$defs/DashboardEnvelopeV120"
     },
     "savings_sessions": {
       "$ref": "#/$defs/SavingsSessionsPayloadV1"
@@ -12115,9 +12464,6 @@
     "storage_telemetry",
     "storage_findings",
     "doctor_findings",
-    "doctor_remediation_preview_request",
-    "doctor_remediation_apply_request",
-    "doctor_remediation",
     "explorer_query_run",
     "explorer_session_size",
     "explorer_read_context",
@@ -12133,10 +12479,16 @@
     "memory_status",
     "memory_fact_detail",
     "analytics_overview",
+    "analytics_usage",
+    "analytics_hints",
+    "analytics_underused",
+    "analytics_diagnostics",
     "savings_overview",
     "savings_sessions",
     "lcm_session",
     "lcm_timeline",
+    "lcm_overview",
+    "lcm_search",
     "loom_temporal",
     "delivery_overview",
     "feedback_status",

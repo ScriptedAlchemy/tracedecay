@@ -415,7 +415,7 @@ function TableGrowthPanel({
 
 /** `/api/storage/findings` is the storage-family projection of the admitted
  * canonical Doctor report. The browser preserves its typed subclass, evidence,
- * coverage, and owner-operation reference without recomputing health. */
+ * and coverage without recomputing health. */
 function StorageFindingCard({ entry }: { entry: DoctorReportEntryV1 }) {
   const { finding, storage_kind: storageKind } = entry;
   const presentation = doctorEvidencePresentation(finding.state);
@@ -449,11 +449,6 @@ function StorageFindingCard({ entry }: { entry: DoctorReportEntryV1 }) {
             </li>
           ))}
         </ul>
-        {finding.remediation ? (
-          <p className="break-all font-mono text-2xs text-text-muted">
-            {finding.remediation.owning_operation}
-          </p>
-        ) : null}
       </div>
     </OverviewCard>
   );
@@ -554,4 +549,3 @@ function readUnavailableMessage(read: StorageTelemetryReadV1): string {
       return assertNever(read);
   }
 }
-

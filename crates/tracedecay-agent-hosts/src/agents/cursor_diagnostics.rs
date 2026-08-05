@@ -5,8 +5,8 @@
 //! (literal `${workspaceFolder}` path, uninitialized project, …) turns every
 //! later tool call in that session into "Timed out waiting for connection"
 //! until the user toggles the server or reloads the window. The stdio spawn
-//! happens outside tracedecay's control, so `tracedecay doctor --agent
-//! cursor` inspects Cursor's own logs to surface that failure class with
+//! happens outside tracedecay's control, so `tracedecay doctor` inspects
+//! Cursor's own logs to surface that failure class with
 //! concrete remediation.
 //!
 //! Everything here is best-effort: missing directories, unreadable files, and

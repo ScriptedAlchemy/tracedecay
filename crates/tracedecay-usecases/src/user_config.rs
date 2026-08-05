@@ -320,8 +320,7 @@ fn temp_write_path(path: &Path) -> PathBuf {
 }
 
 /// Quarantine path (`config.toml.corrupt-<unix-ts>`) for a corrupt config file
-/// preserved during recovery. Mirrors the branch-meta quarantine naming in
-/// `src/storage.rs` / `src/doctor/heal.rs`.
+/// preserved during the explicit configuration recovery operation.
 fn corrupt_backup_path(path: &Path) -> PathBuf {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

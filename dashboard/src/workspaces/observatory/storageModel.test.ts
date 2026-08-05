@@ -94,10 +94,6 @@ describe('Observatory storage read models', () => {
               completeness: 'complete',
               statement: 'store size observed against soft budget',
             },
-            remediation: {
-              owning_operation: 'use-case.application.storage.retention-collect',
-              kind: 'action',
-            },
           },
           storage_kind: 'over_budget_store',
         },
@@ -110,7 +106,6 @@ describe('Observatory storage read models', () => {
           statement: 'storage retention and size authorities were consulted',
         },
       },
-      remediations: [],
       known_families: ['storage'],
       note: 'storage retention and size authorities were consulted',
     });
@@ -120,7 +115,6 @@ describe('Observatory storage read models', () => {
         [
           'over_budget_store',
           'orphan_store',
-          'stale_branch_dbs',
           'incident_debris_present',
           'retention_backlog',
           'table_growth',
@@ -129,7 +123,6 @@ describe('Observatory storage read models', () => {
     ).toEqual([
       'Over-budget stores',
       'Orphan stores',
-      'Stale branch databases',
       'Incident debris',
       'Retention backlog',
       'Table growth',

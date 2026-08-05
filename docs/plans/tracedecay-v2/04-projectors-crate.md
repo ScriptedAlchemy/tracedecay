@@ -181,8 +181,9 @@ typed generations and their own checkpoints.
   clears and supersession without reviving stale findings.
 - Scope tests prove user/project ownership and reject base-checkout fallback for
   branch/worktree code graphs.
-- PR14 tests prove Doctor diagnosis remains read-only and repair views reflect
-  only authoritative, receipt-bearing operations.
+- PR14 tests prove Doctor diagnosis remains read-only. Any separately entered
+  owner operation is projected only from its authoritative durable receipt;
+  Doctor never previews, dispatches, or applies it.
 - Host-surface parity and restart tests must pass before any superseded V1
   projection path is removed.
 - Incremental and rebuild output is byte-identical at the same aggregate

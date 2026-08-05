@@ -2,12 +2,11 @@
 //! (plan 09 §PR14 / plan 11 §"Typed presentation contracts").
 //!
 //! An admitted daemon owner injects the canonical composed report reader into
-//! [`DashboardState`]. This module only resolves scope, invokes that reader,
-//! consults the owner remediation dispatcher, and attaches the dispatch targets
-//! it can build from a finding. Every presentation decision — family
-//! vocabulary, coverage, freshness, domain state, notes, and legal-action
-//! references — belongs to [`tracedecay_api::doctor`]. A dashboard opened
-//! without an admitted reader remains explicitly unsupported.
+//! [`DashboardState`]. This module only resolves scope and invokes that reader.
+//! Every presentation decision — family vocabulary, coverage, freshness,
+//! domain state, notes, and refresh action — belongs to
+//! [`tracedecay_api::doctor`]. A dashboard opened without an admitted reader
+//! remains explicitly unsupported.
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -19,44 +18,20 @@ use tracedecay_api::doctor::{
     project_doctor_report,
 };
 use tracedecay_application::doctor::{
-    DoctorFindingFamilyV1, DoctorRemediationDescriptorV1, DoctorReportCoverageV1,
-    DoctorReportEntryV1,
+    DoctorFindingFamilyV1, DoctorReportCoverageV1, DoctorReportEntryV1,
 };
 
 use super::DashboardState;
-use super::doctor_remediation_api::DoctorRemediationTargetV1;
 use super::read_model::{
-    DashboardDomainStateV1, DashboardEnvelopeV1, DashboardLegalActionKindV1, DashboardScopeV1,
-    scope_from_state,
+    DashboardDomainStateV1, DashboardEnvelopeV1, DashboardScopeV1, scope_from_state,
 };
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
-pub struct DashboardDoctorRemediationDescriptorV1 {
-    #[serde(flatten)]
-    descriptor: DoctorRemediationDescriptorV1,
-    /// The dispatch target this route can construct from the finding alone.
-    /// `None` means the owning surface must supply the target (a protected
-    /// configuration apply needs the concrete key, value, and base revision),
-    /// not that the owner withholds the action — that is `legal_actions`.
-    pub target: Option<DoctorRemediationTargetV1>,
-}
-
-impl DashboardDoctorRemediationDescriptorV1 {
-    #[cfg(test)]
-    fn operation(&self) -> &tracedecay_application::doctor::DoctorOwningOperationRefV1 {
-        self.descriptor.operation()
-    }
-}
-
-/// The canonical Doctor report projection. `entries` retains the storage
-/// subclass attached by the kernel; remediation descriptors are emitted only
-/// after the kernel registry resolves the finding's owner-supplied reference.
+/// The canonical Doctor report projection for the read-only dashboard.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DoctorFindingsPayloadV1 {
     pub family_filter: Option<DoctorFindingFamilyV1>,
     pub entries: Vec<DoctorReportEntryV1>,
     pub report_coverage: Option<DoctorReportCoverageV1>,
-    pub remediations: Vec<DashboardDoctorRemediationDescriptorV1>,
     pub known_families: Vec<DoctorFindingFamilyV1>,
     pub note: String,
 }
@@ -67,24 +42,13 @@ pub async fn findings(
     Query(params): Query<DoctorFindingsQueryV1>,
 ) -> Json<DashboardEnvelopeV1<DoctorFindingsPayloadV1>> {
     let scope = scope_from_state(&state);
-    Json(
-        findings_with_authorities(
-            scope,
-            params,
-            state.doctor_report_reader.clone(),
-            state.doctor_remediation_dispatcher.clone(),
-        )
-        .await,
-    )
+    Json(findings_with_authorities(scope, params, state.doctor_report_reader.clone()).await)
 }
 
 async fn findings_with_authorities(
     scope: DashboardScopeV1,
     params: DoctorFindingsQueryV1,
     doctor_report_reader: Option<crate::DoctorReportReader>,
-    doctor_remediation_dispatcher: Option<
-        super::doctor_remediation_api::DoctorRemediationDispatcherV1,
-    >,
 ) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
     // Validate the optional per-family filter against the closed vocabulary. An
     // unknown family is a typed `error` envelope, not a silent all-families read.
@@ -98,13 +62,7 @@ async fn findings_with_authorities(
             return envelope;
         }
     };
-    findings_for_family_with_authorities(
-        scope,
-        family_filter,
-        doctor_report_reader,
-        doctor_remediation_dispatcher,
-    )
-    .await
+    findings_for_family_with_authorities(scope, family_filter, doctor_report_reader).await
 }
 
 /// Project the admitted canonical Doctor report for one closed finding family.
@@ -116,22 +74,14 @@ pub async fn findings_for_family(
     family_filter: Option<DoctorFindingFamilyV1>,
 ) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
     let scope = scope_from_state(&state);
-    findings_for_family_with_authorities(
-        scope,
-        family_filter,
-        state.doctor_report_reader.clone(),
-        state.doctor_remediation_dispatcher.clone(),
-    )
-    .await
+    findings_for_family_with_authorities(scope, family_filter, state.doctor_report_reader.clone())
+        .await
 }
 
 async fn findings_for_family_with_authorities(
     scope: DashboardScopeV1,
     family_filter: Option<DoctorFindingFamilyV1>,
     doctor_report_reader: Option<crate::DoctorReportReader>,
-    doctor_remediation_dispatcher: Option<
-        super::doctor_remediation_api::DoctorRemediationDispatcherV1,
-    >,
 ) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
     let Some(reader) = doctor_report_reader.as_ref() else {
         return envelope(
@@ -163,38 +113,13 @@ async fn findings_for_family_with_authorities(
         }
     };
 
-    let mut presentation = projection.presentation;
-    if let Some(dispatcher) = doctor_remediation_dispatcher.as_ref() {
-        for reference in &projection.remediation_references {
-            for kind in dispatcher.legal_actions(reference).await {
-                let kind = match kind {
-                    super::doctor_remediation_api::DoctorRemediationLegalActionV1::RequestPreview => {
-                        DashboardLegalActionKindV1::RequestDryRun
-                    }
-                    super::doctor_remediation_api::DoctorRemediationLegalActionV1::RequestApply => {
-                        DashboardLegalActionKindV1::RequestApply
-                    }
-                };
-                presentation.merge_owner_legal_action(kind, reference);
-            }
-        }
-    }
-
     envelope(
         scope,
-        presentation,
+        projection.presentation,
         DoctorFindingsPayloadV1 {
             family_filter,
             entries: projection.entries,
             report_coverage: Some(projection.report_coverage),
-            remediations: projection
-                .remediations
-                .into_iter()
-                .map(|descriptor| DashboardDoctorRemediationDescriptorV1 {
-                    target: DoctorRemediationTargetV1::for_operation(descriptor.operation()),
-                    descriptor,
-                })
-                .collect(),
             known_families: KNOWN_DOCTOR_FINDING_FAMILIES.to_vec(),
             note: projection.note,
         },
@@ -224,7 +149,6 @@ fn unavailable_payload(
         family_filter,
         entries: Vec::new(),
         report_coverage: None,
-        remediations: Vec::new(),
         known_families: KNOWN_DOCTOR_FINDING_FAMILIES.to_vec(),
         note: note.into(),
     }
@@ -241,12 +165,11 @@ mod tests {
     use tracedecay_application::doctor::{
         AdvisoryFeedbackDoctorPort, AdvisoryFeedbackReadV1, CodeIndexMountDoctorPort,
         CodeIndexMountReadV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
-        ConfigurationDriftV1, DoctorCoverageCompletenessV1, DoctorReportComposerV1, DoctorReportV1,
-        DoctorSourceFuture, DoctorStorageFamilyReadV1, HostIntegrationDoctorPort,
-        HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1,
-        ObservabilityDoctorPort, ObservabilityReadV1, OperationalAuditDoctorPort,
-        OperationalAuditReadV1, ProfileAuthorityReadV1, RemoteOperationalReadV1,
-        RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
+        DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
+        HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
+        LanguageServerReadV1, ObservabilityDoctorPort, ObservabilityReadV1,
+        OperationalAuditDoctorPort, OperationalAuditReadV1, ProfileAuthorityReadV1,
+        RemoteOperationalReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, StorageDoctorPort,
     };
     use tracedecay_application::{
         CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -256,12 +179,6 @@ mod tests {
         ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
-
-    use super::super::doctor_remediation_api::{
-        DoctorRemediationDispatchErrorV1, DoctorRemediationDispatcherV1,
-        DoctorRemediationLegalActionV1,
-    };
-    use super::super::read_model::DashboardLegalActionRefV1;
 
     struct DoctorTestSourcesV1 {
         configuration: ConfigurationAuthorityReadV1,
@@ -430,20 +347,13 @@ mod tests {
     async fn findings_for_test(
         params: DoctorFindingsQueryV1,
         report: Option<DoctorReportV1>,
-        dispatcher: Option<DoctorRemediationDispatcherV1>,
     ) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
-        findings_with_authorities(
-            dashboard_scope(),
-            params,
-            report.map(reader_for),
-            dispatcher,
-        )
-        .await
+        findings_with_authorities(dashboard_scope(), params, report.map(reader_for)).await
     }
 
     #[tokio::test]
     async fn findings_route_is_typed_unsupported_not_empty_or_healthy() {
-        let envelope = findings_for_test(DoctorFindingsQueryV1 { family: None }, None, None).await;
+        let envelope = findings_for_test(DoctorFindingsQueryV1 { family: None }, None).await;
 
         assert_eq!(envelope.schema_revision, 1);
         // Absent producer -> unsupported, never complete_zero_findings/ready.
@@ -465,7 +375,6 @@ mod tests {
                 family: Some("configuration".to_string()),
             },
             None,
-            None,
         )
         .await;
         assert_eq!(
@@ -482,7 +391,6 @@ mod tests {
                 family: Some("not_a_family".to_string()),
             },
             None,
-            None,
         )
         .await;
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Error);
@@ -497,7 +405,7 @@ mod tests {
     async fn findings_route_preserves_canonical_unknown_entries() {
         let report = compose_report(&DoctorTestSourcesV1::all_unknown()).await;
         let envelope =
-            findings_for_test(DoctorFindingsQueryV1 { family: None }, Some(report), None).await;
+            findings_for_test(DoctorFindingsQueryV1 { family: None }, Some(report)).await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
         // Advisory has both host-integration and feedback-owner findings;
@@ -531,7 +439,6 @@ mod tests {
                 dashboard_scope(),
                 family,
                 Some(reader_for(report.clone())),
-                None,
             )
             .await;
 
@@ -550,77 +457,5 @@ mod tests {
             assert_eq!(envelope.payload.note, expected.note);
             assert_eq!(envelope.payload.family_filter, family);
         }
-    }
-
-    #[tokio::test]
-    async fn findings_route_does_not_invent_an_action_from_a_descriptor() {
-        let mut inputs = DoctorTestSourcesV1::all_unknown();
-        inputs.configuration = ConfigurationAuthorityReadV1::Resolved {
-            drift: ConfigurationDriftV1::Drifted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-        let report = compose_report(&inputs).await;
-        let envelope = findings_for_test(
-            DoctorFindingsQueryV1 {
-                family: Some("configuration".to_string()),
-            },
-            Some(report),
-            None,
-        )
-        .await;
-
-        assert_eq!(envelope.payload.entries.len(), 1);
-        assert_eq!(envelope.payload.remediations.len(), 1);
-        assert_eq!(
-            envelope.payload.remediations[0].operation().as_str(),
-            tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY
-        );
-        assert_eq!(
-            envelope.legal_actions,
-            vec![DashboardLegalActionRefV1::new(
-                DashboardLegalActionKindV1::Refresh,
-                "use-case.dashboard.doctor.findings.refresh",
-            )]
-        );
-    }
-
-    #[tokio::test]
-    async fn findings_route_exposes_an_action_only_from_an_injected_owner_dispatcher() {
-        let mut inputs = DoctorTestSourcesV1::all_unknown();
-        inputs.configuration = ConfigurationAuthorityReadV1::Resolved {
-            drift: ConfigurationDriftV1::Drifted,
-            coverage: DoctorCoverageCompletenessV1::Complete,
-        };
-        let report = compose_report(&inputs).await;
-        let dispatcher = DoctorRemediationDispatcherV1::new(
-            Arc::new(|_| Box::pin(async { vec![DoctorRemediationLegalActionV1::RequestApply] })),
-            Arc::new(|_| {
-                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
-            }),
-            Arc::new(|_| panic!("finding projection never observes remediation")),
-        );
-        let envelope = findings_for_test(
-            DoctorFindingsQueryV1 {
-                family: Some("configuration".to_string()),
-            },
-            Some(report),
-            Some(dispatcher),
-        )
-        .await;
-
-        assert!(
-            envelope
-                .legal_actions
-                .contains(&DashboardLegalActionRefV1::new(
-                    DashboardLegalActionKindV1::RequestApply,
-                    tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY,
-                ))
-        );
-        // The owner authorizes the action even though this route cannot build
-        // the protected-apply target from the finding. Suppressing the action
-        // because the target is absent would report "no authorized action" for
-        // an operation the owner does authorize.
-        assert_eq!(envelope.payload.remediations.len(), 1);
-        assert!(envelope.payload.remediations[0].target.is_none());
     }
 }

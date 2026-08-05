@@ -611,7 +611,7 @@ impl CommandFamily {
             | Commands::EnableUploadCounter
             | Commands::Gitignore { .. }
             | Commands::Config { .. } => Self::Configuration,
-            Commands::Doctor { .. }
+            Commands::Doctor
             | Commands::Cost { .. }
             | Commands::Bench { .. }
             | Commands::Gain { .. }
@@ -1147,29 +1147,18 @@ async fn dispatch_hook_command(command: Commands) -> tracedecay::errors::Result<
 
 async fn dispatch_update_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
-        Commands::Upgrade {
-            no_heal,
-            no_reinstall,
-        } => {
-            update_cmd::run_upgrade_command(no_heal, no_reinstall)?;
+        Commands::Upgrade { no_reinstall } => {
+            update_cmd::run_upgrade_command(no_reinstall)?;
         }
-        Commands::Update {
-            no_heal,
-            no_reinstall,
-        } => {
-            update_cmd::run_update_command(no_heal, no_reinstall)?;
+        Commands::Update { no_reinstall } => {
+            update_cmd::run_update_command(no_reinstall)?;
         }
         Commands::PostUpdate {
-            no_heal,
             no_reinstall,
             lifecycle_lease_token,
         } => {
-            update_cmd::run_post_update_command(
-                no_heal,
-                no_reinstall,
-                lifecycle_lease_token.as_deref(),
-            )
-            .await?;
+            update_cmd::run_post_update_command(no_reinstall, lifecycle_lease_token.as_deref())
+                .await?;
         }
         Commands::PackageHook {
             action: PackageHookAction::Scoop { action },
@@ -1293,8 +1282,8 @@ async fn dispatch_configuration_command(command: Commands) -> tracedecay::errors
 
 async fn dispatch_diagnostics_command(command: Commands) -> tracedecay::errors::Result<()> {
     match command {
-        Commands::Doctor { agent } => {
-            tracedecay::doctor::run_doctor(agent.as_deref()).await?;
+        Commands::Doctor => {
+            tracedecay::doctor::run_doctor().await?;
         }
         Commands::Cost {
             range,
@@ -1385,7 +1374,7 @@ impl CommandStartupPolicy {
             | Commands::PackageHook { .. }
             | Commands::Uninstall { .. }
             | Commands::Lsp { .. }
-            | Commands::Doctor { .. }
+            | Commands::Doctor
             | Commands::Analytics { .. }
             | Commands::Sessions {
                 action:

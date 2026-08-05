@@ -45,7 +45,7 @@ afterEach(() => {
 describe('fetchEnvelope', () => {
   it('reports the gateway read-only refusal as locked, carrying the daemon reason', async () => {
     stub(405, readOnlyBody);
-    const result = await fetchEnvelope('/api/projects/proj_b/doctor/remediations/apply', PayloadSchema, {
+    const result = await fetchEnvelope('/api/projects/proj_b/settings', PayloadSchema, {
       method: 'POST',
     });
     expect(result).toEqual({ outcome: 'transport', state: 'locked', detail: REFUSAL_DETAIL });

@@ -145,51 +145,13 @@ pub(crate) fn doctor_runtime_tool_result(value: serde_json::Value) -> serde_json
     })
 }
 
-fn doctor_runtime_store_paths(
+fn doctor_runtime_store_layout(
     project_path: &Path,
     profile_root: &Path,
 ) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    let branch = crate::branch::current_branch(project_path);
-    doctor_runtime_store_paths_for_branch(project_path, profile_root, branch.as_deref())
-}
-
-fn doctor_runtime_store_paths_for_branch(
-    project_path: &Path,
-    profile_root: &Path,
-    branch: Option<&str>,
-) -> std::result::Result<(PathBuf, PathBuf), &'static str> {
-    let layout = match crate::storage::read_enrollment_marker(project_path) {
-        Ok(Some(marker)) => {
-            crate::storage::profile_sharded_layout(project_path, profile_root, &marker)
-                .map_err(|_| "project_store_schema_unsupported")?
-        }
-        Ok(None) => {
-            if let Some(layout) =
-                crate::storage::resolve_persisted_layout(project_path, profile_root)
-                    .map_err(|_| "project_store_schema_unsupported")?
-            {
-                layout
-            } else {
-                let data_root = crate::config::get_tracedecay_dir(project_path);
-                let legacy_paths = (
-                    data_root.join(crate::config::db_filename(&data_root)),
-                    data_root.join("sessions.db"),
-                );
-                if legacy_paths.0.is_file() {
-                    return Ok(legacy_paths);
-                }
-                crate::storage::default_profile_sharded_layout(project_path, profile_root)
-                    .map_err(|_| "project_store_schema_unsupported")?
-            }
-        }
-        Err(_) => return Err("project_store_schema_unsupported"),
-    };
-    let (graph_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
-        project_path,
-        &layout.data_root,
-        branch,
-    );
-    Ok((graph_path, layout.sessions_db_path))
+    let layout = crate::storage::resolve_layout(project_path, profile_root)
+        .map_err(|_| "project_store_schema_unsupported")?;
+    Ok((layout.graph_db_path, layout.sessions_db_path))
 }
 
 async fn doctor_literal_workspace_placeholder_paths(
@@ -249,13 +211,13 @@ async fn doctor_runtime_value_inner(
     let Some(project_path) = handshake.project_path.as_deref() else {
         return doctor_runtime_unavailable(None, "project_path_missing");
     };
-    let (graph_path, session_path) =
-        match doctor_runtime_store_paths(project_path, &handshake.client_identity.profile_root) {
+    let (expected_graph_path, session_path) =
+        match doctor_runtime_store_layout(project_path, &handshake.client_identity.profile_root) {
             Ok(paths) => paths,
             Err(reason) => return doctor_runtime_unavailable(Some(project_path), reason),
         };
     let Some(store_administration) = store_administration else {
-        let reason = if graph_path.is_file() {
+        let reason = if expected_graph_path.is_file() {
             "project_store_authority_unavailable"
         } else {
             "project_store_missing"
@@ -265,33 +227,29 @@ async fn doctor_runtime_value_inner(
     let canonical_project_path = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.to_path_buf());
-    let canonical_graph_path = graph_path
-        .canonicalize()
-        .unwrap_or_else(|_| graph_path.clone());
     let graph = store_administration
         .mounted_project_graphs()
         .await
         .into_iter()
         .find(|graph| {
-            let mounted_graph_path = graph.db_path();
             graph
                 .project_root()
                 .canonicalize()
                 .unwrap_or_else(|_| graph.project_root().to_path_buf())
                 == canonical_project_path
-                && mounted_graph_path
-                    .canonicalize()
-                    .unwrap_or(mounted_graph_path)
-                    == canonical_graph_path
         });
     let Some(graph) = graph else {
-        let reason = if graph_path.is_file() {
+        let reason = if expected_graph_path.is_file() {
             "project_store_authority_unavailable"
         } else {
             "project_store_missing"
         };
         return doctor_runtime_unavailable(Some(project_path), reason);
     };
+    let graph_path = graph.db_path();
+    let canonical_graph_path = graph_path
+        .canonicalize()
+        .unwrap_or_else(|_| graph_path.clone());
     let (quick_check_ok, quick_check_error) = match graph.quick_check_report().await {
         Ok(None) => (true, None),
         Ok(Some(problem)) => (false, Some(problem)),
@@ -326,8 +284,6 @@ async fn doctor_runtime_value_inner(
             "db_path": graph_path,
             "canonical_db_path": canonical_graph_path,
             "db_size_bytes": db_size_bytes,
-            "journal_mode": null,
-            "synchronous": null,
             "page_size": page_size,
             "quick_check_ok": quick_check_ok,
             "quick_check_error": quick_check_error,
@@ -527,9 +483,16 @@ pub(in crate::daemon) async fn write_doctor_runtime_response(
     store_administration: &super::StoreAdministration,
     request: DoctorRuntimeRequest,
 ) -> Result<()> {
-    let result = doctor_runtime_tool_result(
-        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await,
-    );
+    let mut value =
+        doctor_runtime_value(handshake, store_administration, request.startup_health_only).await;
+    if request.doctor_report_requested() && value.get("doctor_report").is_none() {
+        value["doctor_report"] = json!({
+            "kind": "unknown",
+            "reason": "doctor_report_owner_warming",
+            "table_growth_evidence": [],
+        });
+    }
+    let result = doctor_runtime_tool_result(value);
     write_json_rpc_response(transport, &JsonRpcResponse::success(request.id, result)).await
 }
 
@@ -847,6 +810,12 @@ mod doctor_runtime_route_tests {
         assert!(outcome.is_none());
         assert!(transport.idle_before_write);
         assert!(!transport.output.is_empty());
+        assert!(transport.output.contains(r#""kind":"unknown""#));
+        assert!(
+            transport
+                .output
+                .contains(r#""reason":"doctor_report_owner_warming""#)
+        );
     }
 
     #[tokio::test]
@@ -1049,7 +1018,7 @@ mod doctor_runtime_route_tests {
     }
 
     #[tokio::test]
-    async fn doctor_store_paths_follow_the_active_branch_database() {
+    async fn doctor_store_paths_ignore_an_active_branch_database() {
         let root = tempfile::TempDir::new().unwrap();
         let project = root.path().join("project");
         let profile = root.path().join("profile");
@@ -1073,15 +1042,20 @@ mod doctor_runtime_route_tests {
         let mut meta = crate::branch_meta::BranchMeta::new_for_dir(&layout.data_root, "main");
         meta.add_branch("feature/doctor", branch_relpath, "main");
         crate::branch_meta::save_branch_meta(&layout.data_root, &meta).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["checkout", "-b", "feature/doctor"])
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
 
         assert_eq!(
-            super::doctor_runtime_store_paths_for_branch(
-                &project,
-                &profile,
-                Some("feature/doctor"),
-            )
-            .expect("resolve branch-aware Doctor paths"),
-            (branch_graph, layout.sessions_db_path)
+            super::doctor_runtime_store_layout(&project, &profile)
+                .expect("resolve canonical Doctor store paths"),
+            (default_graph, layout.sessions_db_path),
+            "Doctor must not follow branch-specific database paths"
         );
     }
 

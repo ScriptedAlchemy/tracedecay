@@ -220,9 +220,8 @@ fn validate_db_file(name: &str, entry: &BranchEntry, is_default: bool) -> Result
 ///
 /// This is the canonical definition of "corrupt branch metadata": anything
 /// this rejects — invalid JSON *or* valid JSON with the wrong schema — makes
-/// the runtime fall back to single-DB mode. Every consumer (loading at
-/// runtime, quarantining in the post-update health pass) must go through this
-/// one predicate so they agree on what corrupt means.
+/// the runtime fall back to single-DB mode. Every reader must go through this
+/// one predicate so invalid metadata is never treated as authority.
 pub fn parse(content: &str) -> serde_json::Result<BranchMeta> {
     let meta: BranchMeta = serde_json::from_str(content)?;
     meta.validate()

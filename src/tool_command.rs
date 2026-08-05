@@ -80,7 +80,6 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
     "tracedecay_lcm_status",
     "tracedecay_lcm_grep",
     "tracedecay_lcm_load_session",
-    "tracedecay_lcm_doctor",
     "tracedecay_lcm_describe",
     "tracedecay_lcm_expand",
     "tracedecay_lcm_expand_query",

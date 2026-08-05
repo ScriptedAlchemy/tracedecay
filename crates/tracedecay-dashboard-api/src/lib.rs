@@ -75,13 +75,6 @@ pub mod config;
 pub mod contract_schema;
 mod delivery_api;
 mod doctor_findings_api;
-pub mod doctor_remediation_api;
-pub use doctor_remediation_api::{
-    DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
-    DoctorRemediationDispatcherV1, DoctorRemediationLegalActionV1,
-    DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1, DoctorRemediationTargetV1,
-    DoctorRemediationVerificationV1,
-};
 mod events_api;
 mod explorer_api;
 pub mod feedback_api;
@@ -91,16 +84,6 @@ mod graph_service;
 mod graph_structure_api;
 pub mod hooks;
 mod lcm_api;
-// SEAM(sessions): the sessions mover physically relocated this dashboard test
-// module to `crates/tracedecay-sessions/src/runtime/lcm/`, where nothing
-// declares it — it is a dashboard test (`super::*` resolves to this crate's
-// root, and it drives an `axum::Router` over `DashboardState`). The `#[path]`
-// follows the file so the coverage is not silently dropped; the lead should
-// physically move it back under this crate (`src/` or `tests/`) at
-// integration, at which point this attribute goes away.
-#[cfg(test)]
-#[path = "../../tracedecay-sessions/src/runtime/lcm/dashboard_fixes_tests.rs"]
-mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
 mod loom_api;
 mod memory_analysis;
@@ -234,8 +217,6 @@ pub struct DashboardStateCompositionV1 {
     pub automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     pub automation_writer: DashboardAutomationWriter,
     pub doctor_report_reader: Option<DoctorReportReader>,
-    pub doctor_remediation_dispatcher:
-        Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     pub code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     pub feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     pub code_diagnostics_broker:
@@ -352,10 +333,6 @@ pub struct DashboardState {
     /// Admitted canonical Doctor report source. Absent when the dashboard was
     /// not opened by an owner holding an exact application request context.
     pub doctor_report_reader: Option<DoctorReportReader>,
-    /// Optional admitted owner-operation router. Its absence keeps remediation
-    /// references descriptive and non-actionable.
-    pub doctor_remediation_dispatcher:
-        Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     /// Active-project daemon application transport. Mutating dashboard routes
     /// use this catalog-bound executor instead of opening stores or applying
     /// configuration inside HTTP adapters.
@@ -433,13 +410,9 @@ impl DashboardState {
             crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1,
         >,
         doctor_report_reader: Option<DoctorReportReader>,
-        doctor_remediation_dispatcher: Option<
-            doctor_remediation_api::DoctorRemediationDispatcherV1,
-        >,
     ) {
         self.code_diagnostics_authority = code_diagnostics_authority;
         self.doctor_report_reader = doctor_report_reader;
-        self.doctor_remediation_dispatcher = doctor_remediation_dispatcher;
     }
 }
 
@@ -530,7 +503,6 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
-        doctor_remediation_dispatcher,
         code_index_freshness_reader,
         feedback_status_reader,
         code_diagnostics_broker,
@@ -591,14 +563,9 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader: None,
-        doctor_remediation_dispatcher: None,
         application_invocation_executor,
     };
-    state.retain_admitted_authorities(
-        code_diagnostics_authority,
-        doctor_report_reader,
-        doctor_remediation_dispatcher,
-    );
+    state.retain_admitted_authorities(code_diagnostics_authority, doctor_report_reader);
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
     if warm_token_counts {
@@ -622,7 +589,6 @@ pub async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
             feedback_status_reader: None,
             code_diagnostics_broker: None,
@@ -661,7 +627,6 @@ pub async fn build_selected_project_state(
             // selected state's exact canonical root and returns only a mounted
             // scheduler, so the root-addressed read port is safe to reuse.
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: active.code_index_freshness_reader.clone(),
             feedback_status_reader: active.feedback_status_reader.clone(),
             code_diagnostics_broker: None,
@@ -841,7 +806,6 @@ where
             automation_scheduler_reconciler: None,
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
             feedback_status_reader: None,
             code_diagnostics_broker: Some(code_diagnostics_broker),
@@ -1404,18 +1368,6 @@ fn project_api_router() -> Router<DashboardState> {
             get(doctor_findings_api::findings),
         )
         .route(
-            "/api/doctor/remediations/preview",
-            post(doctor_remediation_api::preview),
-        )
-        .route(
-            "/api/doctor/remediations/apply",
-            post(doctor_remediation_api::apply),
-        )
-        .route(
-            "/api/doctor/remediations/{operation_id}",
-            get(doctor_remediation_api::status),
-        )
-        .route(
             "/api/storage/telemetry",
             get(storage_telemetry_api::telemetry),
         )
@@ -1807,7 +1759,6 @@ mod authority_tests {
                 automation_scheduler_reconciler: None,
                 automation_writer: standalone_dashboard_automation_writer(),
                 doctor_report_reader: None,
-                doctor_remediation_dispatcher: None,
                 application_invocation_executor: None,
             };
             Self {
@@ -1901,13 +1852,6 @@ mod authority_tests {
                 )
             })
         });
-        let doctor_dispatcher = DoctorRemediationDispatcherV1::new(
-            Arc::new(|_| Box::pin(async { Vec::new() })),
-            Arc::new(|_| {
-                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
-            }),
-            Arc::new(|_| panic!("dashboard construction does not observe remediation")),
-        );
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
             crate::application::dashboard_diagnostics::diagnostic_broker(
                 fixture.layout.project_root.clone(),
@@ -1924,7 +1868,6 @@ mod authority_tests {
                 ),
             ),
             Some(Arc::clone(&doctor_reader)),
-            Some(doctor_dispatcher),
         );
         let state = fixture.state;
 
@@ -1935,11 +1878,39 @@ mod authority_tests {
                 .expect("admitted Doctor reader"),
             &doctor_reader,
         ));
-        assert!(state.doctor_remediation_dispatcher.is_some());
         assert!(
             state.code_diagnostics_authority.is_some(),
             "daemon dashboard must retain the admitted diagnostics authority"
         );
+    }
+
+    #[tokio::test]
+    async fn doctor_routes_expose_diagnostics_without_mutation_endpoints() {
+        let fixture = DashboardStateFixture::open("project.dashboard-doctor-read-only").await;
+        let app = router_with_active_application(fixture.state, None, Router::new());
+
+        for (method, path) in [
+            (Method::POST, "/api/doctor/remediations/preview"),
+            (Method::POST, "/api/doctor/remediations/apply"),
+            (Method::GET, "/api/doctor/remediations/operation"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("legacy Doctor mutation request"),
+                )
+                .await
+                .expect("legacy Doctor mutation response");
+            assert_eq!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{path} is not mounted"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2416,10 +2387,6 @@ mod authority_tests {
                 "{tail} must not be answerable for a selected project"
             );
         }
-        assert_eq!(
-            selected_project_application_read(&Method::POST, "doctor/remediations/apply"),
-            None
-        );
         assert_eq!(
             selected_project_application_read(&Method::POST, "feedback/status"),
             None

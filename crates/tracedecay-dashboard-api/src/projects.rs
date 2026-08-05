@@ -151,7 +151,6 @@ pub(super) struct ProjectContextPayloadV1 {
     is_active: Option<bool>,
     project: Option<PublicCodeProject>,
     aliases: Vec<tracedecay_global_db::ProjectAliasRecord>,
-    stores: Vec<tracedecay_global_db::ProjectStoreContext>,
 }
 
 pub async fn list(
@@ -291,7 +290,6 @@ pub fn registry_unavailable_response(
             is_active: None,
             project: None,
             aliases: Vec::new(),
-            stores: Vec::new(),
         },
         error.to_string(),
     ))
@@ -310,7 +308,6 @@ pub async fn context(
                 is_active: None,
                 project: None,
                 aliases: Vec::new(),
-                stores: Vec::new(),
             },
             "project_registry_not_mounted",
         ));
@@ -329,7 +326,6 @@ pub async fn context(
                 is_active: None,
                 project: None,
                 aliases: Vec::new(),
-                stores: Vec::new(),
             },
         ));
     };
@@ -346,17 +342,13 @@ pub async fn context(
                 runtime.active_project_id(),
             )),
             aliases: context.aliases,
-            stores: context.stores,
         },
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use tracedecay_global_db::{
-        CodeProjectRecord, GraphScopeRecord, ProjectRegistryContext, ProjectStoreContext,
-        StoreArtifactRecord, StoreInstanceRecord,
-    };
+    use tracedecay_global_db::{CodeProjectRecord, ProjectRegistryContext};
 
     fn code_project() -> CodeProjectRecord {
         CodeProjectRecord {
@@ -371,45 +363,11 @@ mod tests {
         }
     }
 
-    fn store_context() -> ProjectStoreContext {
-        ProjectStoreContext {
-            store: StoreInstanceRecord {
-                store_id: "store:test".to_string(),
-                project_id: "proj_test".to_string(),
-                store_kind: "code_project".to_string(),
-                storage_mode: "profile_sharded".to_string(),
-                store_relpath: "projects/proj_test".to_string(),
-                manifest_relpath: Some("projects/proj_test/store_manifest.json".to_string()),
-                created_at: 110,
-                last_verified_at: Some(210),
-                last_write_at: Some(220),
-            },
-            graph_scopes: vec![GraphScopeRecord {
-                graph_scope_id: "store:test:branch:main".to_string(),
-                project_id: "proj_test".to_string(),
-                store_id: "store:test".to_string(),
-                branch_name: "main".to_string(),
-                db_relpath: "projects/proj_test/branches/main.db".to_string(),
-                parent_scope_id: None,
-                last_synced_at: Some(230),
-                writable: true,
-            }],
-            artifacts: vec![StoreArtifactRecord {
-                store_id: "store:test".to_string(),
-                artifact_kind: "graph_db".to_string(),
-                relpath: "projects/proj_test/branches/main.db".to_string(),
-                size_bytes: Some(4096),
-                schema_version: None,
-                updated_at: Some(240),
-            }],
-        }
-    }
-
     fn registry_context() -> ProjectRegistryContext {
         ProjectRegistryContext {
             project: code_project(),
             aliases: Vec::new(),
-            stores: vec![store_context()],
+            stores: Vec::new(),
         }
     }
 
@@ -419,18 +377,6 @@ mod tests {
         let mut changed = registry_context();
         changed.project.canonical_root = "/new-repo".to_string();
         changed.project.last_seen_at += 1;
-
-        assert_ne!(base, changed);
-    }
-
-    #[test]
-    fn registry_context_changes_with_store_metadata() {
-        let base = registry_context();
-        let mut changed = registry_context();
-        changed.stores[0].store.last_write_at = Some(999);
-        changed.stores[0].graph_scopes[0].db_relpath =
-            "projects/proj_test/branches/feature.db".to_string();
-        changed.stores[0].artifacts[0].updated_at = Some(1000);
 
         assert_ne!(base, changed);
     }

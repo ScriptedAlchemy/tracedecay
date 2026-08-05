@@ -48,10 +48,8 @@ function readout(label: string): string | null {
   return screen.getByText(label, { selector: 'dt' }).nextElementSibling?.textContent ?? null;
 }
 
-/** The registry backbone (src/dashboard/projects.rs `context`) — resolves for
- * every registered project whether or not its graph is mounted. Its store
- * carries a `release/2.4` graph scope, which is the branch these tests read
- * back to prove the backbone survived a failed graph read. */
+/** The registry backbone (src/dashboard/projects.rs `context`) resolves for
+ * every registered project whether or not its graph is mounted. */
 const CONTEXT = withEnvelopePayload(wirePayload('/api/projects/proj_x'));
 
 /** Wire-true unseeded slice, cut down to two nodes and the edge between them.
@@ -165,10 +163,27 @@ describe('ScopedBrain', () => {
     );
     expect(fetchMock.mock.calls.map(([input]) => String(input))).toContain('/api/projects/proj_x');
 
-    // Real readouts, from the project's own stores.
+    // Real readouts, from the project's scoped daemon APIs.
     expect(screen.getByText('12.9')).toBeTruthy();
     expect(screen.getByText('173')).toBeTruthy();
-    expect(screen.getByText('release/2.4')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
+  });
+
+  it('renders project identity and checkout aliases without a branch store', async () => {
+    vi.stubGlobal(
+      'fetch',
+      serve({
+        '/api/projects/proj_x/plugins/graph/subgraph': {
+          status: 200,
+          body: SUBGRAPH_ENVELOPE,
+        },
+        '/api/projects/proj_x': { status: 200, body: CONTEXT },
+      }),
+    );
+    renderScoped();
+
+    await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
+    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
   });
 
   it('does not infer an unmounted graph from a generic scoped read failure', async () => {
@@ -188,7 +203,7 @@ describe('ScopedBrain', () => {
     expect(screen.queryByText(/graph field · not mounted/i)).toBeNull();
     expect(screen.queryByTestId('graph-canvas')).toBeNull();
     // The independently successful registry backbone remains available.
-    expect(screen.getByText('release/2.4')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'checkouts' })).toBeTruthy();
   });
 
   /**
@@ -325,7 +340,8 @@ describe('ScopedBrain', () => {
    * Both payloads carry their counts as required non-nullable integers, so an
    * absent store answers with zeros — `available: false` and `exists: false`
    * are the only fields that say those zeros are not measurements. Reading the
-   * numbers without the flags turned "there is no analytics store here" and
+   * numbers without the flags turned "no session or event source is available"
+   * and
    * "this project has no memory bank" into "nothing has happened here", which
    * is the one reading the reader cannot tell apart from real quiet.
    */
@@ -371,7 +387,7 @@ describe('ScopedBrain', () => {
     // And each dash is accounted for, in the source's own words where it sent
     // any — a withheld figure the reader cannot explain reads as a bug.
     expect(screen.getByText(/no memory bank at \/store\/proj_x\/memory\.db/)).toBeTruthy();
-    expect(screen.getByText(/no analytics store/i)).toBeTruthy();
+    expect(screen.getByText(/no session or event source is available/i)).toBeTruthy();
   });
 
   it('keeps a measured zero from an available source', async () => {
@@ -426,7 +442,6 @@ describe('ScopedBrain', () => {
               is_active: null,
               project: null,
               aliases: [],
-              stores: [],
             },
             'partial',
           ),
@@ -437,8 +452,6 @@ describe('ScopedBrain', () => {
 
     await waitFor(() => expect(screen.getByText('Source unavailable')).toBeTruthy());
     expect(screen.getByText(/unable to open \/home\/x\/\.tracedecay\/global\.db/)).toBeTruthy();
-    // The store card the successful backbone draws must not be there.
-    expect(screen.queryByText('release/2.4')).toBeNull();
   });
 
   it('treats a typed 200 missing project as an absent deep link, not an unknown read', async () => {

@@ -145,7 +145,6 @@ fn test_write_and_exec_tools_are_not_read_only() {
         "tracedecay_move_symbol",
         "tracedecay_run_affected_tests",
         "tracedecay_ast_grep_rewrite",
-        "tracedecay_lcm_doctor",
     ];
     // The only entry allowed to be missing: it is registered just when
     // ast-grep is on PATH. Skipping any other name would let a renamed or

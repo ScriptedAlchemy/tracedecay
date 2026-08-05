@@ -569,9 +569,7 @@ authorized daemon operations.
 To check only a specific agent:
 
 ```bash
-tracedecay doctor --agent claude
-tracedecay doctor --agent codex
-tracedecay doctor --agent kiro
+tracedecay doctor
 ```
 
 The accepted agent values are the same values supported by `tracedecay install --agent`.

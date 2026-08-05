@@ -281,7 +281,6 @@ fn direct_effect(tool_name: &str) -> EffectClass {
         | "tracedecay_memory_status"
         | "tracedecay_session_refresh"
         | "tracedecay_run_affected_tests"
-        | "tracedecay_lcm_doctor"
         | "tracedecay_lcm_compress"
         | "tracedecay_lcm_session_boundary"
         | "tracedecay_session_start"
@@ -564,13 +563,9 @@ mod tests {
     }
 
     #[test]
-    fn mixed_repair_tools_are_effects_without_fabricated_lifecycle_claims() {
+    fn administrative_tools_are_effects_without_fabricated_lifecycle_claims() {
         let catalog = mcp_dispatch_catalog().unwrap();
-        for tool_name in [
-            "tracedecay_lcm_doctor",
-            "tracedecay_memory_status",
-            "tracedecay_session_refresh",
-        ] {
+        for tool_name in ["tracedecay_memory_status", "tracedecay_session_refresh"] {
             let contract = catalog.contract(tool_name).unwrap();
             assert_eq!(contract.effect(), EffectClass::Administrative);
             assert!(!contract.read_only());
@@ -581,6 +576,22 @@ mod tests {
                 McpInverseContract::Unavailable { .. }
             ));
         }
+    }
+
+    #[test]
+    fn lcm_doctor_is_a_read_only_diagnostic() {
+        let contract = mcp_dispatch_catalog()
+            .unwrap()
+            .contract("tracedecay_lcm_doctor")
+            .unwrap();
+        assert_eq!(contract.effect(), EffectClass::Read);
+        assert!(contract.read_only());
+        assert!(contract.availability().is_available());
+        assert_eq!(contract.idempotency(), McpIdempotencyContract::NotProvided);
+        assert!(matches!(
+            contract.inverse(),
+            McpInverseContract::NotApplicable
+        ));
     }
 
     #[test]

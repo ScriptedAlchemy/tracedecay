@@ -193,9 +193,7 @@ fn non_hook_commands_keep_warnings_on_stderr() {
 
 #[test]
 fn doctor_skips_startup_maintenance() {
-    let command = Commands::Doctor {
-        agent: Some("kiro".to_string()),
-    };
+    let command = Commands::Doctor;
     assert!(should_skip_startup_maintenance(&command));
 }
 
@@ -217,15 +215,12 @@ fn explicit_agent_config_commands_skip_startup_maintenance() {
         agent: None,
     }));
     assert!(should_skip_startup_maintenance(&Commands::Upgrade {
-        no_heal: false,
         no_reinstall: false
     }));
     assert!(should_skip_startup_maintenance(&Commands::Update {
-        no_heal: false,
         no_reinstall: false
     }));
     assert!(should_skip_startup_maintenance(&Commands::PostUpdate {
-        no_heal: false,
         no_reinstall: false,
         lifecycle_lease_token: None,
     }));
@@ -298,16 +293,13 @@ fn agent_install_maintenance_is_selective() {
         }
     ));
     assert!(should_skip_agent_install_maintenance(&Commands::Upgrade {
-        no_heal: false,
         no_reinstall: false
     }));
     assert!(should_skip_agent_install_maintenance(&Commands::Update {
-        no_heal: false,
         no_reinstall: false
     }));
     assert!(should_skip_agent_install_maintenance(
         &Commands::PostUpdate {
-            no_heal: false,
             no_reinstall: false,
             lifecycle_lease_token: None,
         }
@@ -320,9 +312,7 @@ fn agent_install_maintenance_is_selective() {
             local: false,
         }
     ));
-    assert!(should_skip_agent_install_maintenance(&Commands::Doctor {
-        agent: Some("cursor".to_string()),
-    }));
+    assert!(should_skip_agent_install_maintenance(&Commands::Doctor));
 
     // Run maintenance for normal everyday command invocations so a binary
     // upgrade re-syncs agent config.

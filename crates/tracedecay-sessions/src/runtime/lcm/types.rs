@@ -437,7 +437,7 @@ pub struct LcmConfigStatus {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LcmCleanConfig {
+pub struct LcmNoiseClassificationConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_session_patterns: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

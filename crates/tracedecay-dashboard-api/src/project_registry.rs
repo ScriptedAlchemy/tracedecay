@@ -30,7 +30,6 @@ pub struct ProjectRegistryEntry {
     pub default_branch: Option<String>,
     pub branches: Vec<String>,
     pub store_count: usize,
-    pub graph_scope_count: usize,
     pub artifact_count: usize,
     pub alias_count: usize,
     pub last_seen_at: i64,
@@ -134,18 +133,11 @@ fn project_entry(
     if let Some(branch) = &context.project.default_branch {
         branches.insert(branch.clone());
     }
-    let mut graph_scope_count = 0;
-    let mut artifact_count = 0;
-    for store in &context.stores {
-        graph_scope_count += store.graph_scopes.len();
-        artifact_count += store.artifacts.len();
-        branches.extend(
-            store
-                .graph_scopes
-                .iter()
-                .map(|scope| scope.branch_name.clone()),
-        );
-    }
+    let artifact_count = context
+        .stores
+        .iter()
+        .map(|store| store.artifacts.len())
+        .sum();
     ProjectRegistryEntry {
         project_id: context.project.project_id.clone(),
         label: path_label(&context.project.display_root),
@@ -155,7 +147,6 @@ fn project_entry(
         default_branch: context.project.default_branch.clone(),
         branches: branches.into_iter().collect(),
         store_count: context.stores.len(),
-        graph_scope_count,
         artifact_count,
         alias_count: context.aliases.len(),
         last_seen_at: context.project.last_seen_at,

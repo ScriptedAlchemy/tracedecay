@@ -20,7 +20,6 @@
 use crate::doctor::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
     DoctorEvidenceReferenceV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1, DoctorFindingV1,
-    DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
     DoctorStorageFindingKindV1, DoctorStorageFindingV1,
 };
 use crate::error::ApplicationContractError;
@@ -29,7 +28,6 @@ use super::debris::IncidentDebrisScanV1;
 use super::identity::StoreKeyV1;
 use super::inventory::{
     CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
-    StaleBranchDbRecordV1,
 };
 use super::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, TableGrowthDoctorEvidenceV1,
@@ -41,29 +39,9 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
     match kind {
         DoctorStorageFindingKindV1::OverBudgetStore => "over_budget_store",
         DoctorStorageFindingKindV1::OrphanStore => "orphan_store",
-        DoctorStorageFindingKindV1::StaleBranchDbs => "stale_branch_dbs",
         DoctorStorageFindingKindV1::IncidentDebrisPresent => "incident_debris_present",
         DoctorStorageFindingKindV1::RetentionBacklog => "retention_backlog",
         DoctorStorageFindingKindV1::TableGrowth => "table_growth",
-    }
-}
-
-/// Owning application operation a Doctor finding references for remediation.
-/// Doctor never repairs; it names the operation the owner would invoke.
-const fn owning_operation(kind: DoctorStorageFindingKindV1) -> &'static str {
-    match kind {
-        DoctorStorageFindingKindV1::OverBudgetStore
-        | DoctorStorageFindingKindV1::RetentionBacklog => {
-            "use-case.application.storage.retention-collect"
-        }
-        DoctorStorageFindingKindV1::OrphanStore => {
-            "use-case.application.storage.collect-orphan-store"
-        }
-        DoctorStorageFindingKindV1::StaleBranchDbs => "use-case.application.storage.branch-gc",
-        DoctorStorageFindingKindV1::IncidentDebrisPresent => {
-            "use-case.application.storage.quarantine-and-collect-debris"
-        }
-        DoctorStorageFindingKindV1::TableGrowth => "use-case.application.storage.telemetry.read",
     }
 }
 
@@ -101,15 +79,6 @@ pub(crate) fn truncate_at_char_boundary(value: &str, max: usize) -> String {
     value[..end].to_string()
 }
 
-fn remediation(
-    kind: DoctorStorageFindingKindV1,
-) -> Result<DoctorRemediationRefV1, ApplicationContractError> {
-    Ok(DoctorRemediationRefV1::new(
-        DoctorOwningOperationRefV1::new(owning_operation(kind))?,
-        DoctorRemediationKindV1::Action,
-    ))
-}
-
 fn coverage(
     completeness: DoctorCoverageCompletenessV1,
     statement: &str,
@@ -117,8 +86,7 @@ fn coverage(
     DoctorCoverageStatementV1::new(completeness, statement)
 }
 
-/// Map an observed retention/size problem into a non-healthy Storage finding
-/// with a remediation reference to the owning collection operation.
+/// Map an observed retention/size problem into a non-healthy Storage finding.
 fn problem_finding(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -132,12 +100,11 @@ fn problem_finding(
         state,
         vec![evidence(kind, store, detail)?],
         coverage(completeness, coverage_statement)?,
-        Some(remediation(kind)?),
     )
 }
 
 /// Map an unobservable evidence source (unsupported/denied/unknown) into a
-/// Storage finding that carries the honest non-healthy state and no remediation.
+/// Storage finding that carries the honest non-healthy state.
 fn unobservable_finding(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -150,13 +117,11 @@ fn unobservable_finding(
         state,
         vec![evidence(kind, store, detail)?],
         coverage(DoctorCoverageCompletenessV1::Unknown, coverage_statement)?,
-        None,
     )
 }
 
 /// Map a clean observation into either a healthy finding (complete coverage) or
-/// an honest non-healthy `Partial` finding (incomplete coverage). Never carries
-/// remediation, per the healthy-finding invariant.
+/// an honest non-healthy `Partial` finding (incomplete coverage).
 fn clean_finding(
     kind: DoctorStorageFindingKindV1,
     store: &StoreKeyV1,
@@ -175,13 +140,12 @@ fn clean_finding(
         state,
         vec![evidence(kind, store, detail)?],
         coverage(completeness, coverage_statement)?,
-        None,
     )
 }
 
 /// Wrap one prepared table-growth evidence item in the canonical typed Storage
-/// finding. Significant growth is informational and carries no remediation;
-/// baseline and unavailable reads retain their exact non-healthy evidence state.
+/// finding. Baseline and unavailable reads retain their exact non-healthy
+/// evidence state.
 pub fn table_growth_finding(
     evidence_item: &TableGrowthDoctorEvidenceV1,
 ) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
@@ -268,7 +232,6 @@ pub fn table_growth_finding(
         state,
         vec![evidence(kind, store, &detail)?],
         coverage(completeness, statement)?,
-        None,
     )?;
     DoctorStorageFindingV1::new(kind, finding)
 }
@@ -389,40 +352,6 @@ pub fn orphan_store_finding(
             completeness,
             "identity-resolves",
             "store identity resolves to a live repository root",
-        )?
-    };
-    DoctorStorageFindingV1::new(kind, finding)
-}
-
-/// Produce the `StaleBranchDbs` finding from a branch-DB inventory record.
-///
-/// A branch DB whose ref is gone is `Stale` — its evidence is behind the live
-/// git-ref watermark — and references the branch-GC operation.
-pub fn stale_branch_dbs_finding(
-    record: &StaleBranchDbRecordV1,
-    completeness: DoctorCoverageCompletenessV1,
-) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
-    let kind = DoctorStorageFindingKindV1::StaleBranchDbs;
-    let finding = if record.is_stale() {
-        problem_finding(
-            kind,
-            &record.store,
-            DoctorEvidenceStateV1::Stale,
-            completeness,
-            &format!(
-                "branch-{}.size-{}b",
-                truncate_at_char_boundary(record.branch.as_str(), 120),
-                record.size_bytes.get()
-            ),
-            "branch-scoped store whose git ref is gone awaits lifecycle removal",
-        )?
-    } else {
-        clean_finding(
-            kind,
-            &record.store,
-            completeness,
-            "branch-ref-present",
-            "branch-scoped store's git ref is still live",
         )?
     };
     DoctorStorageFindingV1::new(kind, finding)
@@ -572,9 +501,7 @@ pub fn code_generation_retention_finding(
 mod tests {
     use super::*;
     use crate::storage::debris::{IncidentDebrisArtifactV1, IncidentDebrisScanV1};
-    use crate::storage::identity::{
-        BranchRefV1, RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1,
-    };
+    use crate::storage::identity::{RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1};
     use crate::storage::telemetry::{StoreSizeSampleV1, TableGrowthDoctorEvidenceV1};
     use tracedecay_domain::UtcMicros;
 
@@ -606,7 +533,7 @@ mod tests {
     // --- TableGrowth ---------------------------------------------------------
 
     #[test]
-    fn significant_table_growth_is_informational_without_remediation() {
+    fn significant_table_growth_is_informational() {
         let finding = table_growth_finding(&TableGrowthDoctorEvidenceV1::SignificantGrowth {
             store: store(),
             table: TableNameV1::new("messages").expect("valid"),
@@ -620,7 +547,6 @@ mod tests {
 
         assert_eq!(finding.kind(), DoctorStorageFindingKindV1::TableGrowth);
         assert!(finding.finding().state().is_healthy_complete());
-        assert!(finding.finding().remediation().is_none());
         assert!(only_evidence(&finding).contains("table-messages"));
         assert!(only_evidence(&finding).contains("growth-1048576b"));
     }
@@ -641,13 +567,12 @@ mod tests {
                 .expect("unknown finding");
         assert_eq!(unknown.finding().state(), DoctorEvidenceStateV1::Unknown);
         assert!(!only_evidence(&unknown).contains("0b"));
-        assert!(unknown.finding().remediation().is_none());
     }
 
     // --- OverBudgetStore -----------------------------------------------------
 
     #[test]
-    fn over_budget_store_produces_degraded_finding_with_remediation() {
+    fn over_budget_store_produces_degraded_finding() {
         // 100 pages * 4096 = 409_600 > 300_000 budget.
         let read = StorageTelemetryReadV1::Observed {
             sample: sample(100),
@@ -661,12 +586,11 @@ mod tests {
         assert_eq!(finding.kind(), DoctorStorageFindingKindV1::OverBudgetStore);
         assert_eq!(finding.finding().family(), DoctorFindingFamilyV1::Storage);
         assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
-        assert!(finding.finding().remediation().is_some());
         assert!(only_evidence(&finding).starts_with("storage.over_budget_store."));
     }
 
     #[test]
-    fn within_budget_complete_coverage_is_healthy_without_remediation() {
+    fn within_budget_complete_coverage_is_healthy() {
         // 10 pages * 4096 = 40_960 < 300_000 budget.
         let read = StorageTelemetryReadV1::Observed { sample: sample(10) };
         let finding = over_budget_finding(
@@ -677,7 +601,6 @@ mod tests {
         .expect("finding");
         assert_eq!(finding.kind(), DoctorStorageFindingKindV1::OverBudgetStore);
         assert!(finding.finding().state().is_healthy_complete());
-        assert!(finding.finding().remediation().is_none());
         assert!(finding.finding().coverage().is_complete());
     }
 
@@ -707,7 +630,6 @@ mod tests {
             finding.finding().state(),
             DoctorEvidenceStateV1::Unsupported
         );
-        assert!(finding.finding().remediation().is_none());
     }
 
     #[test]
@@ -748,7 +670,6 @@ mod tests {
         assert_eq!(finding.kind(), DoctorStorageFindingKindV1::OrphanStore);
         assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
         assert!(only_evidence(&finding).starts_with("storage.orphan_store."));
-        assert!(finding.finding().remediation().is_some());
     }
 
     #[test]
@@ -762,36 +683,6 @@ mod tests {
         };
         let finding =
             orphan_store_finding(&record, DoctorCoverageCompletenessV1::Complete).expect("finding");
-        assert!(finding.finding().state().is_healthy_complete());
-    }
-
-    // --- StaleBranchDbs ------------------------------------------------------
-
-    #[test]
-    fn stale_branch_dbs_produces_stale_finding() {
-        let record = StaleBranchDbRecordV1 {
-            store: StoreKeyV1::new("branches/feature-x").expect("valid"),
-            branch: BranchRefV1::new("feature-x").expect("valid"),
-            ref_present: false,
-            size_bytes: StorageByteSizeV1(40_000_000_000),
-        };
-        let finding = stale_branch_dbs_finding(&record, DoctorCoverageCompletenessV1::Complete)
-            .expect("finding");
-        assert_eq!(finding.kind(), DoctorStorageFindingKindV1::StaleBranchDbs);
-        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Stale);
-        assert!(only_evidence(&finding).starts_with("storage.stale_branch_dbs."));
-    }
-
-    #[test]
-    fn live_branch_produces_healthy_finding() {
-        let record = StaleBranchDbRecordV1 {
-            store: StoreKeyV1::new("branches/main").expect("valid"),
-            branch: BranchRefV1::new("main").expect("valid"),
-            ref_present: true,
-            size_bytes: StorageByteSizeV1(1_000),
-        };
-        let finding = stale_branch_dbs_finding(&record, DoctorCoverageCompletenessV1::Complete)
-            .expect("finding");
         assert!(finding.finding().state().is_healthy_complete());
     }
 
@@ -823,7 +714,6 @@ mod tests {
         );
         assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Degraded);
         assert!(only_evidence(&finding).starts_with("storage.incident_debris_present."));
-        assert!(finding.finding().remediation().is_some());
     }
 
     #[test]
@@ -835,7 +725,6 @@ mod tests {
         };
         let finding = incident_debris_finding(&scan).expect("finding");
         assert!(finding.finding().state().is_healthy_complete());
-        assert!(finding.finding().remediation().is_none());
     }
 
     #[test]
@@ -926,7 +815,6 @@ mod tests {
         assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Stale);
         assert!(only_evidence(&finding).contains("stranded-scopes-2"));
         assert!(only_evidence(&finding).contains("stranded-scope-bytes-7730941132b"));
-        assert!(finding.finding().remediation().is_some());
     }
 
     #[test]
@@ -972,16 +860,6 @@ mod tests {
             DoctorCoverageCompletenessV1::Complete,
         )
         .expect("orphan");
-        let stale = stale_branch_dbs_finding(
-            &StaleBranchDbRecordV1 {
-                store: store(),
-                branch: BranchRefV1::new("gone").expect("valid"),
-                ref_present: false,
-                size_bytes: StorageByteSizeV1(1),
-            },
-            DoctorCoverageCompletenessV1::Complete,
-        )
-        .expect("stale");
         let debris = incident_debris_finding(&IncidentDebrisScanV1 {
             store: store(),
             artifacts: vec![debris_artifact(1)],
@@ -1004,17 +882,15 @@ mod tests {
         // review S1) — the kind is recovered by value, not by parsing evidence.
         assert_eq!(over.kind(), DoctorStorageFindingKindV1::OverBudgetStore);
         assert_eq!(orphan.kind(), DoctorStorageFindingKindV1::OrphanStore);
-        assert_eq!(stale.kind(), DoctorStorageFindingKindV1::StaleBranchDbs);
         assert_eq!(
             debris.kind(),
             DoctorStorageFindingKindV1::IncidentDebrisPresent
         );
         assert_eq!(backlog.kind(), DoctorStorageFindingKindV1::RetentionBacklog);
 
-        for finding in [&over, &orphan, &stale, &debris, &backlog] {
+        for finding in [&over, &orphan, &debris, &backlog] {
             assert_eq!(finding.finding().family(), DoctorFindingFamilyV1::Storage);
             assert!(!finding.finding().state().is_healthy_complete());
-            assert!(finding.finding().remediation().is_some());
         }
     }
 }

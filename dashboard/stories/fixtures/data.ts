@@ -93,7 +93,7 @@ function projectEntry(
   label: string,
   root: string,
   ageSecs: number,
-  mass?: { stores: number; scopes: number; artifacts: number },
+  mass?: { stores: number; artifacts: number },
 ): Record<string, unknown> {
   return {
     project_id: id,
@@ -104,7 +104,6 @@ function projectEntry(
     default_branch: 'master',
     branches: ['master', 'codex/tracedecay-total-redesign-plan'],
     store_count: mass?.stores ?? 3,
-    graph_scope_count: mass?.scopes ?? 2,
     artifact_count: mass?.artifacts ?? 7,
     alias_count: 1,
     last_seen_at: nowSecs - ageSecs,
@@ -182,8 +181,7 @@ function syntheticGroup(repo: {
       {
         ...projectEntry(`proj_${repo.name}`, repo.name, root, repo.ageSecs, {
           stores: 1,
-          scopes: Math.max(1, Math.round(repo.mass * 0.35)),
-          artifacts: Math.max(1, Math.round(repo.mass * 0.65)),
+          artifacts: Math.max(1, repo.mass),
         }),
         kind: 'primary',
       },
@@ -246,7 +244,6 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
         {
           ...projectEntry('proj_hermes_home', '.hermes', '/home/zack/.hermes', 20 * DAY, {
             stores: 1,
-            scopes: 0,
             artifacts: 3,
           }),
           kind: 'project',
@@ -263,7 +260,6 @@ const projectTree: ReadonlyArray<Record<string, unknown>> = [
         {
           ...projectEntry('proj_notes', 'notes', '/home/zack/notes', 3 * DAY, {
             stores: 1,
-            scopes: 0,
             artifacts: 1,
           }),
           kind: 'project',
@@ -1288,6 +1284,7 @@ function analyticsHintsPayload(): Record<string, unknown> {
   return {
     available: true,
     source: 'analytics_events',
+    error: null,
     by_category: HINT_CATEGORIES.map((category, i) => ({
       category,
       emitted: 120 - i * 8,
@@ -1442,18 +1439,6 @@ const DOCTOR_FAMILIES = [
   'observability',
 ] as const;
 
-/** Owner operation references, verbatim from
- * `tracedecay_application::doctor::operations` (remediation.rs:30-53). The
- * dashboard route resolves a finding's reference through the kernel registry,
- * so a fixture naming an operation the registry does not seed would produce a
- * descriptor the real route can never emit. */
-const DOCTOR_OPERATIONS = {
-  retentionCollect: 'use-case.application.storage.retention-collect',
-  branchGc: 'use-case.application.storage.branch-gc',
-  protectedApply: 'use-case.application.configuration.protected-apply',
-  codeIndexRemount: 'use-case.application.code-index.remount',
-} as const;
-
 /**
  * `GET /api/doctor/findings` with an admitted report reader — the populated
  * report, not the empty one.
@@ -1472,11 +1457,8 @@ const DOCTOR_OPERATIONS = {
  * `DoctorFindingV1::new` enforces: missing or partial truth never presents as
  * healthy.
  *
- * The descriptors mirror the kernel's seeded registry verbatim (summary,
- * surface, preview_available, action_confirmation), and `target` follows
- * `DoctorRemediationTargetV1::for_operation` — null for the protected
- * configuration apply, which needs a concrete key, value and base revision the
- * route cannot build from a finding alone.
+ * The dashboard carries diagnosis evidence and coverage only. Corrective
+ * actions remain outside this read-only route.
  */
 function doctorFindingsEnvelope(): Record<string, unknown> {
   const entry = (
@@ -1485,16 +1467,13 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
     completeness: 'complete' | 'partial' | 'unknown',
     statement: string,
     evidence: ReadonlyArray<string>,
-    options: { storageKind?: string; operation?: string } = {},
+    options: { storageKind?: string } = {},
   ): Record<string, unknown> => ({
     finding: {
       family,
       state,
       coverage: { completeness, statement },
       evidence: evidence.map((reference) => ({ family, reference })),
-      remediation: options.operation
-        ? { kind: 'action', owning_operation: options.operation }
-        : null,
     },
     storage_kind: options.storageKind ?? null,
   });
@@ -1506,15 +1485,7 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'partial',
       'two of three stores reported a size; the third could not be opened for measurement',
       ['store:lcm:size-observation:wm-41', 'store:memory:size-observation:wm-41'],
-      { storageKind: 'over_budget_store', operation: DOCTOR_OPERATIONS.retentionCollect },
-    ),
-    entry(
-      'storage',
-      'stale',
-      'complete',
-      'branch databases were last reconciled against git refs 19 days ago',
-      ['store:branch-db:reconcile-watermark:wm-22'],
-      { storageKind: 'stale_branch_dbs', operation: DOCTOR_OPERATIONS.branchGc },
+      { storageKind: 'over_budget_store' },
     ),
     entry(
       'configuration',
@@ -1522,7 +1493,6 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'complete',
       'effective configuration diverges from the desired revision on two protected keys',
       ['configuration:revision:r-317', 'configuration:revision:r-318'],
-      { operation: DOCTOR_OPERATIONS.protectedApply },
     ),
     entry(
       'semantic_index',
@@ -1530,7 +1500,6 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
       'unknown',
       'the semantic index did not report a mount state, so its freshness is unknown',
       ['semantic-index:mount-probe:absent'],
-      { operation: DOCTOR_OPERATIONS.codeIndexRemount },
     ),
     entry(
       'storage_runtime',
@@ -1585,56 +1554,11 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
             },
       })),
     },
-    remediations: [
-      {
-        operation: DOCTOR_OPERATIONS.retentionCollect,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'collect retention-eligible rows or reclaim an over-budget store',
-        target: { owner_operation: 'storage_retention_collect' },
-      },
-      {
-        operation: DOCTOR_OPERATIONS.branchGc,
-        surface: 'storage_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'remove branch-scoped databases whose git refs are gone',
-        target: { owner_operation: 'storage_branch_gc' },
-      },
-      {
-        operation: DOCTOR_OPERATIONS.protectedApply,
-        surface: 'configuration_control_plane',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'apply desired configuration to reconcile effective drift',
-        // `for_operation` returns None here: the owning surface supplies the
-        // key, value and base revision. The card says so instead of offering a
-        // button that could not be dispatched.
-        target: null,
-      },
-      {
-        operation: DOCTOR_OPERATIONS.codeIndexRemount,
-        surface: 'semantic_index_runtime',
-        preview_available: true,
-        action_confirmation: 'required',
-        summary: 'remount or rebuild a code/semantic index that is unmounted or stale',
-        target: { owner_operation: 'code_index_remount' },
-      },
-    ],
     known_families: [...DOCTOR_FAMILIES],
     note: 'five of seven finding families were consulted; two reported no evidence source',
   };
-  // `partial`, because two families were never reached. The owner authorizes a
-  // dry run and an apply on the three dispatchable operations; the protected
-  // configuration apply is authorized too, and is simply not dispatchable from
-  // here.
   return envelope(payload, 'partial', [
     { kind: 'refresh', operation: 'use-case.dashboard.doctor.findings.refresh' },
-    ...Object.values(DOCTOR_OPERATIONS).flatMap((operation) => [
-      { kind: 'request_dry_run', operation },
-      { kind: 'request_apply', operation },
-    ]),
   ]);
 }
 
@@ -1643,8 +1567,8 @@ function doctorFindingsEnvelope(): Record<string, unknown> {
  * ========================================================================== */
 
 /** The owner setting a soft store budget comes from, and the wording the daemon
- * emits for the unset/baseline/coverage cases — copied verbatim from
- * `src/dashboard/storage_telemetry_api.rs` so these fixtures stay wire-true. */
+ * emits for an unset budget — copied verbatim from
+ * `storage_telemetry_api.rs` so these fixtures stay wire-true. */
 const BUDGET_SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
 const BUDGET_UNSET_REASON =
   'no soft size budget is configured by the owner for this store (set sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)';
@@ -1755,7 +1679,7 @@ const storageTelemetry = envelope({
   stores: [
     {
       // Shared store file: graph + project memory, budget within its soft
-      // limit, growth observed across the daemon-lifetime watermark ring.
+      // limit. A dashboard status read does not create a growth baseline.
       store: 'graph.db',
       role: 'graph',
       roles: ['graph', 'memory'],
@@ -1818,8 +1742,7 @@ const storageTelemetry = envelope({
       growth: storeGrowthUnknown,
     },
     {
-      // No owner entry: a missing *setting*, never a fabricated pass. First
-      // watermark of this daemon lifetime, so growth is baseline, not zero.
+      // No owner entry: a missing *setting*, never a fabricated pass.
       store: 'savings.db',
       role: 'savings',
       roles: ['savings'],
@@ -1945,7 +1868,6 @@ const storageFindings = envelope({
   family_filter: 'storage',
   entries: [],
   report_coverage: null,
-  remediations: [],
   known_families: [
     'advisory',
     'configuration',
@@ -1959,21 +1881,15 @@ const storageFindings = envelope({
   kind_statuses: [
     {
       kind: 'over_budget_store',
-      state: 'unset',
+      state: 'partial',
       observed_entries: 0,
-      reason: 'No owner budget configured · sync.retention.v1 store_soft_budgets_bytes',
+      reason: 'the canonical report did not carry per-producer completion evidence',
     },
     {
       kind: 'orphan_store',
       state: 'real',
       observed_entries: 1,
       reason: 'canonical Doctor producer returned one observed entry with complete coverage',
-    },
-    {
-      kind: 'stale_branch_dbs',
-      state: 'partial',
-      observed_entries: 0,
-      reason: 'branch-store inventory was consulted but per-producer coverage was incomplete',
     },
     {
       kind: 'incident_debris_present',
@@ -2994,17 +2910,19 @@ function analyticsOverviewPayload(): Record<string, unknown> {
     available: true,
     db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
     scope: 'profile_sharded',
-    usage: {
+    hints: analyticsHintsPayload(),
+    usage: analyticsUsagePayload(),
+    agents: {
       available: true,
-      source: 'analytics_events',
-      event_count: 10_000,
-      message_count: 10_000,
-      by_category: [
-        { category: 'tracedecay_mcp', events: 6837, kind: 'tool' },
-        { category: 'memory', events: 610, kind: 'tool' },
-        { category: 'lcm_session', events: 22, kind: 'tool' },
+      source: 'sessions',
+      by_agent: [
+        { agent: 'Codex', sessions: 42 },
+        { agent: 'Claude', sessions: 31 },
+        { agent: 'Cursor', sessions: 7 },
       ],
     },
+    diagnostics: analyticsDiagnosticsPayload(),
+    underused_tool_families: analyticsUnderusedPayload()['families'],
     observatory: observatoryReadModel(),
   };
 }
@@ -3100,77 +3018,18 @@ function projectContextPayload(projectId: string): Record<string, unknown> {
   };
   const canonicalRoot = entry['canonical_root'] as string;
   const lastSeen = entry['last_seen_at'] as number;
-  const branches = ['master', 'codex/tracedecay-total-redesign-plan', 'release/2.4'];
+  const linkedCheckouts = ['review', 'release'];
   return envelope({
     status: 'ok',
     is_active: entry['is_active'] === true,
     project: entry,
     aliases: [
       { project_id: projectId, alias_path: canonicalRoot, last_seen_at: lastSeen },
-      ...branches.slice(1).map((branch, i) => ({
+      ...linkedCheckouts.map((checkout, i) => ({
         project_id: projectId,
-        alias_path: `${canonicalRoot}/.worktrees/${branch.replace(/\//g, '-')}`,
+        alias_path: `${canonicalRoot}/.worktrees/${checkout}`,
         last_seen_at: lastSeen - (i + 1) * 4 * 3600,
       })),
-    ],
-    stores: [
-      {
-        store: {
-          store_id: `store:${projectId}:profile_sharded`,
-          project_id: projectId,
-          store_kind: 'code_project',
-          storage_mode: 'profile_sharded',
-          store_relpath: `projects/${projectId}`,
-          manifest_relpath: `projects/${projectId}/store_manifest.json`,
-          created_at: lastSeen - 90 * DAY,
-          last_verified_at: lastSeen,
-          last_write_at: lastSeen,
-        },
-        graph_scopes: branches.map((branch, i) => ({
-          graph_scope_id: `store:${projectId}:branch:${branch}`,
-          project_id: projectId,
-          store_id: `store:${projectId}:profile_sharded`,
-          branch_name: branch,
-          db_relpath: `projects/${projectId}/branches/${branch.replace(/\//g, '-')}.db`,
-          parent_scope_id: null,
-          last_synced_at: lastSeen - i * 6 * 3600,
-          writable: i === 0,
-        })),
-        artifacts: [
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'graph_db',
-            relpath: `projects/${projectId}/tracedecay.db`,
-            schema_version: null,
-            size_bytes: 131_088_384,
-            updated_at: lastSeen,
-          },
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'sessions_db',
-            relpath: `projects/${projectId}/sessions.db`,
-            schema_version: null,
-            size_bytes: 42_930_176,
-            updated_at: lastSeen,
-          },
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'memory_db',
-            relpath: `projects/${projectId}/memory.db`,
-            schema_version: null,
-            size_bytes: 9_027_584,
-            updated_at: lastSeen,
-          },
-          {
-            store_id: `store:${projectId}:profile_sharded`,
-            artifact_kind: 'branch_meta',
-            relpath: `projects/${projectId}/branch-meta.json`,
-            schema_version: null,
-            size_bytes: 14_704,
-            updated_at: lastSeen,
-          },
-        ],
-      },
     ],
   });
 }
@@ -3332,16 +3191,23 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
    * screenshot pair. */
   const AGENT_TAPE_ANCHOR = nowSecs - 240;
   const toolCalls = AGENT_TOOL_CALLS.reduce((sum, [, count]) => sum + count, 0);
+  const hookCallCount = 444_038;
   return {
     available: true,
     source: 'analytics_events',
     event_count: 10_000,
     message_count: 10_000,
     events_per_hour: 135.36531714965764,
-    hook_call_count: 444_038,
+    hook_call_count: hookCallCount,
     mcp_tool_call_count: toolCalls,
     tool_call_count: toolCalls,
     tracedecay_call_count: toolCalls,
+    ratios: {
+      events_per_message: 1,
+      tool_calls_per_message: toolCalls / 10_000,
+      mcp_tool_calls_per_message: toolCalls / 10_000,
+      hook_calls_per_message: hookCallCount / 10_000,
+    },
     by_event_kind: [
       { event_kind: 'mcp_tool_call', count: toolCalls },
       { event_kind: 'hook_route', count: 10_000 - toolCalls },
@@ -3356,6 +3222,15 @@ function analyticsDiagnosticsPayload(): Record<string, unknown> {
     ],
     by_mcp_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
     by_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
+    hook_window: {
+      window_rows: 10_000,
+      rows_scanned: 10_000,
+      rows_included: 10_000,
+      truncated: true,
+      total_rows_known: false,
+      oldest_ts_unix_ms: (nowSecs - 3600) * 1000,
+      newest_ts_unix_ms: nowSecs * 1000,
+    },
     recent_events: AGENT_TAPE.map(([ago, tool_name, outcome]) => ({
       event_kind: 'mcp_tool_call',
       hook_name: '',

@@ -575,84 +575,10 @@ pub(crate) struct DaemonConfigurationRuntimeRegistrar {
     service: DaemonInvocationService,
 }
 
-pub(crate) enum DoctorConfigurationOutcomeV1 {
-    Preview {
-        preview_id: PreviewId,
-        execution: OperationReceipt,
-    },
-    Effect {
-        execution: OperationReceipt,
-        receipt: Box<EffectReceipt>,
-    },
-    Denied,
-    Unavailable,
-}
-
 impl DaemonConfigurationRuntimeRegistrar {
     pub(crate) fn new(service: &DaemonInvocationService) -> Self {
         Self {
             service: service.clone(),
-        }
-    }
-
-    pub(crate) async fn doctor_owner_mounted(&self, project_root: &Path) -> bool {
-        self.service
-            .configuration_runtime(Some(project_root))
-            .await
-            .is_some()
-    }
-
-    pub(crate) async fn doctor_execute(
-        &self,
-        project_root: &Path,
-        request_id: &RequestId,
-        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
-        request: ConfigurationSurfaceRequest,
-    ) -> DoctorConfigurationOutcomeV1 {
-        let Some(registered) = self.service.configuration_runtime(Some(project_root)).await else {
-            return DoctorConfigurationOutcomeV1::Unavailable;
-        };
-        let observed_at = current_micros();
-        let deadline = match Deadline::new(UtcMicros(observed_at.0.saturating_add(30_000_000))) {
-            Ok(deadline) => deadline,
-            Err(_) => return DoctorConfigurationOutcomeV1::Unavailable,
-        };
-        let cancellation = match CancellationContext::active(format!(
-            "cancel.doctor-remediation.{}",
-            request_id.as_str()
-        )) {
-            Ok(cancellation) => cancellation,
-            Err(_) => return DoctorConfigurationOutcomeV1::Unavailable,
-        };
-        let response = execute_configuration(
-            request_id.as_str().to_owned(),
-            Some(registered),
-            surface_operation,
-            request,
-            observed_at,
-            deadline,
-            cancellation,
-        )
-        .await;
-        match response.outcome {
-            DaemonInvocationOutcome::Configuration {
-                outcome: ApplicationOutcome::Preview(preview),
-                ..
-            } => DoctorConfigurationOutcomeV1::Preview {
-                preview_id: preview.preview_id,
-                execution: preview.execution,
-            },
-            DaemonInvocationOutcome::Configuration {
-                outcome: ApplicationOutcome::Effect(effect),
-                ..
-            } => DoctorConfigurationOutcomeV1::Effect {
-                execution: effect.execution,
-                receipt: Box::new(effect.receipt),
-            },
-            DaemonInvocationOutcome::ApplicationProblem {
-                problem: ApplicationProblem::NotFoundOrNotAuthorized { .. },
-            } => DoctorConfigurationOutcomeV1::Denied,
-            _ => DoctorConfigurationOutcomeV1::Unavailable,
         }
     }
 

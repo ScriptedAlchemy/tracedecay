@@ -1,17 +1,17 @@
-//! Retention inventory read models (Plan 38 §2, §3, and the branch lifecycle of
-//! §1) that feed the remaining Storage Doctor finding kinds.
+//! Retention inventory read models (Plan 38 §2 and §3) that feed the remaining
+//! Storage Doctor finding kinds.
 //!
 //! These are the minimal typed observations the Doctor producers need to raise
-//! `OrphanStore`, `StaleBranchDbs`, and `RetentionBacklog` findings. They carry
-//! only the observed facts (identity resolution, live-ref presence, past-window
-//! bytes); the collection itself is owned by the daemon storage runtime.
+//! `OrphanStore` and `RetentionBacklog` findings. They carry only the observed
+//! facts (identity resolution and past-window bytes); collection remains owned
+//! by the daemon storage runtime.
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
 use crate::error::ApplicationContractError;
 
-use super::identity::{BranchRefV1, StorageByteSizeV1, StoreKeyV1, TableNameV1};
+use super::identity::{StorageByteSizeV1, StoreKeyV1, TableNameV1};
 
 /// A store whose project identity no longer resolves to a live repository root
 /// (identity-drift orphan, Plan 38 §2), reported with age and size.
@@ -52,26 +52,6 @@ impl OrphanStoreRecordV1 {
         self.observed_at
             .0
             .saturating_sub(self.first_unresolved_at.0)
-    }
-}
-
-/// A branch-scoped store whose git ref state is observed against live refs
-/// (Plan 38 §1 branch lifecycle).
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct StaleBranchDbRecordV1 {
-    pub store: StoreKeyV1,
-    pub branch: BranchRefV1,
-    /// Whether the branch ref still exists in the live repository.
-    pub ref_present: bool,
-    pub size_bytes: StorageByteSizeV1,
-}
-
-impl StaleBranchDbRecordV1 {
-    /// True when the branch DB is stale: its ref is gone.
-    #[must_use]
-    pub fn is_stale(&self) -> bool {
-        !self.ref_present
     }
 }
 
@@ -205,22 +185,6 @@ mod tests {
             observed_at: UtcMicros(400),
         };
         assert!(!record.is_orphan());
-    }
-
-    #[test]
-    fn stale_branch_detects_missing_ref() {
-        let gone = StaleBranchDbRecordV1 {
-            store: store(),
-            branch: BranchRefV1::new("feature-x").expect("valid"),
-            ref_present: false,
-            size_bytes: StorageByteSizeV1(1_000),
-        };
-        assert!(gone.is_stale());
-        let live = StaleBranchDbRecordV1 {
-            ref_present: true,
-            ..gone
-        };
-        assert!(!live.is_stale());
     }
 
     #[test]

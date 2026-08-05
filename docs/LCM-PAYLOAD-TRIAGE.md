@@ -1,16 +1,18 @@
 # LCM external payload retention & GC — triage decision
 
-> **Archived triage record — not implementation authority.** This document
-> preserves historical decomposition and safety rationale. Current requirements
-> come only from the `docs/plans/tracedecay-v2/` hierarchy; exact source
-> anchors, case counts, implementation order, and gate matrices below are not
-> rebuild instructions. The payload integrity, containment, and fail-closed
-> deletion semantics remain product safety boundaries and must be validated
-> through current runtime behavior.
+> **Current V2 routing note.** This document records the payload ownership and
+> maintenance boundaries used by the current implementation. The payload
+> integrity, containment, and fail-closed deletion semantics remain product
+> safety boundaries and must be validated through current runtime behavior.
 
-Status: **historical triage complete**. This record preserves the former
-LCM external-payload retention/GC decomposition; it is not a current V2 entry
-point or implementation plan.
+**Doctor boundary:** `lcm_doctor` requires `provider` and accepts an optional
+`session_id`. It is strictly read-only diagnosis/evidence: it never repairs,
+applies, cleans, garbage-collects, retains, relinks, or migrates. Daemon-owned
+maintenance and explicitly authorized owner operations are separate write paths.
+
+Status: **triage complete**. Current code and the V2 plan hierarchy are the
+implementation authority; this page records the resulting ownership and
+sequencing decisions.
 
 The five discovery/planning children (`t_c2443a7f` audit, `t_f14bb734` contract,
 `t_bbd369f2` GC design, `t_0ab1c041` visibility spec, `t_f0e07c5c` test plan) all
@@ -18,17 +20,16 @@ landed. This card validated their work against source and decided the build orde
 
 ## 1. Verdict
 
-**Historical verdict.** At the time recorded, four artifacts formed a closed spec set
-with explicit cross-references and a single normative hierarchy ("the contract wins;
-the others fill in what it deliberately left open"). Current V2 requirements do not
-use that hierarchy as acceptance authority:
+**Current routing verdict.** The payload documents form a closed spec set with
+explicit cross-references (the contract defines what/why; the GC design defines
+how). Current V2 requirements and runtime behavior remain the acceptance authority:
 
 | Spec | Role | Owns |
 |---|---|---|
 | [`LCM-PAYLOAD-LIFECYCLE.md`](LCM-PAYLOAD-LIFECYCLE.md) | **contract (what/why)** | ownership model OM-1/2, lifecycle state machine, deletion contract D-1..D-4 + SD-1/2, grace GP-1..4, idempotency, missing/dangling/corrupted handling, security §13 |
-| [`LCM-PAYLOAD-GC.md`](LCM-PAYLOAD-GC.md) | **design (how)** | `delete_external_payload`, 4-phase reaper, schema-v5 marker store, config knobs, dry-run report, consolidated safety checklist |
-| Retired payload-visibility spec | retired | Dashboard payload-health, repair, and GC routes were removed; daemon-owned Doctor diagnostics remain the read authority. |
-| Historical GC test matrix | retired | Current coverage follows the V2 product plans and direct behavior; the archived named-case inventory is not an acceptance authority. |
+| [`LCM-PAYLOAD-GC.md`](LCM-PAYLOAD-GC.md) | **design (how)** | `delete_external_payload`, 4-phase reaper, GC marker store, config knobs, dry-run report, consolidated safety checklist |
+| `lcm_doctor` / `lcm_status` | **read-only surfaces** | Provider-scoped diagnosis, payload health, retention evidence, and last-run status. They never apply maintenance. |
+| Daemon/authorized owner maintenance | **write surfaces** | Retention and payload GC apply runs under an active maintenance/write scope, with dry-run and backup requirements. |
 
 Plus the storage/deletion audit in Kanban `t_c2443a7f` (comment 34) which is the
 ground-truth map the contract's §2 was built from.
@@ -37,29 +38,27 @@ ground-truth map the contract's §2 was built from.
 
 The contract's §2 claims were re-checked against the current tree; all hold:
 
-- `LCM_SCHEMA_VERSION = 4` (`schema.rs:7`) → bump to 5 is the next value. ✓
+- `LCM_SCHEMA_VERSION = 8` (`schema.rs:12`), including the additive GC/retention
+  state tables. ✓
 - `lcm_external_payloads` (`schema.rs:133-147`): `payload_ref` PK, `UNIQUE(provider,message_id,payload_ref)`,
   `FK(provider,session_id) REFERENCES sessions ON DELETE CASCADE`, **no FK to/from `lcm_raw_messages`**. ✓ (OM-1/2)
 - Migration guard (`schema.rs:91-96`) skips any DB at `version >= LCM_SCHEMA_VERSION` →
   additive `CREATE TABLE IF NOT EXISTS` is monotonic-safe; no existing column is altered. ✓
-- `is_external_payload_placeholder` (`payload.rs:104`) **already accepts both `[gc'd …]`
-  prefixes** — the tombstone marker is reserved but unwritten; MF-1 needs only the *write* + the
-  new error branch, not a parser change. ✓
-- **No deletion primitive exists today:** zero `remove_file`/`fs::remove` call sites in
-  `payload.rs`; deletes today bypass payload-aware code entirely. ✓
+- `is_external_payload_placeholder` (`payload.rs:104`) accepts both `[gc'd …]`
+  prefixes, and owner GC writes the tombstone form. ✓
+- **Payload deletion and GC are owner-authorized paths:** the deleter, pending
+  delete drain, and GC phases are separate from read-only Doctor diagnostics. ✓
 - Reused primitives all exist at cited anchors: `validate_payload_ref` (`payload.rs:56`),
   `existing_payload_dir` (`payload.rs:357`), `canonical_storage_root` (`payload.rs:366`),
   `ensure_contained` (`payload.rs:396`), `private_file_options` (`payload.rs:457/468`, Linux
-  `O_NOFOLLOW` + non-unix variant), `all_payload_metadata_refs` (`doctor.rs:461`),
-  `referenced_payload_refs` (`doctor.rs:498`, private — to be extracted). ✓
-- `LcmError` (`types.rs:726`) has `InvalidPayloadRef`/`PayloadNotFound`/`PayloadMissing`/
-  `PayloadIntegrityMismatch`; **`PayloadGc'd` and `StillReferenced` are absent** → both are
-  new work (confirms MF-1 and the test-plan §8 open item). ✓
-- Frontend source is real: `dashboard/lcm/src/{entry.tsx,styles.css}` → built to
-  `dashboard/lcm/dist/{index.js,style.css}` by `dashboard/build.mjs`. The visibility UI card
-  lands there. ✓
+  `O_NOFOLLOW` + non-unix variant), `all_payload_metadata_refs` (`maintenance.rs`),
+  `referenced_payload_refs` (`gc.rs`). ✓
+- `LcmError` includes `PayloadGcd` and `StillReferenced` alongside the existing
+  payload integrity variants. ✓
+- Payload health is surfaced through daemon/status evidence surfaces; any future
+  UI apply control must call a separate owner operation, never Doctor. ✓
 
-## 3. Open items reconciled (decisions for the implementation)
+## 3. Decisions for implementation and ownership
 
 The specs deliberately deferred a handful of choices to the triage card. Decisions:
 
@@ -68,10 +67,9 @@ The specs deliberately deferred a handful of choices to the triage card. Decisio
    design (§5.2) owns storage and chose the minimal additive side tables; **that wins.**
    `lcm_gc_meta(key,value)` carries `last_gc_at` / `last_gc_status` / `last_gc_error` /
    `last_reaped_refs` / `last_reaped_bytes` / `last_gc_dry_run_at`; the VISIBILITY §3.2
-   `LcmPayloadGcStatus` fields are **derived** from those keys. The append-only
-   `lcm_gc_runs` history table is deferred to v6 (nice-to-have audit trail); v1 is
-   latest-wins key/value, matching GC.md §5's "smaller blast radius, no ALTER of the hot
-   table" rationale.
+   `LcmPayloadGcStatus` fields are **derived** from those keys. An append-only
+   `lcm_gc_runs` history table remains an optional future audit enhancement; the current
+   latest-wins key/value shape avoids altering the hot table.
 
 2. **Add both `LcmError::PayloadGc'd` (MF-1) and `LcmError::StillReferenced`.** The test plan
    (§8) flagged `StillReferenced` as absent; `DEL-005`/`PHB-003` assert it specifically, and
@@ -93,19 +91,20 @@ The specs deliberately deferred a handful of choices to the triage card. Decisio
    corrupted are never reclaimable. This is the cross-cutting invariant VIS-002 asserts.
 
 5. **Cross-surface numeric agreement is enforced structurally.** `lcm_status.payload`,
-   `lcm_doctor … diagnostics.payloads`, and the dashboard `payload_health` block MUST be
-   computed from one shared helper set (the extracted `referenced_payload_refs` + a shared
+   `lcm_doctor` diagnostics, and any dashboard `payload_health` block MUST be computed
+   from one shared helper set (the extracted `referenced_payload_refs` + a shared
    payload-dir walk + a shared byte-sum query), never re-derived per surface (VIS §5.3,
-   VIS-005). The implementation extracts those helpers; surfaces only serialize them.
+   VIS-005). Read-only surfaces only serialize the evidence.
 
-6. **Schema v5 vs GP-3 column form.** Ship the side-table form (decision 1) as v5. The
-   `unreferenced_since`/`gc_state` column form (GP-3) is a deferred, behavior-preserving v6
-   refactor — not needed for v1 correctness, and tests assert behavior not table shape.
+6. **Marker-table form vs GP-3 column form.** Keep the additive side-table form
+   currently shipped. The `unreferenced_since`/`gc_state` column form (GP-3) is an
+   optional behavior-preserving future schema revision; tests assert behavior,
+   not table shape, and Doctor never performs that migration.
 
 No spec conflict remains. The four docs agree; these decisions only resolve the choices they
 left open.
 
-## 4. Implementation decomposition
+## 4. Implementation and ownership decomposition
 
 The implementation is large but, unlike most large efforts, **does not decompose into a
 concurrent fleet** — the GC core is a strict build-order chain through shared files
@@ -123,10 +122,10 @@ A1 (foundation)  ──►  A2 (reaper engine)  ──►  B (visibility + invoc
 
 | Card | Scope (files owned) | Tests that land with it | Model |
 |---|---|---|---|
-| **A1 — foundation** | `schema.rs` (v5: `lcm_gc_marks`+`lcm_gc_meta`+get/set), `types.rs` (`PayloadGc'd`+`StillReferenced`+`LcmGcConfig`), `gc.rs` NEW (extracted `referenced_payload_refs` + `tombstone_placeholder_in_text`), `doctor.rs` (call shared fn) | `TS-001..003`, `CFG-001..005`, `FS-001..008` | bounded; clear spec |
-| **A2 — reaper engine** | `payload.rs` (`delete_external_payload`+`DeleteOpts/Outcome`, `safe_remove_payload_file`, wire `expand`→`PayloadGc'd`), `gc.rs` (`LcmGcReport`, phases A–D, `run_payload_gc` w/ injected clock, reap-time ref re-check) | `DEL-001..007`, `PHA/PHB/PHC/PHD-*`, `GC-001..012`, `DRY-001..003` | hardest; safety-critical (path/symlink/crash/txn) |
-| **B — visibility + invocation** | `query.rs` (`status()` byte/orphan/tombstoned additions), `doctor.rs` (`payload_diagnostics` bytes + `mode=gc`), `types.rs` (`LcmPayloadGcStatus` + status fields + `LcmGcReport` surfacing), `mcp/tools/definitions.rs` + `handlers/session.rs` (`lcm_status deep`, `lcm_doctor gc` mode), `dashboard/lcm_api.rs` + `mod.rs` (`payload_health` block, `/payloads/health`, `/payloads/gc`, capabilities), `agents/hermes/templates.rs` (gc mode desc + env wiring) | `VIS-001..012` | multi-file integration; cross-surface agreement |
-| **C — frontend** *(deferred, spawned after B)* | `dashboard/lcm/src/{entry.tsx,styles.css}` (Payload Health card + dry-run→apply modal) → rebuild `dashboard/lcm/dist/{index.js,style.css}` via `build.mjs` | visual QA of green/amber/red pill + modal | UI; operator review of design |
+| **A1 — foundation** | Current schema state tables (`lcm_gc_marks`/`lcm_gc_meta` + get/set), `types.rs` (`PayloadGc'd`+`StillReferenced`+`LcmGcConfig`), `gc.rs` (`referenced_payload_refs` + `tombstone_placeholder_in_text`), and read-only Doctor integration | `TS-001..003`, `CFG-001..005`, `FS-001..008` | bounded; clear spec |
+| **A2 — reaper engine** | Owner-only `payload.rs` (`delete_external_payload`+`DeleteOpts/Outcome`, `safe_remove_payload_file`, `expand`→`PayloadGc'd`), `gc.rs` (`LcmGcReport`, phases A–D, `run_payload_gc` w/ injected clock, reap-time ref re-check) | `DEL-001..007`, `PHA/PHB/PHC/PHD-*`, `GC-001..012`, `DRY-001..003` | hardest; safety-critical (path/symlink/crash/txn) |
+| **B — visibility + owner invocation** | `query.rs` (byte/orphan/tombstone evidence), `doctor.rs` (read-only `payload_diagnostics`), `types.rs` (`LcmPayloadGcStatus` + report fields), and the daemon/authorized owner entry point for GC apply. `lcm_doctor`/`lcm_status` remain read-only and provider-scoped (`provider` required, `session_id` optional). | `VIS-001..012` | multi-file integration; cross-surface agreement |
+| **C — frontend** *(deferred, spawned after B)* | Current dashboard surface for payload health and any dry-run→apply control, with apply routed to a separate authorized owner endpoint. | visual QA of green/amber/red evidence and owner authorization | UI; operator review of design |
 
 **Why A1/A2/B are serial, not parallel:** A2 needs A1's schema + extracted helper + error
 variants; B needs A2's `LcmGcReport`/status fields; all three write `types.rs` and `gc.rs`/

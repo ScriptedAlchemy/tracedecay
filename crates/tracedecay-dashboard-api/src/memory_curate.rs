@@ -163,7 +163,6 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         automation_scheduler_reconciler: None,
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
-        doctor_remediation_dispatcher: None,
         application_invocation_executor: None,
     })
 }
@@ -209,7 +208,6 @@ fn user_state(
         automation_scheduler_reconciler: None,
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
-        doctor_remediation_dispatcher: None,
         application_invocation_executor: None,
     }
 }

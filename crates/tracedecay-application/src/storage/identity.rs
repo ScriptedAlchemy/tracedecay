@@ -20,8 +20,6 @@ application_identifier!(
     StoreKeyV1 => ("storage store key", 256),
     /// A physical table name inside a store, used for per-table growth telemetry.
     TableNameV1 => ("storage table name", 128),
-    /// A git ref (branch) a branch-scoped store was created for.
-    BranchRefV1 => ("storage branch ref", 256),
     /// A store-relative path to an incident-debris artifact (for example
     /// `sessions.db.corrupt-1721692800`). Store-relative, never absolute.
     RelativeArtifactPathV1 => ("storage relative artifact path", 512),

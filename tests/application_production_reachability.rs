@@ -337,12 +337,11 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
         "immediate independent owner must return its typed result collection: {immediate_tests:#}"
     );
 
-    let immediate =
-        invoke_mcp_symbol_search(
-            &fixture.client,
-            "request.application-reachability.open.immediate",
-        )
-        .await;
+    let immediate = invoke_mcp_symbol_search(
+        &fixture.client,
+        "request.application-reachability.open.immediate",
+    )
+    .await;
     let immediate = evidence_payload(&immediate).clone();
     assert_first_page_of_many("immediate post-open MCP", &immediate);
 
@@ -357,10 +356,22 @@ async fn immediate_concurrent_and_repeated_opens_publish_one_callable_owner() {
     let client_c = fresh_client();
     let client_d = fresh_client();
     let (a, b, c, d) = tokio::join!(
-        invoke_mcp_symbol_search(&client_a, "request.application-reachability.open.concurrent-a"),
-        invoke_mcp_symbol_search(&client_b, "request.application-reachability.open.concurrent-b"),
-        invoke_mcp_symbol_search(&client_c, "request.application-reachability.open.concurrent-c"),
-        invoke_mcp_symbol_search(&client_d, "request.application-reachability.open.concurrent-d"),
+        invoke_mcp_symbol_search(
+            &client_a,
+            "request.application-reachability.open.concurrent-a"
+        ),
+        invoke_mcp_symbol_search(
+            &client_b,
+            "request.application-reachability.open.concurrent-b"
+        ),
+        invoke_mcp_symbol_search(
+            &client_c,
+            "request.application-reachability.open.concurrent-c"
+        ),
+        invoke_mcp_symbol_search(
+            &client_d,
+            "request.application-reachability.open.concurrent-d"
+        ),
     );
     for (label, result) in [
         ("concurrent-a", a),
@@ -440,7 +451,7 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
                 "request.application-family.mcp.{}",
                 operation.as_str()
             ))
-                .expect("MCP request id"),
+            .expect("MCP request id"),
             request,
             RequestedOutputFormat::Json,
             Some(&fixture.client),
@@ -455,7 +466,7 @@ async fn operation_family_executes_through_cli_mcp_and_http() {
                 "request.application-family.http.{}",
                 operation.as_str()
             ))
-                .expect("HTTP request id"),
+            .expect("HTTP request id"),
             request,
             RequestedOutputFormat::Json,
             Some(&fixture.client),

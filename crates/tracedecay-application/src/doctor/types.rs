@@ -1,12 +1,10 @@
 //! Transport-neutral Doctor kernel contract types.
 //!
-//! The one Doctor application use case (Plan 09 §PR14) composes typed inputs
-//! from the advisory (PR13), configuration (Plan 20), storage-runtime, language
-//! server (Plan 35), semantic index, and observability (Plan 26) authorities
-//! into stable finding families. It never evaluates a generic health score,
-//! repairs directly, or collapses unknown/partial evidence into a healthy or
-//! clean result. Remediation is always a *reference* to an owning application
-//! operation; Doctor never carries an inline action.
+//! The Doctor application use case composes typed inputs from the advisory,
+//! configuration, storage-runtime, language server, semantic index, and
+//! observability authorities into stable finding families. It never evaluates a
+//! generic health score or collapses unknown/partial evidence into a healthy or
+//! clean result. Findings contain diagnostic evidence only.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -39,8 +37,8 @@ pub enum DoctorFindingFamilyV1 {
     StorageRuntime,
     /// Storage retention, size, and efficiency over Plan 26 observability read
     /// models (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this
-    /// family surfaces over-budget stores, identity-drift orphans, stale branch
-    /// DBs, quarantined incident debris, and retention backlog. The typed
+    /// family surfaces over-budget stores, identity-drift orphans, quarantined
+    /// incident debris, and retention backlog. The typed
     /// subclass vocabulary is [`DoctorStorageFindingKindV1`].
     Storage,
     /// Language-server / analyzer engine status (Plan 35 LSP gateway,
@@ -70,9 +68,6 @@ pub enum DoctorStorageFindingKindV1 {
     /// A store whose project identity no longer resolves to a live repository
     /// root (identity-drift orphan), reported with age and size.
     OrphanStore,
-    /// Branch-scoped databases whose git refs are gone and are awaiting
-    /// lifecycle removal.
-    StaleBranchDbs,
     /// Quarantined recovery/corruption artifacts are present and awaiting
     /// collection.
     IncidentDebrisPresent,
@@ -142,23 +137,6 @@ impl DoctorCoverageCompletenessV1 {
     }
 }
 
-/// Preview-versus-action distinction for an owner-supplied remediation.
-///
-/// Doctor never repairs; it references an owning application operation. A
-/// preview pins expected state without mutating; an action is the owning
-/// operation's admitted effect. Both are invoked through the owning operation,
-/// never inline.
-#[derive(
-    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum DoctorRemediationKindV1 {
-    /// A non-mutating preview owned by the responsible operation.
-    Preview,
-    /// An admitted mutating action owned by the responsible operation.
-    Action,
-}
-
 application_identifier!(
     @no_conversions
     /// Durable, non-disclosing reference to one owning-authority evidence
@@ -166,10 +144,6 @@ application_identifier!(
     /// runtime read coverage anchor). Doctor stores the reference only; the
     /// owning authority remains the single source of the record.
     DoctorEvidenceReferenceV1 => ("doctor evidence reference", 1024),
-    /// Reference to the owning application operation that would perform a
-    /// remediation (its capability or use-case identity). Doctor names the
-    /// operation; it never embeds argv, a path, or an inline effect.
-    DoctorOwningOperationRefV1 => ("doctor owning operation reference", 256),
 );
 
 /// A typed reference to one piece of evidence Doctor composed into a finding.
@@ -177,7 +151,9 @@ application_identifier!(
 /// The `family` records which audited input surface produced the evidence, so
 /// a finding may cross-cite evidence from more than one family without losing
 /// provenance.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 pub struct DoctorEvidenceRefV1 {
     family: DoctorFindingFamilyV1,
     reference: DoctorEvidenceReferenceV1,
@@ -207,6 +183,22 @@ impl DoctorEvidenceRefV1 {
 pub struct DoctorCoverageStatementV1 {
     completeness: DoctorCoverageCompletenessV1,
     statement: String,
+}
+
+impl<'de> Deserialize<'de> for DoctorCoverageStatementV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            completeness: DoctorCoverageCompletenessV1,
+            statement: String,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.completeness, wire.statement).map_err(serde::de::Error::custom)
+    }
 }
 
 impl DoctorCoverageStatementV1 {
@@ -248,56 +240,18 @@ impl DoctorCoverageStatementV1 {
     }
 }
 
-/// A reference to an owner-supplied remediation.
-///
-/// Doctor never repairs directly; it names the owning application operation
-/// and whether a preview or action is offered. The caller invokes that owning
-/// operation through its normal admitted path.
-#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
-pub struct DoctorRemediationRefV1 {
-    owning_operation: DoctorOwningOperationRefV1,
-    kind: DoctorRemediationKindV1,
-}
-
-impl DoctorRemediationRefV1 {
-    /// Construct a remediation reference. The operation identity is already
-    /// validated by [`DoctorOwningOperationRefV1::new`].
-    #[must_use]
-    pub fn new(
-        owning_operation: DoctorOwningOperationRefV1,
-        kind: DoctorRemediationKindV1,
-    ) -> Self {
-        Self {
-            owning_operation,
-            kind,
-        }
-    }
-
-    #[must_use]
-    pub fn owning_operation(&self) -> &DoctorOwningOperationRefV1 {
-        &self.owning_operation
-    }
-
-    #[must_use]
-    pub fn kind(&self) -> DoctorRemediationKindV1 {
-        self.kind
-    }
-}
-
 /// One canonical Doctor finding.
 ///
 /// A finding pins its diagnosis `family`, its evidence `state`, the typed
-/// evidence it composed, a coverage statement, and an optional reference to an
-/// owner-supplied remediation. Construction enforces the Plan 09 §PR14
-/// invariants that keep unknown/partial evidence from collapsing into a healthy
-/// or clean result.
+/// evidence it composed, and a coverage statement. Construction enforces the
+/// invariants that keep unknown/partial evidence from collapsing into a
+/// healthy or clean result.
 #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorFindingV1 {
     family: DoctorFindingFamilyV1,
     state: DoctorEvidenceStateV1,
     evidence: Vec<DoctorEvidenceRefV1>,
     coverage: DoctorCoverageStatementV1,
-    remediation: Option<DoctorRemediationRefV1>,
 }
 
 impl DoctorFindingV1 {
@@ -309,14 +263,11 @@ impl DoctorFindingV1 {
     /// 3. A [`DoctorEvidenceStateV1::HealthyCompleteCoverage`] finding requires
     ///    [`DoctorCoverageCompletenessV1::Complete`] coverage — partial or
     ///    unknown coverage never collapses into a healthy claim.
-    /// 4. A healthy-with-complete-coverage finding carries no remediation;
-    ///    Doctor references remediation only for a condition needing repair.
     pub fn new(
         family: DoctorFindingFamilyV1,
         state: DoctorEvidenceStateV1,
         evidence: Vec<DoctorEvidenceRefV1>,
         coverage: DoctorCoverageStatementV1,
-        remediation: Option<DoctorRemediationRefV1>,
     ) -> Result<Self, ApplicationContractError> {
         if evidence.is_empty() {
             return Err(ApplicationContractError::Inconsistent {
@@ -337,17 +288,11 @@ impl DoctorFindingV1 {
                 field: "doctor healthy coverage",
             });
         }
-        if state.is_healthy_complete() && remediation.is_some() {
-            return Err(ApplicationContractError::Inconsistent {
-                field: "doctor healthy remediation",
-            });
-        }
         Ok(Self {
             family,
             state,
             evidence,
             coverage,
-            remediation,
         })
     }
 
@@ -370,10 +315,24 @@ impl DoctorFindingV1 {
     pub fn coverage(&self) -> &DoctorCoverageStatementV1 {
         &self.coverage
     }
+}
 
-    #[must_use]
-    pub fn remediation(&self) -> Option<&DoctorRemediationRefV1> {
-        self.remediation.as_ref()
+impl<'de> Deserialize<'de> for DoctorFindingV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            family: DoctorFindingFamilyV1,
+            state: DoctorEvidenceStateV1,
+            evidence: Vec<DoctorEvidenceRefV1>,
+            coverage: DoctorCoverageStatementV1,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.family, wire.state, wire.evidence, wire.coverage)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -454,14 +413,6 @@ mod tests {
             .expect("valid coverage")
     }
 
-    fn remediation() -> DoctorRemediationRefV1 {
-        DoctorRemediationRefV1::new(
-            DoctorOwningOperationRefV1::new("use-case.application.configuration.protected-apply")
-                .expect("valid operation reference"),
-            DoctorRemediationKindV1::Action,
-        )
-    }
-
     #[test]
     fn doctor_healthy_finding_with_complete_coverage_constructs() {
         let finding = DoctorFindingV1::new(
@@ -472,35 +423,30 @@ mod tests {
                 "runtime.graph-quick-check",
             )],
             complete_coverage(),
-            None,
         )
         .expect("healthy finding");
         assert!(finding.state().is_healthy_complete());
         assert_eq!(finding.evidence().len(), 1);
-        assert!(finding.remediation().is_none());
         assert!(finding.coverage().is_complete());
     }
 
     #[test]
-    fn doctor_degraded_finding_with_remediation_reference_constructs() {
+    fn doctor_finding_wire_contract_contains_diagnostics_only() {
         let finding = DoctorFindingV1::new(
             DoctorFindingFamilyV1::Configuration,
             DoctorEvidenceStateV1::Degraded,
-            vec![
-                evidence(DoctorFindingFamilyV1::Configuration, "config.revision.42"),
-                evidence(DoctorFindingFamilyV1::Advisory, "finding.proximity.warn-1"),
-            ],
-            partial_coverage(),
-            Some(remediation()),
+            vec![evidence(
+                DoctorFindingFamilyV1::Configuration,
+                "config.revision.42",
+            )],
+            complete_coverage(),
         )
-        .expect("degraded finding");
-        assert_eq!(finding.family(), DoctorFindingFamilyV1::Configuration);
-        assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
-        let remediation = finding.remediation().expect("remediation reference");
-        assert_eq!(remediation.kind(), DoctorRemediationKindV1::Action);
-        assert_eq!(
-            remediation.owning_operation().as_str(),
-            "use-case.application.configuration.protected-apply"
+        .expect("diagnostic finding");
+
+        let wire = serde_json::to_value(finding).expect("serialize finding");
+        assert!(
+            wire.get("remediation").is_none(),
+            "Doctor findings must not expose action references: {wire}"
         );
     }
 
@@ -511,7 +457,6 @@ mod tests {
             DoctorEvidenceStateV1::Unknown,
             Vec::new(),
             partial_coverage(),
-            None,
         )
         .expect_err("empty evidence rejected");
         assert_eq!(
@@ -538,7 +483,6 @@ mod tests {
                 ),
             ],
             partial_coverage(),
-            None,
         )
         .expect_err("duplicate evidence rejected");
         assert_eq!(
@@ -559,7 +503,6 @@ mod tests {
                 "lsp.analyzer.ready",
             )],
             partial_coverage(),
-            None,
         )
         .expect_err("partial coverage cannot be healthy");
         assert_eq!(
@@ -585,7 +528,6 @@ mod tests {
                 "runtime.temporal-health",
             )],
             coverage,
-            None,
         )
         .expect_err("unknown coverage cannot be healthy");
         assert_eq!(
@@ -594,45 +536,6 @@ mod tests {
                 field: "doctor healthy coverage"
             }
         );
-    }
-
-    #[test]
-    fn doctor_healthy_finding_rejects_remediation_reference() {
-        let error = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::Advisory,
-            DoctorEvidenceStateV1::HealthyCompleteCoverage,
-            vec![evidence(
-                DoctorFindingFamilyV1::Advisory,
-                "finding.ci-localization.1.1",
-            )],
-            complete_coverage(),
-            Some(remediation()),
-        )
-        .expect_err("healthy finding cannot carry remediation");
-        assert_eq!(
-            error,
-            ApplicationContractError::Inconsistent {
-                field: "doctor healthy remediation"
-            }
-        );
-    }
-
-    #[test]
-    fn doctor_non_healthy_finding_allows_complete_coverage_and_remediation() {
-        let finding = DoctorFindingV1::new(
-            DoctorFindingFamilyV1::StorageRuntime,
-            DoctorEvidenceStateV1::Degraded,
-            vec![evidence(
-                DoctorFindingFamilyV1::StorageRuntime,
-                "runtime.reader-lease",
-            )],
-            complete_coverage(),
-            Some(remediation()),
-        )
-        .expect("degraded finding with full coverage");
-        assert!(!finding.state().is_healthy_complete());
-        assert!(finding.coverage().is_complete());
-        assert!(finding.remediation().is_some());
     }
 
     #[test]
@@ -653,17 +556,6 @@ mod tests {
             DoctorEvidenceReferenceV1::new("ctrl\u{0}char").expect_err("control rejected"),
             ApplicationContractError::InvalidIdentifier {
                 field: "doctor evidence reference"
-            }
-        );
-    }
-
-    #[test]
-    fn doctor_owning_operation_reference_rejects_oversized_input() {
-        let oversized = "x".repeat(257);
-        assert_eq!(
-            DoctorOwningOperationRefV1::new(oversized).expect_err("oversized rejected"),
-            ApplicationContractError::InvalidIdentifier {
-                field: "doctor owning operation reference"
             }
         );
     }
@@ -699,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_storage_family_finding_constructs_and_carries_remediation() {
+    fn doctor_storage_family_finding_constructs() {
         let finding = DoctorFindingV1::new(
             DoctorFindingFamilyV1::Storage,
             DoctorEvidenceStateV1::Degraded,
@@ -708,12 +600,10 @@ mod tests {
                 "storage.orphan-store.age-42d",
             )],
             complete_coverage(),
-            Some(remediation()),
         )
         .expect("storage finding");
         assert_eq!(finding.family(), DoctorFindingFamilyV1::Storage);
         assert!(!finding.state().is_healthy_complete());
-        assert!(finding.remediation().is_some());
     }
 
     #[test]
@@ -726,7 +616,6 @@ mod tests {
                 "storage.size.within-budget",
             )],
             partial_coverage(),
-            None,
         )
         .expect_err("partial coverage cannot be healthy");
         assert_eq!(
@@ -747,7 +636,6 @@ mod tests {
                 "storage.orphan-store.age-42d",
             )],
             complete_coverage(),
-            Some(remediation()),
         )
         .expect("storage finding");
         let typed =
@@ -768,7 +656,6 @@ mod tests {
                 "runtime.reader-lease",
             )],
             complete_coverage(),
-            Some(remediation()),
         )
         .expect("runtime finding");
         assert_eq!(
@@ -788,10 +675,6 @@ mod tests {
                 "over_budget_store",
             ),
             (DoctorStorageFindingKindV1::OrphanStore, "orphan_store"),
-            (
-                DoctorStorageFindingKindV1::StaleBranchDbs,
-                "stale_branch_dbs",
-            ),
             (
                 DoctorStorageFindingKindV1::IncidentDebrisPresent,
                 "incident_debris_present",
@@ -832,10 +715,6 @@ mod tests {
             serde_json::to_string(&DoctorEvidenceStateV1::HealthyCompleteCoverage)
                 .expect("serialize"),
             "\"healthy_complete_coverage\""
-        );
-        assert_eq!(
-            serde_json::to_string(&DoctorRemediationKindV1::Preview).expect("serialize"),
-            "\"preview\""
         );
         let decoded: DoctorEvidenceStateV1 =
             serde_json::from_str("\"denied\"").expect("deserialize");

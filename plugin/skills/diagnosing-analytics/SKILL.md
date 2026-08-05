@@ -31,7 +31,7 @@ store databases directly.
    (Codex hooks may exist but stay skipped until trusted in Codex's own
    hooks approval prompt).
 4. **`tracedecay tool lcm_status --provider all --json`** and
-   **`tracedecay tool lcm_doctor --provider codex --mode diagnose --json`** —
+   **`tracedecay tool lcm_doctor --provider codex --json`** —
    session-store ingest and compression health per provider.
 5. **`tracedecay sessions search "mcp__tracedecay" --provider all`** — find
    tool usage evidence inside ingested transcripts across providers.

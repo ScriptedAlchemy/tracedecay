@@ -3,27 +3,23 @@
 //! This module owns the HTTP presentation of the canonical Doctor report: the
 //! closed finding-family vocabulary, the query DTO, the per-route descriptors,
 //! and the projection from an admitted [`DoctorReportV1`] onto the
-//! [`crate::read_model`] envelope axes (coverage, freshness, domain state, and
-//! legal-action references).
+//! [`crate::read_model`] envelope axes (coverage, freshness, and domain state).
 //!
-//! It evaluates no health and dispatches no remediation. The executable owns
-//! the admitted report source, the owner remediation dispatcher, and the
-//! route-specific payload types that carry an owner-supplied dispatch target;
-//! it hands this module a report and receives presentation, never a verdict.
+//! It evaluates no health and offers no mutation path. The executable hands
+//! this module an admitted report and receives presentation, never a verdict.
 
 use std::fmt;
 
 use serde::Deserialize;
 use tracedecay_application::doctor::{
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
-    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorRemediationDescriptorV1,
-    DoctorRemediationRefV1, DoctorRemediationRegistryV1, DoctorRemediationResolutionErrorV1,
-    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1,
+    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorReportCoverageV1,
+    DoctorReportEntryV1, DoctorReportV1,
 };
 
 use crate::read_model::{
-    DashboardCoverageV1, DashboardDomainStateV1, DashboardFreshnessV1, DashboardLegalActionKindV1,
-    DashboardLegalActionRefV1,
+    DashboardCoverageV1, DashboardDomainStateV1, DashboardFreshnessStateV1, DashboardFreshnessV1,
+    DashboardLegalActionKindV1, DashboardLegalActionRefV1,
 };
 
 /// Owning application operation for a Doctor finding re-read.
@@ -35,15 +31,7 @@ pub const DOCTOR_REPORT_SOURCE_UNSUPPORTED_NOTE: &str =
     "no admitted Doctor report source is available for this dashboard scope";
 
 /// The closed Doctor finding-family vocabulary the read routes project.
-pub const KNOWN_DOCTOR_FINDING_FAMILIES: [DoctorFindingFamilyV1; 7] = [
-    DoctorFindingFamilyV1::Advisory,
-    DoctorFindingFamilyV1::Configuration,
-    DoctorFindingFamilyV1::StorageRuntime,
-    DoctorFindingFamilyV1::Storage,
-    DoctorFindingFamilyV1::LanguageServer,
-    DoctorFindingFamilyV1::SemanticIndex,
-    DoctorFindingFamilyV1::Observability,
-];
+pub use tracedecay_application::doctor::DOCTOR_FINDING_FAMILIES as KNOWN_DOCTOR_FINDING_FAMILIES;
 
 /// Path of the Doctor finding read route, filtered by the caller's query.
 pub const DOCTOR_FINDINGS_ROUTE_PATH: &str = "/api/doctor/findings";
@@ -84,18 +72,7 @@ pub fn parse_doctor_finding_family(
 }
 
 /// The stable label for one finding family, used in coverage omission reasons.
-#[must_use]
-pub const fn doctor_finding_family_label(family: DoctorFindingFamilyV1) -> &'static str {
-    match family {
-        DoctorFindingFamilyV1::Advisory => "advisory",
-        DoctorFindingFamilyV1::Configuration => "configuration",
-        DoctorFindingFamilyV1::StorageRuntime => "storage_runtime",
-        DoctorFindingFamilyV1::Storage => "storage",
-        DoctorFindingFamilyV1::LanguageServer => "language_server",
-        DoctorFindingFamilyV1::SemanticIndex => "semantic_index",
-        DoctorFindingFamilyV1::Observability => "observability",
-    }
-}
+pub use tracedecay_application::doctor::doctor_finding_family_label;
 
 /// The refresh action every Doctor read attaches, including its typed
 /// unavailable states: a caller can always re-read.
@@ -149,20 +126,6 @@ impl DoctorReadPresentationV1 {
             legal_actions: vec![doctor_findings_refresh_action()],
         }
     }
-
-    /// Record one owner-authorized action for a remediation reference. Repeated
-    /// references never duplicate an action.
-    pub fn merge_owner_legal_action(
-        &mut self,
-        kind: DashboardLegalActionKindV1,
-        reference: &DoctorRemediationRefV1,
-    ) {
-        let action =
-            DashboardLegalActionRefV1::new(kind, reference.owning_operation().as_str().to_owned());
-        if !self.legal_actions.contains(&action) {
-            self.legal_actions.push(action);
-        }
-    }
 }
 
 /// Why a Doctor report could not be projected for a route.
@@ -171,22 +134,13 @@ pub enum DoctorProjectionErrorV1 {
     /// The canonical report carried no entry for the requested family. An
     /// absent family is not a clean family.
     FamilyAbsent,
-    /// The canonical registry rejected an owner-supplied remediation reference.
-    RemediationRejected(DoctorRemediationResolutionErrorV1),
 }
 
 impl DoctorProjectionErrorV1 {
     /// The note a route surfaces for this rejection.
     #[must_use]
     pub fn note(&self) -> String {
-        match self {
-            Self::FamilyAbsent => {
-                "canonical Doctor report omitted the requested finding family".to_owned()
-            }
-            Self::RemediationRejected(error) => format!(
-                "Doctor remediation reference was rejected by the canonical registry: {error}"
-            ),
-        }
+        "canonical Doctor report omitted the requested finding family".to_owned()
     }
 }
 
@@ -203,20 +157,12 @@ pub struct DoctorFindingsProjectionV1 {
     pub entries: Vec<DoctorReportEntryV1>,
     /// The report-wide coverage statement, preserved verbatim.
     pub report_coverage: DoctorReportCoverageV1,
-    /// Registry-resolved descriptors, first occurrence per owning operation.
-    pub remediations: Vec<DoctorRemediationDescriptorV1>,
-    /// Every remediation reference the retained entries carry, in report order.
-    /// The executable consults its owner dispatcher for each one.
-    pub remediation_references: Vec<DoctorRemediationRefV1>,
     /// The canonical report's own coverage statement.
     pub note: String,
     pub presentation: DoctorReadPresentationV1,
 }
 
 /// Project an admitted canonical Doctor report for one closed finding family.
-///
-/// Remediation references are resolved through the canonical registry only:
-/// a descriptor describes an owner operation and never authorizes it.
 pub fn project_doctor_report(
     report: &DoctorReportV1,
     family_filter: Option<DoctorFindingFamilyV1>,
@@ -231,33 +177,12 @@ pub fn project_doctor_report(
         return Err(DoctorProjectionErrorV1::FamilyAbsent);
     }
 
-    let registry = DoctorRemediationRegistryV1::default_registry();
-    let mut remediations: Vec<DoctorRemediationDescriptorV1> = Vec::new();
-    let mut remediation_references = Vec::new();
-    for reference in entries
-        .iter()
-        .filter_map(|entry| entry.finding().remediation())
-    {
-        let descriptor = registry
-            .resolve(reference)
-            .map_err(DoctorProjectionErrorV1::RemediationRejected)?;
-        if !remediations
-            .iter()
-            .any(|current| current.operation() == descriptor.operation())
-        {
-            remediations.push(descriptor.clone());
-        }
-        remediation_references.push(reference.clone());
-    }
-
     let coverage = family_coverage(report, family_filter, &entries);
     let domain_state = domain_state(&entries, &coverage);
     let freshness = freshness(&entries, domain_state);
     Ok(DoctorFindingsProjectionV1 {
         entries,
         report_coverage: report.coverage().clone(),
-        remediations,
-        remediation_references,
         note: report.coverage().statement().statement().to_owned(),
         presentation: DoctorReadPresentationV1 {
             domain_state,
@@ -411,22 +336,51 @@ fn freshness(
     entries: &[DoctorReportEntryV1],
     domain_state: DashboardDomainStateV1,
 ) -> DashboardFreshnessV1 {
+    unwatermarked_freshness(
+        entries.iter().map(|entry| entry.finding().state()),
+        domain_state,
+    )
+}
+
+/// Project freshness for evidence that carries no observation timestamp or
+/// source watermark. A report's receipt time is not evidence of source
+/// freshness, so it must not be fabricated as a fresh observation.
+fn unwatermarked_freshness(
+    evidence_states: impl Iterator<Item = DoctorEvidenceStateV1>,
+    domain_state: DashboardDomainStateV1,
+) -> DashboardFreshnessV1 {
     if domain_state == DashboardDomainStateV1::Unsupported {
         return DashboardFreshnessV1::unsupported();
     }
-    if entries
-        .iter()
-        .any(|entry| entry.finding().state() == DoctorEvidenceStateV1::Stale)
-    {
-        return DashboardFreshnessV1::stale_now();
+
+    let mut has_stale_evidence = false;
+    let mut all_evidence_absent = true;
+    for state in evidence_states {
+        has_stale_evidence |= state == DoctorEvidenceStateV1::Stale;
+        all_evidence_absent &= state == DoctorEvidenceStateV1::Absent;
     }
-    DashboardFreshnessV1::fresh_now()
+    if has_stale_evidence {
+        return DashboardFreshnessV1 {
+            state: DashboardFreshnessStateV1::Stale,
+            observed_at_micros: None,
+            watermark: None,
+        };
+    }
+    if all_evidence_absent {
+        return DashboardFreshnessV1 {
+            state: DashboardFreshnessStateV1::Absent,
+            observed_at_micros: None,
+            watermark: None,
+        };
+    }
+
+    DashboardFreshnessV1::unknown()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::read_model::{DashboardCoverageCompletenessV1, DashboardFreshnessStateV1};
+    use crate::read_model::DashboardCoverageCompletenessV1;
 
     #[test]
     fn family_filter_parses_closed_vocabulary_and_rejects_unknown() {
@@ -487,21 +441,15 @@ mod tests {
     }
 
     #[test]
-    fn projection_notes_name_the_exact_rejection() {
+    fn projection_notes_name_the_exact_absence() {
         assert_eq!(
             DoctorProjectionErrorV1::FamilyAbsent.note(),
             "canonical Doctor report omitted the requested finding family"
         );
-        let rejected = DoctorProjectionErrorV1::RemediationRejected(
-            DoctorRemediationResolutionErrorV1::UnknownOperation {
-                operation: "use-case.unknown".to_owned(),
-            },
-        );
         assert_eq!(
-            rejected.note(),
-            "Doctor remediation reference was rejected by the canonical registry: no remediation descriptor is registered for operation use-case.unknown"
+            DoctorProjectionErrorV1::FamilyAbsent.to_string(),
+            DoctorProjectionErrorV1::FamilyAbsent.note()
         );
-        assert_eq!(rejected.to_string(), rejected.note());
     }
 
     #[test]
@@ -510,5 +458,64 @@ mod tests {
             doctor_report_failure_note(&"scope unavailable"),
             "Doctor report composition failed: scope unavailable"
         );
+    }
+
+    #[test]
+    fn unwatermarked_evidence_never_fabricates_freshness() {
+        for (evidence_state, domain_state) in [
+            (
+                DoctorEvidenceStateV1::HealthyCompleteCoverage,
+                DashboardDomainStateV1::Ready,
+            ),
+            (
+                DoctorEvidenceStateV1::Unknown,
+                DashboardDomainStateV1::Partial,
+            ),
+            (
+                DoctorEvidenceStateV1::Partial,
+                DashboardDomainStateV1::Partial,
+            ),
+            (
+                DoctorEvidenceStateV1::Denied,
+                DashboardDomainStateV1::Denied,
+            ),
+            (
+                DoctorEvidenceStateV1::Degraded,
+                DashboardDomainStateV1::Partial,
+            ),
+        ] {
+            let freshness = unwatermarked_freshness([evidence_state].into_iter(), domain_state);
+
+            assert_eq!(freshness.state, DashboardFreshnessStateV1::Unknown);
+            assert_eq!(freshness.observed_at_micros, None);
+            assert_eq!(freshness.watermark, None);
+        }
+    }
+
+    #[test]
+    fn unwatermarked_evidence_preserves_absent_unsupported_and_stale_truth() {
+        let absent = unwatermarked_freshness(
+            [DoctorEvidenceStateV1::Absent].into_iter(),
+            DashboardDomainStateV1::Partial,
+        );
+        assert_eq!(absent.state, DashboardFreshnessStateV1::Absent);
+        assert_eq!(absent.observed_at_micros, None);
+        assert_eq!(absent.watermark, None);
+
+        let unsupported = unwatermarked_freshness(
+            [DoctorEvidenceStateV1::Unsupported].into_iter(),
+            DashboardDomainStateV1::Unsupported,
+        );
+        assert_eq!(unsupported.state, DashboardFreshnessStateV1::Unsupported);
+        assert_eq!(unsupported.observed_at_micros, None);
+        assert_eq!(unsupported.watermark, None);
+
+        let stale = unwatermarked_freshness(
+            [DoctorEvidenceStateV1::Stale].into_iter(),
+            DashboardDomainStateV1::Stale,
+        );
+        assert_eq!(stale.state, DashboardFreshnessStateV1::Stale);
+        assert_eq!(stale.observed_at_micros, None);
+        assert_eq!(stale.watermark, None);
     }
 }

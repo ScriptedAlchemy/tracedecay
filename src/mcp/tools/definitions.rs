@@ -1061,8 +1061,8 @@ mod tests {
             .find(|definition| definition.name == "tracedecay_lcm_doctor")
             .unwrap();
         let dispatch = &doctor.meta.as_ref().unwrap()["tracedecay/dispatch"];
-        assert_eq!(dispatch["effect"], "administrative");
-        assert_eq!(dispatch["availability"]["state"], "unavailable");
+        assert_eq!(dispatch["effect"], "read");
+        assert_eq!(dispatch["availability"]["state"], "available");
         assert!(dispatch.get("receipt").is_none());
         assert!(dispatch.get("reconciliation").is_none());
     }

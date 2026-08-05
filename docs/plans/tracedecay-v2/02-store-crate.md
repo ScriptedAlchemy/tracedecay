@@ -182,8 +182,9 @@ those authorities.
 - Diagnostic persistence rejects dirty overlays, mismatched content digests,
   and client-local authority while preserving explicit clears and supersession
   across restart.
-- Doctor diagnosis is read-only; every repair is authority-fenced, idempotent,
-  and receipt-bearing.
+- Doctor diagnosis is read-only and exposes no repair, cleanup, GC, retention,
+  relink, or recovery operation. Separately entered owning workflows retain
+  their own authorization, idempotency, and durable receipts.
 - External-source kill-point/restart regressions prove observation, receipt,
   lineage, partition frontier, aggregate digest, and projection effects commit
   completely or not at all under at-least-once replay.

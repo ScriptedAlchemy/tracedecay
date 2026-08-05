@@ -91,7 +91,7 @@ tracedecay tool search "<query>"    # CLI symbol search
 tracedecay tool files               # indexed files
 tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
-tracedecay doctor [--agent NAME]    # installation health check
+tracedecay doctor                   # read-only installation health check
 tracedecay dashboard [--open]       # local dashboard
 tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
@@ -199,7 +199,7 @@ separate daemon operation with its own preview, receipt, and recovery state.
 Common fixes:
 
 - Not initialized: run `tracedecay init` from the project root.
-- Agent does not see tools: run `tracedecay doctor --agent <name>`, then restart the agent.
+- Agent does not see tools: run `tracedecay doctor`, then restart the agent.
 - Missing symbols: inspect `tracedecay status --json` for the selected
   generation and typed warming/refresh-required coverage; request an explicit
   administrative refresh only when the daemon says it is needed, then confirm

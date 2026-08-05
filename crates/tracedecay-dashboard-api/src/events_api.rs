@@ -899,7 +899,6 @@ pub(crate) async fn dashboard_state_fixture(
         automation_scheduler_reconciler: None,
         automation_writer: crate::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
-        doctor_remediation_dispatcher: None,
         application_invocation_executor: None,
     };
     (project, state)

@@ -245,7 +245,6 @@ pub(crate) use registrars::{
     DaemonAdvisoryRuntimeRegistrar, DaemonAdvisoryRuntimeRegistrationError,
     DaemonConfigurationRuntimeRegistrar, DaemonFeedbackRuntimeRegistrar,
     DaemonFeedbackRuntimeRegistrationError, DaemonLspOwnerRegistrar, DaemonWorkRuntimeRegistrar,
-    DoctorConfigurationOutcomeV1,
 };
 pub(in crate::daemon::service) use types::{
     RegisteredCallableCodeRuntime, RegisteredConfigurationRuntime, RegisteredFeedbackRuntime,

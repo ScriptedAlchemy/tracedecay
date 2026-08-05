@@ -53,8 +53,6 @@ use self::hydration::GlobalDbTemporalHydrationPort;
 use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
 
-// Consumed by the pr8/transport cold-Doctor route when that branch is integrated.
-#[allow(unused_imports)]
 pub use doctor_health::{
     SessionTemporalHealthFindingKind, SessionTemporalHealthReport, SessionTemporalHealthStatus,
     session_temporal_doctor_health_at,

@@ -201,7 +201,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
-    pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub(crate) code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
@@ -248,7 +247,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             automation_scheduler_reconciler: None,
             automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
-            doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
             feedback_status_reader: None,
             diagnostics_cache: None,

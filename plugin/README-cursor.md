@@ -31,7 +31,7 @@ only a unique registered project; otherwise `serve` exits with an actionable
 "multiple projects" error. The template keeps `--path ${workspaceFolder}`
 because normal Cursor windows expand it and home-dir discovery cannot scope
 multi-project setups. If tools still do not connect, run
-`tracedecay doctor --agent cursor`.
+`tracedecay doctor`.
 
 Hook commands derive the active project from Cursor's event payload /
 `CURSOR_PROJECT_DIR`, not from the plugin directory. They only submit bounded
@@ -60,7 +60,7 @@ diagnostics. Multi-root workspaces remain disabled until PR15.
 
 The component is deployed at
 `~/.cursor/extensions/tracedecay.cursor-native-0.0.0/`; its receipt and
-installed manifest/bundle are checked by `tracedecay doctor --agent cursor`.
+installed manifest/bundle are checked by `tracedecay doctor`.
 TraceDecay does not install or claim ownership of `rust-analyzer`,
 `typescript-language-server`, Pyright, or another language analyzer.
 
@@ -269,7 +269,7 @@ Two layers of defense ship with this plugin:
   error naming the failure and the fix; it rechecks the project on every tool
   call and recovers automatically once `tracedecay init` (or a corrected
   `--path`) makes resolution succeed.
-- `tracedecay doctor --agent cursor` scans Cursor's recent MCP logs
+- `tracedecay doctor` scans supported host integration evidence
   (`~/.config/Cursor/logs` on Linux, `~/Library/Application Support/Cursor/logs`
   on macOS, `%APPDATA%\Cursor\logs` on Windows) for tracedecay spawn failures —
   literal `${workspaceFolder}` errors, `Connection failed: MCP error -32000`,
