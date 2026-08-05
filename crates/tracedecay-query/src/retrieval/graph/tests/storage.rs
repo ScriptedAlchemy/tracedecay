@@ -6,11 +6,33 @@ use tracedecay_graph_db::{
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1,
-    StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
+    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
+    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 use super::*;
+
+#[derive(Debug)]
+struct TestGraphLease {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: std::path::PathBuf,
+}
+
+impl RetainedGraphStoreLeaseV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+}
 
 #[test]
 fn graph_projection_reopens_with_identical_ordered_output() {
@@ -51,15 +73,20 @@ fn graph_projection_reopens_with_identical_ordered_output() {
         StoreIncarnationV1::new(1).expect("valid incarnation"),
         StoreAuthorityEpochV1::new(1).expect("valid epoch"),
     );
-    let canonical_path = temp.path().join("graph.grafeo");
+    let private_directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
+    tracedecay_private_fs::create_private_directory(&private_directory)
+        .expect("create private graph directory");
+    let canonical_path = private_directory.join("graph.grafeo");
     let registration = GraphDbRegistration {
-        verified_locator: VerifiedStoreLocatorV1::new(
-            binding.shard_id.clone(),
-            binding.incarnation,
-            canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
-        ),
-        binding: binding.clone(),
-        canonical_path,
+        authority_lease: Arc::new(TestGraphLease {
+            verified_locator: VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
+            ),
+            binding: binding.clone(),
+            canonical_path,
+        }),
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(30),

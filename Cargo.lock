@@ -5972,12 +5972,14 @@ dependencies = [
  "grafeo-storage",
  "hex",
  "parking_lot",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tracedecay-domain",
+ "tracedecay-private-fs",
  "tracedecay-store",
 ]
 
@@ -6066,6 +6068,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracedecay-private-fs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "tracedecay-query"
 version = "0.1.0"
 dependencies = [
@@ -6084,6 +6095,7 @@ dependencies = [
  "tracedecay-code-index",
  "tracedecay-domain",
  "tracedecay-graph-db",
+ "tracedecay-private-fs",
  "tracedecay-store",
  "tracedecay-temporal-query",
  "zeroize",
@@ -6123,6 +6135,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-domain",
  "tracedecay-lsp",
+ "tracedecay-private-fs",
  "tracedecay-rusqlite-runtime",
  "tracedecay-sqlite-parity-protocol",
  "tracedecay-store",

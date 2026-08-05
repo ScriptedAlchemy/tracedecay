@@ -17,6 +17,7 @@ members = [
     "crates/tracedecay-lsp",
     "crates/tracedecay-migrate",
     "crates/tracedecay-policy",
+    "crates/tracedecay-private-fs",
     "crates/tracedecay-query",
     "crates/tracedecay-runtime-core",
     "crates/tracedecay-sdk",

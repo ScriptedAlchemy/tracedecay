@@ -56,20 +56,8 @@ fn private_graph_root(store_root: &Path) -> LocalStoreLocatorResult<PathBuf> {
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if metadata.permissions().mode() & 0o077 != 0
-            || metadata.uid() != unsafe { libc::geteuid() }
-        {
-            return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
-        }
-    }
-    #[cfg(windows)]
-    crate::windows_security::validate_private_directory(&private_root)
+    tracedecay_private_fs::validate_private_directory(&private_root)
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath)?;
-    #[cfg(not(any(unix, windows)))]
-    return Err(LocalStoreLocatorUnavailableReasonV1::UnsafeLocatorPath);
     let canonical = fs::canonicalize(&private_root)
         .map_err(|_| LocalStoreLocatorUnavailableReasonV1::FilesystemMetadataUnavailable)?;
     canonical

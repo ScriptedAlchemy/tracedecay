@@ -23,6 +23,7 @@ pub(super) fn binding(entry: &RegistryEntry) -> IdentityRef<'_> {
             verified_locator,
             path,
             expected_format,
+            ..
         }
         | RegistryEntry::Ready {
             binding,
@@ -74,6 +75,7 @@ pub(super) fn require_closing(
     reservation: &Eviction,
 ) -> Result<(), GraphDbError> {
     let RegistryEntry::Closing {
+        authority_lease,
         binding,
         verified_locator,
         path,
@@ -90,6 +92,7 @@ pub(super) fn require_closing(
         || path.as_path() != reservation.path
         || expected_format != &reservation.expected_format
         || !Arc::ptr_eq(owner, &reservation.owner)
+        || !Arc::ptr_eq(authority_lease, &reservation.authority_lease)
     {
         return Err(GraphDbError::unavailable(
             "graph close reservation identity changed",
@@ -101,8 +104,11 @@ pub(super) fn require_closing(
 pub(super) fn validate_registration(
     registration: &GraphDbRegistration,
 ) -> Result<(), GraphDbError> {
+    let binding = registration.binding();
+    let verified_locator = registration.verified_locator();
+    let canonical_path = registration.canonical_path();
     if !matches!(
-        registration.binding.shard_id.scope,
+        binding.shard_id.scope,
         StoreShardScopeV1::Project { .. }
             | StoreShardScopeV1::ProjectSessions { .. }
             | StoreShardScopeV1::ProfileSessions
@@ -112,16 +118,16 @@ pub(super) fn validate_registration(
             "graph registry requires a canonical project, session, or code runtime binding",
         ));
     }
-    if registration.verified_locator.shard_id != registration.binding.shard_id
-        || registration.verified_locator.incarnation != registration.binding.incarnation
+    if verified_locator.shard_id != binding.shard_id
+        || verified_locator.incarnation != binding.incarnation
     {
         return Err(GraphDbError::invalid(
             "verified graph locator does not match the runtime binding",
         ));
     }
-    let digest = canonical_store_locator_digest(&registration.canonical_path)
+    let digest = canonical_store_locator_digest(canonical_path)
         .map_err(|error| GraphDbError::invalid(error.to_string()))?;
-    if digest != registration.verified_locator.locator_digest {
+    if digest != verified_locator.locator_digest {
         return Err(GraphDbError::invalid(
             "verified graph locator digest does not bind the canonical graph path",
         ));

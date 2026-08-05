@@ -13,9 +13,40 @@ use tracedecay_graph_db::{
 };
 use tracedecay_store::{
     BrainId, CodeShardScopeV1, GRAPH_STORE_PRIVATE_DIRECTORY, LocatorDigest, ProjectId,
-    RepositoryId, StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
-    UserProfileId, VerifiedStoreLocatorV1, WorktreeId, canonical_store_locator_digest,
+    RepositoryId, RetainedGraphStoreLeaseV1, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1, WorktreeId,
+    canonical_store_locator_digest,
 };
+
+#[derive(Debug)]
+struct TestGraphLease {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: std::path::PathBuf,
+    drop_counter: Option<Arc<AtomicUsize>>,
+}
+
+impl RetainedGraphStoreLeaseV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+}
+
+impl Drop for TestGraphLease {
+    fn drop(&mut self) {
+        if let Some(counter) = &self.drop_counter {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+}
 
 #[derive(Debug)]
 struct Cancelled;
@@ -112,9 +143,12 @@ fn registration(
         canonical_store_locator_digest(&canonical_path).unwrap(),
     );
     GraphDbRegistration {
-        binding,
-        verified_locator,
-        canonical_path,
+        authority_lease: Arc::new(TestGraphLease {
+            binding,
+            verified_locator,
+            canonical_path,
+            drop_counter: None,
+        }),
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: std::time::Instant::now() + Duration::from_secs(30),
@@ -126,31 +160,13 @@ fn graph_path(root: &std::path::Path) -> std::path::PathBuf {
         .join("graph.grafeo")
 }
 
-#[cfg(unix)]
 fn create_private_graph_directory(root: &std::path::Path) {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = std::fs::DirBuilder::new();
-    builder.mode(0o700);
-    match builder.create(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
+    match tracedecay_private_fs::create_private_directory(&root.join(GRAPH_STORE_PRIVATE_DIRECTORY))
+    {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => panic!("create private graph directory: {error}"),
     }
-}
-
-#[cfg(windows)]
-fn create_private_graph_directory(root: &std::path::Path) {
-    match std::fs::create_dir(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create private graph directory: {error}"),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_private_graph_directory(_root: &std::path::Path) {
-    panic!("private graph storage is unsupported on this platform");
 }
 
 fn entity(value: &str) -> GraphEntity {
@@ -350,8 +366,18 @@ fn identity_and_canonical_path_cannot_be_rebound() {
         GraphDbError::Conflict
     );
     let mut changed_locator = registration(identity("profile-a", "project-a"), first_root.path());
-    changed_locator.verified_locator.locator_digest =
+    let mut verified_locator = changed_locator.authority_lease.verified_locator().clone();
+    verified_locator.locator_digest =
         LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap();
+    changed_locator.authority_lease = Arc::new(TestGraphLease {
+        binding: changed_locator.authority_lease.binding().clone(),
+        verified_locator,
+        canonical_path: changed_locator
+            .authority_lease
+            .canonical_path()
+            .to_path_buf(),
+        drop_counter: None,
+    });
     assert_eq!(
         registry.resolve(changed_locator).unwrap_err(),
         GraphDbError::InvalidRequest {
@@ -703,7 +729,7 @@ fn expired_deadline_does_not_open_or_close_a_registered_store() {
 }
 
 #[test]
-fn waiter_cancellation_after_open_retains_the_shared_registered_store() {
+fn final_open_cancellation_removes_the_unpublished_store() {
     let temp = TempDir::new().unwrap();
     let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
     let store_identity = identity("profile-a", "project-a");
@@ -721,14 +747,39 @@ fn waiter_cancellation_after_open_retains_the_shared_registered_store() {
         registry
             .status(&registration(store_identity.clone(), temp.path()))
             .unwrap(),
-        Some(GraphDbRegistryStatus::Ready)
+        None
     );
-    assert!(graph_path(temp.path()).is_file());
+    assert!(!graph_path(temp.path()).exists());
     assert!(
         registry
             .resolve(registration(store_identity, temp.path()))
             .is_ok()
     );
+}
+
+#[test]
+fn registry_retains_authority_lease_until_the_graph_is_closed() {
+    let temp = TempDir::new().unwrap();
+    let registry = GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 }).unwrap();
+    let store_identity = identity("profile-a", "project-a");
+    let mut request = registration(store_identity.clone(), temp.path());
+    let dropped = Arc::new(AtomicUsize::new(0));
+    request.authority_lease = Arc::new(TestGraphLease {
+        binding: request.authority_lease.binding().clone(),
+        verified_locator: request.authority_lease.verified_locator().clone(),
+        canonical_path: request.authority_lease.canonical_path().to_path_buf(),
+        drop_counter: Some(Arc::clone(&dropped)),
+    });
+
+    let database = registry.resolve(request).unwrap();
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    drop(database);
+    assert!(
+        registry
+            .close(&registration(store_identity, temp.path()))
+            .unwrap()
+    );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
 }
 
 #[test]

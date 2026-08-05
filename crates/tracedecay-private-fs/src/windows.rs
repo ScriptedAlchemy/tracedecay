@@ -166,14 +166,19 @@ pub fn validate_directory_path(path: &Path) -> io::Result<()> {
 
 /// Validate an exact protected, inheritable current-user directory ACL.
 pub fn validate_private_directory(path: &Path) -> io::Result<()> {
-    drop(open_and_validate(
+    drop(open_private_directory(path)?);
+    Ok(())
+}
+
+/// Open an exact protected, inheritable current-user directory.
+pub fn open_private_directory(path: &Path) -> io::Result<File> {
+    open_and_validate(
         path,
         PathKind::Directory,
         OPEN_EXISTING,
         SECURITY_ACCESS,
         SHARE_READ_WRITE,
-    )?);
-    Ok(())
+    )
 }
 
 /// Validate an exact protected current-user regular-file ACL.
@@ -197,6 +202,11 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
         SECURITY_ACCESS | FILE_GENERIC_READ,
         SHARE_READ_WRITE_DELETE,
     )
+}
+
+/// Adopt an existing regular file only when it already inherited the exact private ACL.
+pub fn make_private_file(path: &Path) -> io::Result<File> {
+    open_private_file(path)
 }
 
 /// Open or create a private lock file with concurrent read-write sharing.

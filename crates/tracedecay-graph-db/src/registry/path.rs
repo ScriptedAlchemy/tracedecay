@@ -26,32 +26,39 @@ impl GraphPathAnchor {
             .parent()
             .ok_or_else(|| GraphDbError::invalid("canonical graph path has no parent"))?;
         validate_managed_graph_path(path)?;
-        let parent = Handle::from_path(parent_path).map_err(|error| {
-            GraphDbError::unavailable(format!("failed to anchor private graph directory: {error}"))
-        })?;
-        let (mut pending, existing_file) = match Handle::from_path(path) {
-            Ok(file) => (None, Some(file)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                (Some(initialize_graph_file(path)?), None)
-            }
-            Err(error) => {
-                return Err(GraphDbError::unavailable(format!(
-                    "failed to anchor canonical graph database {}: {error}",
-                    path.display()
-                )));
-            }
-        };
+        let parent = tracedecay_private_fs::open_private_directory(parent_path)
+            .and_then(Handle::from_file)
+            .map_err(|error| {
+                GraphDbError::unavailable(format!(
+                    "failed to anchor private graph directory: {error}"
+                ))
+            })?;
+        let (mut pending, existing_file) =
+            match tracedecay_private_fs::open_private_file(path).and_then(Handle::from_file) {
+                Ok(file) => (None, Some(file)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    (Some(initialize_graph_file(path)?), None)
+                }
+                Err(error) => {
+                    return Err(GraphDbError::unavailable(format!(
+                        "failed to anchor canonical graph database {}: {error}",
+                        path.display()
+                    )));
+                }
+            };
         if let Err(error) = validate_managed_graph_path(path) {
             return Err(abort_pending(pending, error));
         }
-        let current_parent = Handle::from_path(parent_path).map_err(|error| {
-            abort_pending(
-                pending.take(),
-                GraphDbError::unavailable(format!(
-                    "failed to re-anchor private graph directory: {error}"
-                )),
-            )
-        })?;
+        let current_parent = tracedecay_private_fs::open_private_directory(parent_path)
+            .and_then(Handle::from_file)
+            .map_err(|error| {
+                abort_pending(
+                    pending.take(),
+                    GraphDbError::unavailable(format!(
+                        "failed to re-anchor private graph directory: {error}"
+                    )),
+                )
+            })?;
         if parent != current_parent {
             return Err(abort_pending(pending, GraphDbError::Conflict));
         }
@@ -74,22 +81,25 @@ impl GraphPathAnchor {
 
     pub(super) fn verify(&self, path: &Path) -> Result<(), GraphDbError> {
         validate_managed_graph_path(path)?;
-        let current_parent = Handle::from_path(
+        let current_parent = tracedecay_private_fs::open_private_directory(
             path.parent()
                 .ok_or_else(|| GraphDbError::invalid("canonical graph path has no parent"))?,
         )
+        .and_then(Handle::from_file)
         .map_err(|error| {
             GraphDbError::unavailable(format!("failed to verify private graph directory: {error}"))
         })?;
         if self.parent != current_parent {
             return Err(GraphDbError::Conflict);
         }
-        let current = Handle::from_path(path).map_err(|error| {
-            GraphDbError::unavailable(format!(
-                "failed to verify canonical graph database {}: {error}",
-                path.display()
-            ))
-        })?;
+        let current = tracedecay_private_fs::open_private_file(path)
+            .and_then(Handle::from_file)
+            .map_err(|error| {
+                GraphDbError::unavailable(format!(
+                    "failed to verify canonical graph database {}: {error}",
+                    path.display()
+                ))
+            })?;
         if self.file != current {
             return Err(GraphDbError::Conflict);
         }
@@ -133,7 +143,7 @@ fn initialize_graph_file(path: &Path) -> Result<PendingGraphFile, GraphDbError> 
             path.display()
         ))
     })?;
-    let file = match Handle::from_path(path) {
+    let file = match tracedecay_private_fs::make_private_file(path).and_then(Handle::from_file) {
         Ok(file) => file,
         Err(error) => {
             drop(initialized);
@@ -148,10 +158,6 @@ fn initialize_graph_file(path: &Path) -> Result<PendingGraphFile, GraphDbError> 
         }
     };
     let pending = PendingGraphFile::new(path, file);
-    if let Err(error) = set_private_file_permissions(path) {
-        drop(initialized);
-        return Err(pending.abort(error));
-    }
     drop(initialized);
     let Some(parent) = path.parent() else {
         return Err(pending.abort(GraphDbError::invalid("canonical graph path has no parent")));
@@ -173,13 +179,21 @@ fn cleanup_created_file(
     expected: Option<&Handle>,
     primary: GraphDbError,
 ) -> GraphDbError {
-    if let Some(expected) = expected {
-        let current = match Handle::from_path(path) {
-            Ok(current) => current,
-            Err(error) => {
-                return rollback_failure("abort graph initialization", primary, error);
-            }
-        };
+    let Some(expected) = expected else {
+        return rollback_failure(
+            "refuse graph initialization cleanup without identity",
+            primary,
+            "initialized graph file identity was never anchored",
+        );
+    };
+    {
+        let current =
+            match tracedecay_private_fs::open_private_file(path).and_then(Handle::from_file) {
+                Ok(current) => current,
+                Err(error) => {
+                    return rollback_failure("abort graph initialization", primary, error);
+                }
+            };
         if &current != expected {
             return rollback_failure(
                 "abort graph initialization",
@@ -224,28 +238,8 @@ pub(super) fn validate_managed_graph_path(path: &Path) -> Result<(), GraphDbErro
             "graph database parent is not the daemon private graph directory",
         ));
     }
-    #[cfg(unix)]
-    let parent_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
-        GraphDbError::unavailable(format!(
-            "failed to inspect private graph directory {}: {error}",
-            parent.display()
-        ))
-    })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        if parent_metadata.permissions().mode() & 0o077 != 0
-            || parent_metadata.uid() != unsafe { libc::geteuid() }
-        {
-            return Err(GraphDbError::invalid(
-                "graph database parent is not private to the daemon owner",
-            ));
-        }
-    }
-    #[cfg(not(any(unix, windows)))]
-    return Err(GraphDbError::invalid(
-        "private graph storage is unsupported on this platform",
-    ));
+    tracedecay_private_fs::validate_private_directory(parent)
+        .map_err(|error| map_private_path_error("graph database parent", error))?;
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => Err(
             GraphDbError::invalid("canonical graph database must be a real file"),
@@ -259,42 +253,21 @@ pub(super) fn validate_managed_graph_path(path: &Path) -> Result<(), GraphDbErro
     }
 }
 
-#[cfg(unix)]
 fn validate_private_graph_file(
-    _path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(), GraphDbError> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-    if metadata.permissions().mode() & 0o077 != 0 || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(GraphDbError::invalid(
-            "canonical graph database is not private to the daemon owner",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn validate_private_graph_file(
-    _path: &Path,
+    path: &Path,
     _metadata: &std::fs::Metadata,
 ) -> Result<(), GraphDbError> {
-    Ok(())
+    tracedecay_private_fs::validate_private_file(path)
+        .map_err(|error| map_private_path_error("canonical graph database", error))
 }
 
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<(), GraphDbError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|error| {
-        GraphDbError::unavailable(format!(
-            "failed to make canonical graph database private {}: {error}",
-            path.display()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn set_private_file_permissions(_path: &Path) -> Result<(), GraphDbError> {
-    Ok(())
+fn map_private_path_error(description: &str, error: std::io::Error) -> GraphDbError {
+    match error.kind() {
+        std::io::ErrorKind::InvalidInput | std::io::ErrorKind::PermissionDenied => {
+            GraphDbError::invalid(format!("{description} is not private to the daemon owner"))
+        }
+        _ => {
+            GraphDbError::unavailable(format!("failed to validate private {description}: {error}"))
+        }
+    }
 }
