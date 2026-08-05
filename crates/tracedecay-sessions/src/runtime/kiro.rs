@@ -38,26 +38,25 @@ use crate::runtime::shared::{
     content_storage_text_and_tools, title_from_messages,
 };
 use crate::runtime::snapshot_observation::{
-    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotAdmissionRecord,
-    SnapshotCaptureOutcome, bounded_snapshot_input_len, capture_snapshot_observations,
-    non_durable_snapshot_record, read_snapshot_text_bounded,
+    MAX_SNAPSHOT_FILE_BYTES, MAX_SNAPSHOT_METADATA_BYTES, SnapshotCaptureOutcome,
+    bounded_snapshot_input_len, capture_snapshot_observations, non_durable_snapshot_record,
+    read_snapshot_text_bounded,
 };
 #[cfg(test)]
-use crate::runtime::snapshot_observation::{
-    canonical_snapshot_envelope, host_admission_error, snapshot_cursor_after,
-};
+use crate::runtime::snapshot_observation::{canonical_snapshot_envelope, host_admission_error};
 use crate::runtime::source::{
     ParsedTranscript, SessionDraft, TranscriptDiscoveryBounds, TranscriptIngestError,
     TranscriptIngestResult, TranscriptSource, collect_files_with_ext_bounded, read_changed_file,
 };
 use serde_json::{Map, Value};
 #[cfg(test)]
-use tracedecay_domain::{
-    ObservationOrderingDomainV1, ObservationSourceCursorV1, ObservationSourceRangeV1,
-};
+use tracedecay_domain::{ObservationOrderingDomainV1, ObservationSourceRangeV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 #[cfg(test)]
 use tracedecay_runtime_core::privacy::parse_normalized_observation_record_v1;
+
+mod observation;
+pub use observation::KiroSnapshotObservationRecord;
 
 const PROVIDER: &str = "kiro";
 const KIRO_LOCATION_KEYS: TranscriptLocationMetadataKeys = TranscriptLocationMetadataKeys::new(
@@ -78,47 +77,6 @@ pub struct KiroSource {
     agent_dir: PathBuf,
     workspace_storage_dir: PathBuf,
     user_registered_roots: Option<Vec<PathBuf>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct KiroSnapshotObservationRecord {
-    session_id: String,
-    native_record_id: String,
-    order: u64,
-    payload: Vec<u8>,
-}
-
-impl SnapshotAdmissionRecord for KiroSnapshotObservationRecord {
-    fn provider(&self) -> &'static str {
-        PROVIDER
-    }
-
-    fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    fn native_record_id(&self) -> &str {
-        &self.native_record_id
-    }
-
-    fn order(&self) -> u64 {
-        self.order
-    }
-
-    fn payload(&self) -> &[u8] {
-        &self.payload
-    }
-}
-
-#[cfg(test)]
-impl KiroSnapshotObservationRecord {
-    fn cursor_after(
-        &self,
-        scope: ObservationScopeV1,
-        generation: ObservationSourceGenerationV1,
-    ) -> TranscriptIngestResult<ObservationSourceCursorV1> {
-        snapshot_cursor_after(PROVIDER, &self.session_id, self.order, scope, generation)
-    }
 }
 
 impl KiroSource {
