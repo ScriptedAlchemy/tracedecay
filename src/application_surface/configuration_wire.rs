@@ -6,9 +6,9 @@ use tracedecay_application::{
     ApplicationWireSchemaV1, ConfigurationAuditRequestV1, ConfigurationBatchRequestV1,
     ConfigurationGetRequestV1, ConfigurationListRequestV1, ConfigurationObservedStateRequestV1,
     ConfigurationProtectedApplyRequestV1, ConfigurationProtectedPreviewRequestV1,
-    ConfigurationRollbackApplyRequestV1, ConfigurationRollbackPreviewRequestV1,
-    ConfigurationSetRequestV1, ConfigurationUnsetRequestV1, ConfigurationWriteCredentialRequestV1,
-    configuration_surface_operation,
+    ConfigurationResetOutcomeV1, ConfigurationResetRequestV1, ConfigurationRollbackApplyRequestV1,
+    ConfigurationRollbackPreviewRequestV1, ConfigurationSetRequestV1, ConfigurationUnsetRequestV1,
+    ConfigurationWriteCredentialRequestV1, configuration_surface_operation,
 };
 use tracedecay_domain::configuration::{CredentialReferenceMetadataV1, ProtectedChangePlan};
 use tracedecay_tool_catalog::{CatalogSnapshotV1, SchemaBodyAuthorityV1};
@@ -35,6 +35,7 @@ pub(super) fn is_configuration_operation(operation: ApplicationSurfaceOperation)
             | ApplicationSurfaceOperation::ConfigurationRollbackPreview
             | ApplicationSurfaceOperation::ConfigurationRollbackApply
             | ApplicationSurfaceOperation::ConfigurationAudit
+            | ApplicationSurfaceOperation::ConfigurationReset
     )
 }
 
@@ -142,6 +143,11 @@ pub(super) fn build_configuration_wire_schema_registry(
         ConfigurationAudit,
         ConfigurationAuditRequestV1,
         ConfigurationAuditPage
+    );
+    add!(
+        ConfigurationReset,
+        ConfigurationResetRequestV1,
+        ConfigurationResetOutcomeV1
     );
     ApplicationWireSchemaRegistryV1::new(schemas).map_err(Into::into)
 }
