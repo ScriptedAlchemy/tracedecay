@@ -459,6 +459,7 @@ impl LspSessionRegistry {
             .map_err(LspEndpointError::Lifecycle)
     }
 
+    /// Rotates the credential and renews the registry-owned bounded lease.
     pub fn reconnect_with_credential(
         &mut self,
         access: &LspSessionAccess,
@@ -480,6 +481,7 @@ impl LspSessionRegistry {
             .get_mut(access.session_id())
             .ok_or(LspEndpointError::AuthenticationFailed)?;
         session.credential = credential.clone();
+        session.expires_at_ms = now_ms.saturating_add(LSP_SESSION_TTL_MS);
         Ok(LspSessionAccess::new(
             access.session_id().clone(),
             credential,
@@ -896,7 +898,15 @@ mod tests {
             endpoint.registry_mut().authenticate(&access, 4).err(),
             Some(LspEndpointError::AuthenticationFailed)
         );
-        endpoint.registry_mut().close(&reconnected, 4).unwrap();
+        endpoint.registry_mut().expire_at(LSP_SESSION_TTL_MS);
+        assert!(
+            endpoint
+                .registry_mut()
+                .authenticate(&reconnected, LSP_SESSION_TTL_MS)
+                .is_ok(),
+            "reconnect must renew the registry-owned lease"
+        );
+        endpoint.registry_mut().expire_at(3 + LSP_SESSION_TTL_MS);
         assert_eq!(endpoint.registry().active_sessions(), 0);
 
         let mut registry = LspSessionRegistry::new(1);

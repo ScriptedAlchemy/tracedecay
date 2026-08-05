@@ -1,5 +1,4 @@
-//! `plan26` module test coverage (split from the former monolithic
-//! `invocation::tests` module).
+//! Invocation-observability test coverage.
 
 use super::*;
 
@@ -10,7 +9,7 @@ fn feedback_rejection_observation_classifies_request_and_revision_failures() {
         DaemonInvocationProblem::InvalidRequest,
     );
     assert_eq!(
-        plan26_rejected_argument(&invalid),
+        invocation_rejected_argument(&invalid),
         Some((
             Plan26RejectedArgumentV1::RequestBody,
             Plan26ArgumentRejectionClassV1::InvalidShape,
@@ -22,7 +21,7 @@ fn feedback_rejection_observation_classifies_request_and_revision_failures() {
         DaemonInvocationProblem::UnsupportedRevision,
     );
     assert_eq!(
-        plan26_rejected_argument(&unsupported),
+        invocation_rejected_argument(&unsupported),
         Some((
             Plan26RejectedArgumentV1::Lifecycle,
             Plan26ArgumentRejectionClassV1::Unsupported,
