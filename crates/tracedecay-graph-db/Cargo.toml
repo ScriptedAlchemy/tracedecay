@@ -22,10 +22,8 @@ sha2 = "0.11"
 same-file = "1"
 thiserror = "2"
 tracedecay-domain = { path = "../tracedecay-domain", version = "0.1.0" }
+tracedecay-private-fs = { path = "../tracedecay-private-fs", version = "0.1.0" }
 tracedecay-store = { path = "../tracedecay-store", version = "0.1.0" }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

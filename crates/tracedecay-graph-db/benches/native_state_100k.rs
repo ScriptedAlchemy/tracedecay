@@ -1,21 +1,43 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 use tracedecay_graph_db::{
     GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId,
-    GraphMutation, GraphNamespace, GraphProjectionId, GraphWatermark, GraphWriteBatch,
-    NeverCancelled, SourceGeneration,
+    GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
+    GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
 };
 use tracedecay_store::{
-    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
+    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
+    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
 
 const ENTITY_COUNT: usize = 100_000;
+
+#[derive(Debug)]
+struct BenchmarkGraphLease {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: std::path::PathBuf,
+}
+
+impl RetainedGraphStoreLeaseV1 for BenchmarkGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &std::path::Path {
+        &self.canonical_path
+    }
+}
 
 fn registration(root: &std::path::Path) -> GraphDbRegistration {
     create_private_graph_directory(root);
@@ -32,44 +54,28 @@ fn registration(root: &std::path::Path) -> GraphDbRegistration {
         StoreAuthorityEpochV1::new(1).expect("valid epoch"),
     );
     GraphDbRegistration {
-        verified_locator: VerifiedStoreLocatorV1::new(
-            binding.shard_id.clone(),
-            binding.incarnation,
-            canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
-        ),
-        binding,
-        canonical_path,
+        authority_lease: Arc::new(BenchmarkGraphLease {
+            verified_locator: VerifiedStoreLocatorV1::new(
+                binding.shard_id.clone(),
+                binding.incarnation,
+                canonical_store_locator_digest(&canonical_path).expect("valid locator digest"),
+            ),
+            binding,
+            canonical_path,
+        }),
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(3_600),
     }
 }
 
-#[cfg(unix)]
 fn create_private_graph_directory(root: &std::path::Path) {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = std::fs::DirBuilder::new();
-    builder.mode(0o700);
-    match builder.create(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
+    match tracedecay_private_fs::create_private_directory(&root.join(GRAPH_STORE_PRIVATE_DIRECTORY))
+    {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => panic!("create private graph directory: {error}"),
     }
-}
-
-#[cfg(windows)]
-fn create_private_graph_directory(root: &std::path::Path) {
-    match std::fs::create_dir(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create private graph directory: {error}"),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_private_graph_directory(_root: &std::path::Path) {
-    panic!("private graph storage is unsupported on this platform");
 }
 
 fn registry() -> GraphDbRegistry {
@@ -77,11 +83,11 @@ fn registry() -> GraphDbRegistry {
         .expect("benchmark registry config is valid")
 }
 
-fn populate(registry: &GraphDbRegistry, request: &GraphDbRegistration) {
+fn populate(registry: &GraphDbRegistry, request: &GraphDbRegistration, entity_count: usize) {
     let db = registry
         .resolve(request.clone())
         .expect("benchmark store opens");
-    let mutations = (0..ENTITY_COUNT)
+    let mutations = (0..entity_count)
         .map(|index| {
             GraphMutation::UpsertEntity(
                 GraphEntity::new(
@@ -103,16 +109,41 @@ fn populate(registry: &GraphDbRegistry, request: &GraphDbRegistration) {
         Arc::new(NeverCancelled),
     )
     .expect("benchmark batch is valid");
-    db.apply(batch).expect("100k-node batch commits");
+    db.apply(batch).expect("native-node batch commits");
     drop(db);
     registry.close(request).expect("benchmark store closes");
+}
+
+fn small_update(entity_count: usize, sequence: usize) -> GraphWriteBatch {
+    let identity = format!("entity-{:06}", entity_count - 1);
+    GraphWriteBatch::new(
+        GraphNamespace::new("benchmark").expect("benchmark namespace is valid"),
+        GraphProjectionId::new("code").expect("benchmark projection is valid"),
+        SourceGeneration::new(format!("small-update-generation-{sequence}"))
+            .expect("benchmark generation is valid"),
+        GraphWatermark::new(format!("small-update-watermark-{sequence}"))
+            .expect("benchmark watermark is valid"),
+        vec![GraphMutation::UpsertEntity(
+            GraphEntity::new(
+                GraphEntityId::new(identity).expect("benchmark identity is valid"),
+                BTreeSet::new(),
+                BTreeMap::from([(
+                    GraphPropertyName::new("revision").expect("benchmark property is valid"),
+                    GraphProperty::I64(sequence as i64),
+                )]),
+            )
+            .expect("benchmark entity is valid"),
+        )],
+        Arc::new(NeverCancelled),
+    )
+    .expect("benchmark batch is valid")
 }
 
 fn native_state_100k(criterion: &mut Criterion) {
     let temp = TempDir::new().expect("benchmark temporary directory exists");
     let registry = registry();
     let request = registration(temp.path());
-    populate(&registry, &request);
+    populate(&registry, &request, ENTITY_COUNT);
 
     criterion.bench_function("native_state/reopen_100k_without_graph_scan", |bencher| {
         bencher.iter_batched(
@@ -135,6 +166,34 @@ fn native_state_100k(criterion: &mut Criterion) {
         bencher.iter(|| {
             db.entity(&namespace, &identity, Arc::new(NeverCancelled))
                 .expect("indexed point read succeeds")
+        });
+    });
+    let sequence = AtomicUsize::new(2);
+    criterion.bench_function("native_state/small_update_100k", |bencher| {
+        bencher.iter(|| {
+            let sequence = sequence.fetch_add(1, Ordering::Relaxed);
+            db.apply(small_update(ENTITY_COUNT, sequence))
+                .expect("small indexed update succeeds")
+        });
+    });
+    drop(db);
+    registry.close(&request).expect("100k store closes");
+
+    let ten_x_temp = TempDir::new().expect("10x benchmark temporary directory exists");
+    let ten_x_registry = registry();
+    let ten_x_request = registration(ten_x_temp.path());
+    let ten_x_entity_count = ENTITY_COUNT * 10;
+    populate(&ten_x_registry, &ten_x_request, ten_x_entity_count);
+    let ten_x_db = ten_x_registry
+        .resolve(ten_x_request.clone())
+        .expect("10x benchmark store opens");
+    let ten_x_sequence = AtomicUsize::new(2);
+    criterion.bench_function("native_state/small_update_1m", |bencher| {
+        bencher.iter(|| {
+            let sequence = ten_x_sequence.fetch_add(1, Ordering::Relaxed);
+            ten_x_db
+                .apply(small_update(ten_x_entity_count, sequence))
+                .expect("10x small indexed update succeeds")
         });
     });
 }

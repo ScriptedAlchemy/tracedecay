@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use tracedecay_store::{StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1};
+use tracedecay_store::{
+    RetainedGraphStoreLeaseV1, StoreRuntimeBindingV1, StoreShardIdV1, VerifiedStoreLocatorV1,
+};
 
 use crate::{
     GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner,
@@ -26,9 +28,7 @@ const OPEN_WAIT_POLL: Duration = Duration::from_millis(10);
 
 #[derive(Clone)]
 pub struct GraphDbRegistration {
-    pub binding: StoreRuntimeBindingV1,
-    pub verified_locator: VerifiedStoreLocatorV1,
-    pub canonical_path: PathBuf,
+    pub authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
     pub cancellation: Arc<dyn GraphCancellation>,
     pub lifecycle_cancellation: Arc<dyn GraphCancellation>,
     pub deadline: Instant,
@@ -38,11 +38,23 @@ impl fmt::Debug for GraphDbRegistration {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("GraphDbRegistration")
-            .field("binding", &self.binding)
-            .field("verified_locator", &self.verified_locator)
-            .field("canonical_path", &self.canonical_path)
+            .field("authority_lease", &self.authority_lease)
             .field("deadline", &self.deadline)
             .finish_non_exhaustive()
+    }
+}
+
+impl GraphDbRegistration {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        self.authority_lease.binding()
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        self.authority_lease.verified_locator()
+    }
+
+    fn canonical_path(&self) -> &Path {
+        self.authority_lease.canonical_path()
     }
 }
 
@@ -80,12 +92,14 @@ struct RegistryState {
 
 enum RegistryEntry {
     Opening {
+        authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
         path: PathBuf,
         expected_format: GraphFormatVersion,
     },
     Ready {
+        authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -94,6 +108,7 @@ enum RegistryEntry {
         last_used: Instant,
     },
     Closing {
+        authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -101,6 +116,7 @@ enum RegistryEntry {
         owner: Arc<GraphDbOwner>,
     },
     Faulted {
+        authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
         binding: StoreRuntimeBindingV1,
         verified_locator: VerifiedStoreLocatorV1,
         path: PathBuf,
@@ -112,6 +128,7 @@ enum RegistryEntry {
 
 #[derive(Clone)]
 struct Eviction {
+    authority_lease: Arc<dyn RetainedGraphStoreLeaseV1>,
     binding: StoreRuntimeBindingV1,
     verified_locator: VerifiedStoreLocatorV1,
     path: PathBuf,
@@ -146,11 +163,12 @@ impl GraphDbRegistry {
     pub fn resolve(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
-        let path = registration.canonical_path.clone();
+        let path = registration.canonical_path().to_path_buf();
         validate_managed_graph_path(&path)?;
         let expected_format = GraphFormatVersion::current();
-        let binding = registration.binding.clone();
-        let verified_locator = registration.verified_locator.clone();
+        let binding = registration.binding().clone();
+        let verified_locator = registration.verified_locator().clone();
+        let authority_lease = Arc::clone(&registration.authority_lease);
         let shard_id = binding.shard_id.clone();
 
         loop {
@@ -166,6 +184,7 @@ impl GraphDbRegistry {
                     expected_format: registered_format,
                     owner,
                     last_used,
+                    ..
                 }) => {
                     require_binding(
                         (
@@ -217,6 +236,7 @@ impl GraphDbRegistry {
                     verified_locator: registered_locator,
                     path: registered_path,
                     expected_format: registered_format,
+                    ..
                 })
                 | Some(RegistryEntry::Closing {
                     binding: registered_binding,
@@ -253,6 +273,7 @@ impl GraphDbRegistry {
                     state.entries.insert(
                         shard_id.clone(),
                         RegistryEntry::Opening {
+                            authority_lease: Arc::clone(&authority_lease),
                             binding: binding.clone(),
                             verified_locator: verified_locator.clone(),
                             path: path.clone(),
@@ -280,12 +301,50 @@ impl GraphDbRegistry {
         let opened = open_registered_graph(&path, expected_format, &registration);
         let mut state = self.state_lock()?;
         match opened {
-            Ok(owner) => {
+            Ok((owner, mut path_anchor)) => {
+                let publication_error = check_request(
+                    registration.lifecycle_cancellation.as_ref(),
+                    registration.deadline,
+                )
+                .and_then(|()| {
+                    check_request(registration.cancellation.as_ref(), registration.deadline)
+                })
+                .and_then(|()| path_anchor.verify(&path))
+                .err();
+                if let Some(error) = publication_error {
+                    let error = close_and_abort_graph_open(
+                        &owner,
+                        path_anchor,
+                        "reject unpublished registered graph",
+                        error,
+                    );
+                    if retains_fault(&error) {
+                        let retained_owner = (!owner.is_closed()).then(|| Arc::new(owner));
+                        state.entries.insert(
+                            shard_id,
+                            RegistryEntry::Faulted {
+                                authority_lease,
+                                binding,
+                                verified_locator,
+                                path,
+                                expected_format,
+                                owner: retained_owner,
+                                error: error.clone(),
+                            },
+                        );
+                    } else {
+                        state.entries.remove(&shard_id);
+                    }
+                    self.inner.changed.notify_all();
+                    return Err(error);
+                }
+                path_anchor.commit();
                 let owner = Arc::new(owner);
                 let database = owner.handle();
                 state.entries.insert(
                     shard_id,
                     RegistryEntry::Ready {
+                        authority_lease,
                         binding,
                         verified_locator,
                         path,
@@ -295,14 +354,14 @@ impl GraphDbRegistry {
                     },
                 );
                 self.inner.changed.notify_all();
-                check_request(registration.cancellation.as_ref(), registration.deadline)
-                    .map(|()| database)
+                Ok(database)
             }
             Err(error) => {
                 if retains_fault(&error) {
                     state.entries.insert(
                         shard_id,
                         RegistryEntry::Faulted {
+                            authority_lease,
                             binding,
                             verified_locator,
                             path,
@@ -323,12 +382,12 @@ impl GraphDbRegistry {
     pub fn reopen(&self, registration: GraphDbRegistration) -> Result<Arc<GraphDb>, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(&registration)?;
-        let path = registration.canonical_path.clone();
+        let path = registration.canonical_path().to_path_buf();
         validate_managed_graph_path(&path)?;
         let expected_format = GraphFormatVersion::current();
         if let CloseReservation::Closing(reservation) = self.reserve_close(
-            &registration.binding,
-            &registration.verified_locator,
+            registration.binding(),
+            registration.verified_locator(),
             Some((&path, expected_format)),
         )? {
             if let Err(error) =
@@ -345,8 +404,8 @@ impl GraphDbRegistry {
                     return Err(error);
                 }
                 self.remove_closed_fault(
-                    &registration.binding,
-                    &registration.verified_locator,
+                    registration.binding(),
+                    registration.verified_locator(),
                     &path,
                     expected_format,
                 )?;
@@ -358,11 +417,11 @@ impl GraphDbRegistry {
     pub fn close(&self, registration: &GraphDbRegistration) -> Result<bool, GraphDbError> {
         check_request(registration.cancellation.as_ref(), registration.deadline)?;
         validate_registration(registration)?;
-        let path = registration.canonical_path.clone();
+        let path = registration.canonical_path().to_path_buf();
         validate_managed_graph_path(&path)?;
         let reservation = match self.reserve_close(
-            &registration.binding,
-            &registration.verified_locator,
+            registration.binding(),
+            registration.verified_locator(),
             Some((&path, GraphFormatVersion::current())),
         )? {
             CloseReservation::Absent => return Ok(false),
@@ -412,6 +471,7 @@ impl GraphDbRegistry {
                 .into_iter()
                 .filter_map(|shard_id| {
                     let RegistryEntry::Ready {
+                        authority_lease,
                         binding,
                         verified_locator,
                         path,
@@ -424,6 +484,7 @@ impl GraphDbRegistry {
                         return None;
                     };
                     let eviction = Eviction {
+                        authority_lease: Arc::clone(authority_lease),
                         binding: binding.clone(),
                         verified_locator: verified_locator.clone(),
                         path: path.clone(),
@@ -435,6 +496,7 @@ impl GraphDbRegistry {
                     state.entries.insert(
                         shard_id,
                         RegistryEntry::Closing {
+                            authority_lease: Arc::clone(&eviction.authority_lease),
                             binding: eviction.binding.clone(),
                             verified_locator: eviction.verified_locator.clone(),
                             path: eviction.path.clone(),
@@ -479,17 +541,17 @@ impl GraphDbRegistry {
         registration: &GraphDbRegistration,
     ) -> Result<Option<GraphDbRegistryStatus>, GraphDbError> {
         validate_registration(registration)?;
-        validate_managed_graph_path(&registration.canonical_path)?;
+        validate_managed_graph_path(registration.canonical_path())?;
         let state = self.state_lock()?;
-        let Some(entry) = state.entries.get(&registration.binding.shard_id) else {
+        let Some(entry) = state.entries.get(&registration.binding().shard_id) else {
             return Ok(None);
         };
         require_binding(
             binding(entry),
             (
-                &registration.binding,
-                &registration.verified_locator,
-                &registration.canonical_path,
+                registration.binding(),
+                registration.verified_locator(),
+                registration.canonical_path(),
                 GraphFormatVersion::current(),
             ),
         )?;
@@ -532,6 +594,7 @@ impl GraphDbRegistry {
                 return Ok(CloseReservation::Removed);
             }
             RegistryEntry::Ready {
+                authority_lease,
                 binding,
                 verified_locator,
                 path,
@@ -539,6 +602,7 @@ impl GraphDbRegistry {
                 owner,
                 last_used,
             } => Eviction {
+                authority_lease: Arc::clone(authority_lease),
                 binding: binding.clone(),
                 verified_locator: verified_locator.clone(),
                 path: path.clone(),
@@ -548,6 +612,7 @@ impl GraphDbRegistry {
                 last_used: *last_used,
             },
             RegistryEntry::Faulted {
+                authority_lease,
                 binding,
                 verified_locator,
                 path,
@@ -555,6 +620,7 @@ impl GraphDbRegistry {
                 owner: Some(owner),
                 error,
             } => Eviction {
+                authority_lease: Arc::clone(authority_lease),
                 binding: binding.clone(),
                 verified_locator: verified_locator.clone(),
                 path: path.clone(),
@@ -567,6 +633,7 @@ impl GraphDbRegistry {
         state.entries.insert(
             requested_binding.shard_id.clone(),
             RegistryEntry::Closing {
+                authority_lease: Arc::clone(&reservation.authority_lease),
                 binding: reservation.binding.clone(),
                 verified_locator: reservation.verified_locator.clone(),
                 path: reservation.path.clone(),
@@ -592,6 +659,7 @@ impl GraphDbRegistry {
         require_closing(entry, &eviction)?;
         let restored = if let Some(error) = eviction.prior_fault {
             RegistryEntry::Faulted {
+                authority_lease: eviction.authority_lease,
                 binding: eviction.binding,
                 verified_locator: eviction.verified_locator,
                 path: eviction.path,
@@ -601,6 +669,7 @@ impl GraphDbRegistry {
             }
         } else {
             RegistryEntry::Ready {
+                authority_lease: eviction.authority_lease,
                 binding: eviction.binding,
                 verified_locator: eviction.verified_locator,
                 path: eviction.path,
@@ -635,6 +704,7 @@ impl GraphDbRegistry {
                 state.entries.insert(
                     reservation.binding.shard_id.clone(),
                     RegistryEntry::Faulted {
+                        authority_lease: reservation.authority_lease,
                         binding: reservation.binding,
                         verified_locator: reservation.verified_locator,
                         path: reservation.path,
@@ -759,6 +829,7 @@ fn reserve_capacity_eviction(
         .map(|(shard_id, _)| shard_id)
         .ok_or(GraphDbError::BudgetExhausted)?;
     let Some(RegistryEntry::Ready {
+        authority_lease,
         binding,
         verified_locator,
         path,
@@ -773,6 +844,7 @@ fn reserve_capacity_eviction(
         ));
     };
     let eviction = Eviction {
+        authority_lease: Arc::clone(authority_lease),
         binding: binding.clone(),
         verified_locator: verified_locator.clone(),
         path: path.clone(),
@@ -784,6 +856,7 @@ fn reserve_capacity_eviction(
     state.entries.insert(
         candidate,
         RegistryEntry::Closing {
+            authority_lease: Arc::clone(&eviction.authority_lease),
             binding: eviction.binding.clone(),
             verified_locator: eviction.verified_locator.clone(),
             path: eviction.path.clone(),
@@ -825,7 +898,7 @@ fn open_registered_graph(
     path: &Path,
     expected_format: GraphFormatVersion,
     registration: &GraphDbRegistration,
-) -> Result<GraphDbOwner, GraphDbError> {
+) -> Result<(GraphDbOwner, GraphPathAnchor), GraphDbError> {
     check_request(
         registration.lifecycle_cancellation.as_ref(),
         registration.deadline,
@@ -865,8 +938,7 @@ fn open_registered_graph(
             error,
         ));
     }
-    path_anchor.commit();
-    Ok(owner)
+    Ok((owner, path_anchor))
 }
 
 fn close_and_abort_graph_open(
@@ -875,9 +947,11 @@ fn close_and_abort_graph_open(
     context: &str,
     primary: GraphDbError,
 ) -> GraphDbError {
-    match owner.close() {
-        Ok(()) => path_anchor.abort(primary),
-        Err(close_error) => rollback_failure(context, primary, close_error),
+    let close_result = owner.close();
+    let cleanup_result = path_anchor.abort(primary);
+    match close_result {
+        Ok(()) => cleanup_result,
+        Err(close_error) => rollback_failure(context, cleanup_result, close_error),
     }
 }
 
@@ -935,5 +1009,46 @@ fn status(entry: &RegistryEntry) -> GraphDbRegistryStatus {
             | GraphDbError::Unavailable { .. }
             | GraphDbError::Closed => GraphDbRegistryStatus::Closed,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use tempfile::tempdir;
+    use tracedecay_store::GRAPH_STORE_PRIVATE_DIRECTORY;
+
+    use super::{GraphPathAnchor, close_and_abort_graph_open};
+    use crate::{GraphDbError, GraphDbOwner, NeverCancelled};
+
+    #[test]
+    fn close_and_cleanup_failures_preserve_both_causes_and_replacement() {
+        let temp = tempdir().unwrap();
+        let private_directory = temp.path().join(GRAPH_STORE_PRIVATE_DIRECTORY);
+        tracedecay_private_fs::create_private_directory(&private_directory).unwrap();
+        let graph_path = private_directory.join("graph.grafeo");
+        let anchor = GraphPathAnchor::acquire(&graph_path).unwrap();
+        let moved = private_directory.join("moved.grafeo");
+        std::fs::rename(&graph_path, &moved).unwrap();
+        drop(tracedecay_private_fs::create_private_file(&graph_path).unwrap());
+
+        let owner = GraphDbOwner::memory(Arc::new(NeverCancelled)).unwrap();
+        owner.handle().inner.poisoned.store(true, Ordering::Release);
+        let error = close_and_abort_graph_open(
+            &owner,
+            anchor,
+            "test close and cleanup",
+            GraphDbError::Cancelled,
+        );
+
+        let GraphDbError::DurabilityUncertain { message } = error else {
+            panic!("close plus cleanup failure must report uncertain durability");
+        };
+        assert!(message.contains("operation cancelled"));
+        assert!(message.contains("identity changed before cleanup"));
+        assert!(message.contains("uncertain durability"));
+        assert!(graph_path.is_file(), "replacement must never be deleted");
     }
 }

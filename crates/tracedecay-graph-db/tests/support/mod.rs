@@ -7,10 +7,31 @@ use tracedecay_graph_db::{
     NeverCancelled,
 };
 use tracedecay_store::{
-    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
-    canonical_store_locator_digest,
+    BrainId, GRAPH_STORE_PRIVATE_DIRECTORY, ProjectId, RetainedGraphStoreLeaseV1,
+    StoreAuthorityEpochV1, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
+    UserProfileId, VerifiedStoreLocatorV1, canonical_store_locator_digest,
 };
+
+#[derive(Debug)]
+struct TestGraphLease {
+    binding: StoreRuntimeBindingV1,
+    verified_locator: VerifiedStoreLocatorV1,
+    canonical_path: PathBuf,
+}
+
+impl RetainedGraphStoreLeaseV1 for TestGraphLease {
+    fn binding(&self) -> &StoreRuntimeBindingV1 {
+        &self.binding
+    }
+
+    fn verified_locator(&self) -> &VerifiedStoreLocatorV1 {
+        &self.verified_locator
+    }
+
+    fn canonical_path(&self) -> &Path {
+        &self.canonical_path
+    }
+}
 
 pub struct RegisteredGraph {
     pub registry: GraphDbRegistry,
@@ -58,40 +79,24 @@ pub fn registration(binding: StoreRuntimeBindingV1, root: &Path) -> GraphDbRegis
         canonical_store_locator_digest(&canonical_path).unwrap(),
     );
     GraphDbRegistration {
-        binding,
-        verified_locator,
-        canonical_path,
+        authority_lease: Arc::new(TestGraphLease {
+            binding,
+            verified_locator,
+            canonical_path,
+        }),
         cancellation: Arc::new(NeverCancelled),
         lifecycle_cancellation: Arc::new(NeverCancelled),
         deadline: Instant::now() + Duration::from_secs(30),
     }
 }
 
-#[cfg(unix)]
 fn create_private_graph_directory(root: &Path) {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let mut builder = std::fs::DirBuilder::new();
-    builder.mode(0o700);
-    match builder.create(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
+    match tracedecay_private_fs::create_private_directory(&root.join(GRAPH_STORE_PRIVATE_DIRECTORY))
+    {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => panic!("create private graph directory: {error}"),
     }
-}
-
-#[cfg(windows)]
-fn create_private_graph_directory(root: &Path) {
-    match std::fs::create_dir(root.join(GRAPH_STORE_PRIVATE_DIRECTORY)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => panic!("create private graph directory: {error}"),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_private_graph_directory(_root: &Path) {
-    panic!("private graph storage is unsupported on this platform");
 }
 
 fn binding() -> StoreRuntimeBindingV1 {

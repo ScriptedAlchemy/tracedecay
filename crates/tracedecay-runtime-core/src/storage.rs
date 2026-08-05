@@ -1148,7 +1148,13 @@ impl PrivateStoreIo {
                 "private store directory parent must already exist",
             ));
         }
-        create_or_validate_private_directory(path)
+        match tracedecay_private_fs::create_private_directory(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                tracedecay_private_fs::validate_private_directory(path)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn create_dir_all(path: &Path) -> io::Result<()> {
@@ -1335,55 +1341,6 @@ impl PrivateStoreIo {
         }
         Ok(bytes)
     }
-}
-
-#[cfg(unix)]
-fn create_or_validate_private_directory(path: &Path) -> io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.mode(0o700);
-            match builder.create(path) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Err(error) => return Err(error),
-    }
-    let metadata = fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_dir()
-        || metadata.permissions().mode() & 0o077 != 0
-        || metadata.uid() != unsafe { libc::geteuid() }
-    {
-        return Err(invalid_input(
-            "private store directory is not owner-private",
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn create_or_validate_private_directory(path: &Path) -> io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => crate::windows_security::validate_private_directory(path),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            crate::windows_security::create_private_directory(path)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn create_or_validate_private_directory(_path: &Path) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "private store directories are unsupported on this platform",
-    ))
 }
 
 fn sync_parent_directory(path: &Path) -> io::Result<()> {

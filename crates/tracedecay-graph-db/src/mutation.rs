@@ -642,3 +642,59 @@ fn map_commit_error(error: grafeo_common::utils::error::Error) -> GraphDbError {
         _ => GraphDbError::unavailable(error.to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use grafeo_common::types::Value;
+    use grafeo_engine::GrafeoDB;
+
+    use super::tracked_create_node;
+    use crate::schema::{FORMAT_LABEL, SEQUENCE_PROPERTY};
+    use crate::state::FormatState;
+    use crate::{
+        GraphDbError, GraphNamespace, GraphProjectionId, GraphWatermark, GraphWriteBatch,
+        NeverCancelled, SourceGeneration,
+    };
+
+    #[test]
+    fn native_create_rejects_missing_locator_without_mutating_graph_or_sequence() {
+        let database = GrafeoDB::new_in_memory();
+        database
+            .session()
+            .create_node_with_props(&[FORMAT_LABEL], [(SEQUENCE_PROPERTY, Value::from(7_i64))])
+            .unwrap();
+        let before = FormatState::load(&database).unwrap();
+        let batch = GraphWriteBatch::new(
+            GraphNamespace::new("project").unwrap(),
+            GraphProjectionId::new("code").unwrap(),
+            SourceGeneration::new("generation").unwrap(),
+            GraphWatermark::new("watermark").unwrap(),
+            Vec::new(),
+            Arc::new(NeverCancelled),
+        )
+        .unwrap();
+        let mut session = database.session();
+        session.begin_transaction().unwrap();
+
+        assert_eq!(
+            tracked_create_node(
+                &session,
+                &["Broken".to_owned()],
+                &[("unindexed".to_owned(), Value::from("value"))],
+                &batch,
+            ),
+            Err(GraphDbError::Corrupt {
+                message: "tracked Grafeo node creation has no native locator".to_owned(),
+            })
+        );
+        session.rollback().unwrap();
+
+        assert!(database.graph_store().nodes_by_label("Broken").is_empty());
+        assert_eq!(
+            FormatState::load(&database).unwrap().sequence,
+            before.sequence
+        );
+    }
+}
