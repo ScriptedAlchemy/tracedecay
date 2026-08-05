@@ -24,8 +24,8 @@ use tracedecay_domain::{
     PrivacyDomainId, ProjectId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
     ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
     RepositoryDirtyStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
-    SanitizedCodeSnapshotV1, SanitizerDispositionV1, SanitizerRevision, ScoreDomainId,
-    SensitivityLevelV1, SnapshotFileDispositionV1, WorktreeId, canonical_sha256,
+    SanitizedCodeSnapshotV1, SanitizerRevision, ScoreDomainId, SnapshotFileDispositionV1,
+    WorktreeId, canonical_sha256,
 };
 
 use crate::{
