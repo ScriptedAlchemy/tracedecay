@@ -11,6 +11,7 @@ use tracedecay_domain::{
 };
 
 pub const MAX_SOURCE_ACQUISITION_ATTEMPTS_V1: u32 = 16;
+pub const MAX_SOURCE_ACQUISITION_RECEIPTS_V1: usize = 1_024;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SourceAcquisitionQueueContractErrorV1 {
@@ -246,6 +247,9 @@ impl SourceAcquisitionQueueStateV1 {
             }
         }
         if self.successor.is_some() && self.active.is_none() {
+            return Err(SourceAcquisitionQueueContractErrorV1::Inconsistent);
+        }
+        if self.receipts.len() > MAX_SOURCE_ACQUISITION_RECEIPTS_V1 {
             return Err(SourceAcquisitionQueueContractErrorV1::Inconsistent);
         }
         for (event_key, receipt) in &self.receipts {

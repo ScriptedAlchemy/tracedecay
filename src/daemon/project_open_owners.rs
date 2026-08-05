@@ -1756,9 +1756,19 @@ async fn register_production_advisory_owner(
         feedback_scope.clone(),
     )
     .await;
-    let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
-        (remote.github, Some(remote.github_source_access), remote.ci)
-    });
+    let (github, github_provider, github_source_access, ci_config) =
+        remote.map_or((None, None, None, None), |remote| {
+            let provider = remote
+                .github
+                .as_ref()
+                .map(|github| github.identity.provider.clone());
+            (
+                remote.github,
+                provider,
+                Some(remote.github_source_access),
+                remote.ci,
+            )
+        });
     let github_pull_request_id = github
         .as_ref()
         .map(|github| github.target.pull_request_id.clone());
@@ -1837,9 +1847,13 @@ async fn register_production_advisory_owner(
         feedback_cycle,
     };
     let scout_claim_graph = Arc::clone(&graph);
+    let external_store = crate::daemon::external_acquisition::open_external_source_store(
+        &project_runtime_db,
+        github_provider.as_ref(),
+    )?;
     let production = Pr13AdvisoryProductionOpenV1 {
         database,
-        project_runtime_db,
+        project_runtime_db: Arc::clone(&project_runtime_db),
         graph,
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         project_root: project_root.to_path_buf(),
@@ -1869,6 +1883,17 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    let external_acquisition =
+        crate::daemon::external_acquisition::mount_production_github_external_acquisition(
+            invocation,
+            project_root,
+            registration.as_ref(),
+            Arc::clone(&project_runtime_db),
+            source_access.clone(),
+            github_provider,
+            external_store,
+        )
+        .await?;
     let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
         registration: Arc::clone(&registration),
         lsp_input: Arc::clone(&feedback_lsp_input),
@@ -1912,6 +1937,7 @@ async fn register_production_advisory_owner(
         let project_root = work_root.clone();
         let root_uri = root_uri.clone();
         let indexed_files = indexed_files.clone();
+        let external_acquisition = external_acquisition.clone();
         async move {
             run_production_pr13_hook_cycle(
                 request,
@@ -1927,6 +1953,7 @@ async fn register_production_advisory_owner(
                 project_root,
                 root_uri,
                 indexed_files,
+                external_acquisition,
             )
             .await;
         }
@@ -1965,6 +1992,9 @@ async fn run_production_pr13_hook_cycle(
     project_root: std::path::PathBuf,
     root_uri: String,
     indexed_files: Vec<String>,
+    external_acquisition: Option<
+        Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>,
+    >,
 ) {
     let Some(document_uri) = hook_feedback_document_uri_or_observe(
         &project_root,
@@ -2053,6 +2083,24 @@ async fn run_production_pr13_hook_cycle(
             expires_at,
         },
     };
+    if matches!(
+        crate::daemon::external_acquisition::handle_github_hook_event(
+            external_acquisition.as_ref(),
+            &invocation.context,
+            advisory.github.as_ref(),
+            request.hook.envelope(),
+            observed_at,
+        )
+        .await,
+        crate::daemon::external_acquisition::DaemonExternalAcquisitionOutcomeV1::Unavailable
+    ) && external_acquisition.is_some()
+    {
+        tracing::warn!(
+            target: "tracedecay::external_acquisition",
+            project_id = feedback_scope.project_id.as_str(),
+            "canonical GitHub external acquisition is unavailable"
+        );
+    }
     let feedback_configuration_digest =
         advisory.feedback.input.request.configuration_digest.clone();
     let host = host_kind_for_hook(request.hook.envelope().producer);

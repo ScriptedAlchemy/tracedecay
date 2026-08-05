@@ -66,16 +66,17 @@ pub use evidence_assembly::{
     derive_source_occurrence_id_v1,
 };
 pub use external_source::{
-    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, MAX_SOURCE_COMMIT_OBSERVATIONS_V1,
-    SourceAcquisitionQueueCasV1, SourceAcquisitionQueueContractErrorV1,
-    SourceAcquisitionQueueResultV1, SourceAcquisitionQueueStateV1,
-    SourceAuthorityPublicationApplyOutcomeV1, SourceAuthorityPublicationReceiptV1,
-    SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
-    SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourcePendingProjectionV1, SourceProjectionApplyOutcomeV1,
-    SourceProjectionCommitV1, SourceProjectionEffectV1, SourceScheduledRefetchV1,
-    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_authority_publication,
-    apply_source_commit, apply_source_projection, build_source_projection,
+    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, MAX_SOURCE_ACQUISITION_RECEIPTS_V1,
+    MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceAcquisitionQueueCasV1,
+    SourceAcquisitionQueueContractErrorV1, SourceAcquisitionQueueResultV1,
+    SourceAcquisitionQueueStateV1, SourceAuthorityPublicationApplyOutcomeV1,
+    SourceAuthorityPublicationReceiptV1, SourceAuthorityPublicationV1, SourceCommitApplyOutcomeV1,
+    SourceCommitReceiptV1, SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1,
+    SourceObjectTransitionV1, SourceObservationEvidenceV1, SourcePendingProjectionV1,
+    SourceProjectionApplyOutcomeV1, SourceProjectionCommitV1, SourceProjectionEffectV1,
+    SourceScheduledRefetchV1, SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1,
+    apply_source_authority_publication, apply_source_commit, apply_source_projection,
+    build_source_projection,
 };
 pub use git_index_transactions::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,

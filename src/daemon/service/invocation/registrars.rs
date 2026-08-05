@@ -1019,6 +1019,18 @@ impl DaemonAdvisoryRuntimeRegistrar {
         }
     }
 
+    pub(crate) async fn register_external_acquisition(
+        &self,
+        project_root: PathBuf,
+        runtime: Arc<dyn crate::daemon::external_acquisition::DaemonExternalAcquisitionRuntimeV1>,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        self.service
+            .project_runtimes
+            .register(project_root, runtime)
+            .await
+            .map_err(DaemonAdvisoryRuntimeRegistrationError::from)
+    }
+
     pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
         &self,
         project_root: PathBuf,

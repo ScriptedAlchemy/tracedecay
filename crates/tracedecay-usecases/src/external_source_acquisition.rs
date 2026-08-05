@@ -70,7 +70,8 @@ pub trait SourceAcquisitionStatePortV1: Send + Sync {
 }
 
 pub use tracedecay_store::{
-    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, SourceAcquisitionQueueStateV1, SourceScheduledRefetchV1,
+    MAX_SOURCE_ACQUISITION_ATTEMPTS_V1, MAX_SOURCE_ACQUISITION_RECEIPTS_V1,
+    SourceAcquisitionQueueStateV1, SourceScheduledRefetchV1,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +139,7 @@ pub trait SourceAcquisitionAuthorizationPortV1: Send + Sync {
 pub struct SourceCanonicalRefetchPageV1 {
     pub envelope: SourceProviderEnvelopeV1,
     pub mutations: Vec<SourceObjectMutationV1>,
+    pub present_objects: std::collections::BTreeSet<tracedecay_domain::SourceNativeObjectIdV1>,
 }
 
 impl SourceCanonicalRefetchPageV1 {
@@ -167,6 +169,7 @@ impl SourceCanonicalRefetchPageV1 {
                 tracedecay_domain::SourceEnvelopeKindV1::Unavailable
             )
             || self.mutations.len() > tracedecay_store::MAX_SOURCE_COMMIT_OBSERVATIONS_V1
+            || self.present_objects.len() > tracedecay_store::MAX_SOURCE_COMMIT_OBSERVATIONS_V1
         {
             return Err(ExternalSourceAcquisitionErrorV1::RemoteChange);
         }
@@ -179,8 +182,14 @@ impl SourceCanonicalRefetchPageV1 {
                 .evidence()
                 .validate_against(&binding, self.envelope.partition(), mutation.observation())
                 .map_err(|_| ExternalSourceAcquisitionErrorV1::RemoteChange)?;
+            let present = self
+                .present_objects
+                .contains(mutation.observation().native_object());
+            let deleted = mutation.observation().content_state()
+                == tracedecay_domain::SourceContentStateV1::AuthoritativeDeleted;
             if mutation.evidence().source_authorization_digest()
                 != &grant.source_authorization_digest
+                || present == deleted
             {
                 return Err(ExternalSourceAcquisitionErrorV1::RemoteChange);
             }
@@ -431,6 +440,16 @@ where
             receipts.insert(
                 admission.receipt().event_key().clone(),
                 admission.receipt().clone(),
+            );
+            bound_receipts(
+                &mut receipts,
+                current
+                    .as_ref()
+                    .and_then(SourceAcquisitionQueueStateV1::active),
+                current
+                    .as_ref()
+                    .and_then(SourceAcquisitionQueueStateV1::successor),
+                admission.receipt(),
             );
             let scheduled = SourceScheduledRefetchV1::new(
                 definition.clone(),
@@ -718,6 +737,25 @@ fn add_duration(
         .checked_add(micros)
         .map(UtcMicros)
         .ok_or(ExternalSourceAcquisitionErrorV1::InvalidState)
+}
+
+fn bound_receipts(
+    receipts: &mut BTreeMap<tracedecay_domain::SourceEventKeyV1, SourceEventAdmissionReceiptV1>,
+    active: Option<&SourceScheduledRefetchV1>,
+    successor: Option<&SourceScheduledRefetchV1>,
+    admitted: &SourceEventAdmissionReceiptV1,
+) {
+    while receipts.len() > MAX_SOURCE_ACQUISITION_RECEIPTS_V1 {
+        let removable = receipts.keys().find(|key| {
+            active.is_none_or(|task| task.event_receipt().event_key() != *key)
+                && successor.is_none_or(|task| task.event_receipt().event_key() != *key)
+                && admitted.event_key() != *key
+        });
+        let Some(removable) = removable.cloned() else {
+            break;
+        };
+        receipts.remove(&removable);
+    }
 }
 
 #[path = "external_source_acquisition_store.rs"]
