@@ -224,7 +224,7 @@ impl CanonicalGenesisConfigurationV1 {
         canonical_sha256(&("tracedecay.configuration.canonical-genesis.v1", self))
     }
 
-    fn resolution_input(&self) -> Result<ConfigurationResolutionInputV1, DomainError> {
+    pub(crate) fn resolution_input(&self) -> Result<ConfigurationResolutionInputV1, DomainError> {
         self.validate()?;
         let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)?;
         Ok(ConfigurationResolutionInputV1 {

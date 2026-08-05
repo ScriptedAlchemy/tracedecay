@@ -21,7 +21,9 @@ use super::migration::{
     ConfigurationMigrationStore,
 };
 use super::registry::ConfigurationRegistry;
-use super::resolver::{ConfigurationResolutionV1, registry_default_candidate};
+use super::resolver::{
+    ConfigurationResolutionV1, registry_default_candidate, resolve_configuration_inputs,
+};
 use super::schema::ConfigurationSchemaError;
 #[cfg(test)]
 use super::schema::ensure_configuration_schema;
@@ -53,6 +55,7 @@ mod audit;
 mod codec;
 mod control;
 mod credential;
+mod genesis;
 mod migration_store;
 mod mutation;
 mod read;
@@ -66,6 +69,7 @@ use activation::{
 #[cfg(test)]
 use audit::decode_audit_row;
 use codec::{StoredConfigurationProtectedOperationV1, invalid_store_data, unavailable_store};
+use genesis::commit_canonical_genesis_transaction;
 #[cfg(test)]
 use migration_store::commit_initial_migration_transaction;
 use migration_store::complete_snapshot_for_current_registry;
@@ -419,9 +423,39 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
         Self { db }
     }
 
-    /// Appends the daemon-owned binding to revisions created before canonical
-    /// genesis carried it. Competing authority stays denied; only an absent
-    /// key or the stable daemon binding after a repository move is repaired.
+    pub async fn initialize_canonical_configuration(
+        &self,
+        registry: &ConfigurationRegistry,
+        genesis: &super::migration::CanonicalGenesisConfigurationV1,
+        created_at: UtcMicros,
+    ) -> Result<ConfigurationCurrentStateV1, ConfigurationError> {
+        genesis.validate().map_err(ConfigurationError::validation)?;
+        let input = genesis
+            .resolution_input()
+            .map_err(ConfigurationError::validation)?;
+        let resolution = resolve_configuration_inputs(registry, &[input])
+            .map_err(ConfigurationError::validation)?;
+        let transaction = self
+            .db
+            .begin_write_transaction()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        commit_canonical_genesis_transaction(
+            &transaction,
+            &genesis.target_revision_id,
+            &resolution,
+            created_at,
+        )
+        .await?;
+        let current = current_state_from_transaction(&transaction).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| ConfigurationError::Unavailable)?;
+        Ok(current)
+    }
+
+    #[cfg(test)]
     pub fn ensure_daemon_source_binding(
         &self,
         binding: ScopeSourceBinding,
@@ -583,49 +617,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .read_snapshot()
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
-            // A durable database whose configuration tables were never created
-            // (for example a sessions.db seeded by another component before any
-            // configuration migration ran) holds no revision by definition.
-            // Counting rows in absent tables would raise a SQL error and be
-            // misreported as an availability failure, so table presence is
-            // checked first.
-            let mut table_rows = read
-                .query(
-                    "SELECT COUNT(*) FROM sqlite_master
-                     WHERE type = 'table'
-                       AND name IN (
-                           'configuration_revisions',
-                           'configuration_migration_receipts'
-                       )",
-                    (),
-                )
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?;
-            let table_count = table_rows
-                .next()
-                .await
-                .map_err(|_| ConfigurationError::Unavailable)?
-                .ok_or_else(|| {
-                    ConfigurationError::validation_message(
-                        "configuration table presence query returned no row",
-                    )
-                })?
-                .get::<i64>(0)
-                .map_err(|_| {
-                    ConfigurationError::validation_message(
-                        "configuration table count is not an integer",
-                    )
-                })?;
-            if table_count < 2 {
-                return Ok(true);
-            }
             let mut rows = read
-                .query(
-                    "SELECT
-                        (SELECT COUNT(*) FROM configuration_revisions),
-                        (SELECT COUNT(*) FROM configuration_migration_receipts)",
-                    (),
-                )
+                .query("SELECT COUNT(*) FROM configuration_revisions", ())
                 .await
                 .map_err(|_| ConfigurationError::Unavailable)?;
             let row = rows
@@ -642,11 +635,6 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                     "configuration revision count is not an integer",
                 )
             })?;
-            let migration_receipt_count = row.get::<i64>(1).map_err(|_| {
-                ConfigurationError::validation_message(
-                    "configuration migration receipt count is not an integer",
-                )
-            })?;
             if rows
                 .next()
                 .await
@@ -657,7 +645,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                     "configuration initialization query returned multiple rows",
                 ));
             }
-            Ok(revision_count == 0 && migration_receipt_count == 0)
+            Ok(revision_count == 0)
         })
     }
 

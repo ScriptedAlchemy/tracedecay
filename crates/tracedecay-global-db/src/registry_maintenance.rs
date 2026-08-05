@@ -6,10 +6,10 @@ use serde::Serialize;
 
 use crate::{
     CodeProjectRecord, GraphScopeUpsert, ProjectRegistryContext, RegisteredGlobalDb,
-    RegisteredGlobalDbWriteTransaction, StoreArtifactUpsert, StoreInstanceUpsert,
+    StoreArtifactUpsert, StoreInstanceUpsert,
 };
 use tracedecay_runtime_core::branch_meta;
-use tracedecay_runtime_core::db::engine::{Executor, IntoParams, QueryExecutor, params};
+use tracedecay_runtime_core::db::engine::{IntoParams, QueryExecutor, params};
 use tracedecay_runtime_core::storage::{
     STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind,
     read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
@@ -63,15 +63,6 @@ impl RegistryOrphanRelinkReport {
             .filter(|plan| plan.status == status)
             .count()
     }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct RegistryOrphanRelinkApplyReport {
-    pub projects: usize,
-    pub aliases: usize,
-    pub stores: usize,
-    pub graph_scopes: usize,
-    pub artifacts: usize,
 }
 
 /// Canonical read-only plan returned by the daemon and consumed by the
@@ -279,54 +270,9 @@ where
     Ok(false)
 }
 
-pub async fn apply_registry_orphan_relink_report(
-    db: &RegisteredGlobalDb,
-    report: &RegistryOrphanRelinkReport,
-) -> std::result::Result<RegistryOrphanRelinkApplyReport, Vec<String>> {
-    let transaction = db.begin_write_transaction().await.map_err(|error| {
-        vec![format!(
-            "could not start atomic registry orphan relink: {error}"
-        )]
-    })?;
-    let issues = preflight_registry_orphan_relink(&transaction, report).await;
-    if !issues.is_empty() {
-        return Err(issues);
-    }
-    let applied = apply_registry_orphan_relink_rows(&transaction, report)
-        .await
-        .map_err(|issue| vec![issue])?;
-    transaction.commit().await.map_err(|error| {
-        vec![format!(
-            "could not commit atomic registry orphan relink: {error}"
-        )]
-    })?;
-    Ok(applied)
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;
-
-pub async fn apply_single_registry_orphan_relink_report(
-    db: &RegisteredGlobalDb,
-    report: &RegistryOrphanRelinkReport,
-) -> std::result::Result<RegistryOrphanRelinkApplyReport, Vec<String>> {
-    let [plan] = report.plans.as_slice() else {
-        return Err(vec![format!(
-            "migration cutover requires exactly one registry orphan relink plan, found {}",
-            report.plans.len()
-        )]);
-    };
-    if plan.status != RegistryOrphanRelinkStatus::Eligible {
-        return Err(vec![format!(
-            "migration cutover registry orphan relink plan for '{}' is {:?}: {}",
-            plan.project.project_id,
-            plan.status,
-            plan.status_reason.as_deref().unwrap_or("not eligible")
-        )]);
-    }
-    apply_registry_orphan_relink_report(db, report).await
-}
 
 async fn preflight_registry_orphan_relink<Q>(
     conn: &Q,
@@ -628,130 +574,4 @@ where
         );
     }
     Ok(values)
-}
-
-async fn apply_registry_orphan_relink_rows<E>(
-    conn: &E,
-    report: &RegistryOrphanRelinkReport,
-) -> std::result::Result<RegistryOrphanRelinkApplyReport, String>
-where
-    E: Executor + ?Sized,
-{
-    let mut applied = RegistryOrphanRelinkApplyReport::default();
-    let now = tracedecay_runtime_core::tracedecay::current_timestamp();
-    for plan in &report.plans {
-        if plan.status != RegistryOrphanRelinkStatus::Eligible {
-            continue;
-        }
-        let project = &plan.project;
-        let canonical_root = RegisteredGlobalDb::canonical_project_key(&project.project_root);
-        applied.projects += usize::try_from(
-            conn.execute(
-                "INSERT OR IGNORE INTO code_projects(
-                     project_id, canonical_root, display_root, git_common_dir, git_remote_url,
-                     default_branch, created_at, last_seen_at
-                 ) VALUES(?1, ?2, ?3, NULL, NULL, ?4, ?5, ?5)",
-                params![
-                    project.project_id.as_str(),
-                    canonical_root,
-                    project.project_root.to_string_lossy().to_string(),
-                    project.default_branch.as_deref(),
-                    now,
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to insert code project: {error}"))?,
-        )
-        .unwrap_or(usize::MAX);
-        for alias in &project.aliases {
-            applied.aliases += usize::try_from(
-                conn.execute(
-                    "INSERT OR IGNORE INTO project_aliases(alias_path, project_id, last_seen_at)
-                     VALUES(?1, ?2, ?3)",
-                    params![
-                        RegisteredGlobalDb::project_path_alias_key(alias),
-                        project.project_id.as_str(),
-                        now,
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to insert project alias: {error}"))?,
-            )
-            .unwrap_or(usize::MAX);
-        }
-        applied.stores += usize::try_from(
-            conn.execute(
-                "INSERT OR IGNORE INTO store_instances(
-                     store_id, project_id, store_kind, storage_mode, store_relpath,
-                     manifest_relpath, created_at, last_verified_at, last_write_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![
-                    plan.store.store_id.as_str(),
-                    plan.store.project_id.as_str(),
-                    plan.store.store_kind.as_str(),
-                    plan.store.storage_mode.as_str(),
-                    plan.store.store_relpath.as_str(),
-                    plan.store.manifest_relpath.as_deref(),
-                    now,
-                    plan.store.last_verified_at,
-                    plan.store.last_write_at,
-                ],
-            )
-            .await
-            .map_err(|error| format!("failed to insert store instance: {error}"))?,
-        )
-        .unwrap_or(usize::MAX);
-        for scope in &plan.graph_scopes {
-            applied.graph_scopes += usize::try_from(
-                conn.execute(
-                    "INSERT INTO graph_scopes(
-                         graph_scope_id, project_id, store_id, branch_name, db_relpath,
-                         parent_scope_id, last_synced_at, writable
-                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                     ON CONFLICT(graph_scope_id) DO UPDATE SET
-                         project_id = excluded.project_id,
-                         store_id = excluded.store_id,
-                         branch_name = excluded.branch_name,
-                         db_relpath = excluded.db_relpath,
-                         parent_scope_id = excluded.parent_scope_id,
-                         last_synced_at = excluded.last_synced_at,
-                         writable = excluded.writable",
-                    params![
-                        scope.graph_scope_id.as_str(),
-                        scope.project_id.as_str(),
-                        scope.store_id.as_str(),
-                        scope.branch_name.as_str(),
-                        scope.db_relpath.as_str(),
-                        scope.parent_scope_id.as_deref(),
-                        scope.last_synced_at,
-                        i64::from(scope.writable),
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to insert graph scope: {error}"))?,
-            )
-            .unwrap_or(usize::MAX);
-        }
-        for artifact in &plan.artifacts {
-            applied.artifacts += usize::try_from(
-                conn.execute(
-                    "INSERT OR IGNORE INTO store_artifacts(
-                         store_id, artifact_kind, relpath, size_bytes, schema_version, updated_at
-                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![
-                        artifact.store_id.as_str(),
-                        artifact.artifact_kind.as_str(),
-                        artifact.relpath.as_str(),
-                        artifact.size_bytes,
-                        artifact.schema_version.as_deref(),
-                        artifact.updated_at,
-                    ],
-                )
-                .await
-                .map_err(|error| format!("failed to insert store artifact: {error}"))?,
-            )
-            .unwrap_or(usize::MAX);
-        }
-    }
-    Ok(applied)
 }

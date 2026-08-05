@@ -8,10 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::global_db::{
-    RegisteredGlobalDb, registry_maintenance::RegistryOrphanRelinkApplyReport,
-    registry_maintenance::RegistryOrphanRelinkReport,
-};
+use crate::global_db::RegisteredGlobalDb;
 
 pub struct ProfileRegistryMaintenanceRuntime {
     profile_database: Arc<RegisteredGlobalDb>,
@@ -98,17 +95,6 @@ impl ProfileRegistryMaintenanceRuntime {
         crate::global_db::registry_maintenance::retire_registry_project_paths(
             self.profile_database.as_ref(),
             project_paths,
-        )
-        .await
-    }
-
-    pub async fn apply_orphan_relink(
-        &self,
-        report: &RegistryOrphanRelinkReport,
-    ) -> std::result::Result<RegistryOrphanRelinkApplyReport, Vec<String>> {
-        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(
-            self.profile_database.as_ref(),
-            report,
         )
         .await
     }

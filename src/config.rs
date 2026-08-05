@@ -29,7 +29,6 @@ use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::{
     CanonicalGenesisConfigurationV1, GlobalDbConfigurationControlStore,
-    migrate_legacy_configuration_inputs_with_genesis,
 };
 
 pub use tracedecay_global_db::configuration::{
@@ -1014,7 +1013,7 @@ pub(crate) fn install_usecase_runtime_configuration_authority() -> Result<()> {
 /// Loads and publishes the durable current configuration for a resolved store
 /// layout.
 ///
-/// A fresh project receives one migration-backed registry-default revision.
+/// A fresh project receives one canonical registry-default revision.
 /// Once any revision exists, open always reads that durable current revision;
 /// a corrupt or ambiguous history is never replaced with local defaults.
 pub(crate) async fn open_runtime_configuration_for_registered_database(
@@ -1034,7 +1033,7 @@ pub(crate) async fn open_runtime_configuration_for_registered_database(
 
 async fn open_runtime_configuration_from_store(
     target: RuntimeConfigurationTarget,
-    layout: &crate::storage::StoreLayout,
+    _layout: &crate::storage::StoreLayout,
     store: &GlobalDbConfigurationControlStore<'_>,
 ) -> Result<PinnedRuntimeConfiguration> {
     if let Err(error) = store.current().await {
@@ -1051,17 +1050,10 @@ async fn open_runtime_configuration_from_store(
         let target_layer = ConfigurationLayerIdV1::Project {
             project_id: target.project_id.clone(),
         };
-        let initial_revision_id =
-            ConfigurationRevisionId::new("configuration.initial.migration.v1").map_err(
-                |error| config_error(format!("invalid initial configuration revision: {error}")),
-            )?;
-        let legacy_target = LegacyConfigurationDecodeTargetV1 {
-            target_layer: target_layer.clone(),
-            target_revision_id: initial_revision_id.clone(),
-        };
-        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-        let legacy =
-            read_legacy_configuration_inputs(&layout.config_path, &environment, &legacy_target)?;
+        let initial_revision_id = ConfigurationRevisionId::new(
+            "configuration.canonical-genesis.v1",
+        )
+        .map_err(|error| config_error(format!("invalid canonical genesis revision: {error}")))?;
         // The project's first durable revision states the one binding the
         // daemon already owns for the project it just registered. Both
         // components restate resolved identity the caller holds — the
@@ -1084,37 +1076,12 @@ async fn open_runtime_configuration_from_store(
                 })?,
             ],
         };
-        migrate_legacy_configuration_inputs_with_genesis(
-            &registry,
-            &legacy,
-            &genesis,
-            store,
-            current_utc_micros(),
-        )
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "configuration initial migration could not commit: {error}"
-            ))
-        })?;
+        store
+            .initialize_canonical_configuration(&registry, &genesis, current_utc_micros())
+            .await
+            .map_err(map_configuration_error)?;
     }
-    let daemon_binding = scope_control::daemon_owned_project_source_binding(
-        &target.project_id,
-        &target.project_root,
-    )
-    .map_err(|error| {
-        config_error(format!(
-            "daemon project source binding could not be derived: {error}"
-        ))
-    })?;
-    let current = store
-        .ensure_daemon_source_binding(daemon_binding, current_utc_micros())
-        .await
-        .map_err(|error| {
-            config_error(format!(
-                "daemon project source binding forward repair failed: {error}"
-            ))
-        })?;
+    let current = store.current().await.map_err(map_configuration_error)?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone())?;

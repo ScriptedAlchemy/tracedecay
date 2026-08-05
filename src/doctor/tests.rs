@@ -336,45 +336,10 @@ async fn orphan_reporting_uses_complete_registry_rows_not_token_accounting() {
         "{:?}",
         batch_diff.issues
     );
-    let applied =
-        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(db, &eligible)
-            .await
-            .unwrap();
-    assert_eq!(applied.projects, 1);
-    assert_eq!(
-        orphan_store_manifest_report(db, &profile_root).await.0,
-        0,
-        "a complete reconstruction registry is healthy without a legacy projects.path row"
-    );
-    assert_eq!(
-        crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(db, &eligible)
-            .await
-            .unwrap(),
-        crate::global_db::registry_maintenance::RegistryOrphanRelinkApplyReport::default()
-    );
-
-    db.writer_connection()
-        .unwrap()
-        .execute(
-            "DELETE FROM store_artifacts WHERE store_id=?1",
-            crate::db::engine::params![eligible.plans[0].store.store_id.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
-    crate::global_db::registry_maintenance::apply_registry_orphan_relink_report(db, &eligible)
-        .await
-        .unwrap();
-
-    db.writer_connection()
-        .unwrap()
-        .execute(
-            "DELETE FROM store_instances WHERE store_id=?1",
-            crate::db::engine::params![eligible.plans[0].store.store_id.as_str()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(orphan_store_manifest_report(db, &profile_root).await.0, 1);
+    let eligible_diff =
+        crate::global_db::registry_maintenance::diff_registry_orphan_relink_report(db, &eligible)
+            .await;
+    assert_eq!(eligible_diff.missing_plans, 1);
 }
 
 #[test]

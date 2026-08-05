@@ -1,18 +1,13 @@
 use super::schema_contract::{
-    authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
-    ensure_authority_invariant_schema, ensure_authority_invariants, require_foreign_key_audit,
-    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
-    suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
-    validate_authority_schema_contract, validate_registry_schema_contract,
+    ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
+    validate_authority_rows_exhaustive, validate_authority_schema_contract,
+    validate_registry_schema_contract,
 };
 use super::{
-    configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
-    ensure_session_parent_columns, git_index_transactions, global_db_operation_error, observation,
-    observation_projection, project_registry, session_temporal,
+    configuration, git_index_transactions, global_db_operation_error, observation,
+    observation_projection, session_temporal,
 };
-use tracedecay_runtime_core::db::engine::{
-    Connection, Executor, QueryExecutor, TransactionBehavior, params,
-};
+use tracedecay_runtime_core::db::engine::{Connection, QueryExecutor, TransactionBehavior, params};
 use tracedecay_rusqlite_runtime::repository::AUTHORIZED_SCOPE_SET_SCHEMA_V1;
 use tracedecay_rusqlite_runtime::work::WORK_SCHEMA_V1;
 
@@ -229,8 +224,7 @@ pub async fn ensure_registered_schema(
 
 #[derive(Clone, Copy)]
 pub struct RegisteredSchemaConvergence {
-    force_exhaustive: bool,
-    is_fresh: bool,
+    _validated: (),
 }
 
 /// Installs the minimum schema and write guards required before a registered
@@ -240,35 +234,44 @@ pub async fn ensure_registered_schema_for_admission(
     conn: &Connection,
 ) -> tracedecay_runtime_core::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
-    let is_fresh = !table_exists(conn, "sessions").await?
-        && !table_exists(conn, "observations").await?
-        && !table_exists(conn, "code_projects").await?;
-    ensure_authority_audit_checkpoint_schema(conn).await?;
-    let force_exhaustive = !authority_invariant_triggers_intact(conn).await?;
-    if force_exhaustive && !is_fresh {
-        // Persist the requirement before the schema transaction repairs the
-        // trigger evidence that armed it. The progress row doubles as the
-        // resumable cursor and is removed only by a completed FK sweep.
-        require_foreign_key_audit(conn).await?;
+    let mut registered_object_exists = false;
+    for table in [
+        "code_projects",
+        "sessions",
+        "observations",
+        "configuration_revisions",
+        "work_items",
+        "lcm_messages",
+        "session_git_spans",
+        "workflow_index_entries",
+    ] {
+        registered_object_exists |= table_exists(conn, table).await?;
+    }
+    let is_fresh = !registered_object_exists;
+    if !is_fresh {
+        validate_registry_schema_contract(conn)
+            .await
+            .map_err(|error| reset_required(error.to_string()))?;
+        validate_authority_schema_contract(conn)
+            .await
+            .map_err(|error| reset_required(error.to_string()))?;
+        validate_authority_rows_exhaustive(conn)
+            .await
+            .map_err(|error| reset_required(error.to_string()))?;
+        return Ok(RegisteredSchemaConvergence { _validated: () });
     }
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
-    let migration = async {
+    let creation = async {
         transaction
             .execute_batch(REGISTRY_SCHEMA)
             .await
             .map_err(|error| {
                 global_db_operation_error("initialize global project registry", error)
             })?;
-        ensure_code_project_native_root_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure native project roots", error))?;
-        project_registry::migrate_project_rows_to_canonical_keys(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("migrate canonical project keys", error))?;
         validate_registry_schema_contract(&transaction).await?;
 
         configuration::ensure_configuration_schema(&transaction)
@@ -290,15 +293,7 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| {
                 global_db_operation_error("initialize authorized scope-set schema", error)
             })?;
-        ensure_session_parent_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
-        ensure_parse_offset_columns(&transaction)
-            .await
-            .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
-
         ensure_authority_audit_checkpoint_schema(&transaction).await?;
-        suspend_session_invariants_for_schema_upgrade(&transaction).await?;
         session_temporal::ensure_session_temporal_schema(&transaction).await?;
         observation::ensure_observation_schema(&transaction).await?;
         observation_projection::ensure_observation_projection_schema(&transaction)
@@ -330,7 +325,7 @@ pub async fn ensure_registered_schema_for_admission(
     }
     .await;
 
-    match migration {
+    match creation {
         Ok(()) => transaction
             .commit()
             .await
@@ -352,33 +347,28 @@ pub async fn ensure_registered_schema_for_admission(
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
     validate_authority_schema_contract(conn).await?;
-    Ok(RegisteredSchemaConvergence {
-        force_exhaustive,
-        is_fresh,
-    })
+    validate_authority_rows_exhaustive(conn).await?;
+    Ok(RegisteredSchemaConvergence { _validated: () })
 }
 
-/// Completes resumable authority convergence after the registered runtime is
-/// available. Every stage retains its existing durable checkpoint semantics.
-///
 /// Stores are created at the final schema by
 /// [`ensure_registered_schema_for_admission`], so there is nothing here to step
 /// an older shape forward: the historical projection-anchor binding, retrieval
-/// anchor, repository provenance, projector version migration, and session
-/// project-path passes were all one-time legacy upgrades and have been removed.
-/// Only the authority invariant audit remains, and it stays out of line because
-/// it pages real authority rows on a large store.
+/// anchor, repository provenance, projector version, and session project-path
+/// conversion passes were one-time upgrades and have been removed.
 pub async fn converge_registered_schema(
-    conn: &Connection,
-    convergence: RegisteredSchemaConvergence,
+    _conn: &Connection,
+    _convergence: RegisteredSchemaConvergence,
 ) -> tracedecay_runtime_core::errors::Result<()> {
-    // The invariant pass pages historical authority rows and can legitimately
-    // outlive an ordinary open on a large store. The admission phase has
-    // already installed and validated its guard triggers, so daemon reads and
-    // guarded writes may proceed while these idempotent repairs advance.
-    // Completed repairs survive interruption, while the trusted checkpoint is
-    // still written only after every audit succeeds.
-    ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
+    Ok(())
+}
+
+fn reset_required(actual: String) -> tracedecay_runtime_core::errors::TraceDecayError {
+    tracedecay_runtime_core::errors::TraceDecayError::ResetRequired {
+        store: "registered global/session database".to_owned(),
+        expected: "exact-final registered schema and authority rows".to_owned(),
+        actual,
+    }
 }
 
 async fn table_exists(
@@ -403,132 +393,4 @@ pub async fn validate_observation_authority_connection(
 ) -> tracedecay_runtime_core::errors::Result<()> {
     validate_authority_schema_contract(conn).await?;
     validate_authority_rows_exhaustive(conn).await
-}
-
-pub async fn begin_observation_authority_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    suspend_immutability_for_canonical_repair(conn).await
-}
-
-pub async fn finish_observation_authority_canonical_repair(
-    conn: &impl Executor,
-) -> tracedecay_runtime_core::errors::Result<()> {
-    restore_immutability_after_canonical_repair(conn).await
-}
-
-#[cfg(test)]
-mod tests {
-    use tempfile::TempDir;
-
-    use super::ensure_registered_schema;
-    use tracedecay_runtime_core::db::engine::TestConnection;
-
-    #[tokio::test]
-    async fn late_audit_failure_preserves_completed_idempotent_repairs() {
-        let directory = TempDir::new().unwrap();
-        let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize authority schema");
-        }
-        {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
-            connection
-                .execute_batch(
-                    "PRAGMA foreign_keys = OFF;
-                 DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
-                 DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
-                 INSERT INTO projection_queue(observation_id, observation_sequence)
-                 VALUES ('orphaned-observation', 1);
-                 INSERT INTO session_query_cursor_keys (
-                    key_id, key_version, key_material, created_at, retired_at
-                 ) VALUES
-                    ('cursor-a', 1, X'01', 100, NULL),
-                    ('cursor-b', 2, X'02', 200, NULL);
-                 DELETE FROM authority_audit_checkpoints;",
-                )
-                .expect("seed a repair followed by a late audit failure");
-        }
-
-        let connection = TestConnection::open(&database_path);
-        let error = ensure_registered_schema(&connection)
-            .await
-            .expect_err("corrupt cursor keys must fail the full offline audit");
-        assert!(
-            error
-                .to_string()
-                .contains("session cursor key rotation state is invalid"),
-            "unexpected audit failure: {error}"
-        );
-
-        let mut rows = connection
-            .query("SELECT COUNT(*) FROM projection_queue", ())
-            .await
-            .unwrap();
-        assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            0,
-            "an idempotent repair completed before a later audit failure must remain committed"
-        );
-        drop(rows);
-        let mut rows = connection
-            .query(
-                "SELECT bounded_passes_since_exhaustive
-                 FROM authority_audit_checkpoints
-                 WHERE audit_name = 'observation-authority'",
-                (),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-            -1,
-            "validated exhaustive-audit frontiers must remain resumable after a late failure"
-        );
-    }
-
-    #[tokio::test]
-    async fn foreign_key_failure_remains_blocking_after_trigger_repair() {
-        let directory = TempDir::new().unwrap();
-        let database_path = directory.path().join("sessions.db");
-        {
-            let connection = TestConnection::open(&database_path);
-            ensure_registered_schema(&connection)
-                .await
-                .expect("initialize authority schema");
-        }
-        {
-            let connection = rusqlite::Connection::open(&database_path).unwrap();
-            connection
-                .execute_batch(
-                    "PRAGMA foreign_keys = OFF;
-                     DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
-                     CREATE TABLE audit_parent (id INTEGER PRIMARY KEY);
-                     CREATE TABLE audit_child (
-                        id INTEGER PRIMARY KEY,
-                        parent_id INTEGER NOT NULL REFERENCES audit_parent(id)
-                     );
-                     INSERT INTO audit_child(id, parent_id) VALUES (1, 99);",
-                )
-                .expect("seed a foreign-key violation behind a broken trigger");
-        }
-
-        for attempt in 1..=2 {
-            let connection = TestConnection::open(&database_path);
-            let error = ensure_registered_schema(&connection)
-                .await
-                .expect_err("an observed foreign-key violation must keep admission closed");
-            assert!(
-                error
-                    .to_string()
-                    .contains("global database contains a foreign-key violation"),
-                "open attempt {attempt} returned an unexpected error: {error}"
-            );
-        }
-    }
 }
