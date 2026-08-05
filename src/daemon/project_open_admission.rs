@@ -96,6 +96,20 @@ pub(super) enum ProjectOpenTaskState {
 pub(super) struct ProjectOpenFailure {
     pub(super) message: String,
     pub(super) retry_at: Option<Instant>,
+    pub(super) typed: Option<ProjectOpenTypedFailure>,
+}
+
+#[derive(Clone)]
+pub(super) enum ProjectOpenTypedFailure {
+    ProfileResetRequired {
+        component: &'static str,
+        found_version: Option<i64>,
+        required_version: i64,
+    },
+    ResetRequired {
+        authority: String,
+        reason: String,
+    },
 }
 
 pub(super) enum ProjectOpenTaskClaim {
@@ -167,6 +181,9 @@ pub(super) fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Dura
             }
             Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
         }
+        TraceDecayError::ProfileResetRequired { .. } | TraceDecayError::ResetRequired { .. } => {
+            Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
+        }
         _ => None,
     }
 }
@@ -180,6 +197,24 @@ impl ProjectOpenFailure {
         Self {
             message: error.to_string(),
             retry_at,
+            typed: match error {
+                TraceDecayError::ProfileResetRequired {
+                    component,
+                    found_version,
+                    required_version,
+                } => Some(ProjectOpenTypedFailure::ProfileResetRequired {
+                    component: *component,
+                    found_version: *found_version,
+                    required_version: *required_version,
+                }),
+                TraceDecayError::ResetRequired { authority, reason } => {
+                    Some(ProjectOpenTypedFailure::ResetRequired {
+                        authority: authority.clone(),
+                        reason: reason.clone(),
+                    })
+                }
+                _ => None,
+            },
         }
     }
 
@@ -188,6 +223,26 @@ impl ProjectOpenFailure {
     }
 
     pub(super) fn to_error(&self) -> TraceDecayError {
+        match &self.typed {
+            Some(ProjectOpenTypedFailure::ProfileResetRequired {
+                component,
+                found_version,
+                required_version,
+            }) => {
+                return TraceDecayError::ProfileResetRequired {
+                    component: *component,
+                    found_version: *found_version,
+                    required_version: *required_version,
+                };
+            }
+            Some(ProjectOpenTypedFailure::ResetRequired { authority, reason }) => {
+                return TraceDecayError::ResetRequired {
+                    authority: authority.clone(),
+                    reason: reason.clone(),
+                };
+            }
+            None => {}
+        }
         let message = match self.retry_at {
             Some(retry_at) => format!(
                 "{PROJECT_OPEN_FAILURE_RETRY_HINT}; retry after {} ms: {}",
@@ -509,5 +564,24 @@ impl ProjectServerKey {
             project_root: authority::canonical_identity_path(cg.project_root())?,
             scope_prefix: handshake.scope_prefix.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod typed_failure_tests {
+    use super::*;
+
+    #[test]
+    fn cached_project_open_failure_preserves_workflow_reset_authority() {
+        let error = TraceDecayError::reset_required("workflow", "partial workflow schema");
+        let failure = ProjectOpenFailure::from_error(&error);
+
+        assert!(matches!(
+            failure.to_error(),
+            TraceDecayError::ResetRequired {
+                ref authority,
+                ref reason,
+            } if authority == "workflow" && reason == "partial workflow schema"
+        ));
     }
 }
