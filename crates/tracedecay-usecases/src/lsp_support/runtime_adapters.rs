@@ -43,6 +43,33 @@ pub(crate) fn managed_diagnostic_authority_digest(
     .map_err(|_| LspRuntimeFailure::new("managed-diagnostic-authority-identity-unavailable"))
 }
 
+pub(crate) fn validate_managed_diagnostic_scope(
+    request: &CanonicalDiagnosticRefreshRequest,
+    scope: &crate::lsp_runtime::LspFeedbackProjectionScope,
+) -> Result<(), LspRuntimeFailure> {
+    let expected_content_digest = request
+        .expected_content_digest
+        .as_ref()
+        .ok_or_else(|| LspRuntimeFailure::new("managed-diagnostic-content-identity-unavailable"))?;
+    if scope.document_content_digest.as_ref() != Some(expected_content_digest) {
+        return Err(LspRuntimeFailure::new("managed-diagnostic-content-stale"));
+    }
+    if request
+        .expected_code_generation_id
+        .as_ref()
+        .is_some_and(|expected| expected != &scope.code_generation_id)
+        || request
+            .expected_snapshot_digest
+            .as_ref()
+            .is_some_and(|expected| expected != &scope.snapshot_digest)
+    {
+        return Err(LspRuntimeFailure::new(
+            "managed-diagnostic-generation-stale",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct TokioLspRuntime {
     handle: Handle,
@@ -165,6 +192,12 @@ where
                     .resolve_document(&document.uri)
                     .is_ok_and(|owner| owner == &request.root)
             });
+            let code_generation_id =
+                tracedecay_domain::CodeGenerationId::new(indexed.code_generation_id.clone())
+                    .map_err(|_| {
+                        LspRuntimeFailure::new("workspace-code-generation-identity-invalid")
+                    })?;
+            let admitted_index = indexed.clone();
             if request
                 .overlays
                 .iter()
@@ -193,6 +226,8 @@ where
                     overlay,
                     source_generation: None,
                     expected_content_digest: Some(content_digest.clone()),
+                    expected_code_generation_id: Some(code_generation_id.clone()),
+                    expected_snapshot_digest: Some(indexed.snapshot_digest.clone()),
                 };
                 let diagnostics = refresh_document_snapshot(
                     Arc::clone(&broker),
@@ -209,9 +244,24 @@ where
                     diagnostics,
                 });
             }
+            let mut current_index = documents
+                .indexed_documents(
+                    request.root.clone(),
+                    tracedecay_lsp::MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
+                )
+                .await?;
+            current_index.documents.retain(|document| {
+                request
+                    .workspace
+                    .resolve_document(&document.uri)
+                    .is_ok_and(|owner| owner == &request.root)
+            });
+            if current_index != admitted_index {
+                return Err(LspRuntimeFailure::new("workspace-code-generation-stale"));
+            }
             Ok(WorkspaceGenerationDiagnostics {
-                code_generation_id: indexed.code_generation_id,
-                snapshot_digest: indexed.snapshot_digest,
+                code_generation_id: admitted_index.code_generation_id,
+                snapshot_digest: admitted_index.snapshot_digest,
                 documents: snapshots,
             })
         })
@@ -274,7 +324,20 @@ where
         .filter(|diagnostic| diagnostic.file == relative_path)
         .map(|diagnostic| broker_diagnostic(request.document_uri.as_str(), diagnostic))
         .collect();
+    let expected_code_generation_id = request.expected_code_generation_id.clone();
+    let expected_snapshot_digest = request.expected_snapshot_digest.clone();
     let managed = managed.snapshot(request).await?;
+    if expected_code_generation_id
+        .as_ref()
+        .is_some_and(|expected| expected != &managed.code_generation_id)
+        || expected_snapshot_digest
+            .as_ref()
+            .is_some_and(|expected| expected != &managed.snapshot_digest)
+    {
+        return Err(LspRuntimeFailure::new(
+            "managed-diagnostic-generation-stale",
+        ));
+    }
     let authority_digest = tracedecay_domain::canonical_sha256(&(
         "tracedecay.lsp.merged-diagnostic-authority.v1",
         upstream_authority_digest,
@@ -344,6 +407,215 @@ pub trait LspSemanticRequestAuthority: Send + Sync {
 
 struct SemanticAuthorityAdapter {
     inner: Arc<dyn LspSemanticRequestAuthority>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use tracedecay_domain::{CodeGenerationId, ContentDigest, ManifestDigest};
+    use tracedecay_lsp::{
+        AuthorizedLspWorkspace, CanonicalWorkspaceDiagnosticRefreshRequest,
+        IndexedWorkspaceDocument, ManagedDiagnosticSnapshot,
+    };
+
+    use super::*;
+
+    fn digest(byte: char) -> ManifestDigest {
+        ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    struct PublishingWorkspaceIndex {
+        reads: AtomicUsize,
+        drift: WorkspaceIndexDrift,
+    }
+
+    #[derive(Clone, Copy)]
+    enum WorkspaceIndexDrift {
+        None,
+        Publish,
+        AddFile,
+    }
+
+    impl LspDiagnosticDocumentPort for PublishingWorkspaceIndex {
+        fn load_document(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<LspDocument, LspRuntimeFailure>> {
+            Box::pin(async {
+                Ok(LspDocument {
+                    language: "unknown".to_owned(),
+                    language_id: "unknown".to_owned(),
+                    relative_path: "src/lib.rs".to_owned(),
+                    text: "fn main() {}".to_owned(),
+                })
+            })
+        }
+    }
+
+    impl LspWorkspaceDocumentIndexPort for PublishingWorkspaceIndex {
+        fn is_mounted(&self) -> bool {
+            true
+        }
+
+        fn indexed_documents(
+            &self,
+            _root: AdmittedRoot,
+            _maximum_documents: usize,
+        ) -> LspRuntimeFuture<Result<tracedecay_lsp::IndexedWorkspaceDocuments, LspRuntimeFailure>>
+        {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            let drifted = read > 0;
+            let published = drifted && matches!(self.drift, WorkspaceIndexDrift::Publish);
+            let file_added = drifted && matches!(self.drift, WorkspaceIndexDrift::AddFile);
+            Box::pin(async move {
+                let mut documents = vec![IndexedWorkspaceDocument {
+                    uri: "file:///workspace/src/lib.rs".to_owned(),
+                    content_digest: ContentDigest::of_bytes(b"fn main() {}"),
+                }];
+                if file_added {
+                    documents.push(IndexedWorkspaceDocument {
+                        uri: "file:///workspace/src/new.rs".to_owned(),
+                        content_digest: ContentDigest::of_bytes(b"fn added() {}"),
+                    });
+                }
+                Ok(tracedecay_lsp::IndexedWorkspaceDocuments {
+                    code_generation_id: if published {
+                        "code-generation-2".to_owned()
+                    } else {
+                        "code-generation-1".to_owned()
+                    },
+                    snapshot_digest: if published { digest('b') } else { digest('a') },
+                    documents,
+                })
+            })
+        }
+    }
+
+    struct FixedManagedDiagnostics;
+
+    impl ManagedDiagnosticSnapshotPort for FixedManagedDiagnostics {
+        fn snapshot(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
+            Box::pin(async {
+                Ok(ManagedDiagnosticSnapshot {
+                    generation: 1,
+                    code_generation_id: CodeGenerationId::new("code-generation-1").unwrap(),
+                    snapshot_digest: digest('a'),
+                    authority_digest: digest('c'),
+                    diagnostics: Vec::new(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_sweep_rejects_a_generation_published_before_completion() {
+        let root = AdmittedRoot::authorized("file:///workspace", digest('d'));
+        let workspace = AuthorizedLspWorkspace::new(Some(digest('e')), vec![root.clone()]).unwrap();
+        let authority = BrokerDiagnosticSnapshotAuthority::new(
+            Arc::new(AsyncMutex::new(DiagnosticBroker::new_for_test(
+                "/workspace",
+                Vec::new(),
+            ))),
+            Arc::new(PublishingWorkspaceIndex {
+                reads: AtomicUsize::new(0),
+                drift: WorkspaceIndexDrift::Publish,
+            }),
+            Arc::new(FixedManagedDiagnostics),
+            Duration::from_millis(1),
+        );
+
+        let error = authority
+            .refresh_workspace(CanonicalWorkspaceDiagnosticRefreshRequest {
+                workspace,
+                root,
+                overlays: Vec::new(),
+            })
+            .await
+            .expect_err("a cross-generation sweep must not be published");
+
+        assert_eq!(error.class(), "workspace-code-generation-stale");
+    }
+
+    #[tokio::test]
+    async fn workspace_sweep_rejects_a_file_added_before_completion() {
+        let root = AdmittedRoot::authorized("file:///workspace", digest('d'));
+        let workspace = AuthorizedLspWorkspace::new(Some(digest('e')), vec![root.clone()]).unwrap();
+        let authority = BrokerDiagnosticSnapshotAuthority::new(
+            Arc::new(AsyncMutex::new(DiagnosticBroker::new_for_test(
+                "/workspace",
+                Vec::new(),
+            ))),
+            Arc::new(PublishingWorkspaceIndex {
+                reads: AtomicUsize::new(0),
+                drift: WorkspaceIndexDrift::AddFile,
+            }),
+            Arc::new(FixedManagedDiagnostics),
+            Duration::from_millis(1),
+        );
+
+        let error = authority
+            .refresh_workspace(CanonicalWorkspaceDiagnosticRefreshRequest {
+                workspace,
+                root,
+                overlays: Vec::new(),
+            })
+            .await
+            .expect_err("a file-set change must make the sweep partial");
+
+        assert_eq!(error.class(), "workspace-code-generation-stale");
+    }
+
+    struct MismatchedManagedDiagnostics;
+
+    impl ManagedDiagnosticSnapshotPort for MismatchedManagedDiagnostics {
+        fn snapshot(
+            &self,
+            _request: CanonicalDiagnosticRefreshRequest,
+        ) -> LspRuntimeFuture<Result<ManagedDiagnosticSnapshot, LspRuntimeFailure>> {
+            Box::pin(async {
+                Ok(ManagedDiagnosticSnapshot {
+                    generation: 2,
+                    code_generation_id: CodeGenerationId::new("code-generation-2").unwrap(),
+                    snapshot_digest: digest('b'),
+                    authority_digest: digest('c'),
+                    diagnostics: Vec::new(),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_sweep_rejects_managed_diagnostics_from_another_generation() {
+        let root = AdmittedRoot::authorized("file:///workspace", digest('d'));
+        let workspace = AuthorizedLspWorkspace::new(Some(digest('e')), vec![root.clone()]).unwrap();
+        let authority = BrokerDiagnosticSnapshotAuthority::new(
+            Arc::new(AsyncMutex::new(DiagnosticBroker::new_for_test(
+                "/workspace",
+                Vec::new(),
+            ))),
+            Arc::new(PublishingWorkspaceIndex {
+                reads: AtomicUsize::new(0),
+                drift: WorkspaceIndexDrift::None,
+            }),
+            Arc::new(MismatchedManagedDiagnostics),
+            Duration::from_millis(1),
+        );
+
+        let error = authority
+            .refresh_workspace(CanonicalWorkspaceDiagnosticRefreshRequest {
+                workspace,
+                root,
+                overlays: Vec::new(),
+            })
+            .await
+            .expect_err("managed diagnostics must share the admitted generation");
+
+        assert_eq!(error.class(), "managed-diagnostic-generation-stale");
+    }
 }
 
 impl tracedecay_lsp::LspSemanticRequestAuthority for SemanticAuthorityAdapter {

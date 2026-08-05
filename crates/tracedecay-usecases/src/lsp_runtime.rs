@@ -1858,13 +1858,7 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 )
                 .await?;
             let scope = current.scope;
-            let expected_content_digest =
-                request.expected_content_digest.as_ref().ok_or_else(|| {
-                    LspRuntimeFailure::new("managed-diagnostic-content-identity-unavailable")
-                })?;
-            if scope.document_content_digest.as_ref() != Some(expected_content_digest) {
-                return Err(LspRuntimeFailure::new("managed-diagnostic-content-stale"));
-            }
+            crate::lsp_support::validate_managed_diagnostic_scope(&request, &scope)?;
             let Some(result) = current.result else {
                 return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
             };
@@ -1892,6 +1886,8 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 .await?;
             Ok(ManagedDiagnosticSnapshot {
                 generation: scope.generation,
+                code_generation_id: scope.code_generation_id.clone(),
+                snapshot_digest: scope.snapshot_digest.clone(),
                 authority_digest: crate::lsp_support::managed_diagnostic_authority_digest(&scope)?,
                 diagnostics,
             })
