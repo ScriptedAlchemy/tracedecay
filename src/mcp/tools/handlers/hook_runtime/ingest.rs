@@ -137,6 +137,127 @@ async fn drain_host_observation_projections(
     Ok(stats.transcript.messages_upserted)
 }
 
+struct ClaudeCompactEvent {
+    session_id: String,
+    compact_summary: String,
+    current_tokens: Option<i64>,
+    context_length: Option<i64>,
+}
+
+fn parse_claude_compact_event(args: &Value) -> Result<ClaudeCompactEvent> {
+    if required_str(args, "provider")? != "claude" {
+        return Err(config_error(
+            "Claude compact action requires provider `claude`",
+        ));
+    }
+    let event_json = required_str(args, "event_json")?;
+    let event: Value = serde_json::from_str(event_json)
+        .map_err(|_| config_error("Claude compact event is not valid JSON"))?;
+    if event.get("hook_event_name").and_then(Value::as_str) != Some("PostCompact") {
+        return Err(config_error(
+            "Claude compact action requires a PostCompact event",
+        ));
+    }
+    let event_summary = event
+        .get("compact_summary")
+        .and_then(Value::as_str)
+        .filter(|summary| !summary.trim().is_empty())
+        .ok_or_else(|| config_error("Claude PostCompact event omitted its native summary"))?;
+    let requested_summary = required_str(args, "compact_summary")?;
+    if event_summary != requested_summary {
+        return Err(config_error(
+            "Claude compact summary does not exactly match the native event",
+        ));
+    }
+    let session_id = event
+        .get("session_id")
+        .and_then(Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+        .ok_or_else(|| config_error("Claude PostCompact event omitted session id"))?;
+    Ok(ClaudeCompactEvent {
+        session_id: session_id.to_owned(),
+        compact_summary: event_summary.to_owned(),
+        current_tokens: event_i64(&event, &["context_tokens", "current_tokens", "tokens"]),
+        context_length: event_i64(&event, &["context_window_size", "context_length"]),
+    })
+}
+
+pub(super) async fn claude_compact(
+    cg: &TraceDecay,
+    args: &Value,
+    session_authorities: SessionAuthorities<'_>,
+) -> Result<Value> {
+    let event = parse_claude_compact_event(args)?;
+    let db = session_authorities
+        .project
+        .ok_or_else(|| config_error("daemon project session database is unavailable"))?;
+    let project_id = project_observation_id(cg)?;
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let admission =
+        host_admission_facade(Some(cg), HostAdmissionScope::Project, session_authorities)?;
+    let source = crate::sessions::claude::ClaudeSource::new()
+        .ok_or_else(|| config_error("Claude transcript source is unavailable"))?;
+    let cancellation = ObservationCancellation::default();
+    let ingest =
+        crate::sessions::claude_observation::ingest_source_with_observations_with_admission(
+            &source,
+            cg.project_root(),
+            scope,
+            &admission,
+            Some(crate::sessions::claude_observation::CLAUDE_HOOK_MAX_NEW_BYTES),
+            cancellation,
+        )
+        .await
+        .map_err(|error| map_claude_observation_ingest_error(&error))?;
+    let authoritative =
+        crate::daemon::lcm_summarization::native_summary_evidence(db, "claude", &event.session_id)
+            .await
+            .map_err(|error| {
+                config_error(format!("read Claude compaction evidence failed: {error}"))
+            })?
+            .ok_or_else(|| {
+                config_error("canonical Claude compact summary evidence is unavailable")
+            })?;
+    if authoritative.text != event.compact_summary {
+        return Err(config_error(
+            "canonical Claude compact summary does not exactly match the native event",
+        ));
+    }
+
+    let effects =
+        crate::daemon::lcm_effects::DaemonLcmEffectService::new(Arc::clone(db), None, None);
+    let mut request = host_lcm_request(
+        "claude",
+        &event.session_id,
+        event.current_tokens,
+        event.context_length,
+        None,
+        None,
+        "Claude context compaction",
+        None,
+    );
+    request.summarizer = crate::sessions::lcm::LcmSummarizerMode::Provided {
+        summary_text: event.compact_summary,
+        route: Some(authoritative.route),
+    };
+    let result = effects
+        .compress(request)
+        .await
+        .map_err(|error| config_error(format!("store Claude compaction failed: {error}")))?;
+    Ok(json!({
+        "action": "claude_compact",
+        "status": result.status,
+        "reason": result.reason,
+        "summary_nodes_created": result.summary_nodes_created,
+        "summary_node_ids": result.summary_nodes.into_iter().map(|node| node.node_id).collect::<Vec<_>>(),
+        "relation_projection_status": result.relation_projection_status,
+        "messages_upserted": ingest.transcript.messages_upserted,
+        "observations_committed": ingest.observations_committed,
+    }))
+}
+
 pub(super) async fn codex_compact(
     cg: &TraceDecay,
     args: &Value,

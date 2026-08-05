@@ -7,9 +7,9 @@ use crate::db::engine::{QueryExecutor, params};
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::lcm::{LcmError, LcmSummaryRequest};
 
-pub(super) struct AuthoritativeSummary {
-    pub(super) text: String,
-    pub(super) route: String,
+pub(crate) struct AuthoritativeSummary {
+    pub(crate) text: String,
+    pub(crate) route: String,
 }
 
 pub(super) async fn resolve_authoritative_summary(
@@ -71,7 +71,7 @@ async fn generate_provider_summary(
     }
 }
 
-pub(super) async fn native_summary_evidence(
+pub(crate) async fn native_summary_evidence(
     database: &RegisteredGlobalDb,
     provider: &str,
     session_id: &str,

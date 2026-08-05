@@ -37,6 +37,40 @@ fn codex_and_cursor_compaction_requests_delegate_summarization_to_the_daemon() {
     }
 }
 
+#[test]
+fn claude_compact_requires_exact_native_event_evidence() {
+    let event_json = r#"{"hook_event_name":"PostCompact","session_id":"claude-1","compact_summary":"  exact native summary\n","context_tokens":900}"#;
+    let parsed = parse_claude_compact_event(&json!({
+        "provider": "claude",
+        "event_json": event_json,
+        "compact_summary": "  exact native summary\n",
+    }))
+    .unwrap();
+    assert_eq!(parsed.session_id, "claude-1");
+    assert_eq!(parsed.compact_summary, "  exact native summary\n");
+    assert_eq!(parsed.current_tokens, Some(900));
+
+    for args in [
+        json!({
+            "provider": "cursor",
+            "event_json": event_json,
+            "compact_summary": "  exact native summary\n",
+        }),
+        json!({
+            "provider": "claude",
+            "event_json": event_json,
+            "compact_summary": "changed summary",
+        }),
+        json!({
+            "provider": "claude",
+            "event_json": r#"{"hook_event_name":"Stop","session_id":"claude-1","compact_summary":"  exact native summary\n"}"#,
+            "compact_summary": "  exact native summary\n",
+        }),
+    ] {
+        assert!(parse_claude_compact_event(&args).is_err());
+    }
+}
+
 #[tokio::test]
 async fn daemon_profile_ingest_rejects_an_unregistered_database() {
     let temp = tempfile::TempDir::new().unwrap();

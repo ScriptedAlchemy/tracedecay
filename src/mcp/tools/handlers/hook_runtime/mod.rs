@@ -37,7 +37,9 @@ use context_scout::{
 };
 use errors::map_host_admission_outcome;
 use hermes::{hermes_receipt, user_review};
-use ingest::{accounting_receipt, codex_compact, cursor_compact, ingest_transcript};
+use ingest::{
+    accounting_receipt, claude_compact, codex_compact, cursor_compact, ingest_transcript,
+};
 
 fn required_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key)
@@ -88,6 +90,7 @@ pub async fn handle_hook_runtime(
                 "hook action `{action}` requires projectless daemon routing"
             )));
         }
+        "claude_compact" => claude_compact(cg, &args, session_authorities).await?,
         "codex_compact" => codex_compact(cg, &args, session_authorities).await?,
         "cursor_compact" => cursor_compact(cg, &args, session_authorities).await?,
         other => {

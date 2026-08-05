@@ -14,6 +14,10 @@ fn required_str_rejects_missing_and_empty_values() {
 fn projectless_runtime_rejects_project_database_actions() {
     assert!(!projectless_action_allowed("reset_counter", &json!({})));
     assert!(!projectless_action_allowed(
+        "claude_compact",
+        &json!({ "provider": "claude" }),
+    ));
+    assert!(!projectless_action_allowed(
         "ingest_transcript",
         &json!({ "user_scope": false }),
     ));
