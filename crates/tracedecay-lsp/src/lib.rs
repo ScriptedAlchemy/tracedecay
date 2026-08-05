@@ -44,6 +44,7 @@ mod request_sequence;
 mod rpc;
 mod session;
 mod workspace;
+mod workspace_diagnostics;
 
 pub use bridge::{
     AsyncContentLengthError, BridgeDirection, BridgePumpOutcome, ContentLengthCodec,
@@ -135,3 +136,10 @@ pub use session::{
     RequestAdmission, SessionLifecycle,
 };
 pub use workspace::{WorkspaceFolderMutation, WorkspaceFolderMutationApplyError};
+pub use workspace_diagnostics::{
+    CanonicalWorkspaceDiagnosticRefreshRequest, IndexedWorkspaceDocument,
+    IndexedWorkspaceDocuments, MAX_WORKSPACE_DIAGNOSTIC_BYTES, MAX_WORKSPACE_DIAGNOSTIC_FANOUT,
+    MAX_WORKSPACE_DIAGNOSTIC_RESULT_ID_BYTES, MAX_WORKSPACE_DIAGNOSTIC_RESULTS,
+    WorkspaceDiagnosticRootFailure, WorkspaceDiagnosticSnapshotOutcome,
+    WorkspaceDocumentDiagnostics, WorkspaceGenerationDiagnostics,
+};

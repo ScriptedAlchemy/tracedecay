@@ -254,6 +254,9 @@ where
         self.diagnostics.refresh_request = None;
         self.diagnostics.refresh_needed = false;
         self.diagnostics.active_refreshes.clear();
+        self.diagnostics.workspace_results.clear();
+        self.diagnostics.workspace_snapshots.clear();
+        self.diagnostics.workspace_failures.clear();
         self.context.subscriptions.clear();
         self.context.currentness.clear();
         self.context.pending_requests.clear();
@@ -308,6 +311,15 @@ where
         self.diagnostics
             .active_refreshes
             .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .workspace_results
+            .retain(|uri, _| !belongs_to_removed_root(uri));
+        self.diagnostics
+            .workspace_snapshots
+            .retain(|root_uri, _| !removed.iter().any(|root| root.matches_root_uri(root_uri)));
+        self.diagnostics
+            .workspace_failures
+            .retain(|root_uri, _| !removed.iter().any(|root| root.matches_root_uri(root_uri)));
         self.context.currentness.retain(|(_, uri), _| {
             uri.as_deref()
                 .is_none_or(|uri| !belongs_to_removed_root(uri))

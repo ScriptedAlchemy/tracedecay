@@ -85,6 +85,51 @@ impl DiagnosticSnapshotPort for Diagnostics {
             completed_operation_id: None,
         }
     }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        true
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        if root.uri() == "file:///failed" {
+            return WorkspaceDiagnosticSnapshotOutcome::Failed {
+                code_generation_id: None,
+                failure_class: "indexed-generation-unavailable".to_owned(),
+            };
+        }
+        let uri = format!("{}/src/lib.rs", root.uri().trim_end_matches('/'));
+        let overlay = overlays.iter().find(|overlay| overlay.uri == uri);
+        let DiagnosticSnapshotOutcome::Ready { diagnostics, .. } =
+            self.document_diagnostics(root, &uri, overlay)
+        else {
+            panic!("fixed diagnostic snapshot must be ready");
+        };
+        WorkspaceDiagnosticSnapshotOutcome::Ready {
+            diagnostics: WorkspaceGenerationDiagnostics {
+                code_generation_id: format!(
+                    "code-generation-{}",
+                    root.scope_digest().map_or("single", ManifestDigest::as_str)
+                ),
+                snapshot_digest: root.scope_digest().cloned().unwrap_or_else(|| {
+                    ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap()
+                }),
+                documents: vec![WorkspaceDocumentDiagnostics {
+                    uri,
+                    version: overlay.map(|overlay| overlay.version),
+                    content_digest: overlay.map_or_else(
+                        || ContentDigest::of_bytes(b"clean"),
+                        |overlay| ContentDigest::of_bytes(overlay.text.as_bytes()),
+                    ),
+                    diagnostics,
+                }],
+            },
+            completed_operation_id: None,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -338,6 +383,7 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
     let routed = semantics.routed_scope_digests.clone();
     let gateway_capabilities = GatewayCapabilities {
         supports_workspace_folders: true,
+        supports_workspace_diagnostics: true,
         ..GatewayCapabilities::default()
     };
     let upstream = UpstreamCapabilities {
@@ -381,7 +427,11 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
         }
     });
     session.handle_payload(&serde_json::to_vec(&initialize).unwrap(), 0);
-    session.drain_outbound();
+    let initialize_response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(
+        initialize_response["result"]["capabilities"]["diagnosticProvider"]["workspaceDiagnostics"],
+        true
+    );
     session.handle_payload(
         br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
         1,
@@ -414,8 +464,12 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
         br#"{"jsonrpc":"2.0","id":6,"method":"tracedecay/textDocument/renameCandidate","params":{"textDocument":{"uri":"file:///right/src/lib.rs"},"position":{"line":3,"character":5}}}"#,
         6,
     );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":7,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
+        7,
+    );
     let responses = session.drain_outbound();
-    assert_eq!(responses.len(), 5);
+    assert_eq!(responses.len(), 6);
     let workspace_response: Value = serde_json::from_slice(&responses[2]).unwrap();
     assert_eq!(
         workspace_response["result"]
@@ -437,6 +491,14 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
     );
     assert_eq!(rename_response["result"]["placeholder"], "old_name");
     assert_eq!(rename_response["result"]["range"]["start"]["line"], 3);
+    let workspace_diagnostics: Value = serde_json::from_slice(&responses[5]).unwrap();
+    let workspace_items = workspace_diagnostics["result"]["items"].as_array().unwrap();
+    assert_eq!(workspace_items.len(), 2);
+    assert!(workspace_items.iter().all(|item| item["kind"] == "full"));
+    assert_eq!(
+        workspace_diagnostics["result"]["tracedecay"]["complete"],
+        true
+    );
     assert_eq!(
         *routed.lock().expect("read routed roots"),
         vec![
@@ -448,12 +510,105 @@ fn two_root_session_routes_documents_and_workspace_requests_to_exact_roots() {
         ]
     );
 
+    let previous_result_ids = workspace_items
+        .iter()
+        .map(|item| {
+            json!({
+                "uri": item["uri"],
+                "value": item["resultId"],
+            })
+        })
+        .collect::<Vec<_>>();
     session.handle_payload(
-        br#"{"jsonrpc":"2.0","id":7,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///escape.rs"},"position":{"line":0,"character":0}}}"#,
-        7,
+        &serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "workspace/diagnostic",
+            "params": { "previousResultIds": previous_result_ids },
+        }))
+        .unwrap(),
+        8,
+    );
+    let unchanged: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert!(
+        unchanged["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["kind"] == "unchanged")
+    );
+
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":9,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///escape.rs"},"position":{"line":0,"character":0}}}"#,
+        9,
     );
     let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
     assert_eq!(response["error"]["data"]["reason"], "outsideAdmittedRoot");
+}
+
+#[test]
+fn workspace_diagnostics_preserve_ready_roots_when_one_root_fails() {
+    let workspace = AuthorizedLspWorkspace::new(
+        Some(ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap()),
+        vec![
+            AdmittedRoot::authorized(
+                "file:///left",
+                ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).unwrap(),
+            ),
+            AdmittedRoot::authorized(
+                "file:///failed",
+                ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).unwrap(),
+            ),
+        ],
+    )
+    .unwrap();
+    let gateway_capabilities = GatewayCapabilities {
+        supports_workspace_folders: true,
+        supports_workspace_diagnostics: true,
+        ..GatewayCapabilities::default()
+    };
+    let upstream = UpstreamCapabilities {
+        supports_diagnostics: true,
+        semantic: BTreeSet::new(),
+    };
+    let initial = negotiate_capabilities(
+        &ClientCapabilities::default(),
+        &gateway_capabilities,
+        &upstream,
+    );
+    let mut session = DaemonLspProtocolSession::from_workspace_ports(
+        workspace,
+        initial,
+        gateway_capabilities,
+        upstream,
+        Feedback::default(),
+        Semantics,
+        Diagnostics,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"workspaceFolders":[{"uri":"file:///left","name":"left"},{"uri":"file:///failed","name":"failed"}],"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"diagnostic":{}},"workspace":{"workspaceFolders":true}}}}"#,
+        0,
+    );
+    session.drain_outbound();
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+        1,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":2,"method":"workspace/diagnostic","params":{"previousResultIds":[]}}"#,
+        2,
+    );
+    let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(response["result"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(response["result"]["tracedecay"]["complete"], false);
+    assert_eq!(
+        response["result"]["tracedecay"]["rootFailures"][0]["rootUri"],
+        "file:///failed"
+    );
+    assert_eq!(
+        response["result"]["tracedecay"]["rootFailures"][0]["failureClass"],
+        "indexed-generation-unavailable"
+    );
 }
 
 #[test]

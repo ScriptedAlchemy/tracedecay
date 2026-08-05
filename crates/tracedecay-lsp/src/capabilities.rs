@@ -272,6 +272,9 @@ pub enum CapabilityParseError {
 pub struct GatewayCapabilities {
     pub supports_publish_diagnostics: bool,
     pub supports_document_diagnostics: bool,
+    /// True only when the daemon mounted exact indexed-root enumeration and
+    /// canonical root diagnostic snapshot authorities.
+    pub supports_workspace_diagnostics: bool,
     /// Whether the daemon can answer from canonical `TraceDecay` diagnostics
     /// when an upstream analyzer does not provide diagnostics.
     pub supports_managed_diagnostics: bool,
@@ -287,6 +290,7 @@ impl Default for GatewayCapabilities {
         Self {
             supports_publish_diagnostics: true,
             supports_document_diagnostics: true,
+            supports_workspace_diagnostics: false,
             supports_managed_diagnostics: true,
             supports_workspace_folders: false,
             semantic: SemanticCapability::ALL.into_iter().collect(),
@@ -373,7 +377,7 @@ impl EffectiveCapabilities {
                 "diagnosticProvider".into(),
                 json!({
                     "interFileDependencies": true,
-                    "workspaceDiagnostics": false,
+                    "workspaceDiagnostics": self.workspace_diagnostics_supported,
                 }),
             );
         }
@@ -561,7 +565,9 @@ pub fn negotiate_capabilities(
         supports_context_expansion,
         workspace_folders_supported: client.supports_workspace_folders
             && gateway.supports_workspace_folders,
-        workspace_diagnostics_supported: false,
+        workspace_diagnostics_supported: diagnostics_supported
+            && client.supports_document_diagnostics
+            && gateway.supports_workspace_diagnostics,
         rename_supported: false,
         general_code_actions_supported: false,
         execute_command_supported: false,

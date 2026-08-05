@@ -916,7 +916,7 @@ impl DaemonLspOwnerRegistrar {
         scope_grant: CapabilityGrantSnapshot,
         registered_database: Arc<crate::global_db::RegisteredGlobalDb>,
         database: Database,
-        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        code_index: Arc<crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1>,
         runtime: tokio::runtime::Handle,
         diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
         languages: &[String],
@@ -940,6 +940,9 @@ impl DaemonLspOwnerRegistrar {
                 message: "production feedback cycle input is not registered for the project"
                     .to_owned(),
             })?;
+        let scope_set_storage = registered_database.authorized_scope_set_storage()?;
+        let mut gateway_capabilities = gateway_capabilities;
+        gateway_capabilities.supports_workspace_folders = true;
         let semantics = production_semantic_authorities(
             runtime.clone(),
             diagnostic_broker.clone(),
@@ -959,7 +962,10 @@ impl DaemonLspOwnerRegistrar {
                 runtime,
                 feedback_runtime,
                 database,
-                code_index,
+                code_index.clone() as Arc<dyn LspCodeIndexProjectionIdentityPort>,
+                Arc::new(PublishedCodeIndexWorkspaceDocuments::new(
+                    code_index.as_ref().clone(),
+                )),
                 move |_| Arc::clone(&feedback_cycle_input),
                 semantics.semantics,
                 diagnostic_broker,
@@ -972,7 +978,6 @@ impl DaemonLspOwnerRegistrar {
                 message: format!("could not construct LSP session factory: {error:?}"),
             })?,
         );
-        let scope_set_storage = registered_database.authorized_scope_set_storage()?;
         self.register_lsp_owner(
             project_root,
             DaemonLspInvocationOwner::authorized(factory.clone(), scope_grant, scope_set_storage),

@@ -16,6 +16,9 @@ use crate::provider::{
     DiagnosticSnapshotPort, GenerationDiagnostics,
 };
 use crate::request_sequence::ProcessLocalRequestSequence;
+use crate::workspace_diagnostics::{
+    CanonicalWorkspaceDiagnosticRefreshRequest, WorkspaceDiagnosticSnapshotOutcome,
+};
 use tracedecay_code_extraction::incremental::ParseDocumentIdentity;
 #[cfg(test)]
 use tracedecay_code_extraction::incremental::{ParseReport, ParseReuse};
@@ -24,10 +27,12 @@ use tracedecay_domain::{ContentDigest, ManifestDigest, canonical_sha256};
 mod retained_parse;
 mod retention;
 mod text_edits;
+mod workspace_diagnostics;
 
 use retained_parse::RetainedOverlayParse;
 pub use retained_parse::{OverlayExtractionState, OverlayParseState, OverlayParseUnavailable};
 use text_edits::apply_change;
+use workspace_diagnostics::WorkspaceDiagnosticAdapter;
 
 /// A single unsaved document cannot consume more than two MiB of the daemon.
 pub const MAX_OVERLAY_BYTES: usize = 2 * 1024 * 1024;
@@ -265,6 +270,7 @@ pub struct CanonicalDiagnosticRefreshRequest {
     pub document_uri: String,
     pub overlay: Option<OverlaySnapshot>,
     pub source_generation: Option<u64>,
+    pub expected_content_digest: Option<ContentDigest>,
 }
 
 /// Current canonical managed diagnostics created by the feedback owner.
@@ -287,6 +293,19 @@ pub trait CanonicalDiagnosticSnapshotAuthority: Send + Sync {
         &self,
         request: CanonicalDiagnosticRefreshRequest,
     ) -> LspRuntimeFuture<Result<GenerationDiagnostics, LspRuntimeFailure>>;
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        false
+    }
+
+    fn refresh_workspace(
+        &self,
+        _request: CanonicalWorkspaceDiagnosticRefreshRequest,
+    ) -> LspRuntimeFuture<
+        Result<crate::workspace_diagnostics::WorkspaceGenerationDiagnostics, LspRuntimeFailure>,
+    > {
+        Box::pin(async { Err(LspRuntimeFailure::new("workspace-diagnostics-unsupported")) })
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -308,6 +327,7 @@ pub struct DiagnosticSnapshotAdapter {
         DiagnosticRefreshIdentity,
         DiagnosticSnapshotOutcome,
     >,
+    workspace: WorkspaceDiagnosticAdapter,
 }
 
 impl DiagnosticSnapshotAdapter {
@@ -315,11 +335,14 @@ impl DiagnosticSnapshotAdapter {
         runtime: Arc<dyn LspRuntimeSpawner>,
         authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
     ) -> Self {
+        let workspace =
+            WorkspaceDiagnosticAdapter::new(Arc::clone(&runtime), Arc::clone(&authority));
         Self {
             runtime,
             authority,
             next_operation: ProcessLocalRequestSequence::starting_at(1),
             operations: BoundedOperationTable::new(MAX_DIAGNOSTIC_OPERATIONS),
+            workspace,
         }
     }
 
@@ -382,6 +405,8 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
             document_uri: document_uri.to_owned(),
             overlay: overlay.cloned(),
             source_generation,
+            expected_content_digest: overlay
+                .map(|overlay| ContentDigest::of_bytes(overlay.text.as_bytes())),
         };
         let authority = Arc::clone(&self.authority);
         let admission: Result<_, crate::request_sequence::SequenceExhausted> =
@@ -423,6 +448,26 @@ impl DiagnosticSnapshotPort for DiagnosticSnapshotAdapter {
                 failure_class: "diagnostic-identity-exhausted".to_owned(),
             },
         }
+    }
+
+    fn supports_workspace_diagnostics(&self) -> bool {
+        self.workspace.supports()
+    }
+
+    fn workspace_diagnostics(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> WorkspaceDiagnosticSnapshotOutcome {
+        self.workspace.snapshot(root, overlays)
+    }
+
+    fn request_workspace_refresh(
+        &self,
+        root: &AdmittedRoot,
+        overlays: &[OverlaySnapshot],
+    ) -> DiagnosticRefreshAdmission {
+        self.workspace.request(root, overlays)
     }
 }
 

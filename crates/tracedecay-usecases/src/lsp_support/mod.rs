@@ -8,5 +8,5 @@ pub use factory::{
 };
 pub use runtime_adapters::{
     BrokerDiagnosticSnapshotAuthority, DaemonSemanticProviderAdapter, LspDiagnosticDocumentPort,
-    LspSemanticRequestAuthority,
+    LspSemanticRequestAuthority, LspWorkspaceDocumentIndexPort,
 };

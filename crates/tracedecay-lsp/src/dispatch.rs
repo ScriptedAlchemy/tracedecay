@@ -31,6 +31,7 @@ pub(crate) enum LspClientMethod {
     TextDocumentDidClose,
     TextDocumentDidSave,
     WorkspaceDidChangeWorkspaceFolders,
+    WorkspaceDiagnostic,
     TextDocumentDiagnostic,
     TextDocumentDeclaration,
     TextDocumentDefinition,
@@ -68,6 +69,7 @@ impl LspClientMethod {
             "textDocument/didClose" => Self::TextDocumentDidClose,
             "textDocument/didSave" => Self::TextDocumentDidSave,
             "workspace/didChangeWorkspaceFolders" => Self::WorkspaceDidChangeWorkspaceFolders,
+            "workspace/diagnostic" => Self::WorkspaceDiagnostic,
             "textDocument/diagnostic" => Self::TextDocumentDiagnostic,
             "textDocument/declaration" => Self::TextDocumentDeclaration,
             "textDocument/definition" => Self::TextDocumentDefinition,
@@ -267,6 +269,11 @@ fn dispatch_request<P, S, D>(
                 let _ = session.enqueue_value(error_response(response_id, error));
             }
         },
+        LspClientMethod::WorkspaceDiagnostic => {
+            session.with_request(response_id, None, now_ms, move |session| {
+                session.pull_workspace_diagnostics(&params)
+            });
+        }
         LspClientMethod::TextDocumentDeclaration => {
             start_position_semantic(
                 session,
