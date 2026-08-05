@@ -19,13 +19,47 @@ fn lsp_scope_roots_canonicalize_independent_of_folder_order() {
         None,
     )
     .unwrap();
+    let locator_a = tracedecay_application::RegisteredRootLocatorV1::new(
+        ProjectId::new("project.a").unwrap(),
+        tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
+        "store.a",
+        "/a",
+    )
+    .unwrap();
+    let locator_b = tracedecay_application::RegisteredRootLocatorV1::new(
+        ProjectId::new("project.b").unwrap(),
+        tracedecay_domain::UserProfileId::new("profile.fixture").unwrap(),
+        "store.b",
+        "/b",
+    )
+    .unwrap();
     let mut forward = vec![
-        (PathBuf::from("/a"), "file:///a".to_owned(), scope_a.clone()),
-        (PathBuf::from("/b"), "file:///b".to_owned(), scope_b.clone()),
+        (
+            PathBuf::from("/a"),
+            "file:///a".to_owned(),
+            scope_a.clone(),
+            locator_a.clone(),
+        ),
+        (
+            PathBuf::from("/b"),
+            "file:///b".to_owned(),
+            scope_b.clone(),
+            locator_b.clone(),
+        ),
     ];
     let mut reverse = vec![
-        (PathBuf::from("/b"), "file:///b".to_owned(), scope_b),
-        (PathBuf::from("/a"), "file:///a".to_owned(), scope_a),
+        (
+            PathBuf::from("/b"),
+            "file:///b".to_owned(),
+            scope_b,
+            locator_b,
+        ),
+        (
+            PathBuf::from("/a"),
+            "file:///a".to_owned(),
+            scope_a,
+            locator_a,
+        ),
     ];
 
     assert!(canonicalize_lsp_roots(&mut forward));
