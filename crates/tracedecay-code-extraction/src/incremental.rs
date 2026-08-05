@@ -868,10 +868,17 @@ fn extraction_ranges(
                 }
                 node = parent;
             }
+            let mut region_start = node;
+            while let Some(previous) = region_start.prev_named_sibling() {
+                if !is_attached_leading_syntax(previous.kind()) {
+                    break;
+                }
+                region_start = previous;
+            }
             Some(ParseChangedRange {
-                start_byte: node.start_byte(),
+                start_byte: region_start.start_byte(),
                 end_byte: node.end_byte(),
-                start_position: node.start_position().into(),
+                start_position: region_start.start_position().into(),
                 end_position: node.end_position().into(),
             })
         })
@@ -881,6 +888,20 @@ fn extraction_ranges(
         left.start_byte == right.start_byte && left.end_byte == right.end_byte
     });
     expanded
+}
+
+fn is_attached_leading_syntax(kind: &str) -> bool {
+    matches!(
+        kind,
+        "annotation"
+            | "attribute"
+            | "attribute_item"
+            | "block_comment"
+            | "comment"
+            | "decorator"
+            | "line_comment"
+            | "marker_annotation"
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
