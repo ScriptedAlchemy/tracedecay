@@ -24,7 +24,7 @@
 - Preserve typed cancellation, staleness, denial, unavailable, reset-required, corruption, and budget-exhaustion outcomes.
 - Validation and pre-commit mutation failures leave the prior graph readable. A Grafeo post-commit WAL/checkpoint failure is reported as typed `DurabilityUncertain`, permanently closes that handle, and permits no further reads until exact reopen/recovery validates the store.
 - Preserve deterministic ordering, pagination, authorization, coverage, and exact source hydration above the storage layer.
-- Never install, dogfood, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
+- Never install, run, restart, or test V2 against the operator's live TraceDecay profile. All runtime tests use isolated temporary home/profile/socket paths.
 - Each implementation lane uses its own recognized worktree, merges the current integration floor before review, and is parent-reviewed before merge.
 
 Official implementation references:
