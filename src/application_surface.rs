@@ -109,7 +109,10 @@ mod configuration_wire;
 mod handoff;
 mod workflow;
 
-use configuration_wire::validate_configuration_outcome;
+use configuration_wire::{
+    build_configuration_wire_schema_registry, is_configuration_operation,
+    validate_configuration_outcome,
+};
 use handoff::router_with_executor as handoff_application_router_with_executor;
 use workflow::router_with_executor as workflow_application_router_with_executor;
 
@@ -790,18 +793,41 @@ fn application_invoker_for_surface(
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
+    let configuration_schemas = (surface == BindingSurface::Http
+        || required_operations
+            .iter()
+            .copied()
+            .any(is_configuration_operation))
+    .then(|| build_configuration_wire_schema_registry(composition.snapshot()))
+    .transpose()?;
     if surface == BindingSurface::Http {
         for operation in HttpApplicationOperation::ALL {
             if !operation.is_http_exposed() {
                 continue;
             }
-            if resolve_application_binding(&resolver, surface, operation).is_none() {
+            let Some(binding) = resolve_application_binding(&resolver, surface, operation) else {
+                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+            };
+            if is_configuration_operation(operation)
+                && configuration_schemas
+                    .as_ref()
+                    .and_then(|schemas| schemas.get(&binding.binding_id))
+                    .is_none()
+            {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }
     } else {
         for operation in required_operations {
-            if resolve_application_binding(&resolver, surface, *operation).is_none() {
+            let Some(binding) = resolve_application_binding(&resolver, surface, *operation) else {
+                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+            };
+            if is_configuration_operation(*operation)
+                && configuration_schemas
+                    .as_ref()
+                    .and_then(|schemas| schemas.get(&binding.binding_id))
+                    .is_none()
+            {
                 return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
             }
         }

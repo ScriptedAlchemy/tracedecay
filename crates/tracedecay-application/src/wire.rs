@@ -4,8 +4,14 @@
 //! the one operation vocabulary those projections and the root dispatcher
 //! share.
 
+use std::collections::BTreeMap;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracedecay_tool_catalog::{
+    BindingId, BindingSurface, CapabilityId, CapabilityManifestV1, CatalogValidationError,
+    SchemaBodyAuthorityV1, SurfaceBindingV1,
+};
 
 /// Canonical application owner family responsible for an operation.
 #[derive(Clone, Copy, Debug, JsonSchema, PartialEq, Eq, Hash)]
@@ -89,6 +95,109 @@ pub enum ApplicationWireOperation {
     ContextScoutClaim,
     ContextScoutDelivery,
     ContextScoutFeedback,
+}
+
+/// Concrete request and result schema bodies for one operation.
+///
+/// Executability is deliberately absent. The composition root joins schemas
+/// with independently verified service and route availability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ApplicationWireSchemaV1 {
+    operation: ApplicationWireOperation,
+    capability_id: CapabilityId,
+    binding_id: BindingId,
+    surface: BindingSurface,
+    request: SchemaBodyAuthorityV1,
+    result: SchemaBodyAuthorityV1,
+}
+
+impl ApplicationWireSchemaV1 {
+    pub fn from_catalog(
+        operation: ApplicationWireOperation,
+        manifest: &CapabilityManifestV1,
+        binding: &SurfaceBindingV1,
+        request: SchemaBodyAuthorityV1,
+        result: SchemaBodyAuthorityV1,
+    ) -> Result<Self, CatalogValidationError> {
+        if binding.capability_id() != manifest.capability_id()
+            || manifest
+                .binding_ids()
+                .binary_search(binding.binding_id())
+                .is_err()
+            || ApplicationWireOperation::from_catalog_name(binding.operation().as_str())
+                != Some(operation)
+            || request.schema_ref() != manifest.request_schema()
+            || result.schema_ref() != manifest.result_schema()
+        {
+            return Err(CatalogValidationError::InvalidCapability {
+                capability_id: manifest.capability_id().clone(),
+                reason: "wire schema authority does not match its catalog binding",
+            });
+        }
+        Ok(Self {
+            operation,
+            capability_id: manifest.capability_id().clone(),
+            binding_id: binding.binding_id().clone(),
+            surface: binding.surface(),
+            request,
+            result,
+        })
+    }
+
+    pub const fn operation(&self) -> ApplicationWireOperation {
+        self.operation
+    }
+
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.capability_id
+    }
+
+    pub fn binding_id(&self) -> &BindingId {
+        &self.binding_id
+    }
+
+    pub const fn surface(&self) -> BindingSurface {
+        self.surface
+    }
+
+    pub fn request(&self) -> &SchemaBodyAuthorityV1 {
+        &self.request
+    }
+
+    pub fn result(&self) -> &SchemaBodyAuthorityV1 {
+        &self.result
+    }
+}
+
+/// Canonically ordered schema authority assembled from DTO-owning crates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApplicationWireSchemaRegistryV1 {
+    schemas: BTreeMap<BindingId, ApplicationWireSchemaV1>,
+}
+
+impl ApplicationWireSchemaRegistryV1 {
+    pub fn new(schemas: Vec<ApplicationWireSchemaV1>) -> Result<Self, CatalogValidationError> {
+        let mut registry = BTreeMap::new();
+        for schema in schemas {
+            if registry
+                .insert(schema.binding_id().clone(), schema)
+                .is_some()
+            {
+                return Err(CatalogValidationError::DuplicateValue {
+                    field: "application wire schema bindings",
+                });
+            }
+        }
+        Ok(Self { schemas: registry })
+    }
+
+    pub fn get(&self, binding_id: &BindingId) -> Option<&ApplicationWireSchemaV1> {
+        self.schemas.get(binding_id)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &ApplicationWireSchemaV1> {
+        self.schemas.values()
+    }
 }
 
 impl ApplicationWireOperation {
