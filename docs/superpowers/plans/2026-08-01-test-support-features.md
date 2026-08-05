@@ -292,12 +292,11 @@ host-admission adapters deliberately stay outside it."
 
 **2b — `FixtureGraph` / `GraphRuntimePort`.** Not rebuilt against the trait.
 `FixtureGraph` no longer exists in `tracedecay-usecases`; the `edit` module
-became a directory tree (`a881bd830`) and the port-dependent tests were re-homed
-at the composition root — e.g. the `api_migration_*` planner tests now live in
-`src/tracedecay/edits/api_migration_graph_tests.rs`, driving the real graph
-runtime instead of a double. This is the second option the original 2b text
-allowed ("re-homed at the composition root") and it removes the double rather
-than maintaining it.
+became a directory tree (`a881bd830`) and the retained port-dependent tests
+were re-homed at the composition root, driving the real graph runtime instead
+of a double. This is the second option the original 2b text allowed ("re-homed
+at the composition root") and it removes the double rather than maintaining
+it.
 
 **2c — repo-root `#[path]` fixtures.** The migrate half is gone: the three
 `#[path]`-includes of `src/global_db/schema*` no longer exist in
