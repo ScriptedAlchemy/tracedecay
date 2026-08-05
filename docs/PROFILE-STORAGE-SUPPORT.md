@@ -1,30 +1,17 @@
-# Profile Storage Support Requirements
+# Profile Storage Support Boundary
 
-This document captures support, privacy, and test-fixture requirements for profile-backed project storage.
-
-## Storage wording
-
-User-facing docs and generated guidance should describe the **resolved active project store** instead of assuming every project writes graph data to `<repo>/.tracedecay/tracedecay.db`.
-
-User-level project storage is the default:
-
-- New projects resolve to profile-sharded stores such as `~/.tracedecay/projects/<project_id>/`.
-- Repo-local `.tracedecay/` is used only for explicit local installs or legacy projects.
-- Legacy projects with `.tracedecay/` continue to use that directory in place when `.tracedecay/` is absent.
-- `~/.tracedecay/global.db` remains user-level accounting/registry state, not the canonical graph DB.
-
-Profile-sharded stores contain graph DBs, sessions, payloads, response handles,
-branch DBs, and dashboard sidecars. Hermes uses the same user-level project
-store as every other adapter. A Hermes home or profile directory is host-owned
-state, never a TraceDecay project identity; the project is an explicit runtime
-root or the current working directory's Git project.
+TraceDecay V2 accepts only the exact final shape for an admitted profile store.
+Any other persisted shape returns `ResetRequired` and requires an explicit reset
+or recreation; support guidance must not promise a V1 reader, conversion,
+backfill, sidecar reconciliation, or profile-store migration.
 
 ## Planned Support Bundle Privacy
 
 Support-bundle export is not implemented yet. When it lands, the redacted mode should default to metadata only and may include:
 
 - Resolved active project identity, storage mode, store class, and resolution source.
-- Store manifests, schema versions, aggregate table counts, artifact sizes, health states, lock or dirty indicators, and migration manifest IDs.
+- Exact-shape admission status, aggregate table counts, artifact sizes, health
+  states, and lock or dirty indicators.
 - Redacted aliases and path classes sufficient to explain which store was selected.
 - Error codes and high-level diagnostics that do not embed payload contents.
 
@@ -38,32 +25,3 @@ The redacted bundle must not include:
 - Absolute paths by default when they reveal private directory names; use explicit `--include-paths` for full paths.
 
 Any opt-in mode that includes paths or payload excerpts should mark the bundle as sensitive and require an explicit flag.
-
-## Fixture Contract
-
-Migration and storage-status tests should share fixture builders instead of reimplementing core storage behavior in tests.
-
-Reusable fixtures should cover:
-
-- Repo-local `.tracedecay/` stores with graph DB, sessions DB, branch metadata, response handles, and dashboard sidecars.
-- Legacy `.tracedecay/` stores that remain active in place.
-- Profile-sharded code-project stores with a repo enrollment marker and private profile shard.
-- Legacy Hermes-local stores whose target project is provable from a historical
-  pin or durable session metadata. Fixtures must verify one-time migration,
-  idempotency, and preservation/reporting when no unique target is provable.
-- Stale or unregistered registry rows, moved repos, worktrees, symlinked roots, dirty sentinels, sync locks, and `.branch-add.lock`.
-- Seeded `lcm-payloads/`, response handles, curation artifacts, WAL/SHM sidecars, and `TRACEDECAY_GLOBAL_DB` overrides.
-
-Suggested helper shape:
-
-```rust
-struct StorageFixture {
-    temp: tempfile::TempDir,
-    project_root: PathBuf,
-    store_root: PathBuf,
-    storage_mode: StorageMode,
-    store_class: StoreClass,
-}
-```
-
-Helpers should create files and SQLite databases directly enough for inventory/status tests, but resolver-open verification should use the real resolver once that API exists. Destructive cleanup, migration apply, and rollback fixtures must be backup-first and should assert that source stores are retained unless an explicit cleanup command runs.
