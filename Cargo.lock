@@ -5965,6 +5965,7 @@ name = "tracedecay-graph-db"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "fs2",
  "grafeo-adapters",
  "grafeo-common",
  "grafeo-core",

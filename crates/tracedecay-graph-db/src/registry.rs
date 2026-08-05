@@ -310,6 +310,7 @@ impl GraphDbRegistry {
                     check_request(registration.cancellation.as_ref(), registration.deadline)
                 })
                 .and_then(|()| path_anchor.verify(&path))
+                .and_then(|()| path_anchor.verify_engine_lock())
                 .err();
                 if let Some(error) = publication_error {
                     let error = close_and_abort_graph_open(
@@ -935,6 +936,14 @@ fn open_registered_graph(
             &owner,
             path_anchor,
             "reject replaced registered graph open",
+            error,
+        ));
+    }
+    if let Err(error) = path_anchor.verify_engine_lock() {
+        return Err(close_and_abort_graph_open(
+            &owner,
+            path_anchor,
+            "reject mismatched Grafeo graph file",
             error,
         ));
     }

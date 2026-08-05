@@ -12,16 +12,18 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, EXPLICIT_ACCESS_W, GetSecurityInfo, NO_MULTIPLE_TRUSTEE,
-    SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    SE_FILE_OBJECT, SET_ACCESS, SetEntriesInAclW, SetSecurityInfo, TRUSTEE_IS_SID, TRUSTEE_IS_USER,
+    TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CopySid,
     DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetLengthSid,
     GetSecurityDescriptorControl, GetTokenInformation, InitializeSecurityDescriptor, IsValidAcl,
-    IsValidSecurityDescriptor, IsValidSid, NO_INHERITANCE, OWNER_SECURITY_INFORMATION, PSID,
-    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetSecurityDescriptorControl, SetSecurityDescriptorDacl,
-    SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    IsValidSecurityDescriptor, IsValidSid, NO_INHERITANCE, OWNER_SECURITY_INFORMATION,
+    PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SUB_CONTAINERS_AND_OBJECTS_INHERIT, SetSecurityDescriptorControl,
+    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_INFORMATION_CLASS, TOKEN_QUERY,
+    TOKEN_USER, TokenUser,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CREATE_NEW, CreateDirectoryW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE,
@@ -29,6 +31,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
     FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FileAttributeTagInfo, GetFileInformationByHandleEx, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL,
+    WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, SECURITY_DESCRIPTOR_REVISION,
@@ -204,9 +207,19 @@ pub fn open_private_file(path: &Path) -> io::Result<File> {
     )
 }
 
-/// Adopt an existing regular file only when it already inherited the exact private ACL.
+/// Protect an existing regular file through its exact opened handle.
 pub fn make_private_file(path: &Path) -> io::Result<File> {
-    open_private_file(path)
+    let file = open_handle_with_share(
+        path,
+        OPEN_EXISTING,
+        SECURITY_ACCESS | FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC | WRITE_OWNER,
+        null(),
+        SHARE_READ_WRITE_DELETE,
+    )?;
+    validate_file_kind(&file, path, PathKind::File)?;
+    protect_existing_file(&file, path)?;
+    validate_private_handle(&file, path, PathKind::File)?;
+    Ok(file)
 }
 
 /// Open or create a private lock file with concurrent read-write sharing.
@@ -261,6 +274,35 @@ fn open_with_private_creation_acl(
     with_private_security_attributes(path, kind, |attributes| {
         open_handle_with_share(path, disposition, access, attributes, share_mode)
     })
+}
+
+fn protect_existing_file(file: &File, path: &Path) -> io::Result<()> {
+    let current_user = current_user_sid()
+        .map_err(|error| wrap_error("resolve current Windows user SID", path, error))?;
+    let acl = private_acl(&current_user, PathKind::File.inheritance())
+        .map_err(|error| wrap_error("build private Windows file DACL", path, error))?;
+    // SAFETY: the file handle, SID, and ACL are valid and remain live for the call.
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            current_user.as_psid(),
+            null_mut(),
+            acl.0.cast(),
+            null(),
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return Err(wrap_error(
+            "protect existing Windows file",
+            path,
+            io::Error::from_raw_os_error(status as i32),
+        ));
+    }
+    Ok(())
 }
 
 fn with_private_security_attributes<T>(
@@ -839,6 +881,26 @@ mod tests {
         let path = temp.path().join("secret");
 
         drop(create_private_file(&path).unwrap());
+
+        let snapshot = snapshot(&path, PathKind::File);
+        assert!(snapshot.owner_is_current_user);
+        assert!(snapshot.dacl_is_protected);
+        assert_eq!(snapshot.ace_count, 1);
+        assert!(snapshot.ace_is_allowed);
+        assert_eq!(snapshot.ace_mask, FILE_ALL_ACCESS);
+        assert_eq!(snapshot.ace_inheritance, NO_INHERITANCE as u8);
+        assert!(snapshot.trustee_is_current_user);
+    }
+
+    #[test]
+    fn ordinary_file_is_hardened_through_its_opened_handle() {
+        let temp = tempfile::tempdir().unwrap();
+        let private = temp.path().join("private");
+        create_private_directory(&private).unwrap();
+        let path = private.join("grafeo-created");
+        drop(std::fs::File::create(&path).unwrap());
+
+        drop(make_private_file(&path).unwrap());
 
         let snapshot = snapshot(&path, PathKind::File);
         assert!(snapshot.owner_is_current_user);
