@@ -96,385 +96,49 @@ const fn default_http_page_size() -> u32 {
     DEFAULT_HTTP_PAGE_SIZE
 }
 
-/// Canonical operation identity shared by every retained application surface.
-/// Transport bindings select the exposed subset without defining another
-/// operation enum or name conversion.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum HttpApplicationOperation {
-    GitStatus,
-    GitDiff,
-    GitHistory,
-    GitBlame,
-    GitHunks,
-    GitPreview,
-    GitApply,
-    FeedbackDiagnostics,
-    FeedbackGet,
-    FeedbackExpand,
-    FeedbackList,
-    FeedbackImpact,
-    FeedbackAdvisoryCycle,
-    AffectedTests,
-    TestResults,
-    CodeExactOccurrence,
-    CodePhraseSearch,
-    CodeSymbolSearch,
-    CodeSignatureSearch,
-    CodeImplementations,
-    CodeTypeHierarchy,
-    CodeCallers,
-    CodeCallees,
-    CodeFacets,
-    CodeTimeline,
-    CodeDeclaration,
-    CodeDefinition,
-    CodeTypeDefinition,
-    CodeReferences,
-    SessionLookup,
-    QualifiedName,
-    CallChain,
-    FileDependents,
-    SourceLines,
-    SourceBody,
-    SourceOutline,
-    ModuleApi,
-    FileMetadata,
-    HealthRead,
-    HealthDelta,
-    StorageStatus,
-    DiagnosticsRead,
-    ConfigurationList,
-    ConfigurationExplain,
-    ConfigurationGet,
-    ConfigurationSet,
-    ConfigurationUnset,
-    ConfigurationBatch,
-    ConfigurationWriteCredential,
-    ConfigurationObservedState,
-    ConfigurationProtectedPreview,
-    ConfigurationProtectedApply,
-    ConfigurationRollbackPreview,
-    ConfigurationRollbackApply,
-    ConfigurationAudit,
-    ContextScoutStatus,
-    ContextScoutRecent,
-    ContextScoutExplain,
-    ContextScoutCapability,
-    ContextScoutBudget,
-    ContextScoutPause,
-    ContextScoutResume,
-    ContextScoutCancel,
-    ContextScoutClaim,
-    ContextScoutDelivery,
-    ContextScoutFeedback,
+pub use tracedecay_application::{
+    ApplicationOwnerKind as HttpApplicationOwnerKind,
+    ApplicationWireOperation as HttpApplicationOperation,
+};
+
+const fn is_http_exposed(operation: HttpApplicationOperation) -> bool {
+    !matches!(
+        operation,
+        HttpApplicationOperation::GitPreview | HttpApplicationOperation::GitApply
+    )
 }
 
-/// The canonical application owner family responsible for one HTTP binding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum HttpApplicationOwnerKind {
-    Git,
-    Feedback,
-    CallableCode,
-    Primitive,
-    Configuration,
-    ContextScout,
-}
-
-impl HttpApplicationOperation {
-    pub const ALL: [Self; 66] = [
-        Self::GitStatus,
-        Self::GitDiff,
-        Self::GitHistory,
-        Self::GitBlame,
-        Self::GitHunks,
-        Self::GitPreview,
-        Self::GitApply,
-        Self::FeedbackDiagnostics,
-        Self::FeedbackGet,
-        Self::FeedbackExpand,
-        Self::FeedbackList,
-        Self::FeedbackImpact,
-        Self::FeedbackAdvisoryCycle,
-        Self::AffectedTests,
-        Self::TestResults,
-        Self::CodeExactOccurrence,
-        Self::CodePhraseSearch,
-        Self::CodeSymbolSearch,
-        Self::CodeSignatureSearch,
-        Self::CodeImplementations,
-        Self::CodeTypeHierarchy,
-        Self::CodeCallers,
-        Self::CodeCallees,
-        Self::CodeFacets,
-        Self::CodeTimeline,
-        Self::CodeDeclaration,
-        Self::CodeDefinition,
-        Self::CodeTypeDefinition,
-        Self::CodeReferences,
-        Self::SessionLookup,
-        Self::QualifiedName,
-        Self::CallChain,
-        Self::FileDependents,
-        Self::SourceLines,
-        Self::SourceBody,
-        Self::SourceOutline,
-        Self::ModuleApi,
-        Self::FileMetadata,
-        Self::HealthRead,
-        Self::HealthDelta,
-        Self::StorageStatus,
-        Self::DiagnosticsRead,
-        Self::ConfigurationList,
-        Self::ConfigurationExplain,
-        Self::ConfigurationGet,
-        Self::ConfigurationSet,
-        Self::ConfigurationUnset,
-        Self::ConfigurationBatch,
-        Self::ConfigurationWriteCredential,
-        Self::ConfigurationObservedState,
-        Self::ConfigurationProtectedPreview,
-        Self::ConfigurationProtectedApply,
-        Self::ConfigurationRollbackPreview,
-        Self::ConfigurationRollbackApply,
-        Self::ConfigurationAudit,
-        Self::ContextScoutStatus,
-        Self::ContextScoutRecent,
-        Self::ContextScoutExplain,
-        Self::ContextScoutCapability,
-        Self::ContextScoutBudget,
-        Self::ContextScoutPause,
-        Self::ContextScoutResume,
-        Self::ContextScoutCancel,
-        Self::ContextScoutClaim,
-        Self::ContextScoutDelivery,
-        Self::ContextScoutFeedback,
-    ];
-
-    pub fn from_catalog_name(name: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|operation| operation.as_str() == name)
-    }
-
-    pub fn from_tool_name(tool_name: &str) -> Option<Self> {
-        let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
-        if operation == "diagnostics" {
-            return Some(Self::DiagnosticsRead);
+fn route_path(operation: HttpApplicationOperation) -> Option<String> {
+    let path = match operation {
+        HttpApplicationOperation::GitStatus => "/git/status".to_owned(),
+        HttpApplicationOperation::GitDiff => "/git/diff".to_owned(),
+        HttpApplicationOperation::GitHistory => "/git/history".to_owned(),
+        HttpApplicationOperation::GitBlame => "/git/blame".to_owned(),
+        HttpApplicationOperation::GitHunks => "/git/hunks".to_owned(),
+        HttpApplicationOperation::AffectedTests => "/tests/affected".to_owned(),
+        HttpApplicationOperation::TestResults => "/tests/results".to_owned(),
+        HttpApplicationOperation::FeedbackDiagnostics => "/feedback/diagnostics".to_owned(),
+        HttpApplicationOperation::FeedbackGet => "/feedback/get".to_owned(),
+        HttpApplicationOperation::FeedbackExpand => "/feedback/expand".to_owned(),
+        HttpApplicationOperation::FeedbackList => "/feedback/list".to_owned(),
+        HttpApplicationOperation::FeedbackImpact => "/feedback/impact".to_owned(),
+        HttpApplicationOperation::FeedbackAdvisoryCycle => "/feedback/advisory_cycle".to_owned(),
+        operation if operation.is_callable_code() => {
+            format!("/code/{}", operation.as_str())
         }
-        Self::from_catalog_name(operation)
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::GitStatus => "git_status",
-            Self::GitDiff => "git_diff",
-            Self::GitHistory => "git_history",
-            Self::GitBlame => "git_blame",
-            Self::GitHunks => "git_hunks",
-            Self::GitPreview => "git_preview",
-            Self::GitApply => "git_apply",
-            Self::FeedbackDiagnostics => "feedback_diagnostics",
-            Self::FeedbackGet => "feedback_get",
-            Self::FeedbackExpand => "feedback_expand",
-            Self::FeedbackList => "feedback_list",
-            Self::FeedbackImpact => "feedback_impact",
-            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
-            Self::AffectedTests => "affected_tests",
-            Self::TestResults => "test_results",
-            Self::CodeExactOccurrence => "code_exact_occurrence",
-            Self::CodePhraseSearch => "code_phrase_search",
-            Self::CodeSymbolSearch => "code_symbol_search",
-            Self::CodeSignatureSearch => "code_signature_search",
-            Self::CodeImplementations => "code_implementations",
-            Self::CodeTypeHierarchy => "code_type_hierarchy",
-            Self::CodeCallers => "code_callers",
-            Self::CodeCallees => "code_callees",
-            Self::CodeFacets => "code_facets",
-            Self::CodeTimeline => "code_timeline",
-            Self::CodeDeclaration => "code_declaration",
-            Self::CodeDefinition => "code_definition",
-            Self::CodeTypeDefinition => "code_type_definition",
-            Self::CodeReferences => "code_references",
-            Self::SessionLookup => "session_lookup",
-            Self::QualifiedName => "qualified_name",
-            Self::CallChain => "call_chain",
-            Self::FileDependents => "file_dependents",
-            Self::SourceLines => "source_lines",
-            Self::SourceBody => "source_body",
-            Self::SourceOutline => "source_outline",
-            Self::ModuleApi => "module_api",
-            Self::FileMetadata => "file_metadata",
-            Self::HealthRead => "health_read",
-            Self::HealthDelta => "health_delta",
-            Self::StorageStatus => "storage_status",
-            Self::DiagnosticsRead => "diagnostics_read",
-            Self::ConfigurationList => "configuration_list",
-            Self::ConfigurationExplain => "configuration_explain",
-            Self::ConfigurationGet => "configuration_get",
-            Self::ConfigurationSet => "configuration_set",
-            Self::ConfigurationUnset => "configuration_unset",
-            Self::ConfigurationBatch => "configuration_batch",
-            Self::ConfigurationWriteCredential => "configuration_write_credential",
-            Self::ConfigurationObservedState => "configuration_observed_state",
-            Self::ConfigurationProtectedPreview => "configuration_protected_preview",
-            Self::ConfigurationProtectedApply => "configuration_protected_apply",
-            Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
-            Self::ConfigurationRollbackApply => "configuration_rollback_apply",
-            Self::ConfigurationAudit => "configuration_audit",
-            Self::ContextScoutStatus => "context_scout_status",
-            Self::ContextScoutRecent => "context_scout_recent",
-            Self::ContextScoutExplain => "context_scout_explain",
-            Self::ContextScoutCapability => "context_scout_capability",
-            Self::ContextScoutBudget => "context_scout_budget",
-            Self::ContextScoutPause => "context_scout_pause",
-            Self::ContextScoutResume => "context_scout_resume",
-            Self::ContextScoutCancel => "context_scout_cancel",
-            Self::ContextScoutClaim => "context_scout_claim",
-            Self::ContextScoutDelivery => "context_scout_delivery",
-            Self::ContextScoutFeedback => "context_scout_feedback",
+        operation if operation.owner_kind() == HttpApplicationOwnerKind::Primitive => {
+            format!("/primitives/{}", operation.as_str())
         }
-    }
-
-    pub const fn owner_kind(self) -> HttpApplicationOwnerKind {
-        match self {
-            Self::GitStatus
-            | Self::GitDiff
-            | Self::GitHistory
-            | Self::GitBlame
-            | Self::GitHunks
-            | Self::GitPreview
-            | Self::GitApply => HttpApplicationOwnerKind::Git,
-            Self::FeedbackDiagnostics
-            | Self::FeedbackGet
-            | Self::FeedbackExpand
-            | Self::FeedbackList
-            | Self::FeedbackImpact
-            | Self::FeedbackAdvisoryCycle
-            | Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
-            Self::CodeExactOccurrence
-            | Self::CodePhraseSearch
-            | Self::CodeCallees
-            | Self::CodeFacets
-            | Self::CodeTimeline
-            | Self::CodeDeclaration
-            | Self::CodeDefinition
-            | Self::CodeTypeDefinition
-            | Self::CodeReferences => HttpApplicationOwnerKind::CallableCode,
-            Self::TestResults
-            | Self::CodeSymbolSearch
-            | Self::CodeSignatureSearch
-            | Self::CodeImplementations
-            | Self::CodeTypeHierarchy
-            | Self::CodeCallers
-            | Self::SessionLookup
-            | Self::QualifiedName
-            | Self::CallChain
-            | Self::FileDependents
-            | Self::SourceLines
-            | Self::SourceBody
-            | Self::SourceOutline
-            | Self::ModuleApi
-            | Self::FileMetadata
-            | Self::HealthRead
-            | Self::HealthDelta
-            | Self::StorageStatus
-            | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
-            Self::ConfigurationList
-            | Self::ConfigurationExplain
-            | Self::ConfigurationGet
-            | Self::ConfigurationSet
-            | Self::ConfigurationUnset
-            | Self::ConfigurationBatch
-            | Self::ConfigurationWriteCredential
-            | Self::ConfigurationObservedState
-            | Self::ConfigurationProtectedPreview
-            | Self::ConfigurationProtectedApply
-            | Self::ConfigurationRollbackPreview
-            | Self::ConfigurationRollbackApply
-            | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
-            Self::ContextScoutStatus
-            | Self::ContextScoutRecent
-            | Self::ContextScoutExplain
-            | Self::ContextScoutCapability
-            | Self::ContextScoutBudget
-            | Self::ContextScoutPause
-            | Self::ContextScoutResume
-            | Self::ContextScoutCancel
-            | Self::ContextScoutClaim
-            | Self::ContextScoutDelivery
-            | Self::ContextScoutFeedback => HttpApplicationOwnerKind::ContextScout,
+        operation if operation.owner_kind() == HttpApplicationOwnerKind::Configuration => {
+            format!("/configuration/{}", operation.as_str())
         }
-    }
-
-    /// Whether the operation is addressed under `/code/{operation}`.
-    ///
-    /// This is not an owner-kind question: the callable-code router also
-    /// carries the five search operations a Primitive owner answers, so the
-    /// route membership has to be stated once and consulted in both
-    /// polarities.
-    pub const fn is_callable_code_route(self) -> bool {
-        matches!(
-            self,
-            Self::CodeExactOccurrence
-                | Self::CodePhraseSearch
-                | Self::CodeSymbolSearch
-                | Self::CodeSignatureSearch
-                | Self::CodeImplementations
-                | Self::CodeTypeHierarchy
-                | Self::CodeCallers
-                | Self::CodeCallees
-                | Self::CodeFacets
-                | Self::CodeTimeline
-                | Self::CodeDeclaration
-                | Self::CodeDefinition
-                | Self::CodeTypeDefinition
-                | Self::CodeReferences
-        )
-    }
-
-    /// Whether this canonical operation has a public HTTP catalog binding.
-    ///
-    /// Git preview/apply remain in the shared operation family but are
-    /// intentionally exposed through CLI/MCP mutation bindings only.
-    pub const fn is_http_exposed(self) -> bool {
-        !matches!(self, Self::GitPreview | Self::GitApply)
-    }
-
-    pub fn route_path(self) -> String {
-        match self {
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Git => {
-                format!(
-                    "/git/{}",
-                    operation
-                        .as_str()
-                        .strip_prefix("git_")
-                        .expect("Git HTTP operation names use the git_ prefix")
-                )
-            }
-            Self::AffectedTests => "/tests/affected".to_owned(),
-            Self::TestResults => "/tests/results".to_owned(),
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Feedback => {
-                format!(
-                    "/feedback/{}",
-                    operation
-                        .as_str()
-                        .strip_prefix("feedback_")
-                        .expect("feedback HTTP operation names use the feedback_ prefix")
-                )
-            }
-            operation if operation.is_callable_code_route() => {
-                format!("/code/{}", operation.as_str())
-            }
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Primitive => {
-                format!("/primitives/{}", operation.as_str())
-            }
-            operation if operation.owner_kind() == HttpApplicationOwnerKind::Configuration => {
-                format!("/configuration/{}", operation.as_str())
-            }
-            operation => format!("/context-scout/{}", operation.as_str()),
+        operation if operation.owner_kind() == HttpApplicationOwnerKind::ContextScout => {
+            format!("/context-scout/{}", operation.as_str())
         }
-    }
+        HttpApplicationOperation::GitPreview | HttpApplicationOperation::GitApply => return None,
+        _ => return None,
+    };
+    Some(path)
 }
 
 /// Generated route documentation derived from the same catalog snapshot and
@@ -522,12 +186,15 @@ pub fn http_route_documents(
         else {
             continue;
         };
-        if !operation.is_http_exposed() {
+        if !is_http_exposed(operation) {
             continue;
         }
+        let Some(path) = route_path(operation) else {
+            continue;
+        };
         documents.push(HttpRouteDocumentV1 {
             method: "POST",
-            path: operation.route_path(),
+            path,
             operation: operation.as_str().to_owned(),
             capability_id: capability.capability_id().as_str().to_owned(),
             binding_id: binding.binding_id().as_str().to_owned(),
@@ -815,13 +482,13 @@ fn parse_primitive_read_operation(operation: &str) -> Option<HttpApplicationOper
     HttpApplicationOperation::from_catalog_name(operation).filter(|operation| {
         operation.owner_kind() == HttpApplicationOwnerKind::Primitive
             && *operation != HttpApplicationOperation::TestResults
-            && !operation.is_callable_code_route()
+            && !operation.is_callable_code()
     })
 }
 
 fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOperation> {
     HttpApplicationOperation::from_catalog_name(operation)
-        .filter(|operation| operation.is_callable_code_route())
+        .filter(|operation| operation.is_callable_code())
 }
 
 fn parse_configuration_operation(operation: &str) -> Option<HttpApplicationOperation> {
@@ -941,7 +608,7 @@ where
 mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
-        parse_callable_code_operation, parse_configuration_operation,
+        is_http_exposed, parse_callable_code_operation, parse_configuration_operation,
         parse_context_scout_operation, parse_feedback_read_operation, parse_git_read_operation,
     };
 
@@ -1200,8 +867,8 @@ mod tests {
             HttpApplicationOperation::from_tool_name("tracedecay_diagnostics"),
             Some(HttpApplicationOperation::DiagnosticsRead)
         );
-        assert!(!HttpApplicationOperation::GitPreview.is_http_exposed());
-        assert!(!HttpApplicationOperation::GitApply.is_http_exposed());
+        assert!(!is_http_exposed(HttpApplicationOperation::GitPreview));
+        assert!(!is_http_exposed(HttpApplicationOperation::GitApply));
         assert_eq!(
             HttpApplicationOperation::GitPreview.owner_kind(),
             HttpApplicationOwnerKind::Git
