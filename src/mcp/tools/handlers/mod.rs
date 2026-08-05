@@ -226,6 +226,10 @@ pub struct ToolCallRegistryOptions<'a> {
     pub(crate) code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver:
         Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    /// Daemon-owned bounded native transcript and session/Git convergence.
+    /// Absence is a typed unavailable authority, never a local store fallback.
+    pub(crate) session_sync_service:
+        Option<&'a dyn tracedecay_application::session_sync::SessionSyncServicePort>,
     pub preselected_project_reader: bool,
     pub session_authorities: SessionAuthorities<'a>,
 }
@@ -261,6 +265,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            session_sync_service: None,
             preselected_project_reader: false,
             session_authorities: SessionAuthorities::default(),
         }

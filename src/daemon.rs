@@ -314,6 +314,7 @@ mod query_mcp_admission;
 #[cfg(unix)]
 mod scheduler;
 mod service;
+pub(crate) mod session_sync;
 pub(crate) mod session_temporal_refresh_scheduler;
 pub(crate) mod store_runtime;
 mod store_writer_gate;

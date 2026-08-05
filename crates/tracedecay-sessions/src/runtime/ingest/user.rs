@@ -209,6 +209,29 @@ pub async fn ingest_user_global_sources_for_provider_with_authorities<A: Session
     profile_root: &Path,
     provider: Option<SessionProvider>,
 ) -> TranscriptIngestOutcome {
+    ingest_user_global_sources_for_provider_with_authorities_and_cancellation(
+        brain_id,
+        profile_id,
+        registered,
+        registry_db,
+        profile_root,
+        provider,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub async fn ingest_user_global_sources_for_provider_with_authorities_and_cancellation<
+    A: SessionIngestAuthority,
+>(
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &A,
+    registry_db: &A,
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestOutcome {
     let registry_shard = &registry_db.shard_id();
     if registry_shard.brain_id != *brain_id
         || registry_shard.profile_id != *profile_id
@@ -235,13 +258,14 @@ pub async fn ingest_user_global_sources_for_provider_with_authorities<A: Session
             )],
         );
     };
-    ingest_user_global_sources_for_provider_with_roots(
+    ingest_user_global_sources_for_provider_with_roots_and_cancellation(
         brain_id,
         profile_id,
         registered,
         profile_root,
         provider,
         roots,
+        cancellation,
     )
     .await
 }

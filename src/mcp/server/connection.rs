@@ -733,6 +733,9 @@ impl McpServer {
     }
 
     pub(crate) async fn shutdown_background_tasks(&self) {
+        if let Some(service) = self.session_sync_service.as_ref() {
+            service.shutdown().await;
+        }
         if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
             worker.shutdown().await;
         }
