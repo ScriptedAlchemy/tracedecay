@@ -25,7 +25,7 @@ const COMPLETION_RESERVE: Duration = Duration::from_millis(750);
 mod tests;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum ReflogHeadState {
+pub(in super::super) enum ReflogHeadState {
     LocalBranch(String),
     Detached,
 }
@@ -49,7 +49,7 @@ impl From<ReflogHeadState> for HeadState {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct ReflogCursor {
+pub(in super::super) struct ReflogCursor {
     pub worktree: PathBuf,
     pub reflog_path: PathBuf,
     pub source_generation: String,
@@ -66,7 +66,7 @@ pub(super) struct ReflogCursor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReflogSegment {
+pub(in super::super) struct ReflogSegment {
     pub ordinal: i64,
     pub branch: Option<String>,
     pub start: i64,
@@ -75,43 +75,43 @@ pub(super) struct ReflogSegment {
 }
 
 #[derive(Debug)]
-pub(super) struct ReflogChunk {
+pub(in super::super) struct ReflogChunk {
     pub cursor: ReflogCursor,
     pub segments: Vec<ReflogSegment>,
     pub complete: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReflogVerificationCursor {
+pub(in super::super) struct ReflogVerificationCursor {
     pub byte_offset: u64,
     pub content_chain: String,
 }
 
 #[derive(Debug)]
-pub(super) struct ReflogVerificationChunk {
+pub(in super::super) struct ReflogVerificationChunk {
     pub cursor: ReflogVerificationCursor,
     pub complete: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GraphPending {
+pub(in super::super) struct GraphPending {
     pub oid: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct GraphCommit {
+pub(in super::super) struct GraphCommit {
     pub oid: String,
     pub committed_at: i64,
 }
 
 #[derive(Debug)]
-pub(super) struct GraphChunk {
+pub(in super::super) struct GraphChunk {
     pub pending: Vec<GraphPending>,
     pub newly_seen: Vec<String>,
     pub commits: Vec<GraphCommit>,
 }
 
-pub(super) fn initialize_reflog_cursor(
+pub(in super::super) fn initialize_reflog_cursor(
     project_path: &Path,
     window_end: i64,
     control: &BoundedGitControl,
@@ -172,7 +172,7 @@ pub(super) fn initialize_reflog_cursor(
     })
 }
 
-pub(super) fn scan_reflog_chunk(
+pub(in super::super) fn scan_reflog_chunk(
     project_path: &Path,
     window_start: i64,
     window_end: i64,
@@ -230,12 +230,13 @@ pub(super) fn scan_reflog_chunk(
             continue;
         }
         if timestamp <= window_start {
+            let segment_end = cursor.segment_end;
             push_segment(
                 &mut cursor,
                 &mut segments,
                 &state,
                 window_start,
-                cursor.segment_end,
+                segment_end,
                 segment_tip,
             )?;
             complete = true;
@@ -243,12 +244,13 @@ pub(super) fn scan_reflog_chunk(
         }
         if let Some(checkout) = checkout {
             validate_checkout_to(&repository, &checkout.to, &state, &mut consulted_refs)?;
+            let segment_end = cursor.segment_end;
             push_segment(
                 &mut cursor,
                 &mut segments,
                 &state,
                 timestamp,
-                cursor.segment_end,
+                segment_end,
                 segment_tip,
             )?;
             state = classify_checkout_target(&repository, &checkout.from, &mut consulted_refs)?;
@@ -260,12 +262,13 @@ pub(super) fn scan_reflog_chunk(
         }
     }
     if !complete && earliest_processed == 0 {
+        let segment_end = cursor.segment_end;
         push_segment(
             &mut cursor,
             &mut segments,
             &state,
             window_start,
-            cursor.segment_end,
+            segment_end,
             segment_tip,
         )?;
         complete = true;
@@ -287,7 +290,7 @@ pub(super) fn scan_reflog_chunk(
     })
 }
 
-pub(super) fn scan_reflog_verification_chunk(
+pub(in super::super) fn scan_reflog_verification_chunk(
     project_path: &Path,
     source: &ReflogCursor,
     target_byte_offset: u64,
@@ -344,7 +347,7 @@ pub(super) fn scan_reflog_verification_chunk(
     Ok(ReflogVerificationChunk { cursor, complete })
 }
 
-pub(super) fn scan_graph_chunk(
+pub(in super::super) fn scan_graph_chunk(
     project_path: &Path,
     window_start: i64,
     window_end: i64,
@@ -689,7 +692,7 @@ fn extend_content_chain(
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
-pub(super) fn verify_source(
+pub(in super::super) fn verify_source(
     repository: &gix::Repository,
     cursor: &ReflogCursor,
 ) -> Result<(), BoundedBackfillInterruption> {
@@ -727,7 +730,7 @@ pub(super) fn verify_source(
     Ok(())
 }
 
-pub(super) fn verify_reflog_source(
+pub(in super::super) fn verify_reflog_source(
     project_path: &Path,
     cursor: &ReflogCursor,
     control: &BoundedGitControl,
@@ -740,21 +743,23 @@ pub(super) fn verify_reflog_source(
 }
 
 #[cfg(unix)]
-pub(super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
+pub(in super::super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     use std::os::unix::ffi::OsStrExt as _;
 
     Ok(path.as_os_str().as_bytes().to_vec())
 }
 
 #[cfg(unix)]
-pub(super) fn decode_path(encoded: &[u8]) -> Result<PathBuf, BoundedBackfillInterruption> {
+pub(in super::super) fn decode_path(
+    encoded: &[u8],
+) -> Result<PathBuf, BoundedBackfillInterruption> {
     use std::os::unix::ffi::OsStrExt as _;
 
     Ok(PathBuf::from(std::ffi::OsStr::from_bytes(encoded)))
 }
 
 #[cfg(windows)]
-pub(super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
+pub(in super::super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     use std::os::windows::ffi::OsStrExt as _;
 
     Ok(path
@@ -765,7 +770,9 @@ pub(super) fn encode_path(path: &Path) -> Result<Vec<u8>, BoundedBackfillInterru
 }
 
 #[cfg(windows)]
-pub(super) fn decode_path(encoded: &[u8]) -> Result<PathBuf, BoundedBackfillInterruption> {
+pub(in super::super) fn decode_path(
+    encoded: &[u8],
+) -> Result<PathBuf, BoundedBackfillInterruption> {
     use std::os::windows::ffi::OsStringExt as _;
 
     if !encoded.len().is_multiple_of(2) {
@@ -779,12 +786,14 @@ pub(super) fn decode_path(encoded: &[u8]) -> Result<PathBuf, BoundedBackfillInte
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(super) fn encode_path(_path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
+pub(in super::super) fn encode_path(_path: &Path) -> Result<Vec<u8>, BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(super) fn decode_path(_encoded: &[u8]) -> Result<PathBuf, BoundedBackfillInterruption> {
+pub(in super::super) fn decode_path(
+    _encoded: &[u8],
+) -> Result<PathBuf, BoundedBackfillInterruption> {
     Err(BoundedBackfillInterruption::SourceUnavailable)
 }
 

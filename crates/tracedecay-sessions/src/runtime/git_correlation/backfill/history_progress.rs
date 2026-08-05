@@ -14,7 +14,7 @@ pub(super) const fn initial_reflog_content_chain() -> &'static str {
     INITIAL_REFLOG_CONTENT_CHAIN
 }
 
-pub(super) async fn install_final_schema(
+pub(in super::super) async fn install_final_schema(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
     let schema = format!(
