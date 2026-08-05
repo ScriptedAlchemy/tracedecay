@@ -260,7 +260,7 @@ impl DaemonEngine {
         &self,
         key: &ProjectServerKey,
     ) -> Option<MemoryRepairSchedulerRetirement> {
-        let reservation = self.store_administration.reserve_retirement_reaper()?;
+        let reservation = self.store_administration.reserve_retirement_reaper(key)?;
         let (task, completion, termination) = {
             let mut schedulers = self
                 .store_administration

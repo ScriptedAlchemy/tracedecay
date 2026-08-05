@@ -774,6 +774,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         crate::errors::TraceDecayError::File { .. }
         | crate::errors::TraceDecayError::Parse { .. }
         | crate::errors::TraceDecayError::Database { .. }
+        | crate::errors::TraceDecayError::ResetRequired { .. }
         | crate::errors::TraceDecayError::DatabaseOperation { .. }
         | crate::errors::TraceDecayError::Search { .. }
         | crate::errors::TraceDecayError::SyncLock { .. }

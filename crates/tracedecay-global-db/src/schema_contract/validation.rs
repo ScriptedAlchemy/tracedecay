@@ -418,6 +418,12 @@ pub async fn validate_registry_schema_contract(
     validate_named_tables_and_indexes(conn, REGISTRY_TABLE_NAMES).await
 }
 
+pub async fn validate_remote_deletion_schema_contract(
+    conn: &impl QueryExecutor,
+) -> tracedecay_runtime_core::errors::Result<()> {
+    validate_named_tables_and_indexes(conn, &["remote_deletion_tombstones"]).await
+}
+
 /// Validates the composed registry, observation-authority, and projection-authority schemas.
 ///
 /// Transcript, LCM, git-correlation, and workflow-index tables are independently owned by their

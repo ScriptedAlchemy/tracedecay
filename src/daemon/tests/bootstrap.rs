@@ -507,6 +507,66 @@ async fn remote_project_deletion_stays_settling_until_transferred_reaper_joins()
 }
 
 #[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_project_deletion_ignores_unrelated_server_retirement() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project = root.join("target-repository");
+    std::fs::create_dir_all(&project).expect("create target repository");
+    run_git(&project, &["init", "--quiet"]);
+    let layout = enroll_project_on_disk_only(&project, &profile_root, "proj_retirement_target");
+    std::fs::remove_file(&layout.graph_db_path).expect("remove synthetic graph file");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "project retirement isolation");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let unrelated_owner = StoreOwnerKey {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+        project_id: Some("proj_unrelated_retirement".to_owned()),
+        store_root: profile_root.join("projects/proj_unrelated_retirement"),
+        graph_db_path: profile_root.join("projects/proj_unrelated_retirement/graph.db"),
+    };
+    let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
+    started_rx
+        .await
+        .expect("unrelated server retirement started");
+    engine
+        .store_administration
+        .track_project_server_retirement(unrelated_owner, task)
+        .await;
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+
+    let deletion = engine
+        .store_administration
+        .execute_remote_deletion(
+            &owners,
+            super::super::remote_deletion::RemoteDeletionReceiptTarget::Project,
+            Some("proj_retirement_target".to_owned()),
+            "tombstone.retirement-isolation".to_owned(),
+        )
+        .await;
+    release.release();
+    completed_rx
+        .await
+        .expect("unrelated server retirement completed");
+    engine
+        .store_administration
+        .join_project_server_retirements()
+        .await;
+    let receipt = deletion.expect("unrelated retirement must not make target deletion settle");
+    assert_eq!(
+        receipt.status,
+        super::super::remote_deletion::RemoteDeletionStatus::Deleted
+    );
+    assert!(!layout.data_root.exists());
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn remote_project_deletion_denies_unknown_and_cross_profile_identities_without_tombstones() {
     let home = TempDir::new().expect("isolated home");
@@ -696,6 +756,139 @@ async fn remote_account_deletion_removes_all_exact_profile_shards_and_fences_rep
         error.message.contains("remotely deleted"),
         "unexpected projectless denial: {}",
         error.message
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn remote_account_deletion_joins_admitted_open_before_enumeration_and_reconciles_restart() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let profile_root = root.join(".tracedecay");
+    let project_root = root.join("racing-project");
+    let project_id = "proj_remote_account_race";
+    std::fs::create_dir_all(&project_root).expect("create racing project");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "remote account open race");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: engine.store_administration.clone(),
+        invocation: engine.invocation.clone(),
+        project_open_gates: Arc::clone(&engine.project_open_gates),
+    };
+    let tasks = super::super::project_open_tasks(engine.project_open_gates.as_ref()).await;
+    let route = ProjectRouteKey {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+        project_path: project_root,
+        scope_prefix: None,
+    };
+    let data_root = crate::storage::profile_sharded_data_root(&profile_root, project_id);
+    let racing_data_root = data_root.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let open = tasks
+        .start(route, async move {
+            started_tx.send(()).map_err(|_| TraceDecayError::Config {
+                message: "account deletion race observer dropped".to_owned(),
+            })?;
+            release_rx.await.map_err(|_| TraceDecayError::Config {
+                message: "account deletion race release dropped".to_owned(),
+            })?;
+            std::fs::create_dir_all(&racing_data_root)?;
+            std::fs::write(racing_data_root.join("post-tombstone.txt"), "owned write")?;
+            Ok(())
+        })
+        .await;
+    let open = match open {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("racing project open must be admitted before account deletion")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("racing project open must fit the bounded registry")
+        }
+    };
+    started_rx.await.expect("racing project open started");
+
+    let deletion_administration = engine.store_administration.clone();
+    let deletion_owners = owners.clone();
+    let deletion = tokio::spawn(async move {
+        deletion_administration
+            .execute_remote_deletion(
+                &deletion_owners,
+                super::super::remote_deletion::RemoteDeletionReceiptTarget::Account,
+                None,
+                "tombstone.remote-account-race".to_owned(),
+            )
+            .await
+    });
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            if engine
+                .store_administration
+                .remote_account_deletion_tombstone()
+                .await
+                .expect("read account tombstone")
+                .is_some()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("account tombstone was not persisted");
+    release_tx.send(()).expect("release racing shard creation");
+    super::super::ProjectOpenTasks::wait_for_completion(open)
+        .await
+        .expect("racing open completed its owned write");
+    deletion
+        .await
+        .expect("account deletion task")
+        .expect("account deletion after joined open");
+    let late_route = ProjectRouteKey {
+        profile_root: profile_root.clone(),
+        global_db_path: profile_root.join("global.db"),
+        project_path: root.join("late-project"),
+        scope_prefix: None,
+    };
+    assert!(
+        matches!(
+            tasks.start(late_route, async { Ok(()) }).await,
+            super::super::ProjectOpenTaskClaim::Failed(_)
+        ),
+        "account deletion must leave profile project-open admission closed"
+    );
+    assert!(
+        !data_root.exists(),
+        "account deletion must enumerate after every admitted open has joined"
+    );
+
+    std::fs::create_dir_all(&data_root).expect("recreate post-deletion shard");
+    std::fs::write(data_root.join("restart-race.txt"), "late shard")
+        .expect("write post-deletion shard");
+    drop(tasks);
+    drop(owners);
+    drop(engine);
+
+    let restarted = test_daemon_engine_for_profile(&profile_root);
+    let restarted_owners = super::super::remote_deletion::RemoteDeletionRuntimeOwners {
+        administration: restarted.store_administration.clone(),
+        invocation: restarted.invocation.clone(),
+        project_open_gates: Arc::clone(&restarted.project_open_gates),
+    };
+    let mode =
+        super::super::remote_deletion::resume_remote_account_deletion_for_boot(&restarted_owners)
+            .await
+            .expect("resume account deletion after restart");
+    assert!(matches!(
+        mode,
+        super::super::remote_deletion::RemoteDeletionBootMode::DeletionOnly(_)
+    ));
+    assert!(
+        !data_root.exists(),
+        "Deleted replay must reconcile every shard present after the tombstone"
     );
 }
 
@@ -1500,6 +1693,79 @@ async fn project_open_shutdown_retains_noncooperative_task_until_retry_joins_it(
             .await
     );
     assert_eq!(tasks.tracked_route_count().await, 0);
+}
+
+#[tokio::test]
+async fn project_open_identity_shutdown_ignores_unrelated_retiring_routes() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let unrelated = project_open_test_route("unrelated-retiring-open");
+    let target = project_open_test_route("target-project-open");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let state = tasks
+        .start(unrelated.clone(), async move {
+            started_tx
+                .send(())
+                .map_err(|_| crate::errors::TraceDecayError::Config {
+                    message: "unrelated open observer dropped".to_owned(),
+                })?;
+            release_rx
+                .await
+                .map_err(|_| crate::errors::TraceDecayError::Config {
+                    message: "unrelated open release dropped".to_owned(),
+                })?;
+            Ok(())
+        })
+        .await;
+    let state = match state {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => {
+            panic!("unrelated open must start")
+        }
+        super::super::ProjectOpenTaskClaim::Saturated => {
+            panic!("unrelated open must fit the bounded registry")
+        }
+    };
+    started_rx.await.expect("unrelated open started");
+    assert!(
+        !tasks
+            .shutdown_project_identity_with_deadline(
+                &unrelated.profile_root,
+                "proj_unrelated",
+                &[unrelated.project_path.clone()].into_iter().collect(),
+                tokio::time::Duration::from_millis(10),
+            )
+            .await,
+        "noncooperative unrelated open must remain retained"
+    );
+
+    assert!(
+        tasks
+            .shutdown_project_identity_with_deadline(
+                &target.profile_root,
+                "proj_target",
+                &[target.project_path].into_iter().collect(),
+                tokio::time::Duration::from_millis(10),
+            )
+            .await,
+        "target cleanup must not wait on an unrelated retiring open"
+    );
+
+    release_tx.send(()).expect("release unrelated open");
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect("unrelated open completed");
+    assert!(
+        tasks
+            .shutdown_project_identity_with_deadline(
+                &unrelated.profile_root,
+                "proj_unrelated",
+                &[unrelated.project_path].into_iter().collect(),
+                tokio::time::Duration::from_secs(1),
+            )
+            .await,
+        "unrelated owner must remain joinable by its exact identity"
+    );
 }
 
 #[tokio::test]

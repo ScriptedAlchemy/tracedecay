@@ -1031,6 +1031,7 @@ pub(super) async fn production_project_server(
             resolved.cancel_startup_transcript_ingest();
             schedule_project_server_retirement(
                 store_administration,
+                key.owner.clone(),
                 vec![Arc::clone(&resolved)],
                 None,
             )
@@ -1090,6 +1091,7 @@ pub(super) async fn production_project_server(
                         failed_full_server.cancel_startup_transcript_ingest();
                         schedule_project_server_retirement(
                             store_administration,
+                            key.owner.clone(),
                             vec![failed_full_server],
                             None,
                         )
@@ -1134,6 +1136,7 @@ pub(super) async fn production_project_server(
                     // after this closure returns and releases that writer.
                     schedule_project_server_retirement(
                         store_administration,
+                        failed_key.owner.clone(),
                         removed,
                         Some(Arc::clone(&route_registered)),
                     )

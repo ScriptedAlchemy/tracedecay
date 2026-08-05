@@ -25,6 +25,9 @@ pub enum TraceDecayError {
     #[error("database error: {message} (operation: {operation})")]
     Database { message: String, operation: String },
 
+    #[error("database reset required: {message} (operation: {operation})")]
+    ResetRequired { message: String, operation: String },
+
     /// Retained for source compatibility. New database failures use
     /// [`Self::Database`] so callers receive one stable public classification.
     #[deprecated(note = "use TraceDecayError::Database")]

@@ -365,7 +365,7 @@ impl RegisteredGlobalDb {
         expected: RemoteDeletionCleanupState,
         next: RemoteDeletionCleanupState,
     ) -> Result<RemoteDeletionTombstoneTransitionOutcome> {
-        validate_transition(&expected, &next)?;
+        validate_transition(&next)?;
         let transaction = self.begin_write_transaction().await?;
         let existing = read_tombstone(
             &transaction,
@@ -481,19 +481,8 @@ impl RegisteredGlobalDb {
     }
 }
 
-fn validate_transition(
-    expected: &RemoteDeletionCleanupState,
-    next: &RemoteDeletionCleanupState,
-) -> Result<()> {
-    let allowed = match expected {
-        RemoteDeletionCleanupState::Deleted => next == &RemoteDeletionCleanupState::Deleted,
-        RemoteDeletionCleanupState::Pending
-        | RemoteDeletionCleanupState::Settling { .. }
-        | RemoteDeletionCleanupState::Partial { .. } => {
-            !matches!(next, RemoteDeletionCleanupState::Pending)
-        }
-    };
-    if !allowed {
+fn validate_transition(next: &RemoteDeletionCleanupState) -> Result<()> {
+    if matches!(next, RemoteDeletionCleanupState::Pending) {
         return Err(remote_deletion_error(
             "validate remote deletion transition",
             "cleanup state transition is not allowed",

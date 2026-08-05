@@ -4,6 +4,7 @@ use super::schema_contract::{
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
     validate_authority_schema_contract, validate_registry_schema_contract,
+    validate_remote_deletion_schema_contract,
 };
 use super::{
     configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
@@ -74,7 +75,16 @@ const REGISTRY_SCHEMA: &str = "
         PRIMARY KEY (store_id, artifact_kind, relpath),
         FOREIGN KEY(store_id) REFERENCES store_instances(store_id) ON DELETE CASCADE
     );
-    CREATE TABLE IF NOT EXISTS remote_deletion_tombstones (
+    CREATE INDEX IF NOT EXISTS idx_project_aliases_project_id
+        ON project_aliases(project_id);
+    CREATE INDEX IF NOT EXISTS idx_store_instances_project_id
+        ON store_instances(project_id);
+    CREATE INDEX IF NOT EXISTS idx_graph_scopes_project_store
+        ON graph_scopes(project_id, store_id);
+";
+
+const REMOTE_DELETION_SCHEMA: &str = "
+    CREATE TABLE remote_deletion_tombstones (
         profile_id TEXT NOT NULL,
         target_kind TEXT NOT NULL,
         project_id TEXT NOT NULL,
@@ -102,12 +112,6 @@ const REGISTRY_SCHEMA: &str = "
                 AND retryable IN (0, 1))
         )
     );
-    CREATE INDEX IF NOT EXISTS idx_project_aliases_project_id
-        ON project_aliases(project_id);
-    CREATE INDEX IF NOT EXISTS idx_store_instances_project_id
-        ON store_instances(project_id);
-    CREATE INDEX IF NOT EXISTS idx_graph_scopes_project_store
-        ON graph_scopes(project_id, store_id);
 ";
 
 const TRANSCRIPT_SCHEMA: &str = "
@@ -276,6 +280,14 @@ pub async fn ensure_registered_schema_for_admission(
     let is_fresh = !table_exists(conn, "sessions").await?
         && !table_exists(conn, "observations").await?
         && !table_exists(conn, "code_projects").await?;
+    if !is_fresh && let Err(error) = validate_remote_deletion_schema_contract(conn).await {
+        return Err(
+            tracedecay_runtime_core::errors::TraceDecayError::ResetRequired {
+                operation: "validate registered global database catalog".to_owned(),
+                message: error.to_string(),
+            },
+        );
+    }
     ensure_authority_audit_checkpoint_schema(conn).await?;
     let force_exhaustive = !authority_invariant_triggers_intact(conn).await?;
     if force_exhaustive && !is_fresh {
@@ -296,6 +308,14 @@ pub async fn ensure_registered_schema_for_admission(
             .map_err(|error| {
                 global_db_operation_error("initialize global project registry", error)
             })?;
+        if is_fresh {
+            transaction
+                .execute_batch(REMOTE_DELETION_SCHEMA)
+                .await
+                .map_err(|error| {
+                    global_db_operation_error("initialize remote deletion catalog", error)
+                })?;
+        }
         ensure_code_project_native_root_columns(&transaction)
             .await
             .map_err(|error| global_db_operation_error("ensure native project roots", error))?;
@@ -455,7 +475,97 @@ mod tests {
     use tempfile::TempDir;
 
     use super::ensure_registered_schema;
-    use tracedecay_runtime_core::db::engine::TestConnection;
+    use tracedecay_runtime_core::db::engine::{QueryExecutor, TestConnection};
+
+    #[tokio::test]
+    async fn existing_registry_without_remote_deletion_catalog_requires_typed_reset() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        {
+            let connection = TestConnection::open(&database_path);
+            ensure_registered_schema(&connection)
+                .await
+                .expect("initialize final V2 authority schema");
+        }
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch("DROP TABLE remote_deletion_tombstones")
+                .expect("remove required final V2 catalog");
+        }
+
+        let connection = TestConnection::open(&database_path);
+        let error = ensure_registered_schema(&connection)
+            .await
+            .expect_err("an existing catalog must not migrate in remote deletion state");
+        let tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { operation, message } =
+            error
+        else {
+            panic!("missing final V2 catalog returned the wrong typed problem: {error}");
+        };
+        assert_eq!(operation, "validate registered global database catalog");
+        assert!(
+            message.contains("remote_deletion_tombstones"),
+            "reset problem must identify the missing final catalog: {message}"
+        );
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM sqlite_schema
+                 WHERE type = 'table' AND name = 'remote_deletion_tombstones'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "rejected catalog must not be silently migrated"
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_registry_with_mismatched_remote_deletion_catalog_requires_typed_reset() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        {
+            let connection = TestConnection::open(&database_path);
+            ensure_registered_schema(&connection)
+                .await
+                .expect("initialize final V2 authority schema");
+        }
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "ALTER TABLE remote_deletion_tombstones
+                     ADD COLUMN incompatible_branch_catalog TEXT",
+                )
+                .expect("make the required final V2 catalog incompatible");
+        }
+
+        let connection = TestConnection::open(&database_path);
+        let error = ensure_registered_schema(&connection)
+            .await
+            .expect_err("an incompatible catalog must not be converged");
+        assert!(
+            matches!(
+                error,
+                tracedecay_runtime_core::errors::TraceDecayError::ResetRequired { .. }
+            ),
+            "incompatible final V2 catalog returned the wrong typed problem: {error}"
+        );
+        let mut rows = connection
+            .query(
+                "SELECT 1 FROM pragma_table_xinfo('remote_deletion_tombstones')
+                 WHERE name = 'incompatible_branch_catalog'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_some(),
+            "rejected catalog must not be silently converged"
+        );
+    }
 
     #[tokio::test]
     async fn late_audit_failure_preserves_completed_idempotent_repairs() {
