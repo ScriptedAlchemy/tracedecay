@@ -42,7 +42,7 @@ flowchart TB
     style C fill:#6b3d3d,color:#fff,stroke:#6b3d3d
 ```
 
-That many grammars create a binary-size problem. Not everyone needs COBOL parsing. Version 2.0.0 introduced feature-flag tiers: `lite` compiles eleven core languages, `medium` adds nine more, and `full` (the default) includes all thirty-one. Individual `lang-*` flags let you cherry-pick. A `cargo install tracedecay --no-default-features --features lang-nix,lang-bash` gives you exactly what you need and nothing else.
+That many grammars create a binary-size problem. Not everyone needs COBOL parsing. Version 2.0.0 introduced feature-flag tiers: `lite` compiles eleven core languages, `medium` adds nine more, and `full` (the default) includes all thirty-one. Individual `lang-*` flags let source builds cherry-pick languages with `cargo build --release --no-default-features --features lang-nix,lang-bash`.
 
 ## From Nine Tools to Thirty-Seven
 
