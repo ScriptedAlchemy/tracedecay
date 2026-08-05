@@ -960,6 +960,7 @@ fn message_metadata(entry: &Value, location_cwd: Option<&Path>) -> Value {
 #[cfg(test)]
 mod observation_tests {
     use super::*;
+    use crate::runtime::snapshot_observation::SnapshotAdmissionRecord;
 
     #[test]
     fn workspace_folder_file_uri_round_trips_native_paths() {
