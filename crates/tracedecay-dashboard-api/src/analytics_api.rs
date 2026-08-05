@@ -1099,8 +1099,9 @@ async fn diagnostics_summary(
     state: &DashboardState,
     durable_events: Option<&[Value]>,
 ) -> Result<Value, String> {
-    let message_count =
-        session_message_rows(state.lcm_db.as_deref())?.map_or(0, |rows| rows.len() as i64);
+    let message_count = session_message_rows(state.lcm_db.as_deref())
+        .await?
+        .map_or(0, |rows| rows.len() as i64);
     let hook_analytics = read_hook_analytics_rows(state);
     Ok(diagnostics_summary_from_parts(
         message_count,
