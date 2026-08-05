@@ -55,10 +55,6 @@ pub use fingerprints::StoredFingerprint;
 pub use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
 pub(crate) use memory_v2::MemoryV2LegacyPurgeReceipt;
-pub use memory_v2::{
-    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
-    list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
-};
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
     publish_fact_feedback_finding_tx, tombstone_fact_derivatives_tx,

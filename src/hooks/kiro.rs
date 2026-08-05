@@ -10,7 +10,6 @@ use serde_json::Value;
 use tracedecay_hooks::DaemonHookEvent;
 
 use super::claude::is_code_research_prompt;
-use super::memory_inject;
 use super::post_tool_use::{EmptyPathPolicy, notify_edited_paths};
 use super::tool_hints::{HintAgent, ToolHintInput, decide_hint};
 use super::{
@@ -140,8 +139,8 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
     let root = event_project_root_from_json(&event);
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Kiro, "userPromptSubmit", &event);
-    if let Some(root) = root.as_deref()
-        && let Some(guidance) = super::v2::dispatch(
+    let v2_guidance = if let Some(root) = root.as_deref() {
+        super::v2::dispatch(
             tracedecay_hooks::HookHostV1::Kiro,
             &event,
             root,
@@ -149,12 +148,9 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         )
         .await
         .into_recorded_guidance(&hook_telemetry)
-    {
-        if let Some(guidance) = guidance {
-            println!("{guidance}");
-        }
-        return 0;
-    }
+    } else {
+        None
+    };
     reset_counter_for_kiro_event(&event, Some(&hook_telemetry)).await;
     let ingest = ingest_kiro_transcript_for_event(
         &event,
@@ -167,10 +163,13 @@ pub async fn hook_kiro_prompt_submit() -> i32 {
         // User-scope catch-up can ingest several changed Kiro sessions in one
         // bounded sweep, so let the reflector select all recent Kiro evidence
         // instead of falsely attributing the batch to the prompt's session id.
-        super::schedule_user_session_review("kiro", None);
+        super::schedule_user_session_review("kiro", None).await;
     }
-    if let Some(recall) = Box::pin(kiro_prompt_memory_recall(&event)).await {
-        println!("{recall}");
+    if let Some(guidance) = v2_guidance {
+        if let Some(guidance) = guidance {
+            println!("{guidance}");
+        }
+        return 0;
     }
     0
 }
@@ -269,14 +268,6 @@ async fn ingest_kiro_transcript_for_event(
             KiroIngestOutcome::default()
         }
     }
-}
-
-async fn kiro_prompt_memory_recall(event_json: &str) -> Option<String> {
-    let parsed = serde_json::from_str::<Value>(event_json).ok()?;
-    // Kiro resolves the root from the event `cwd` alone, without the registry
-    // lookup Codex and Cursor make.
-    memory_inject::prompt_memory_recall(&parsed, || std::future::ready(event_project_root(&parsed)))
-        .await
 }
 
 async fn notify_kiro_post_tool_use(parsed: &Value, telemetry: &super::analytics::HookTimingSpan) {

@@ -132,83 +132,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn seed_transcript_backfill_for_test(
-        &self,
-        scope: HostAdmissionScope,
-        session: &crate::sessions::SessionRecord,
-        messages: &[crate::sessions::SessionMessageRecord],
-    ) -> crate::errors::Result<()> {
-        if !self.upsert_session_for_test(scope, session).await? {
-            return Err(crate::errors::TraceDecayError::Database {
-                operation: "seed transcript backfill session fixture".to_owned(),
-                message: "registered session fixture write failed".to_owned(),
-            });
-        }
-        for message in messages {
-            if !self.upsert_session_message_for_test(scope, message).await? {
-                return Err(crate::errors::TraceDecayError::Database {
-                    operation: "seed transcript backfill message fixture".to_owned(),
-                    message: format!(
-                        "registered message fixture write failed for {}/{}",
-                        message.provider, message.message_id
-                    ),
-                });
-            }
-        }
-        self.session_database_for_test(scope)?
-            .writer_connection()?
-            .execute(
-                "DELETE FROM session_schema_migrations
-                 WHERE name = 'transcript_facts_backfill'",
-                (),
-            )
-            .await
-            .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "clear transcript backfill fixture marker".to_owned(),
-                message: error.to_string(),
-            })?;
-        Ok(())
-    }
-
-    #[doc(hidden)]
-    pub async fn transcript_backfill_marker_version_for_test(
-        &self,
-        scope: HostAdmissionScope,
-    ) -> crate::errors::Result<Option<i64>> {
-        let snapshot = self
-            .session_database_for_test(scope)?
-            .read_snapshot()
-            .await?;
-        let mut rows = snapshot
-            .query(
-                "SELECT version FROM session_schema_migrations
-                 WHERE name = 'transcript_facts_backfill'",
-                (),
-            )
-            .await
-            .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "query transcript backfill marker".to_owned(),
-                message: error.to_string(),
-            })?;
-        let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
-                    operation: "read transcript backfill marker".to_owned(),
-                    message: error.to_string(),
-                })?
-        else {
-            return Ok(None);
-        };
-        row.get::<i64>(0)
-            .map(Some)
-            .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "decode transcript backfill marker".to_owned(),
-                message: error.to_string(),
-            })
-    }
-
-    #[doc(hidden)]
     pub async fn set_project_parse_offset_for_test(
         &self,
         path: &str,
@@ -513,10 +436,16 @@ impl HostAdmissionTestRuntimeV1 {
         provider: &str,
         message_id: &str,
     ) -> crate::errors::Result<Option<crate::sessions::lcm::LcmRawMessage>> {
-        Ok(self
-            .project_database_for_test()?
-            .lcm_load_raw_message(provider, message_id)
-            .await)
+        let database = self.project_database_for_test()?;
+        let snapshot = database.read_snapshot().await?;
+        Ok(
+            crate::sessions::lcm::schema::load_raw_message(&snapshot, provider, message_id)
+                .await
+                .map_err(|error| crate::errors::TraceDecayError::Database {
+                    operation: "read project LCM raw message fixture".to_owned(),
+                    message: error.to_string(),
+                })?,
+        )
     }
 
     /// Live `lcm_raw_messages` store ids for one provider session, in store order.

@@ -269,6 +269,7 @@ pub(crate) struct DaemonInvocationService {
     operation_events: OperationEventAuthority,
 }
 
+#[cfg(test)]
 impl Default for DaemonInvocationService {
     fn default() -> Self {
         Self::with_code_index_schedulers(

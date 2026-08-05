@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tracedecay::agents::host_bundle_registry::{
+    default_components, unsupported_host_component_set_reason,
+};
 use tracedecay::agents::host_bundle_v2::{
     HostBundleComponentV1, HostComponentSetReceiptV1, HostKindV1, latest_host_component_receipt_at,
     latest_host_component_set_receipt_at,
@@ -41,10 +44,16 @@ const CODEX_CONFIGS: &[(&str, &[u8])] = &[(
     ".codex/config.toml",
     b"# operator comment\nmodel = \"o4-mini\" # keep inline\napproval_policy = \"on-failure\"\n\n[mcp_servers.foreign]\ncommand = \"foreign-bin\"\nargs = [\"--stdio\"]\n",
 )];
-const HERMES_CONFIGS: &[(&str, &[u8])] = &[(
-    ".hermes/config.yaml",
-    b"theme: dark\nplugins:\n  enabled:\n    - foreign\n",
-)];
+const HERMES_CONFIGS: &[(&str, &[u8])] = &[
+    (
+        ".hermes/config.yaml",
+        b"theme: dark\nplugins:\n  enabled:\n    - foreign\n",
+    ),
+    (
+        ".hermes/profiles/review/config.yaml",
+        b"theme: light\nplugins:\n  enabled:\n    - foreign\n",
+    ),
+];
 const KIRO_CONFIGS: &[(&str, &[u8])] = &[
     (
         ".kiro/settings/mcp.json",
@@ -63,38 +72,29 @@ const OPENCODE_CONFIGS: &[(&str, &[u8])] = &[(
 "#,
 )];
 
-const HOSTS: &[HostCase] = &[
+fn host_case(host: HostKindV1) -> HostCase {
+    let configs = match host {
+        HostKindV1::ClaudeCode => CLAUDE_CONFIGS,
+        HostKindV1::CursorDesktop => CURSOR_CONFIGS,
+        HostKindV1::Codex => CODEX_CONFIGS,
+        HostKindV1::Hermes => HERMES_CONFIGS,
+        HostKindV1::Kiro => KIRO_CONFIGS,
+        HostKindV1::KimiCode => &[],
+        HostKindV1::OpenCode => OPENCODE_CONFIGS,
+        unsupported => panic!("no production lifecycle case for unsupported host {unsupported:?}"),
+    };
     HostCase {
-        id: "claude",
-        host: HostKindV1::ClaudeCode,
-        configs: CLAUDE_CONFIGS,
-    },
-    HostCase {
-        id: "cursor",
-        host: HostKindV1::CursorDesktop,
-        configs: CURSOR_CONFIGS,
-    },
-    HostCase {
-        id: "codex",
-        host: HostKindV1::Codex,
-        configs: CODEX_CONFIGS,
-    },
-    HostCase {
-        id: "hermes",
-        host: HostKindV1::Hermes,
-        configs: HERMES_CONFIGS,
-    },
-    HostCase {
-        id: "kiro",
-        host: HostKindV1::Kiro,
-        configs: KIRO_CONFIGS,
-    },
-    HostCase {
-        id: "opencode",
-        host: HostKindV1::OpenCode,
-        configs: OPENCODE_CONFIGS,
-    },
-];
+        id: tracedecay::agents::integration_id_for_host(host),
+        host,
+        configs,
+    }
+}
+
+fn supported_host_cases() -> impl Iterator<Item = HostCase> {
+    HostKindV1::ALL
+        .into_iter()
+        .filter_map(|host| (!default_components(host).is_empty()).then(|| host_case(host)))
+}
 
 struct IsolatedCli {
     home: TempDir,
@@ -209,6 +209,90 @@ fn seed_host(case: HostCase, cli: &IsolatedCli) -> BTreeMap<PathBuf, Vec<u8>> {
     originals
 }
 
+fn copy_test_bundle(source: &Path, destination: &Path) {
+    for entry in fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            fs::create_dir_all(&destination_path).unwrap();
+            copy_test_bundle(&source_path, &destination_path);
+        } else {
+            fs::create_dir_all(destination_path.parent().unwrap()).unwrap();
+            fs::copy(source_path, destination_path).unwrap();
+        }
+    }
+}
+
+fn set_claude_native_activation(cli: &IsolatedCli, active: bool) {
+    let settings_path = cli.home.path().join(".claude/settings.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    let enabled_plugins = settings
+        .get_mut("enabledPlugins")
+        .and_then(serde_json::Value::as_object_mut)
+        .unwrap();
+    if active {
+        enabled_plugins.insert("tracedecay@tracedecay".to_string(), true.into());
+    } else {
+        enabled_plugins.remove("tracedecay@tracedecay");
+    }
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&settings).unwrap(),
+    )
+    .unwrap();
+
+    let marketplaces_path = cli
+        .home
+        .path()
+        .join(".claude/plugins/known_marketplaces.json");
+    let mut marketplaces: serde_json::Value =
+        serde_json::from_slice(&fs::read(&marketplaces_path).unwrap()).unwrap();
+    let marketplaces = marketplaces.as_object_mut().unwrap();
+    if active {
+        marketplaces.insert(
+            "tracedecay".to_string(),
+            serde_json::json!({
+                "source": {
+                    "source": "directory",
+                    "path": cli
+                        .home
+                        .path()
+                        .join(".claude/plugins/marketplaces/tracedecay")
+                },
+                "installLocation": cli
+                    .home
+                    .path()
+                    .join(".claude/plugins/marketplaces/tracedecay")
+            }),
+        );
+    } else {
+        marketplaces.remove("tracedecay");
+    }
+    fs::write(
+        &marketplaces_path,
+        serde_json::to_vec_pretty(&marketplaces).unwrap(),
+    )
+    .unwrap();
+    let cache_root = cli
+        .home
+        .path()
+        .join(".claude/plugins/cache/tracedecay/tracedecay")
+        .join(tracedecay_agent_hosts::PRODUCT_VERSION);
+    if active {
+        fs::create_dir_all(&cache_root).unwrap();
+        copy_test_bundle(
+            &cli.home
+                .path()
+                .join(".claude/plugins/marketplaces/tracedecay"),
+            &cache_root,
+        );
+    } else if cache_root.exists() {
+        fs::remove_dir_all(cache_root).unwrap();
+    }
+}
+
 fn assert_seeded_bytes(cli: &IsolatedCli, originals: &BTreeMap<PathBuf, Vec<u8>>) {
     for (relative, expected) in originals {
         assert_eq!(
@@ -224,18 +308,6 @@ fn latest_receipt(cli: &IsolatedCli, host: HostKindV1) -> HostComponentSetReceip
     latest_host_component_set_receipt_at(&cli.lifecycle_root(), host)
         .unwrap()
         .expect("host lifecycle receipt")
-}
-
-fn pending_registration_backup(cli: &IsolatedCli, integration_id: &str) -> PathBuf {
-    let root = cli
-        .lifecycle_root()
-        .join(".tracedecay-host-bundle-v1/registration-backups");
-    let entries = fs::read_dir(root)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect::<Vec<_>>();
-    assert_eq!(entries.len(), 1, "expected one pending registration backup");
-    entries.into_iter().next().unwrap().join(integration_id)
 }
 
 fn assert_receipt_digests(cli: &IsolatedCli, receipt: &HostComponentSetReceiptV1) {
@@ -395,12 +467,14 @@ fn native_feedback(case: HostCase) -> Option<[(&'static str, Vec<u8>); 2]> {
 
 #[test]
 fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
-    for case in HOSTS
-        .iter()
-        .filter(|case| !matches!(case.host, HostKindV1::Codex | HostKindV1::Kiro))
-    {
+    for case in supported_host_cases().filter(|case| {
+        !matches!(
+            case.host,
+            HostKindV1::ClaudeCode | HostKindV1::Codex | HostKindV1::KimiCode
+        )
+    }) {
         let cli = IsolatedCli::new();
-        let originals = seed_host(*case, &cli);
+        let originals = seed_host(case, &cli);
 
         assert_success(
             case.id,
@@ -409,25 +483,12 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
         );
         let install_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &install_receipt);
-        if case.host == HostKindV1::ClaudeCode {
-            let settings: serde_json::Value = serde_json::from_slice(
-                &fs::read(cli.home.path().join(".claude/settings.json")).unwrap(),
-            )
-            .unwrap();
-            assert_eq!(
-                settings
-                    .pointer("/env/FOREIGN_SETTING")
-                    .and_then(serde_json::Value::as_str),
-                Some("preserved"),
-                "Claude install dropped an unrelated native setting"
-            );
-        }
 
         assert_success(case.id, "update", cli.run(&["update-plugin"]));
         let update_receipt = latest_receipt(&cli, case.host);
         assert_receipt_digests(&cli, &update_receipt);
 
-        if let Some(events) = native_feedback(*case) {
+        if let Some(events) = native_feedback(case) {
             for (phase, (entrypoint, fixture)) in ["edit", "stop"].into_iter().zip(events) {
                 assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
             }
@@ -437,13 +498,8 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             .component_receipts
             .iter()
             .flat_map(|component| &component.artifacts)
-            .find(|artifact| {
-                !artifact.relative_path.ends_with(".json")
-                    && !artifact.relative_path.ends_with(".toml")
-                    && !artifact.relative_path.ends_with(".yaml")
-                    && !artifact.relative_path.ends_with(".yml")
-            })
-            .expect("non-registration repair artifact");
+            .next()
+            .expect("managed repair artifact");
         fs::write(
             cli.home.path().join(&repair_target.relative_path),
             b"operator-corrupted managed artifact",
@@ -504,6 +560,9 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
             "{} recovery did not preserve the pre-interruption receipt",
             case.id
         );
+        assert_success(case.id, "post-recovery repair", cli.run(&["reinstall"]));
+        let repaired_receipt = latest_receipt(&cli, case.host);
+        assert_receipt_digests(&cli, &repaired_receipt);
 
         let state = cli
             .home
@@ -584,12 +643,128 @@ fn production_cli_completes_deterministic_lifecycle_for_config_native_hosts() {
 }
 
 #[test]
+fn hermes_dashboard_opt_out_survives_install_update_and_reinstall() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Hermes);
+    seed_host(case, &cli);
+
+    let assert_dashboard_absent = || {
+        for plugin in [
+            cli.home.path().join(".hermes/plugins/tracedecay"),
+            cli.home
+                .path()
+                .join(".hermes/profiles/review/plugins/tracedecay"),
+        ] {
+            assert!(!plugin.join("dashboard/manifest.json").exists());
+            assert!(!plugin.join("dashboard/plugin_api.py").exists());
+            assert!(!plugin.join("dashboard/dist/index.js").exists());
+        }
+    };
+
+    assert_success(
+        case.id,
+        "install --no-dashboard",
+        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
+    );
+    assert_dashboard_absent();
+    assert_success(
+        case.id,
+        "reinstall preflight",
+        cli.run(&["reinstall", "--dry-run"]),
+    );
+    assert_dashboard_absent();
+    assert_success(case.id, "update", cli.run(&["update-plugin"]));
+    assert_dashboard_absent();
+    assert_success(case.id, "reinstall", cli.run(&["reinstall"]));
+    assert_dashboard_absent();
+}
+
+#[test]
+fn feedback_policy_failure_precedes_apply_and_restore_mutations() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::Hermes);
+    let originals = seed_host(case, &cli);
+    assert_success(
+        case.id,
+        "install --no-dashboard",
+        cli.run(&["install", "--agent", case.id, "--no-dashboard"]),
+    );
+    let receipt = latest_receipt(&cli, case.host);
+    let before_apply = owned_bytes(&cli, &receipt, &originals);
+    let config_path = cli.profile.join("config.toml");
+    let valid_config = fs::read(&config_path).unwrap();
+    let corrupt_config =
+        b"installed_agents = [\"hermes\"]\nagent_dashboard_enabled = { hermes = false\n";
+    let state = cli.home.path().join("hermes-policy-feedback.json");
+    let apply_args = [
+        "feedback-rollback",
+        "apply",
+        "--agent",
+        case.id,
+        "--state",
+        state.to_str().unwrap(),
+        "--yes",
+    ];
+
+    fs::write(&config_path, corrupt_config).unwrap();
+    let refused_apply = cli.run_with_env(
+        &apply_args,
+        "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+        "next",
+    );
+    assert!(!refused_apply.status.success());
+    assert!(!state.exists());
+    assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
+
+    fs::write(&config_path, &valid_config).unwrap();
+    assert_success(
+        case.id,
+        "feedback apply",
+        cli.run_with_env(
+            &apply_args,
+            "TRACEDECAY_TEST_FEEDBACK_ROUTE_REVISION",
+            "next",
+        ),
+    );
+    let applied = owned_bytes(&cli, &receipt, &originals);
+    assert_ne!(applied, before_apply);
+    assert!(
+        applied
+            .values()
+            .any(|bytes| bytes.ends_with(b"\nfeedback-route:next\n")),
+        "feedback activation replaced the exact applied target bytes"
+    );
+
+    fs::write(&config_path, corrupt_config).unwrap();
+    let refused_restore = cli.run(&[
+        "feedback-rollback",
+        "restore",
+        "--state",
+        state.to_str().unwrap(),
+        "--yes",
+    ]);
+    assert!(!refused_restore.status.success());
+    assert_eq!(owned_bytes(&cli, &receipt, &originals), applied);
+
+    fs::write(&config_path, valid_config).unwrap();
+    assert_success(
+        case.id,
+        "feedback restore",
+        cli.run(&[
+            "feedback-rollback",
+            "restore",
+            "--state",
+            state.to_str().unwrap(),
+            "--yes",
+        ]),
+    );
+    assert_eq!(owned_bytes(&cli, &receipt, &originals), before_apply);
+}
+
+#[test]
 fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::Codex)
-        .unwrap();
+    let case = host_case(HostKindV1::Codex);
     let originals = seed_host(case, &cli);
 
     let output = cli.run(&["install", "--agent", "codex"]);
@@ -610,7 +785,7 @@ fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
     assert!(
         cli.home
             .path()
-            .join("plugins/tracedecay/.codex-plugin/plugin.json")
+            .join(".codex/plugins/tracedecay/.codex-plugin/plugin.json")
             .is_file(),
         "Codex manual remediation has no staged plugin source"
     );
@@ -629,12 +804,212 @@ fn codex_lifecycle_refuses_unavailable_noninteractive_activation() {
 }
 
 #[test]
+fn claude_lifecycle_tracks_assets_only_after_native_activation() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::ClaudeCode);
+    let originals = seed_host(case, &cli);
+
+    let deferred = cli.run(&["install", "--agent", case.id]);
+    assert!(!deferred.status.success());
+    let stderr = String::from_utf8_lossy(&deferred.stderr);
+    assert!(
+        stderr.contains("Claude Code owns marketplace registration"),
+        "Claude deferral omitted its native activation boundary: {stderr}"
+    );
+    assert!(
+        cli.home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/marketplace.json")
+            .is_file(),
+        "Claude deferral did not stage the verified marketplace source"
+    );
+    assert_seeded_bytes(&cli, &originals);
+    assert!(
+        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
+            .unwrap()
+            .is_none(),
+        "staging native activation published a lifecycle receipt"
+    );
+
+    set_claude_native_activation(&cli, true);
+    let settings_path = cli.home.path().join(".claude/settings.json");
+    let marketplaces_path = cli
+        .home
+        .path()
+        .join(".claude/plugins/known_marketplaces.json");
+    let active_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
+    assert_success(
+        case.id,
+        "receipt-backed install after native activation",
+        cli.run(&["install", "--agent", case.id]),
+    );
+    let install_receipt = latest_receipt(&cli, case.host);
+    assert_receipt_digests(&cli, &install_receipt);
+    assert_eq!(
+        [
+            fs::read(&settings_path).unwrap(),
+            fs::read(&marketplaces_path).unwrap(),
+        ],
+        active_native_state,
+        "catalog install rewrote Claude-owned activation state"
+    );
+
+    let cache_manifest = cli
+        .home
+        .path()
+        .join(".claude/plugins/cache/tracedecay/tracedecay")
+        .join(tracedecay_agent_hosts::PRODUCT_VERSION)
+        .join(".claude-plugin/plugin.json");
+    fs::write(
+        &cache_manifest,
+        br#"{"name":"tracedecay","version":"stale"}"#,
+    )
+    .unwrap();
+    let before_stale_update = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
+    let stale_update = cli.run(&["update-plugin"]);
+    assert!(!stale_update.status.success());
+    assert!(
+        String::from_utf8_lossy(&stale_update.stderr).contains("loaded TraceDecay cache is stale"),
+        "Claude stale cache did not produce native-update remediation: {}",
+        String::from_utf8_lossy(&stale_update.stderr)
+    );
+    assert_eq!(
+        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
+        before_stale_update,
+        "stale native cache changed the component receipt"
+    );
+    fs::copy(
+        cli.home
+            .path()
+            .join(".claude/plugins/marketplaces/tracedecay/.claude-plugin/plugin.json"),
+        &cache_manifest,
+    )
+    .unwrap();
+    assert_success(
+        case.id,
+        "catalog update after native cache refresh",
+        cli.run(&["update-plugin"]),
+    );
+    assert_success(case.id, "catalog repair", cli.run(&["reinstall"]));
+    for (phase, (entrypoint, fixture)) in ["edit", "stop"]
+        .into_iter()
+        .zip(native_feedback(case).unwrap())
+    {
+        assert_success(case.id, phase, cli.run_with_stdin(&[entrypoint], &fixture));
+    }
+    assert_eq!(
+        [
+            fs::read(&settings_path).unwrap(),
+            fs::read(&marketplaces_path).unwrap(),
+        ],
+        active_native_state,
+        "catalog maintenance rewrote Claude-owned activation state"
+    );
+
+    let before_refusal = serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap();
+    let refused = cli.run(&["uninstall", "--agent", case.id]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("unsupported"),
+        "Claude native-removal boundary was not reported truthfully: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(
+        serde_json::to_vec(&latest_receipt(&cli, case.host)).unwrap(),
+        before_refusal,
+        "native-removal deferral changed the lifecycle receipt"
+    );
+
+    set_claude_native_activation(&cli, false);
+    let removed_native_state = [
+        fs::read(&settings_path).unwrap(),
+        fs::read(&marketplaces_path).unwrap(),
+    ];
+    assert_success(
+        case.id,
+        "receipt-backed uninstall after native removal",
+        cli.run(&["uninstall", "--agent", case.id]),
+    );
+    assert_eq!(
+        [
+            fs::read(&settings_path).unwrap(),
+            fs::read(&marketplaces_path).unwrap(),
+        ],
+        removed_native_state,
+        "catalog uninstall rewrote Claude-owned activation state"
+    );
+    let uninstall_receipt = latest_receipt(&cli, case.host);
+    assert!(
+        uninstall_receipt
+            .component_receipts
+            .iter()
+            .all(|component| {
+                component
+                    .artifacts
+                    .iter()
+                    .all(|artifact| !cli.home.path().join(&artifact.relative_path).exists())
+            })
+    );
+}
+
+#[test]
+fn kimi_lifecycle_reports_official_activation_deferral() {
+    let cli = IsolatedCli::new();
+    let case = host_case(HostKindV1::KimiCode);
+
+    let output = cli.run(&["install", "--agent", case.id]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Kimi") && stderr.contains("plugin"),
+        "Kimi deferral omitted its official activation boundary: {stderr}"
+    );
+    assert!(
+        latest_host_component_set_receipt_at(&cli.lifecycle_root(), case.host)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn unadmitted_catalog_hosts_never_fall_back_to_direct_installers() {
+    for host in HostKindV1::ALL {
+        let Some(reason) = unsupported_host_component_set_reason(host) else {
+            continue;
+        };
+        if matches!(host, HostKindV1::CursorCloud | HostKindV1::ClineFamily) {
+            continue;
+        }
+        let cli = IsolatedCli::new();
+        let agent = tracedecay::agents::integration_id_for_host(host);
+
+        let output = cli.run(&["install", "--agent", agent]);
+
+        assert!(
+            !output.status.success(),
+            "{host:?} bypassed typed component unavailability through a direct installer"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("{reason:?}")),
+            "{host:?} did not report its catalog reason {reason:?}: {stderr}"
+        );
+        assert!(
+            latest_host_component_set_receipt_at(&cli.lifecycle_root(), host)
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
 fn killed_registration_mutation_recovers_exact_pre_effect_state() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -692,10 +1067,7 @@ fn killed_registration_mutation_recovers_exact_pre_effect_state() {
 #[test]
 fn killed_install_recovers_with_original_journal_operation() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     #[cfg(unix)]
@@ -745,10 +1117,7 @@ fn recovery_rejects_foreign_metadata_drift_with_unchanged_bytes() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
@@ -793,10 +1162,7 @@ fn recovery_rejects_foreign_metadata_drift_with_unchanged_bytes() {
 #[test]
 fn interrupted_registration_rollback_converges_across_two_restarts() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     let killed = cli.run_with_env(
@@ -837,10 +1203,7 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let config_path = cli.home.path().join(".config/opencode/opencode.json");
     fs::set_permissions(&config_path, fs::Permissions::from_mode(0o640)).unwrap();
@@ -877,419 +1240,13 @@ fn successful_atomic_replacement_preserves_mode_and_extended_acl() {
     );
 }
 
-#[test]
-fn claude_nonempty_rewrite_recovers_after_real_write_kill() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let claude_md = cli.home.path().join(".claude/CLAUDE.md");
-    let installed = fs::read(&claude_md).unwrap();
-    let mut with_foreign = b"# Operator preface\n\n".to_vec();
-    with_foreign.extend_from_slice(&installed);
-    with_foreign.extend_from_slice(b"\n# Operator suffix\n");
-    fs::write(&claude_md, &with_foreign).unwrap();
-
-    let mut command = cli.command(&["uninstall", "--agent", case.id]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-            &claude_md,
-        )
-        .output()
-        .unwrap();
-    assert!(
-        !killed.status.success(),
-        "Claude rewrite fault did not abort"
-    );
-    let after_kill = fs::read(&claude_md).unwrap();
-    assert_ne!(after_kill, with_foreign);
-    assert!(
-        !after_kill.is_empty(),
-        "fault crossed a removal, not rewrite"
-    );
-
-    assert_success(
-        case.id,
-        "Claude rewrite recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&claude_md).unwrap(), with_foreign);
-}
-
-#[test]
-fn claude_global_install_recovers_project_config_mutations() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let mcp_path = cli.project.path().join(".mcp.json");
-    let settings_path = cli.project.path().join(".claude/settings.local.json");
-    let mcp_original =
-        br#"{"mcpServers":{"tracedecay":{"command":"old"},"foreign":{"command":"keep"}}}
-"#;
-    let settings_original =
-        br#"{"enabledMcpjsonServers":["tracedecay","foreign"],"operator":"keep"}
-"#;
-    fs::write(&mcp_path, mcp_original).unwrap();
-    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    fs::write(&settings_path, settings_original).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(
-            cli.home.path().join(".claude"),
-            fs::Permissions::from_mode(0o710),
-        )
-        .unwrap();
-        fs::set_permissions(
-            settings_path.parent().unwrap(),
-            fs::Permissions::from_mode(0o750),
-        )
-        .unwrap();
-    }
-
-    let mut command = cli.command(&["install", "--agent", case.id]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-            &settings_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!killed.status.success());
-    assert_ne!(
-        fs::read(&mcp_path).unwrap(),
-        mcp_original,
-        "install stopped before project MCP mutation\nstderr:\n{}",
-        String::from_utf8_lossy(&killed.stderr)
-    );
-    assert_ne!(fs::read(&settings_path).unwrap(), settings_original);
-
-    let mut recovery = cli.command(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    let interrupted = recovery
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_REGISTRATION_ROLLBACK_WRITE_PATH",
-            &settings_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!interrupted.status.success());
-    assert_success(
-        case.id,
-        "Claude interrupted rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&mcp_path).unwrap(), mcp_original);
-    assert_eq!(fs::read(&settings_path).unwrap(), settings_original);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        assert_eq!(
-            fs::metadata(cli.home.path().join(".claude"))
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o710
-        );
-        assert_eq!(
-            fs::metadata(settings_path.parent().unwrap())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o750
-        );
-    }
-    assert_success(
-        case.id,
-        "Claude idempotent rollback restart",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&mcp_path).unwrap(), mcp_original);
-    assert_eq!(fs::read(&settings_path).unwrap(), settings_original);
-}
-
-#[test]
-fn claude_recovery_recreates_vanished_directory_with_modified_config() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    let originals = seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-    assert_ne!(
-        fs::read(&settings_path).unwrap(),
-        originals[&PathBuf::from(".claude/settings.json")]
-    );
-    fs::remove_dir_all(cli.home.path().join(".claude")).unwrap();
-
-    assert_success(
-        case.id,
-        "vanished modified directory recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(
-        fs::read(&settings_path).unwrap(),
-        originals[&PathBuf::from(".claude/settings.json")]
-    );
-}
-
-#[cfg(unix)]
-#[test]
-fn claude_recovery_refuses_foreign_directory_metadata_drift() {
-    use std::os::unix::fs::PermissionsExt;
-
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let claude_dir = cli.home.path().join(".claude");
-    fs::set_permissions(&claude_dir, fs::Permissions::from_mode(0o710)).unwrap();
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE",
-        "1",
-    );
-    assert!(!killed.status.success());
-    fs::set_permissions(&claude_dir, fs::Permissions::from_mode(0o777)).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    assert_eq!(
-        fs::metadata(&claude_dir).unwrap().permissions().mode() & 0o777,
-        0o777,
-        "recovery must preserve foreign directory metadata drift"
-    );
-}
-
-#[test]
-fn claude_tracedecay_only_project_mcp_removal_recovers() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let mcp_path = cli.project.path().join(".mcp.json");
-    let original = br#"{"mcpServers":{"tracedecay":{"command":"old"}}}
-"#;
-    fs::write(&mcp_path, original).unwrap();
-
-    let mut command = cli.command(&["install", "--agent", case.id]);
-    let killed = command
-        .env(
-            "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_REMOVE_PATH",
-            &mcp_path,
-        )
-        .output()
-        .unwrap();
-    assert!(!killed.status.success());
-    assert!(
-        !mcp_path.exists(),
-        "install stopped before tracedecay-only MCP removal\nstderr:\n{}",
-        String::from_utf8_lossy(&killed.stderr)
-    );
-
-    assert_success(
-        case.id,
-        "tracedecay-only project MCP recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert_eq!(fs::read(&mcp_path).unwrap(), original);
-}
-
-#[test]
-fn claude_old_directory_missing_backup_layout_recovers() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let backup = pending_registration_backup(&cli, case.id);
-    let identity_path = backup.join("identity.v1.json");
-    let mut identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(identity["schema_version"], 2);
-    identity["schema_version"] = 1.into();
-    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-
-    let plan_path = backup.join("mutation-plan.v1.json");
-    let mut plan: serde_json::Value =
-        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
-    assert_eq!(plan["schema_version"], 2);
-    plan["schema_version"] = 1.into();
-    let directories = plan["directories"].as_array_mut().unwrap();
-    let absent_directory = cli.project.path().join(".claude");
-    let index = directories
-        .iter()
-        .position(|path| path == &serde_json::to_value(&absent_directory).unwrap())
-        .expect("project Claude directory must be journaled");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-    assert!(
-        absent_directory.is_dir(),
-        "current apply must have created the originally absent directory"
-    );
-    fs::remove_file(backup.join(format!("directory-{index}.applied.metadata.json"))).unwrap();
-
-    assert_success(
-        case.id,
-        "old directory backup recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-    assert!(!absent_directory.exists());
-}
-
-#[test]
-fn claude_base_v1_plan_without_directories_key_recovers() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let backup = pending_registration_backup(&cli, case.id);
-    let identity_path = backup.join("identity.v1.json");
-    let mut identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
-    identity["schema_version"] = 1.into();
-    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-    let plan_path = backup.join("mutation-plan.v1.json");
-    let mut plan: serde_json::Value =
-        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
-    plan["schema_version"] = 1.into();
-    plan.as_object_mut().unwrap().remove("directories");
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-    for entry in fs::read_dir(&backup).unwrap() {
-        let path = entry.unwrap().path();
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("directory-"))
-        {
-            fs::remove_file(path).unwrap();
-        }
-    }
-
-    assert_success(
-        case.id,
-        "base v1 registration recovery",
-        cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]),
-    );
-}
-
-#[test]
-fn claude_future_registration_backup_version_fails_truthfully() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let backup = pending_registration_backup(&cli, case.id);
-    let identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(backup.join("identity.v1.json")).unwrap()).unwrap();
-    assert_eq!(identity["schema_version"], 2);
-    let plan_path = backup.join("mutation-plan.v1.json");
-    let mut plan: serde_json::Value =
-        serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
-    assert_eq!(plan["schema_version"], 2);
-    plan["schema_version"] = 99.into();
-    fs::write(&plan_path, serde_json::to_vec(&plan).unwrap()).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("host recovery backup format is unsupported"));
-    assert!(stderr.contains("use the TraceDecay version that created it"));
-}
-
-#[test]
-fn claude_future_identity_version_fails_truthfully() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    let settings_path = cli.home.path().join(".claude/settings.json");
-    let killed = cli.run_with_env(
-        &["install", "--agent", case.id],
-        "TRACEDECAY_TEST_ABORT_AFTER_HOST_CONFIG_WRITE_PATH",
-        settings_path.to_str().unwrap(),
-    );
-    assert!(!killed.status.success());
-
-    let identity_path = pending_registration_backup(&cli, case.id).join("identity.v1.json");
-    let mut identity: serde_json::Value =
-        serde_json::from_slice(&fs::read(&identity_path).unwrap()).unwrap();
-    assert_eq!(identity["schema_version"], 2);
-    identity["schema_version"] = 99.into();
-    fs::write(&identity_path, serde_json::to_vec(&identity).unwrap()).unwrap();
-
-    let refused = cli.run(&["host-bundle", "recover", "--agent", case.id, "--yes"]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("host recovery backup format is unsupported"));
-    assert!(stderr.contains("use the TraceDecay version that created it"));
-}
-
 #[cfg(unix)]
 #[test]
 fn claude_install_rejects_empty_symlinked_config_directory() {
     use std::os::unix::fs::symlink;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
+    let case = host_case(HostKindV1::ClaudeCode);
     seed_host(case, &cli);
     let claude_dir = cli.home.path().join(".claude");
     fs::remove_dir_all(&claude_dir).unwrap();
@@ -1305,68 +1262,9 @@ fn claude_install_rejects_empty_symlinked_config_directory() {
 }
 
 #[test]
-fn claude_global_uninstall_removes_current_project_legacy_registration() {
-    let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::ClaudeCode)
-        .unwrap();
-    seed_host(case, &cli);
-    assert_success(
-        case.id,
-        "initial install",
-        cli.run(&["install", "--agent", case.id]),
-    );
-    let mcp_path = cli.project.path().join(".mcp.json");
-    let settings_path = cli.project.path().join(".claude/settings.local.json");
-    fs::write(
-        &mcp_path,
-        br#"{"mcpServers":{"tracedecay":{"command":"old"},"foreign":{"command":"keep"}}}"#,
-    )
-    .unwrap();
-    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
-    fs::write(
-        &settings_path,
-        br#"{"enabledMcpjsonServers":["tracedecay","foreign"],"hooks":{"Stop":[{"hooks":[{"type":"command","command":"tracedecay hook"}]}]},"operator":"keep"}"#,
-    )
-    .unwrap();
-
-    assert_success(
-        case.id,
-        "global uninstall",
-        cli.run(&["uninstall", "--agent", case.id]),
-    );
-    assert!(
-        !fs::read_to_string(&mcp_path)
-            .unwrap()
-            .contains("tracedecay")
-    );
-    assert!(
-        !fs::read_to_string(&settings_path)
-            .unwrap()
-            .contains("tracedecay")
-    );
-    let mcp: serde_json::Value = serde_json::from_slice(&fs::read(&mcp_path).unwrap()).unwrap();
-    assert_eq!(mcp["mcpServers"]["foreign"]["command"], "keep");
-    let settings: serde_json::Value =
-        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
-    assert_eq!(settings["operator"], "keep");
-    assert!(
-        settings["enabledMcpjsonServers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|value| value == "foreign")
-    );
-}
-
-#[test]
 fn killed_install_recovery_refuses_later_operator_edit() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     let killed = cli.run_with_env(
         &["install", "--agent", case.id],
@@ -1404,10 +1302,7 @@ fn killed_install_recovery_refuses_later_operator_edit() {
 #[test]
 fn stale_feedback_registration_refuses_before_artifact_or_receipt_effects() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1480,10 +1375,7 @@ fn stale_feedback_registration_refuses_before_artifact_or_receipt_effects() {
 #[test]
 fn killed_feedback_switch_recovers_from_durable_effect_identity() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1577,10 +1469,7 @@ fn killed_feedback_switch_recovers_from_durable_effect_identity() {
 #[test]
 fn newer_feedback_receipt_refuses_before_restore_effects() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1637,10 +1526,7 @@ fn newer_feedback_receipt_refuses_before_restore_effects() {
 #[test]
 fn killed_feedback_registration_recovers_without_applied_marker() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1690,10 +1576,7 @@ fn killed_feedback_registration_recovers_without_applied_marker() {
 #[test]
 fn killed_feedback_registration_rejects_later_operator_edit() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1747,10 +1630,7 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
     use std::os::unix::fs::PermissionsExt;
 
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     seed_host(case, &cli);
     assert_success(
         case.id,
@@ -1800,10 +1680,7 @@ fn killed_feedback_registration_rejects_metadata_only_drift() {
 #[test]
 fn killed_feedback_restore_converges_on_restart() {
     let cli = IsolatedCli::new();
-    let case = *HOSTS
-        .iter()
-        .find(|case| case.host == HostKindV1::OpenCode)
-        .unwrap();
+    let case = host_case(HostKindV1::OpenCode);
     let originals = seed_host(case, &cli);
     assert_success(
         case.id,

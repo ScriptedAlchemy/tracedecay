@@ -765,6 +765,7 @@ fn map_lcm_error(error: LcmError) -> SessionTemporalExecutionError {
         | LcmError::PayloadNotFound
         | LcmError::PayloadMissing
         | LcmError::PayloadGcd => SessionTemporalExecutionError::Deleted,
+        LcmError::PayloadLocked => SessionTemporalExecutionError::Locked,
         LcmError::PayloadNotOwnedBySession | LcmError::SummarySourceNotOwnedBySession => {
             SessionTemporalExecutionError::Denied
         }

@@ -6,6 +6,7 @@ use tracedecay_domain::framed_log::partial_tail_matches_prefix;
 use tracedecay_domain::{canonical_json_bytes, framed_log::checksum as frame_checksum};
 
 use crate::HookHostV1;
+use serde_json::Value;
 
 use super::frame::{decode_complete_frame, encode_frame};
 use super::types::{
@@ -18,8 +19,32 @@ use super::{
 
 pub(super) fn read_meta(root: &Path) -> Result<Option<HookSpoolMetaV1>, HookSpoolError> {
     read_bounded(&meta_path(root), MAX_META_BYTES)?
-        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| HookSpoolError::MetadataCorrupted))
+        .map(|bytes| decode_exact_meta(&bytes))
         .transpose()
+}
+
+fn decode_exact_meta(bytes: &[u8]) -> Result<HookSpoolMetaV1, HookSpoolError> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| HookSpoolError::MetadataCorrupted)?;
+    let Some(found) = value.get("version").and_then(Value::as_u64) else {
+        return Err(HookSpoolError::ResetRequired {
+            reason: super::HookSpoolResetReasonV1::MetadataShape,
+        });
+    };
+    let found = u16::try_from(found).map_err(|_| HookSpoolError::ResetRequired {
+        reason: super::HookSpoolResetReasonV1::MetadataShape,
+    })?;
+    if found != super::SPOOL_META_VERSION {
+        return Err(HookSpoolError::ResetRequired {
+            reason: super::HookSpoolResetReasonV1::MetadataVersion {
+                found,
+                expected: super::SPOOL_META_VERSION,
+            },
+        });
+    }
+    serde_json::from_value(value).map_err(|_| HookSpoolError::ResetRequired {
+        reason: super::HookSpoolResetReasonV1::MetadataShape,
+    })
 }
 
 pub(super) fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError> {
@@ -97,8 +122,7 @@ pub(super) fn validate_meta(
     limits: HookSpoolLimitsV1,
     host: HookHostV1,
 ) -> Result<(), HookSpoolError> {
-    if meta.version != super::SPOOL_META_VERSION
-        || meta.next_sequence == 0
+    if meta.next_sequence == 0
         || meta.next_sequence <= meta.committed_through
         || meta.acknowledged.len() > limits.max_host_records as usize
     {

@@ -8,8 +8,9 @@
 
 use std::time::Duration;
 
-/// Overall budget for the `preCompact` hook (registered with a 120s timeout).
-const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_secs(115);
+/// A hook only waits for daemon acknowledgement; the daemon owns the eventual
+/// transcript capture and model-backed compaction work.
+const CURSOR_PRE_COMPACT_BUDGET: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CursorPreCompactOutcome {
@@ -99,4 +100,56 @@ async fn cursor_pre_compact_via_daemon_inner(
     serde_json::from_value(result).unwrap_or_else(|error| {
         CursorPreCompactOutcome::error(format!("invalid daemon compaction response: {error}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn native_compaction_routes_once_to_daemon_within_hook_budget() {
+        let project = tempfile::tempdir().unwrap();
+        let project_root = project.path().canonicalize().unwrap();
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: "proj_cursor_compaction".to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .unwrap();
+        let daemon = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "status": "scheduled",
+            "reason": "accepted",
+            "summary_nodes_created": 0,
+            "summary_node_ids": [],
+        })]);
+        let event_json = serde_json::json!({
+            "hook_event_name": "preCompact",
+            "conversation_id": "cursor-compact-session",
+            "generation_id": "cursor-compact-generation",
+            "workspace_roots": [project_root],
+        })
+        .to_string();
+
+        let started = std::time::Instant::now();
+        let outcome = cursor_pre_compact_via_daemon(&event_json).await;
+
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "native compaction exceeded the hook budget"
+        );
+        assert_eq!(outcome.status, "scheduled");
+        assert_eq!(
+            daemon.calls(),
+            [(
+                Some(project_root),
+                serde_json::json!({
+                    "action": "cursor_compact",
+                    "event_json": event_json,
+                    "format": "json",
+                }),
+            )]
+        );
+    }
 }

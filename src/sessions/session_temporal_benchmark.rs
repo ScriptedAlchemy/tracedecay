@@ -199,7 +199,7 @@ impl SessionScopeAuthorizer for AllowAuthorizer {
         request: &SessionScopeAuthorizationRequest,
     ) -> Result<SessionAuthorizationGrant, SessionAuthorizationError> {
         SessionAuthorizationGrant::issue(
-            AuthorizationGrantId::new("grant.pr8.benchmark").unwrap(),
+            AuthorizationGrantId::new("grant.session-temporal-benchmark").unwrap(),
             1,
             context,
             binding,
@@ -702,7 +702,10 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         NoopWake,
         SessionRefreshConfiguration::new(PROJECTOR_VERSION, CONFIG_VERSION).unwrap(),
     );
-    let (context, binding) = request_context(&format!("request.pr8.{repetition}"), &project_id);
+    let (context, binding) = request_context(
+        &format!("request.session-temporal.{repetition}"),
+        &project_id,
+    );
     let target = SessionRefreshTarget::new(
         SessionId::new(&session_id).unwrap(),
         Some("codex".to_owned()),
@@ -944,7 +947,7 @@ fn request_context(
     let actor = ActorId::new("actor.pr8.benchmark").unwrap();
     let request_id = RequestId::new(request).unwrap();
     let identity = ResolvedSessionIdentity::for_project(
-        ProfileId::new("profile.pr8.benchmark").unwrap(),
+        ProfileId::new("profile.session-temporal-benchmark").unwrap(),
         project_id.clone(),
         SessionStoreId::new(format!("store.{}", project_id.as_str())).unwrap(),
         SessionRootId::new("root.pr8.benchmark").unwrap(),
@@ -963,7 +966,7 @@ fn request_context(
     let observed_at = application_observed_at();
     let expires_at = UtcMicros(observed_at.0.saturating_add(30_000_000));
     let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.pr8.benchmark.application").unwrap(),
+        CapabilityGrantId::new("grant.session-temporal-benchmark.application").unwrap(),
         1,
         session_application_grant_digest(capability, policy, configuration, &cancellation, budgets)
             .unwrap(),
@@ -1035,7 +1038,7 @@ fn validate_sanitization_receipt(root: &Path) -> BenchResult<()> {
     let receipt = read_json(&root.join(SANITIZATION_RECEIPT_PATH))?;
     require_json_value(
         &receipt["schema"],
-        json!("pr8-fixture-sanitization-receipt-v1"),
+        json!("session-temporal-fixture-sanitization-receipt-v1"),
         "receipt schema",
     )?;
     require_json_value(

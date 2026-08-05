@@ -82,16 +82,24 @@ impl SessionExecutor {
                     session_id, generation, agent_id, agent_json, created_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5)",
             )?,
+            message: savepoint.prepare(
+                "SELECT provider, role, text
+                 FROM session_messages
+                 WHERE session_id = ?1 AND message_id = ?2
+                 ORDER BY provider
+                 LIMIT 2",
+            )?,
             occurrence: savepoint.prepare(
                 "INSERT INTO session_occurrences (
                     session_id, generation, occurrence_id, source_observation_id,
-                    projection_output_ordinal, retrieval_anchor_id, thread_id,
+                    source_provider, projection_output_ordinal, retrieval_anchor_id, thread_id,
                     thread_grouping_json, turn_id, turn_grouping_json, message_id,
                     agent_id, role, knowledge_at, valid_time_json, evidence_json,
+                    sanitized_content_digest, sanitized_content_bytes,
                     snippet_text, index_text
                  ) VALUES (
                     ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-                    ?15, ?16, '', ''
+                    ?15, ?16, ?17, ?18, ?19, '', ''
                  )",
             )?,
             copy: savepoint.prepare(

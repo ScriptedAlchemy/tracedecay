@@ -29,5 +29,14 @@ impl<'a> TemporalSqlRead<'a> {
     }
 }
 
+impl engine::QueryExecutor for TemporalSqlRead<'_> {
+    async fn query<P>(&self, sql: &str, params: P) -> engine::Result<engine::Rows>
+    where
+        P: engine::IntoParams,
+    {
+        TemporalSqlRead::query(self, sql, params).await
+    }
+}
+
 pub(super) type TemporalSqlRows = engine::Rows;
 pub(super) type TemporalSqlRow = engine::Row;

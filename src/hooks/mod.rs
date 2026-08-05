@@ -3,7 +3,6 @@
 //! Each agent sends its own event schema and expects its own output shape, so
 //! handlers stay agent-specific while shared plumbing lives here.
 
-use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
@@ -34,9 +33,8 @@ pub(crate) use v2::protected_session_id_for_native as hook_v2_protected_session_
 pub(crate) use v2::publish_daemon_bindings as publish_hook_v2_bindings;
 
 pub use claude::{
-    claude_session_context_for_event, evaluate_hook_decision, hook_claude_post_tool_use,
-    hook_claude_session_start, hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit,
-    hook_stop,
+    evaluate_hook_decision, hook_claude_post_tool_use, hook_claude_session_start,
+    hook_claude_subagent_start, hook_pre_tool_use, hook_prompt_submit, hook_stop,
 };
 pub use codex::{
     codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
@@ -46,12 +44,10 @@ pub use codex::{
     hook_codex_user_prompt_submit, record_codex_subagent_start,
 };
 pub use cursor::{
-    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_after_file_edit_rel_paths,
-    cursor_post_tool_use_decision, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_should_run_sync, evaluate_cursor_after_file_edit, evaluate_cursor_post_tool_use,
-    evaluate_cursor_subagent_start, hook_cursor_after_file_edit, hook_cursor_after_shell,
-    hook_cursor_before_submit_prompt, hook_cursor_post_tool_use, hook_cursor_pre_compact,
-    hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
+    CURSOR_CATCH_UP_INGEST_MAX_BYTES, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_should_run_sync, evaluate_cursor_subagent_start, hook_cursor_after_file_edit,
+    hook_cursor_after_shell, hook_cursor_before_submit_prompt, hook_cursor_post_tool_use,
+    hook_cursor_pre_compact, hook_cursor_session_end, hook_cursor_session_start, hook_cursor_stop,
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
@@ -59,7 +55,6 @@ pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
 };
-pub use post_tool_use::claude_post_tool_use_matcher;
 pub use steering::{
     CURSOR_PLUGIN_SKILLS, HookWorkspaceStatus, build_codex_session_context,
     build_codex_session_context_for_workspace, build_cursor_session_context, cursor_staleness_hint,
@@ -370,7 +365,55 @@ pub(crate) async fn notify_hook_event_with_optional_telemetry(
 
 pub async fn hook_hermes_terminal_receipt() -> i32 {
     let event_json = read_hook_event!();
-    let Ok(event) = serde_json::from_str::<DaemonHookEvent>(&event_json) else {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&event_json) else {
+        return 0;
+    };
+    let cwd = parsed
+        .get("cwd")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            parsed.get("route").and_then(|route| {
+                route
+                    .get("cwd")
+                    .or_else(|| route.get("worktree"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+        });
+    let project_root = match cwd {
+        Some(cwd) => {
+            crate::config::discover_project_root_with_identity(std::path::Path::new(&cwd)).await
+        }
+        None => None,
+    };
+    let hook_name = parsed
+        .get("hook_event_name")
+        .or_else(|| parsed.get("event"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("nativeCallback");
+    let hook_telemetry = record_hook_invoked(
+        project_root.as_deref(),
+        HintAgent::Hermes,
+        hook_name,
+        &event_json,
+    );
+    if let Some(guidance) = v2::dispatch_for_scope(
+        tracedecay_hooks::HookHostV1::Hermes,
+        &event_json,
+        project_root.as_deref(),
+        Some(&hook_telemetry),
+    )
+    .await
+    .into_recorded_guidance(&hook_telemetry)
+    {
+        if let Some(guidance) = guidance {
+            println!("{}", serde_json::json!({ "additional_context": guidance }));
+        }
+        return 0;
+    }
+
+    let Ok(event) = serde_json::from_value::<DaemonHookEvent>(parsed) else {
         return 0;
     };
     if event.agent != "hermes"
@@ -382,36 +425,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     {
         return 0;
     }
-    let cwd = event
-        .route
-        .as_ref()
-        .and_then(|route| route.cwd.clone().or_else(|| route.worktree.clone()))
-        .or_else(|| event.cwd.clone());
-    let project_root = match cwd {
-        Some(cwd) => crate::config::discover_project_root_with_identity(&cwd).await,
-        None => None,
-    };
-    let hook_telemetry = record_hook_invoked(
-        project_root.as_deref(),
-        HintAgent::Hermes,
-        event.event.as_str(),
-        &event_json,
-    );
     if let Some(project_root) = project_root.as_ref() {
-        if let Some(guidance) = v2::dispatch(
-            tracedecay_hooks::HookHostV1::Hermes,
-            &event_json,
-            project_root,
-            Some(&hook_telemetry),
-        )
-        .await
-        .into_recorded_guidance(&hook_telemetry)
-        {
-            if let Some(guidance) = guidance {
-                println!("{}", serde_json::json!({ "additional_context": guidance }));
-            }
-            return 0;
-        }
         notify_hook_event_with_telemetry(project_root, event, &hook_telemetry).await;
     } else if let Err(error) = daemon_hook_action(
         None,
@@ -425,47 +439,8 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
     0
 }
 
-pub(crate) fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let payload = serde_json::json!({ "provider": provider, "session_id": session_id }).to_string();
-    let mut command = std::process::Command::new(exe);
-    command.arg("hook-user-session-review");
-    let _ = spawn_reaped_hook_child(command, payload.as_bytes());
-}
-
-fn spawn_reaped_hook_child(
-    mut command: std::process::Command,
-    payload: &[u8],
-) -> std::io::Result<u32> {
-    let mut child = command
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    let pid = child.id();
-    let write_result = child
-        .stdin
-        .take()
-        .map_or(Ok(()), |mut stdin| stdin.write_all(payload));
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    write_result?;
-    Ok(pid)
-}
-
-pub async fn hook_user_session_review() -> i32 {
-    let event = read_hook_event!();
-    let Ok(payload) = serde_json::from_str::<Value>(&event) else {
-        return 0;
-    };
-    let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
-        return 0;
-    };
-    let session_id = payload.get("session_id").and_then(Value::as_str);
-    if let Err(error) = daemon_hook_action(
+pub(crate) async fn schedule_user_session_review(provider: &str, session_id: Option<&str>) {
+    let hint = daemon_hook_action(
         None,
         serde_json::json!({
             "action": "user_review",
@@ -473,12 +448,8 @@ pub async fn hook_user_session_review() -> i32 {
             "session_id": session_id,
         }),
         None,
-    )
-    .await
-    {
-        eprintln!("[tracedecay] {provider} user session review daemon call failed: {error}");
-    }
-    0
+    );
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(25), hint).await;
 }
 
 const TRACEDECAY_RESEARCH_BLOCK_REASON: &str = "STOP: Use tracedecay MCP tools \

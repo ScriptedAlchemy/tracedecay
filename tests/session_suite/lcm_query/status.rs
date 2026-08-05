@@ -236,10 +236,9 @@ async fn status_uses_python_half_even_rounding_for_ratio_ties() {
     assert_eq!(status.dag.compression_ratio, "1.2:1");
 }
 
-// Pins the SQL pushdown of `count_lossy_ingest_records` to the previous
-// serde_json semantics: only a JSON boolean `true` under
-// `$.ingest_protection.lossy` counts; numeric 1, false, missing keys,
-// non-object metadata, invalid JSON, and NULL metadata are all not-lossy.
+// Pins the SQL pushdown of `count_lossy_ingest_records`: only a JSON boolean
+// `true` under `$.ingest_protection.lossy` counts. Provider metadata outside
+// the object contract fails closed before persistence.
 #[tokio::test]
 async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
     let tmp = TempDir::new().unwrap();
@@ -261,11 +260,6 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
         ),
         ("missing-key", Some(r#"{"ingest_protection":{}}"#)),
         ("missing-section", Some(r#"{"other":true}"#)),
-        ("invalid-json", Some("{not json")),
-        (
-            "non-object",
-            Some(r#"[{"ingest_protection":{"lossy":true}}]"#),
-        ),
         ("null-metadata", None),
     ];
     for (idx, (message_id, metadata)) in variants.iter().enumerate() {
@@ -278,6 +272,17 @@ async fn status_counts_lossy_ingest_records_with_pinned_metadata_semantics() {
         );
         message.metadata_json = metadata.map(str::to_string);
         assert!(db.upsert_session_message(&message).await);
+    }
+    for (message_id, metadata) in [
+        ("invalid-json", "{not json"),
+        ("non-object", r#"[{"ingest_protection":{"lossy":true}}]"#),
+    ] {
+        let mut message = raw_message("cursor", message_id, "session-lossy", 100, "body");
+        message.metadata_json = Some(metadata.to_string());
+        assert!(
+            !db.upsert_session_message(&message).await,
+            "malformed or non-object provider metadata must fail closed"
+        );
     }
 
     let status = db

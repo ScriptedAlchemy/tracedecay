@@ -38,6 +38,7 @@ fn compatibility_proposal_request_digest(
         "tags": request.tags(),
         "entities": request.entities(),
         "metadata": compatibility_payload_metadata(request.metadata()),
+        "sanitization_receipt": request.sanitization_receipt(),
         "automation_run_id": request.automation_run_id(),
         "default_trust": request.default_trust().as_f64(),
         "actor": request.actor().map(ActorId::as_str),

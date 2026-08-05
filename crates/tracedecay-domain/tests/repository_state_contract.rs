@@ -52,6 +52,7 @@ fn snapshot(head: GitOidV1) -> RepositoryStateSnapshotV1 {
         None,
         None,
         None,
+        None,
         UtcMicros(42),
         GitCoverageV1::complete(),
     )

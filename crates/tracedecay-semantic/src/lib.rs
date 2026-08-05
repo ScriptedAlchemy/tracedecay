@@ -17,23 +17,19 @@ use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkV1, ComponentRevision, ManifestDigest,
     ProjectionBatchRequestV1, ProjectionKeyV1, VectorGenerationIdV1,
 };
-use tracedecay_query::retrieval::ports::RetrievalPortError;
-use tracedecay_query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticExecutionControl, SemanticQueryEmbeddingPort,
-    SemanticQueryEmbeddingRequestV1,
-};
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub use self::fastembed_adapter::AdmittedProjectionArtifactV1;
+#[cfg(not(any(test, feature = "test-helpers")))]
+use self::fastembed_adapter::AdmittedProjectionArtifactV1;
 use self::fastembed_adapter::{
-    AdmittedProjectionArtifactV1, BoundedSanitizedTextBatchV1, CancellationSignal,
-    EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
+    BoundedSanitizedTextBatchV1, EmbeddingRuntime, EmbeddingSession, FastEmbedEmbeddingRuntime,
 };
 use self::projector::{
-    CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation,
-    prepare_vector_generation_async, split_projection_request,
+    CanonicalChunkVectorEncoderV1, PreparedVectorGenerationV1, prepare_vector_generation_async,
+    split_projection_request,
 };
-use self::runtime_query::{
-    CurrentSemanticQueryRuntimeV1, PooledSemanticQueryEmbedder, PooledSemanticQueryEmbedderFactory,
-};
+use self::runtime_query::CurrentSemanticQueryRuntimeV1;
 use self::runtime_service::{
     SemanticRuntimeService, SharedEmbeddingRuntimeFactory, fastembed_runtime_factory,
 };
@@ -50,8 +46,8 @@ pub mod projector;
 pub mod rerank_adapter;
 mod runtime_query;
 mod runtime_service;
+mod semantic_evaluation;
 pub mod session_pool;
-
 // Test-support constructors. Dependent crates opt in through `test-helpers`
 // exactly like the query kernel's `*_for_test` surface.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -59,16 +55,23 @@ pub use model_catalog::production_fastembed_catalog;
 #[cfg(any(test, feature = "test-helpers"))]
 pub use model_catalog::{CatalogedFastEmbedModelV1, FastEmbedModelCatalogV1};
 #[cfg(any(test, feature = "test-helpers"))]
-pub use model_lifecycle::{ModelLifecycleErrorV1, ModelMemberSourceV1};
+pub use model_lifecycle::ModelMemberSourceV1;
 pub use model_lifecycle::{
-    SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1, SemanticModelLifecycleStatusV1,
-    apply_config_and_queue_startup, shared_lifecycle_owner,
+    ModelLifecycleErrorV1, SemanticModelLifecycleOwnerV1, SemanticModelLifecycleStateV1,
+    SemanticModelLifecycleStatusV1, apply_config_and_queue_startup,
+    open_local_semantic_evaluation_lifecycle, shared_lifecycle_owner,
 };
 
 pub use runtime_service::{
     PreparedSemanticRuntimeCommitV1, SemanticGenerationPointerV1,
     SemanticRuntimeScheduleCancellationV1, SemanticRuntimeScheduleFailureV1,
-    SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1, SemanticRuntimeWorkV1,
+    SemanticRuntimeScheduleStatusV1, SemanticRuntimeSchedulingHandleV1,
+    SemanticRuntimeShutdownReceiptV1, SemanticRuntimeWorkV1,
+};
+pub use semantic_evaluation::{
+    PreparedSemanticEvaluationProjectionV1, SemanticEvaluationProjectionCancellationV1,
+    SemanticEvaluationQueryEmbedderV1, SemanticEvaluationQueryFactoryV1,
+    measure_semantic_evaluation_projection_cancellation, prepare_semantic_evaluation_projection,
 };
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).
@@ -156,6 +159,10 @@ pub enum SemanticFallbackReasonV1 {
     Loading,
     /// Model acquisition or load failed; exact/lexical/graph remain available.
     ModelFailed,
+    /// A complete prior activation exists but does not match the newest source.
+    Stale,
+    /// The semantic store schema must be explicitly reset before semantics run.
+    ResetRequired,
 }
 
 type SemanticProjectionStageFutureV1 = Pin<
@@ -392,99 +399,6 @@ pub struct SemanticRuntimeStatusProjectionV1 {
     pub prior_generation: Option<VectorGenerationIdV1>,
 }
 
-#[derive(Clone)]
-pub struct DaemonSemanticQueryFactoryV1 {
-    inner: Arc<PooledSemanticQueryEmbedderFactory<FastEmbedEmbeddingRuntime>>,
-}
-
-/// Isolated evaluator projection. It reuses the verified production artifact
-/// and `FastEmbed` runtime, but has no durable vector pointer and cannot replace
-/// a project's active generation.
-pub struct PreparedSemanticEvaluationProjectionV1 {
-    pub query_factory: DaemonSemanticQueryFactoryV1,
-    pub prepared: PreparedVectorGenerationV1,
-}
-
-pub fn prepare_semantic_evaluation_projection(
-    artifact: LoadedSemanticArtifactV1,
-    request: ProjectionBatchRequestV1,
-    canonical_chunks: &[CodeSearchChunkV1],
-    max_sessions: usize,
-    memory_ceiling_bytes: u64,
-) -> Result<PreparedSemanticEvaluationProjectionV1, SemanticRuntimeScheduleFailureV1> {
-    let authority = artifact.into_authority();
-    let factory: SharedEmbeddingRuntimeFactory<FastEmbedEmbeddingRuntime> =
-        fastembed_runtime_factory();
-    let runtime = SemanticRuntimeService::new_owned(
-        Arc::clone(&authority),
-        factory,
-        SessionPoolConfigV1 {
-            max_sessions,
-            max_queued_waiters: 0,
-            idle_timeout: std::time::Duration::from_mins(5),
-            memory_ceiling_bytes,
-        },
-    )
-    .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?;
-    let progress = Arc::new(SemanticRuntimeScheduleCancellationV1::new(
-        request.changes.added_or_changed.len().max(1) as u64,
-    ));
-    let mut encoder = RuntimeChunkVectorEncoderV1::new(Arc::clone(&runtime), progress);
-    let prepared = prepare_vector_generation(
-        authority.projection(),
-        request,
-        canonical_chunks,
-        &mut encoder,
-    )
-    .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-    Ok(PreparedSemanticEvaluationProjectionV1 {
-        query_factory: DaemonSemanticQueryFactoryV1 {
-            inner: PooledSemanticQueryEmbedderFactory::new(runtime),
-        },
-        prepared,
-    })
-}
-
-impl DaemonSemanticQueryFactoryV1 {
-    pub fn create<'a, C>(&self, control: &'a C) -> DaemonSemanticQueryEmbedderV1<'a>
-    where
-        C: SemanticExecutionControl + Sync,
-    {
-        let cancellation = Arc::new(QueryCancellationV1(control));
-        DaemonSemanticQueryEmbedderV1 {
-            inner: self.inner.create(cancellation),
-        }
-    }
-
-    pub fn resident_cache_bytes(&self) -> u64 {
-        self.inner.runtime().stats().resident_bytes
-    }
-}
-
-struct QueryCancellationV1<'a, C>(&'a C);
-
-impl<C> CancellationSignal for QueryCancellationV1<'_, C>
-where
-    C: SemanticExecutionControl + Sync,
-{
-    fn cancelled(&self) -> bool {
-        self.0.is_cancelled()
-    }
-}
-
-pub struct DaemonSemanticQueryEmbedderV1<'a> {
-    inner: PooledSemanticQueryEmbedder<'a, FastEmbedEmbeddingRuntime>,
-}
-
-impl SemanticQueryEmbeddingPort for DaemonSemanticQueryEmbedderV1<'_> {
-    fn embed_query(
-        &self,
-        request: SemanticQueryEmbeddingRequestV1<'_>,
-    ) -> Result<EphemeralQueryEmbeddingV1, RetrievalPortError> {
-        self.inner.embed_query(request)
-    }
-}
-
 /// The daemon-callable semantic owner. It exposes no transport operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SemanticRuntimeSchedulingBoundsV1 {
@@ -595,8 +509,9 @@ impl DaemonSemanticRuntimeHandleV1 {
         let pool_config = self.pool_config.clone();
         let runtime = Arc::clone(&self.runtime);
         let query_in_flight = Arc::clone(&self.query_in_flight);
-        let work = SemanticRuntimeWorkV1::new(
+        let work = SemanticRuntimeWorkV1::new_with_projection(
             request.target_generation,
+            projection_key.clone(),
             total_units,
             move |progress| async move {
                 let authority = tokio::task::spawn_blocking(request.load_artifact)
@@ -703,12 +618,28 @@ impl DaemonSemanticRuntimeHandleV1 {
         self.scheduling.cancel()
     }
 
+    pub fn begin_shutdown(&self) -> bool {
+        let _transition = self
+            .transitions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.scheduling.begin_shutdown()
+    }
+
+    pub async fn cancel_and_join_until(
+        &self,
+        deadline: tokio::time::Instant,
+    ) -> SemanticRuntimeShutdownReceiptV1 {
+        self.begin_shutdown();
+        self.scheduling.cancel_and_join_until(deadline).await
+    }
+
     pub fn query_factory(
         &self,
         source_generation: &CodeGenerationId,
         vector_generation: &VectorGenerationIdV1,
         projection_key: &ProjectionKeyV1,
-    ) -> Option<DaemonSemanticQueryFactoryV1> {
+    ) -> Option<SemanticEvaluationQueryFactoryV1> {
         let current = self.current()?;
         if current.source_generation != *source_generation
             || current.generation != *vector_generation
@@ -722,7 +653,7 @@ impl DaemonSemanticRuntimeHandleV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()?
             .factory_for(source_generation, vector_generation, projection_key)?;
-        Some(DaemonSemanticQueryFactoryV1 { inner })
+        Some(SemanticEvaluationQueryFactoryV1::from_runtime(inner))
     }
 
     /// Test-only binding for a pointer published without a production runtime.

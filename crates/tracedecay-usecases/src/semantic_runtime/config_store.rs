@@ -921,14 +921,13 @@ fn decode_optional_digest(
 #[cfg(test)]
 mod tests {
     use tracedecay_application::ResolvedScope;
-    use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{ProjectId, RepositoryId, WorktreeId};
 
     use super::*;
     use tracedecay_global_db::tests::harness::RegisteredGlobalDbTestRuntime;
 
     #[tokio::test]
-    async fn exact_query_bootstrap_is_explicit_and_required_before_activation() {
+    async fn missing_evaluated_evidence_keeps_activation_state_absent() {
         let directory = tempfile::tempdir().unwrap();
         let project_root = directory.path().join("project");
         std::fs::create_dir_all(&project_root).unwrap();
@@ -955,33 +954,6 @@ mod tests {
             store.current_record().await.unwrap_err(),
             SemanticConfigurationBackendErrorV1::Unavailable
         );
-
-        let (_, accepted, compatibility) =
-            crate::semantic_runtime::bundled_query_authority().unwrap();
-        assert!(accepted.is_exact_query_fallback());
-        let configuration = SemanticConfigurationPinV1 {
-            revision_id: ConfigurationRevisionId::new("configuration.revision.semantic-bootstrap")
-                .unwrap(),
-            snapshot_id: ConfigurationSnapshotId::new("configuration.snapshot.semantic-bootstrap")
-                .unwrap(),
-            effective_behavior_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
-                .unwrap(),
-        };
-        let state = RetrievalProfileStateV1::new(
-            configuration.revision_id.clone(),
-            accepted.clone(),
-            &compatibility,
-        )
-        .unwrap();
-
-        store
-            .install_initial_state(&configuration, &state)
-            .await
-            .unwrap();
-
-        let stored = store.current_record().await.unwrap();
-        assert_eq!(stored.state.active(), &accepted);
-        assert!(stored.state.active().is_exact_query_fallback());
-        assert!(stored.receipt.is_none());
+        assert!(store.current_state_if_present().await.unwrap().is_none());
     }
 }

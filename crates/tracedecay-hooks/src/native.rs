@@ -125,7 +125,8 @@ impl DecodedNativeHookEventV1 {
 
 /// Opaque material that a binding-aware host adapter may attach after native
 /// decoding. It never accepts a provider's raw ID, source, path, or payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NativeEnvelopeMaterialV1 {
     pub event_id: [u8; 16],
     pub protected_session_id: [u8; 32],
@@ -136,12 +137,35 @@ pub struct NativeEnvelopeMaterialV1 {
     pub changed_range_count: u8,
 }
 
+/// Content-free native material submitted by a projectless host hook.
+///
+/// The hook has no project route, so it cannot read a project binding or
+/// decide a fallback action. The daemon reconstructs the profile-scoped V2
+/// envelope from its authenticated profile identity before accepting it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileScopedNativeHookAdmissionV1 {
+    pub decoded: DecodedNativeHookEventV1,
+    pub material: NativeEnvelopeMaterialV1,
+}
+
+impl ProfileScopedNativeHookAdmissionV1 {
+    pub fn into_envelope(
+        self,
+        binding: &HookScopeBindingV1,
+    ) -> Result<HookEventEnvelopeV2, NativeHookDecodeError> {
+        self.decoded.into_envelope(binding, self.material)
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum NativeHookDecodeError {
     #[error("native hook payload exceeds the Hook V2 bound")]
     PayloadTooLarge,
     #[error("native hook payload is malformed")]
     MalformedPayload,
+    #[error("native hook payload exceeds structural limits")]
+    StructureLimit,
     #[error("native hook event is not a checked-in supported event")]
     UnsupportedNativeEvent,
     #[error("native hook event is missing a required typed identity")]
@@ -211,6 +235,9 @@ pub fn decode_opencode_lsp_event(
 }
 
 fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> {
+    const MAX_NATIVE_DEPTH: usize = 32;
+    const MAX_NATIVE_VALUES: usize = 2_048;
+
     if payload.len() > MAX_HOOK_PAYLOAD_BYTES {
         return Err(NativeHookDecodeError::PayloadTooLarge);
     }
@@ -218,6 +245,27 @@ fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> 
         serde_json::from_slice(payload).map_err(|_| NativeHookDecodeError::MalformedPayload)?;
     if !raw.is_object() {
         return Err(NativeHookDecodeError::MalformedPayload);
+    }
+    let mut values = 0usize;
+    let mut pending = vec![(&raw, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        values = values.saturating_add(1);
+        if values > MAX_NATIVE_VALUES || depth > MAX_NATIVE_DEPTH {
+            return Err(NativeHookDecodeError::StructureLimit);
+        }
+        match value {
+            Value::Array(items) => {
+                pending.extend(items.iter().map(|item| (item, depth.saturating_add(1))));
+            }
+            Value::Object(fields) => {
+                pending.extend(
+                    fields
+                        .values()
+                        .map(|field| (field, depth.saturating_add(1))),
+                );
+            }
+            _ => {}
+        }
     }
     Ok(raw)
 }
@@ -293,6 +341,18 @@ struct CodexStopEvent {
     permission_mode: String,
     stop_hook_active: bool,
     last_assistant_message: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct CodexPostToolUseEvent {
+    session_id: String,
+    turn_id: String,
+    cwd: String,
+    tool_name: String,
+    tool_use_id: String,
+    tool_input: Value,
+    tool_response: Value,
 }
 
 #[allow(dead_code)]
@@ -500,6 +560,15 @@ fn decode_claude(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 fn decode_codex(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     match event_name(raw, "hook_event_name")? {
         "SessionStart" => Ok(NativeHookSignalV1::SessionBoundary(HookBoundaryV1::Start)),
+        "PostToolUse" => {
+            let event = decode_shape::<CodexPostToolUseEvent>(raw)?;
+            if event.tool_name.is_empty() || event.tool_use_id.is_empty() {
+                return Err(NativeHookDecodeError::MissingTypedIdentity);
+            }
+            Ok(NativeHookSignalV1::ToolLifecycle(
+                HookLifecyclePhaseV1::Completed,
+            ))
+        }
         "Stop" => {
             decode_shape::<CodexStopEvent>(raw)?;
             Ok(NativeHookSignalV1::SessionBoundary(
@@ -536,7 +605,7 @@ fn decode_cursor(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeErro
 fn decode_hermes(raw: &Value) -> Result<NativeHookSignalV1, NativeHookDecodeError> {
     if let Some(event_bus_name) = raw.get("event") {
         return match event_bus_name.as_str().filter(|value| !value.is_empty()) {
-            Some("turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
+            Some("turnCompleted" | "turnIngested") => Ok(NativeHookSignalV1::SessionBoundary(
                 HookBoundaryV1::TurnComplete,
             )),
             Some("terminalReceipt") => {
@@ -809,6 +878,30 @@ mod tests {
     }
 
     #[test]
+    fn kimi_and_opencode_reject_deep_or_oversized_payloads_before_typed_decode() {
+        for (host, discriminator) in [
+            (
+                NativeHostIdentityV1::KimiCode,
+                r#""hook_event_name":"Stop""#,
+            ),
+            (NativeHostIdentityV1::OpenCode, r#""type":"session.idle""#),
+        ] {
+            let nested = format!("{}null{}", "[".repeat(33), "]".repeat(33));
+            let deep = format!(r#"{{{discriminator},"nested":{nested}}}"#);
+            assert_eq!(
+                decode_native_hook_event(host, deep.as_bytes()),
+                Err(NativeHookDecodeError::StructureLimit)
+            );
+
+            let oversized = vec![b' '; MAX_HOOK_PAYLOAD_BYTES + 1];
+            assert_eq!(
+                decode_native_hook_event(host, &oversized),
+                Err(NativeHookDecodeError::PayloadTooLarge)
+            );
+        }
+    }
+
+    #[test]
     fn hermes_hook_discriminators_do_not_alias_event_bus_variants() {
         for fixture in [
             include_bytes!("../fixtures/host_events/hermes/saved-edit.json").as_slice(),
@@ -828,6 +921,30 @@ mod tests {
                     &serde_json::to_vec(&payload).unwrap()
                 ),
                 Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            );
+        }
+    }
+
+    #[test]
+    fn hermes_turn_completion_and_ingestion_are_truthful_native_boundaries() {
+        for event in ["turnCompleted", "turnIngested"] {
+            let payload = serde_json::json!({
+                "agent": "hermes",
+                "event": event,
+                "route": {"session_id": "session.hermes"},
+                "receipt": {
+                    "status": "success",
+                    "transcript_watermark": "message.hermes"
+                }
+            });
+            assert_eq!(
+                decode_native_hook_event(
+                    NativeHostIdentityV1::Hermes,
+                    &serde_json::to_vec(&payload).unwrap(),
+                )
+                .unwrap()
+                .signal,
+                NativeHookSignalV1::SessionBoundary(HookBoundaryV1::TurnComplete)
             );
         }
     }
@@ -856,18 +973,20 @@ mod tests {
     }
 
     #[test]
-    fn codex_documented_unverified_post_tool_use_stays_unavailable() {
+    fn codex_documented_post_tool_use_preserves_native_tool_lifecycle() {
         let codex = include_str!("../fixtures/host_events/codex.json");
         assert_eq!(
             decode_native_hook_event(
                 NativeHostIdentityV1::Codex,
                 fixture_request(codex, "saved_edit").as_slice()
-            ),
-            Err(NativeHookDecodeError::UnsupportedNativeEvent)
+            )
+            .unwrap()
+            .signal,
+            NativeHookSignalV1::ToolLifecycle(HookLifecyclePhaseV1::Completed)
         );
         assert_eq!(
             stock_event_support(NativeHostIdentityV1::Codex, HookEventFamily::ToolLifecycle),
-            HookEventSupportV1::Unavailable
+            HookEventSupportV1::Native
         );
     }
 

@@ -15,10 +15,10 @@ use tracedecay_domain::{
     CompactCandidate, DiversityPolicy, ExactClass, FusionProfile, ManifestDigest,
     OptionalStagePublicStatus, PublicRetrieverStatus, QueryFallbackSubpayload, RankedCandidate,
     RerankPolicy, RetrievalAnchorId, RetrievalFailure, RetrievalRequest, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, SanitizedStageFailure,
+    RetrieverKind, RetrieverOutcome, SanitizedStageFailure, SourceFreshness,
 };
 
-use super::candidate_output::{CandidateWorkloadV1, ProfileSpecV1, ResourceSampleV1};
+use super::candidate_output::{ProfileSpecV1, ResourceSampleV1};
 use tracedecay_query::retrieval::fusion::{
     CompositionKernel, CompositionLaneInput, FusionStageError, FusionStageInput,
 };
@@ -35,16 +35,14 @@ use tracedecay_query::retrieval::semantic::{
     CodeSemanticEvidenceV1, SemanticLaneRetriever, SemanticRetrievalRequestV1, SemanticSearchKindV1,
 };
 
-const REQUIRED_RESOURCE_SCALES: [&str; 2] = ["current", "10x"];
-const REQUIRED_PROJECTION_CASES: [SemanticProjectionCaseV1; 7] = [
-    SemanticProjectionCaseV1::Clean,
-    SemanticProjectionCaseV1::OneSymbol,
-    SemanticProjectionCaseV1::Deletion,
-    SemanticProjectionCaseV1::NoOp,
-    SemanticProjectionCaseV1::IdempotencyReplay,
-    SemanticProjectionCaseV1::Cancellation,
-    SemanticProjectionCaseV1::IncompatibleState,
-];
+mod fallback;
+mod profile_requirements;
+mod resource_contract;
+
+pub use profile_requirements::{SemanticNativeProfileRequirementsV1, native_profile_requirements};
+
+use profile_requirements::requirements_for_profile;
+use resource_contract::{REQUIRED_PROJECTION_CASES, REQUIRED_RESOURCE_SCALES};
 
 /// Why a real optional-stage run could not be recorded.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,38 +75,6 @@ impl<T> SemanticNativeStageResultV1<T> {
     }
 }
 
-/// Optional stages requested by one checked-in Plan 15 profile.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct SemanticNativeProfileRequirementsV1 {
-    pub profile_id: String,
-    pub semantic_requested: bool,
-    pub rerank_requested: bool,
-}
-
-/// Derive execution requirements from the checked-in workload profile.
-pub fn native_profile_requirements(
-    workload: &CandidateWorkloadV1,
-    profile_id: &str,
-) -> Result<SemanticNativeProfileRequirementsV1, SemanticNativeEvaluationErrorV1> {
-    let profile = workload
-        .profile_matrix
-        .iter()
-        .find(|profile| profile.profile_id == profile_id)
-        .ok_or_else(|| {
-            SemanticNativeEvaluationErrorV1::Contract(format!("unknown profile {profile_id}"))
-        })?;
-    Ok(requirements_for_profile(profile))
-}
-
-fn requirements_for_profile(profile: &ProfileSpecV1) -> SemanticNativeProfileRequirementsV1 {
-    SemanticNativeProfileRequirementsV1 {
-        profile_id: profile.profile_id.clone(),
-        semantic_requested: profile.semantic_weight_ppm != 0,
-        rerank_requested: profile.rerank_weight_ppm != 0,
-    }
-}
-
 /// Channel-removal comparisons required by Plans 15 and 31.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -125,6 +91,7 @@ pub enum SemanticChannelAblationV1 {
 pub struct SemanticChannelAblationResultV1 {
     pub ablation: SemanticChannelAblationV1,
     pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub freshness: Vec<SourceFreshness>,
     pub ranked_candidates: Vec<RankedCandidate>,
     pub measurement: SemanticNativeStageMeasurementV1,
 }
@@ -344,6 +311,15 @@ pub fn evaluate_native_query(
         )?);
     }
     ablations.sort_by_key(|result| result.ablation);
+    let query_fallback_baseline = ablations
+        .iter()
+        .find(|result| result.ablation == SemanticChannelAblationV1::QueryExactLexicalGraph)
+        .ok_or_else(|| {
+            SemanticNativeEvaluationErrorV1::Contract(
+                "native evaluation produced no query fallback baseline".to_owned(),
+            )
+        })?;
+    fallback::validate_query_fallback_baseline(input.fallback, query_fallback_baseline)?;
 
     let rerank_source = ablations
         .iter()
@@ -473,6 +449,7 @@ fn compose_ablation(
     Ok(SemanticChannelAblationResultV1 {
         ablation,
         public_lane_statuses: output.public_lane_statuses,
+        freshness: output.freshness,
         ranked_candidates: output.ranked_candidates,
         measurement: SemanticNativeStageMeasurementV1 {
             elapsed_micros: elapsed_micros(started),
@@ -1010,7 +987,8 @@ impl SemanticNativeResourceSampleV1 {
             && idempotency_replay.chunks_deleted == 0
             && idempotency_replay.chunks_reused == 0
             && cancellation.outcome == SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication
-            && cancellation.projection_calls == 0
+            && cancellation.projection_calls != 0
+            && cancellation.chunks_added_or_changed != 0
             && incompatible.outcome == SemanticProjectionCaseOutcomeV1::FullRebuildIncompatible
             && incompatible.projection_calls != 0
     }
@@ -1120,7 +1098,7 @@ impl SemanticNativeResourceEvidenceV1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::load_candidate_workload;
+    use crate::{CandidateWorkloadV1, load_candidate_workload};
     use tracedecay_domain::canonical_sha256;
 
     fn checked_in_workload() -> CandidateWorkloadV1 {
@@ -1254,10 +1232,10 @@ mod tests {
                     SemanticProjectionCaseV1::Cancellation,
                     projection_case_sample(
                         SemanticProjectionCaseOutcomeV1::CancelledWithoutPublication,
+                        1,
                         0,
                         0,
-                        0,
-                        0,
+                        1,
                     ),
                 ),
                 (
@@ -1315,5 +1293,21 @@ mod tests {
             .projection_calls = 1;
 
         assert!(!sample.is_complete());
+    }
+
+    #[test]
+    fn projection_case_matrix_rejects_cancellation_before_any_projection_work() {
+        let mut sample = complete_resource_sample();
+        let cancellation = sample
+            .projection_cases
+            .get_mut(&SemanticProjectionCaseV1::Cancellation)
+            .expect("cancellation case");
+        cancellation.chunks_added_or_changed = 0;
+        cancellation.projection_calls = 0;
+
+        assert!(
+            !sample.is_complete(),
+            "a pre-start cancellation cannot stand in for interrupted semantic projection"
+        );
     }
 }

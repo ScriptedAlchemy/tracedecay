@@ -155,27 +155,6 @@ fn assert_valid_cursor_chain(history: &[(i64, i64, Option<i64>)]) {
     );
 }
 
-async fn fts_legacy_message_ids(db_path: &Path) -> Vec<String> {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT raw.message_id
-             FROM lcm_raw_messages_fts
-             JOIN lcm_raw_messages raw ON raw.store_id = lcm_raw_messages_fts.rowid
-             WHERE lcm_raw_messages_fts MATCH 'legacy'
-             ORDER BY raw.message_id",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut ids = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        ids.push(row.get(0).unwrap());
-    }
-    ids
-}
-
 async fn schema_version(db_path: &Path) -> i64 {
     let db = TestConnection::open(db_path);
     let conn = (*db).clone();
@@ -232,92 +211,6 @@ async fn set_migration_version(db_path: &Path, version: i64) {
     )
     .await
     .unwrap();
-}
-
-/// Rewrites the raw-message FTS objects into the pre-v3 shape (role +
-/// `metadata_json` indexed alongside `index_text`) and stamps the requested
-/// schema version, simulating a database written by an older tracedecay.
-async fn downgrade_raw_fts_to_v2(db_path: &Path) {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS lcm_raw_messages_fts_insert;
-         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_delete;
-         DROP TRIGGER IF EXISTS lcm_raw_messages_fts_update;
-         DROP TABLE IF EXISTS lcm_raw_messages_fts;
-         CREATE VIRTUAL TABLE lcm_raw_messages_fts USING fts5(
-             index_text, role, metadata_json,
-             content='lcm_raw_messages',
-             content_rowid='store_id'
-         );
-         CREATE TRIGGER lcm_raw_messages_fts_insert
-             AFTER INSERT ON lcm_raw_messages BEGIN
-                 INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
-                 VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
-             END;
-         CREATE TRIGGER lcm_raw_messages_fts_delete
-             AFTER DELETE ON lcm_raw_messages BEGIN
-                 INSERT INTO lcm_raw_messages_fts(
-                     lcm_raw_messages_fts, rowid, index_text, role, metadata_json
-                 )
-                 VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
-             END;
-         CREATE TRIGGER lcm_raw_messages_fts_update
-             AFTER UPDATE ON lcm_raw_messages BEGIN
-                 INSERT INTO lcm_raw_messages_fts(
-                     lcm_raw_messages_fts, rowid, index_text, role, metadata_json
-                 )
-                 VALUES ('delete', OLD.store_id, OLD.index_text, OLD.role, OLD.metadata_json);
-                 INSERT INTO lcm_raw_messages_fts(rowid, index_text, role, metadata_json)
-                 VALUES (NEW.store_id, NEW.index_text, NEW.role, NEW.metadata_json);
-             END;
-         INSERT INTO lcm_raw_messages_fts(lcm_raw_messages_fts) VALUES('rebuild');
-         UPDATE session_schema_migrations SET version = 2 WHERE name = 'lcm';",
-    )
-    .await
-    .unwrap();
-}
-
-async fn fts_message_ids_matching(db_path: &Path, query: &str) -> Vec<String> {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT raw.message_id
-             FROM lcm_raw_messages_fts
-             JOIN lcm_raw_messages raw ON raw.store_id = lcm_raw_messages_fts.rowid
-             WHERE lcm_raw_messages_fts MATCH ?1
-             ORDER BY raw.message_id",
-            params![query],
-        )
-        .await
-        .unwrap();
-    let mut ids = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        ids.push(row.get(0).unwrap());
-    }
-    ids
-}
-
-async fn raw_fts_object_sql(db_path: &Path) -> Vec<String> {
-    let db = TestConnection::open(db_path);
-    let conn = (*db).clone();
-    let mut rows = conn
-        .query(
-            "SELECT sql FROM sqlite_master
-             WHERE name IN ('lcm_raw_messages_fts',
-                            'lcm_raw_messages_fts_insert',
-                            'lcm_raw_messages_fts_delete',
-                            'lcm_raw_messages_fts_update')",
-            (),
-        )
-        .await
-        .unwrap();
-    let mut sqls = Vec::new();
-    while let Some(row) = rows.next().await.unwrap() {
-        sqls.push(row.get(0).unwrap());
-    }
-    sqls
 }
 
 async fn normalized_trigger_sql(db_path: &Path, trigger: &str) -> String {
@@ -629,7 +522,7 @@ async fn copy_database_for_temporal_restart(source: &Path, target: &Path) {
     std::fs::copy(source, target).unwrap();
 }
 
-mod lcm_migration;
+mod lcm_schema_contract;
 mod temporal_catalog;
 mod temporal_constraints;
 mod temporal_cursor;
