@@ -75,9 +75,9 @@ impl TraceDecay {
         MemoryApplication::new(owner, store).map_err(memory_application_error)
     }
 
-    /// Add a fact to the holographic memory store. The outcome carries the
-    /// stored (or pre-existing) fact plus a write-time diff report
-    /// (near-duplicate / possible-conflict / secret rejection).
+    /// Adds a canonical fact and updates its derived holographic projection.
+    /// The outcome carries the stored (or pre-existing) fact plus a write-time
+    /// diff report (near-duplicate / possible-conflict / secret rejection).
     pub async fn add_fact(&self, request: AddFactRequest) -> Result<AddFactOutcome> {
         let context = self.generated_memory_operation("add fact")?;
         self.project_memory_application()

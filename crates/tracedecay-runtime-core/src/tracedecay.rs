@@ -1,8 +1,8 @@
 //! Kernel-owned slice of the root `tracedecay` orchestrator module.
 //!
-//! Only the shared wall-clock reader moved: `db::memory_v2`, `memory::store`,
-//! and `runtime_identity` all stamp records with it, and those layers now live
-//! in this crate. The root `tracedecay` module re-exports it so
+//! Only the shared wall-clock reader moved: `db::memory_v2` and
+//! `runtime_identity` stamp records with it, and those layers now live in this
+//! crate. The root `tracedecay` module re-exports it so
 //! `crate::tracedecay::current_timestamp` keeps resolving on both sides of the
 //! split.
 

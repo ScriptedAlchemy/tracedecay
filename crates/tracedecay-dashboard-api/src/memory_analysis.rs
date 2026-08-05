@@ -5,11 +5,10 @@
 
 use serde_json::{Value, json};
 
-// Similarity primitives live in `tracedecay_runtime_core::memory::similarity` (shared with the
-// write-time diff check in `MemoryStore::add_fact`); re-exported so dashboard
-// behavior and call sites stay identical.
+// Similarity primitives live in the runtime core and are re-exported so the
+// dashboard's behavior and call sites stay identical.
 pub use tracedecay_runtime_core::memory::similarity::{
-    lexical_overlap, phase_cosine_similarity, similarity_classification,
+    contains_negation_cue, lexical_overlap, phase_cosine_similarity, similarity_classification,
 };
 
 pub const SIMILARITY_FACT_CAP: i64 = 2000;
@@ -376,8 +375,7 @@ fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or("");
-    tracedecay_runtime_core::memory::diff::contains_negation_cue(a_content)
-        || tracedecay_runtime_core::memory::diff::contains_negation_cue(b_content)
+    contains_negation_cue(a_content) || contains_negation_cue(b_content)
 }
 
 /// Propose hard-delete actions for `likely_duplicate` pairs from pre-scored facts.
@@ -394,7 +392,7 @@ fn pair_has_supersession_cue(facts: &[Value], a: usize, b: usize) -> bool {
 /// searches keep returning is demonstrably in use; when the trust-based loser
 /// choice would delete it, the pair is left out of the automatic plan for
 /// LLM/human review instead. (Recall `retrieval_count` now also feeds a small
-/// bounded ranking boost in `combined_score` — see `memory::retrieval`; this
+/// bounded ranking boost in `combined_score`; this
 /// access-reluctance guard is an additional curation-only signal on top of it.)
 pub fn propose_dedup_actions(facts: &[Value], pairs: &[ScoredPair]) -> Vec<Value> {
     let mut consumed_losers: std::collections::HashSet<i64> = std::collections::HashSet::new();
@@ -593,9 +591,7 @@ pub fn propose_hygiene_candidates(
         let b = &pair_facts[pair.b];
         let a_content = a.get("content").and_then(Value::as_str).unwrap_or("");
         let b_content = b.get("content").and_then(Value::as_str).unwrap_or("");
-        if !tracedecay_runtime_core::memory::diff::contains_negation_cue(a_content)
-            && !tracedecay_runtime_core::memory::diff::contains_negation_cue(b_content)
-        {
+        if !contains_negation_cue(a_content) && !contains_negation_cue(b_content) {
             continue;
         }
         // Older = smaller semantic freshness timestamp; on a tie, the smaller fact_id.

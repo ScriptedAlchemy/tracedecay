@@ -3,6 +3,7 @@ use tracedecay_domain::{
     FactIdentityMaterialV1, FactIdentitySourceV1, FactLineageEventKindV1, FactLineageEventV1,
     ProvenanceId, UtcMicros,
 };
+use tracedecay_store::{MemoryV2ArchiveFamilyV1, MemoryV2ArchiveScalarV1};
 
 use crate::db::engine::{Connection, TestConnection, params};
 
@@ -266,4 +267,149 @@ async fn owner_archive_exports_and_imports_production_writer_closure_idempotentl
         .await
         .unwrap();
     retry.commit().await.unwrap();
+}
+
+#[tokio::test]
+async fn owner_archive_omits_payloads_and_redacts_feedback_for_denied_facts() {
+    let (runtime, _dir) = database().await;
+    let conn = (*runtime).clone();
+    let owner = owner();
+    let owner_key = owner_key(&owner).unwrap();
+
+    for (ordinal, payload_access) in ["quarantined", "retention_expired"].into_iter().enumerate() {
+        let fact_id = format!("archive.denied.fact.{ordinal}");
+        let assertion_id = format!("archive.denied.assertion.{ordinal}");
+        let event_id = format!("archive.denied.event.{ordinal}");
+        conn.execute(
+            "INSERT INTO memory_v2_facts(
+                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+             ) VALUES(?1, ?2, ?3, ?4, '{}', 100)",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                owner_key.json.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_assertions(
+                assertion_id, fact_id, owner_kind, project_id, owner_json,
+                assertion_header_json, kind_json, payload_reference_json, receipt_json,
+                asserted_at, actor_id
+             ) VALUES(?1, ?2, ?3, ?4, ?5, '{}', '{}', '{}', '{}', 100, NULL)",
+            params![
+                assertion_id.as_str(),
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                owner_key.json.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_assertion_payloads(
+                assertion_id, fact_id, owner_kind, project_id, payload_json, content
+             ) VALUES(?1, ?2, ?3, ?4, '{}', 'private payload')",
+            params![
+                assertion_id.as_str(),
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_assertion_vectors(
+                assertion_id, fact_id, owner_kind, project_id,
+                vector, algebra, dimensions, precision
+             ) VALUES(?1, ?2, ?3, ?4, X'00000000', 'cosine', 1, 'f32')",
+            params![
+                assertion_id.as_str(),
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_lineage_events(
+                event_id, fact_id, owner_kind, project_id, event_json, occurred_at, recorded_at
+             ) VALUES(?1, ?2, ?3, ?4, '{}', 100, 100)",
+            params![
+                event_id.as_str(),
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_current_facts(
+                fact_id, owner_kind, project_id, payload_access, trust_score,
+                active_assertion_id, last_event_id, updated_at
+             ) VALUES(?1, ?2, ?3, ?4, 0.5, ?5, ?6, 100)",
+            params![
+                fact_id.as_str(),
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                payload_access,
+                assertion_id.as_str(),
+                event_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_v2_feedback_history(
+                owner_kind, project_id, fact_id, event_id, action, old_trust, new_trust,
+                occurred_at, source, note, details_availability
+             ) VALUES(?1, ?2, ?3, ?4, 'helpful', 0.4, 0.5, 100,
+                      'private source', 'private note', 'available')",
+            params![
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                fact_id.as_str(),
+                event_id.as_str(),
+            ],
+        )
+        .await
+        .unwrap();
+    }
+
+    let archive = export_memory_v2_owner_archive(&conn, MemoryV2ArchiveDatabase::Main, &owner)
+        .await
+        .unwrap();
+    assert!(
+        !archive.records().iter().any(|record| matches!(
+            record.family(),
+            MemoryV2ArchiveFamilyV1::AssertionPayload | MemoryV2ArchiveFamilyV1::AssertionVector
+        )),
+        "denied payload and vector content must not leave the owner store"
+    );
+    let feedback_records = archive
+        .records()
+        .iter()
+        .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::FeedbackHistory)
+        .collect::<Vec<_>>();
+    assert_eq!(feedback_records.len(), 2);
+    for record in feedback_records {
+        assert_eq!(
+            record.fields().get("source"),
+            Some(&MemoryV2ArchiveScalarV1::Null)
+        );
+        assert_eq!(
+            record.fields().get("note"),
+            Some(&MemoryV2ArchiveScalarV1::Null)
+        );
+        assert_eq!(
+            record.fields().get("details_availability"),
+            Some(&MemoryV2ArchiveScalarV1::Text("legacy_redacted".to_owned()))
+        );
+    }
 }

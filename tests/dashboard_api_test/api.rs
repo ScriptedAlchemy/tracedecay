@@ -53,7 +53,7 @@ fn dashboard_memory_status_does_not_wait_for_the_writer_lane() {
             .unwrap_or_else(|error| panic!("reopen dashboard fixture project: {error}"));
         let writer = cg
             .db()
-            .memory_writer()
+            .writer_connection("hold dashboard writer lane")
             .await
             .unwrap_or_else(|error| panic!("hold dashboard writer: {error}"));
 

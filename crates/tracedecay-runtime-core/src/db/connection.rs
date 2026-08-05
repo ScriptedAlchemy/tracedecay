@@ -127,15 +127,6 @@ pub enum DatabaseMemoryTransaction<'a> {
     Write(DatabaseWriteTransaction<'a>),
 }
 
-/// Opaque, serialized access to memory mutations for integration fixtures.
-///
-/// This capability intentionally exposes neither the writable connection nor
-/// arbitrary SQL execution.
-#[doc(hidden)]
-pub struct DatabaseMemoryWriter<'a> {
-    writer: DatabaseWriterConnection<'a>,
-}
-
 /// An immediate transaction that retains the canonical writer lane until the
 /// transaction commits, rolls back, or is dropped.
 pub struct DatabaseWriteTransaction<'a> {

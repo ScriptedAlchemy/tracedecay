@@ -1033,24 +1033,19 @@ async fn memory_fact_store_update_trust_delta_uses_direct_fact_lookup() {
     let first: Value = serde_json::from_str(extract_text(&first.value)).unwrap();
     let first_id = first["fact"]["fact_id"].as_i64().unwrap();
 
-    let db = cg.open_project_store_db().await.unwrap();
-    let mut fixture_conn = rusqlite::Connection::open(db.database_path()).unwrap();
-    let fixture_tx = fixture_conn.transaction().unwrap();
     for i in 0..205i64 {
-        fixture_tx
-            .execute(
-                "INSERT INTO memory_facts (
-                    content, category, tags, trust_score, created_at, updated_at, source, metadata
-                 )
-                 VALUES (?1, 'general', '[]', 0.5, ?2, ?2, 'test', '{}')",
-                rusqlite::params![
-                    format!("Later fact {i} should not hide the first fact"),
-                    9_000_000_000i64 + i,
-                ],
-            )
-            .unwrap();
+        cg.add_fact(tracedecay::memory::types::AddFactRequest {
+            content: format!("Later fact {i} should not hide the first fact"),
+            category: tracedecay::memory::types::MemoryCategory::General,
+            source: Some("test".to_owned()),
+            tags: Vec::new(),
+            entities: Vec::new(),
+            trust: Some(0.5),
+            metadata: serde_json::json!({}),
+        })
+        .await
+        .unwrap();
     }
-    fixture_tx.commit().unwrap();
 
     let updated = handle_tool_call(
         &cg,
@@ -1247,31 +1242,36 @@ async fn memory_fact_store_uses_project_store_when_serving_branch_db() {
         .as_i64()
         .expect("fact_store add should return numeric id");
 
-    let (branch_db, _) = crate::common::open_test_database(&cg.db_path())
-        .await
-        .unwrap();
-    let branch_writer = branch_db.memory_writer().await.unwrap();
-    assert!(
-        branch_writer
-            .store()
-            .get_fact(fact_id)
-            .await
-            .unwrap()
-            .is_none(),
+    let branch_projection_count = rusqlite::Connection::open_with_flags(
+        cg.db_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT COUNT(*) FROM memory_facts WHERE fact_id = ?1",
+        rusqlite::params![fact_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap();
+    assert_eq!(
+        branch_projection_count, 0,
         "MCP memory writes must not be scoped to the branch graph DB"
     );
 
-    let (project_db, _) = crate::common::open_test_database(&cg.store_layout().graph_db_path)
-        .await
-        .unwrap();
-    let project_writer = project_db.memory_writer().await.unwrap();
-    assert!(
-        project_writer
-            .store()
-            .get_fact(fact_id)
-            .await
-            .unwrap()
-            .is_some(),
+    let project_projection_count = rusqlite::Connection::open_with_flags(
+        &cg.store_layout().graph_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT COUNT(*) FROM memory_facts
+         WHERE fact_id = ?1 AND canonical_fact_id IS NOT NULL",
+        rusqlite::params![fact_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap();
+    assert_eq!(
+        project_projection_count, 1,
         "MCP memory writes must land in the shared project memory store"
     );
 }

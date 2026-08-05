@@ -265,58 +265,6 @@ async fn retained_reader_never_observes_uncommitted_writer_state() {
 }
 
 #[tokio::test]
-async fn opaque_memory_writer_serializes_and_mutates_without_raw_connection_access() {
-    let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("graph.db");
-    let authority = DatabaseAuthority::acquire_test(&path, "memory writer capability").unwrap();
-    let (db, _) = Database::publish_fixture_runtime(
-        &path,
-        &authority,
-        TestDatabaseRuntimeMode::Initialize,
-        test_code_shard().unwrap(),
-    )
-    .await
-    .unwrap();
-    let first = db.memory_writer().await.unwrap();
-    let mut second = Box::pin(db.memory_writer());
-
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(25), &mut second)
-            .await
-            .is_err()
-    );
-    drop(first);
-    let second = second.await.unwrap();
-    second
-        .store()
-        .add_fact(
-            crate::memory::types::AddFactRequest {
-                content: "opaque writer fixture".to_string(),
-                category: crate::memory::types::MemoryCategory::General,
-                source: Some("test".to_string()),
-                tags: Vec::new(),
-                entities: Vec::new(),
-                trust: None,
-                metadata: serde_json::json!({}),
-            },
-            crate::memory::trust::DEFAULT_TRUST,
-        )
-        .await
-        .unwrap();
-    drop(second);
-
-    let mut rows = db
-        .conn()
-        .query("SELECT COUNT(*) FROM memory_facts", ())
-        .await
-        .unwrap();
-    assert_eq!(
-        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
-        1
-    );
-}
-
-#[tokio::test]
 async fn cancelled_write_transaction_rolls_back_before_releasing_lane() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("graph.db");

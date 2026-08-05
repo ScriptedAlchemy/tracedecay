@@ -1,8 +1,7 @@
 use super::{
     Connection, Database, DatabaseEngineConnection, DatabaseEngineReadSnapshot,
-    DatabaseMemoryTransaction, DatabaseMemoryWriter, DatabaseWriteTransaction,
-    DatabaseWriterConnection, ReadSnapshot, Result, TraceDecayError, TransactionBehavior,
-    database_query_error, integrity,
+    DatabaseMemoryTransaction, DatabaseWriteTransaction, DatabaseWriterConnection, ReadSnapshot,
+    Result, TraceDecayError, TransactionBehavior, database_query_error, integrity,
 };
 
 impl Database {
@@ -157,16 +156,6 @@ impl Database {
         Ok(DatabaseWriterConnection {
             _guard: guard,
             conn,
-        })
-    }
-
-    /// Acquires opaque, serialized access to memory mutations.
-    #[doc(hidden)]
-    pub async fn memory_writer(&self) -> Result<DatabaseMemoryWriter<'_>> {
-        Ok(DatabaseMemoryWriter {
-            writer: self
-                .writer_connection("memory store writer capability")
-                .await?,
         })
     }
 

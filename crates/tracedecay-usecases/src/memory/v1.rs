@@ -376,7 +376,7 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
         let target = self.legacy_compatibility_target(fact_id)?;
         // Removing a fact that was never stored (or was concurrently removed
         // just before this call) is an idempotent no-op, mirroring the legacy
-        // MemoryStore contract. The authority resolves that disposition
+        // Canonical memory contract. The authority resolves that disposition
         // inside its single remove transaction and reports it as
         // `removed() == false`; callers (e.g. the dashboard curate handler)
         // surface this as a per-op "fact not found" result rather than an

@@ -25,8 +25,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::Value;
 use tempfile::TempDir;
-use tracedecay::memory::trust::DEFAULT_TRUST;
-use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory, SearchFactsRequest};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 #[derive(Deserialize)]
@@ -355,35 +354,30 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
         return;
     }
 
-    let db_path = fixture.db_path();
-    let open_path = db_path.clone();
-    runtime().block_on(async move {
-        let (db, _) = common::open_test_database(&open_path)
+    let profile_root = fixture.home_path.join(".tracedecay");
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    runtime().block_on(async {
+        let cg = TraceDecay::open_with_options(&fixture.project_path, open_options)
             .await
-            .unwrap_or_else(|e| panic!("open {}: {e}", open_path.display()));
-        let writer = db
-            .memory_writer()
-            .await
-            .unwrap_or_else(|e| panic!("open memory writer: {e}"));
-        let store = writer.store();
+            .unwrap_or_else(|e| panic!("open memory fixture project: {e}"));
         for fact in facts {
             let category = fact
                 .category
                 .parse::<MemoryCategory>()
                 .unwrap_or_else(|e| panic!("invalid seed fact category `{}`: {e}", fact.category));
-            let outcome = store
-                .add_fact(
-                    AddFactRequest {
-                        content: fact.content.clone(),
-                        category,
-                        source: Some(fact.source.clone()),
-                        tags: Vec::new(),
-                        entities: Vec::new(),
-                        trust: Some(fact.trust),
-                        metadata: serde_json::json!({}),
-                    },
-                    DEFAULT_TRUST,
-                )
+            let outcome = cg
+                .add_fact(AddFactRequest {
+                    content: fact.content.clone(),
+                    category,
+                    source: Some(fact.source.clone()),
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    trust: Some(fact.trust),
+                    metadata: serde_json::json!({}),
+                })
                 .await
                 .unwrap_or_else(|e| panic!("seed setup fact `{}`: {e}", fact.content));
             assert!(
@@ -391,30 +385,28 @@ fn seed_setup_facts(fixture: &Fixture, facts: &[SeedFact]) {
                 "seed setup fact should be stored: {}",
                 fact.content
             );
+            for _ in 0..fact.retrieval_count {
+                let results = cg
+                    .search_facts(SearchFactsRequest {
+                        query: fact.content.clone(),
+                        category: Some(category),
+                        limit: Some(1),
+                        min_trust: Some(0.0),
+                        include_why: false,
+                    })
+                    .await
+                    .unwrap_or_else(|e| panic!("recall setup fact `{}`: {e}", fact.content));
+                assert!(
+                    results
+                        .iter()
+                        .any(|result| result.fact.content == fact.content),
+                    "seed setup fact should be recalled: {}",
+                    fact.content
+                );
+            }
         }
-        drop(writer);
-        db.close();
+        cg.close();
     });
-    let conn = rusqlite::Connection::open(&db_path)
-        .unwrap_or_else(|e| panic!("open {}: {e}", db_path.display()));
-    let transaction = conn
-        .unchecked_transaction()
-        .expect("begin setup fact update");
-    for fact in facts {
-        transaction
-            .execute(
-                "UPDATE memory_facts SET trust_score = ?1, retrieval_count = ?2, source = ?3 \
-                 WHERE content = ?4",
-                rusqlite::params![
-                    fact.trust,
-                    fact.retrieval_count,
-                    fact.source.as_str(),
-                    fact.content.as_str()
-                ],
-            )
-            .unwrap_or_else(|e| panic!("update seed setup fact `{}`: {e}", fact.content));
-    }
-    transaction.commit().expect("commit setup fact updates");
 }
 
 fn canonical_test_dir(path: &Path) -> PathBuf {

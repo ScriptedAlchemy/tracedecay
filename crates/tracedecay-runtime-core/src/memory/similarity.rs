@@ -1,9 +1,5 @@
-//! Content-similarity primitives shared by the write-time diff check and the
-//! dashboard's similarity/curation analytics.
-//!
-//! Moved here from `src/dashboard/memory_analysis.rs` so `MemoryStore::add_fact`
-//! can classify near-duplicates at write time without depending on the
-//! dashboard; the dashboard re-exports these to keep its behavior identical.
+//! Content-similarity primitives shared by canonical writes and dashboard
+//! similarity/curation analytics.
 
 use std::collections::BTreeSet;
 
@@ -11,6 +7,23 @@ const TOKEN_STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "has", "have", "in", "is",
     "it", "of", "on", "or", "that", "the", "this", "to", "was", "were", "with",
 ];
+
+const NEGATION_CUES: &[&str] = &[
+    "no longer",
+    "switched from",
+    "instead of",
+    "rather than",
+    "replaced",
+    "supersedes",
+    "superseded",
+    "deprecated",
+];
+
+/// True when `text` contains one of the unambiguous state-change cues.
+pub fn contains_negation_cue(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    NEGATION_CUES.iter().any(|cue| lower.contains(cue))
+}
 
 pub(crate) fn content_tokens(content: &str) -> BTreeSet<String> {
     let mut tokens = BTreeSet::new();
@@ -110,6 +123,17 @@ mod tests {
         assert!(tokens.contains("brown"));
         assert!(!tokens.contains("the"));
         assert!(!tokens.contains("and"));
+    }
+
+    #[test]
+    fn negation_cues_match_state_changes_not_bare_not() {
+        assert!(contains_negation_cue("We no longer use Redis for caching"));
+        assert!(contains_negation_cue("Switched from npm to pnpm"));
+        assert!(contains_negation_cue("Use tokio instead of async-std"));
+        assert!(contains_negation_cue("The v1 API is deprecated"));
+        assert!(contains_negation_cue("ESLint replaced TSLint here"));
+        assert!(!contains_negation_cue("This is not a conflict marker"));
+        assert!(!contains_negation_cue("Do not store secrets in memory"));
     }
 
     #[test]

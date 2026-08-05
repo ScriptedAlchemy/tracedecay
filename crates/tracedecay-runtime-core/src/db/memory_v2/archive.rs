@@ -408,7 +408,7 @@ fn archive_column_expression(
             WHERE current.fact_id=archive_row.fact_id
               AND current.owner_kind=archive_row.owner_kind
               AND current.project_id=archive_row.project_id
-              AND current.payload_access IN ('expired', 'redacted', 'deleted')
+              AND current.payload_access <> 'eligible'
         )"
     );
     if column == "details_availability" {
@@ -438,7 +438,7 @@ fn archive_visibility_predicate(
             WHERE current.fact_id=archive_row.fact_id
               AND current.owner_kind=archive_row.owner_kind
               AND current.project_id=archive_row.project_id
-              AND current.payload_access IN ('expired', 'redacted', 'deleted')
+              AND current.payload_access <> 'eligible'
         )"
     )
 }

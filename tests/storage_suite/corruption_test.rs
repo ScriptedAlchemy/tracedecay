@@ -840,7 +840,10 @@ async fn post_open_fts_repair_waits_for_concurrent_writer()
             "DELETE FROM nodes_fts_data WHERE id > 10;",
         )
         .await?;
-    let writer = ts.db().memory_writer().await?;
+    let writer = ts
+        .db()
+        .writer_connection("hold FTS repair writer lane")
+        .await?;
 
     let repair_project_root = project_root.clone();
     let mut repair = tokio::spawn(async move {

@@ -134,9 +134,9 @@ pub struct FactRecord {
     pub trust_score: f64,
     pub source: Option<String>,
     pub retrieval_count: i64,
-    /// Times this fact was RETURNED from a recall search (`FactRetriever::
-    /// search`), as opposed to `retrieval_count`, which also counts probe,
-    /// list, related, and reason scans.
+    /// Times this fact was returned from tracked recall, as opposed to
+    /// `retrieval_count`, which also counts probe, list, related, and reason
+    /// scans.
     #[serde(default)]
     pub access_count: i64,
     pub helpful_count: i64,

@@ -1,4 +1,4 @@
-//! PR7 compatibility fact authority suite (moved verbatim from `memory_test`).
+//! Canonical fact authority and derived compatibility projection suite.
 
 use super::*;
 
@@ -364,8 +364,20 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
         .await
         .unwrap();
 
+    let canonical_fact_id = rusqlite::Connection::open_with_flags(
+        db.database_path(),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1",
+        rusqlite::params![fact.fact_id],
+        |row| row.get::<_, String>(0),
+    )
+    .unwrap();
     let history_state = |label: &'static str| {
         let db = &db;
+        let canonical_fact_id = canonical_fact_id.clone();
         async move {
             rusqlite::Connection::open_with_flags(
                 db.database_path(),
@@ -377,10 +389,8 @@ async fn compatibility_v1_remove_redacts_feedback_history_free_text() {
                             COUNT(source), COUNT(note),
                             SUM(CASE WHEN details_availability = 'available' THEN 1 ELSE 0 END)
                      FROM memory_v2_feedback_history
-                     WHERE fact_id = (
-                         SELECT canonical_fact_id FROM memory_facts WHERE fact_id = ?1
-                     )",
-                rusqlite::params![fact.fact_id],
+                     WHERE fact_id = ?1",
+                rusqlite::params![canonical_fact_id],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,

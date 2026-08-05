@@ -1,7 +1,7 @@
 use super::{
     Connection, DatabaseEngineConnection, DatabaseEngineReadSnapshot, DatabaseEngineStatement,
-    DatabaseEngineStatementTarget, DatabaseMemoryTransaction, DatabaseMemoryWriter,
-    DatabaseWriteTransaction, DatabaseWriterConnection, Path, Result, TraceDecayError,
+    DatabaseEngineStatementTarget, DatabaseMemoryTransaction, DatabaseWriteTransaction,
+    DatabaseWriterConnection, Path, Result, TraceDecayError,
 };
 
 impl DatabaseWriterConnection<'_> {
@@ -20,10 +20,6 @@ impl DatabaseWriterConnection<'_> {
         P: crate::db::engine::IntoParams,
     {
         self.conn.execute(sql, params).await
-    }
-
-    pub fn memory_store(&self) -> crate::memory::store::MemoryStore<'_> {
-        crate::memory::store::MemoryStore::new_runtime(&self.conn)
     }
 
     #[cfg(test)]
@@ -242,19 +238,6 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
                     .await
             }
         }
-    }
-}
-
-impl DatabaseMemoryWriter<'_> {
-    /// Returns a memory store whose writable connection remains protected by
-    /// the canonical database writer lane for this capability's lifetime.
-    pub fn store(&self) -> crate::memory::store::MemoryStore<'_> {
-        self.writer.memory_store()
-    }
-
-    /// Returns a retriever bound to the same serialized memory authority.
-    pub fn retriever(&self) -> crate::memory::retrieval::FactRetriever<'_> {
-        crate::memory::retrieval::FactRetriever::new_runtime(&self.writer.conn)
     }
 }
 
