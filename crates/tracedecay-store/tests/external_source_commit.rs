@@ -780,6 +780,36 @@ fn sequential_definition_and_binding_revisions_preserve_immutable_history() {
     assert_eq!(revised.binding(), &binding_v2);
 }
 
+#[test]
+fn source_commit_does_not_publish_projection_inline() {
+    let definition = definition();
+    let binding = binding(&definition);
+    let observation = object();
+    let source = commit(
+        &definition,
+        &binding,
+        None,
+        SourceCoverageV1::Partial,
+        vec![mutation(
+            &binding,
+            &partition(),
+            observation.clone(),
+            None,
+            SourceObjectTransitionV1::Initial,
+            '2',
+        )],
+        None,
+        '2',
+    );
+
+    let state = committed(apply_source_commit(None, source).unwrap());
+
+    assert!(
+        state.projected_objects().is_empty(),
+        "source acknowledgement must precede projection publication"
+    );
+}
+
 /// Build a state whose validation touches every memoized record kind: a
 /// multi-revision object with explicit lineage, two commit receipts, and a
 /// projection carrying mutations, effects, and lineage edges.
