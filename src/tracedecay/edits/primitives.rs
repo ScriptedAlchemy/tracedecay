@@ -121,7 +121,7 @@ impl TraceDecay {
     ///
     /// Multi-file edit authorities use this to keep the graph unavailable
     /// until the entire file family, including any rollback, is coherent.
-    pub(super) async fn reindex_file_within_graph_mutation(
+    pub(in crate::tracedecay) async fn reindex_file_within_graph_mutation(
         &self,
         _mutation: &super::super::indexing::BranchGraphMutationV1,
         file_path: &str,

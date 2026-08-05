@@ -95,6 +95,18 @@ fn next_branch_graph_publication_epoch(
 }
 
 impl TraceDecay {
+    pub(crate) async fn published_branch_graph_source(
+        &self,
+    ) -> Option<crate::branch_meta::BranchGraphSourceV1> {
+        let encoded = self
+            .db
+            .get_metadata(BRANCH_QUERY_GRAPH_SOURCE_KEY)
+            .await
+            .ok()
+            .flatten()?;
+        serde_json::from_str(&encoded).ok()
+    }
+
     /// Starts a graph publication epoch before any rows become visible.
     ///
     /// The sync lock serializes the read/advance/write sequence across
@@ -229,6 +241,13 @@ impl TraceDecay {
         )
         .await?;
         mutation.sync_lease.commit()
+    }
+
+    pub(in crate::tracedecay) async fn resolve_all_within_branch_graph_mutation(
+        &self,
+        _mutation: &BranchGraphMutationV1,
+    ) -> Result<()> {
+        self.resolve_all_unresolved_refs().await
     }
 }
 

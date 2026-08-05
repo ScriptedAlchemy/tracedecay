@@ -132,14 +132,7 @@ impl BranchGraphReadPort for TraceDecayBranchGraph {
     }
 
     fn published_source(&self) -> BranchSourceFuture<'_> {
-        Box::pin(async move {
-            let encoded = GraphRuntimePort::db(self.graph.as_ref())
-                .get_metadata(crate::tracedecay::BRANCH_QUERY_GRAPH_SOURCE_KEY)
-                .await
-                .ok()
-                .flatten()?;
-            serde_json::from_str(&encoded).ok()
-        })
+        Box::pin(self.graph.published_branch_graph_source())
     }
 }
 
