@@ -1,0 +1,352 @@
+use std::sync::Arc;
+
+use tracedecay_application::retrieval::PrimitiveFailureKind;
+use tracedecay_application::{
+    ApplicationWireOperation, OpaqueCursor, PageAdmissionError, PageAdmissionFuture,
+    PageAdmissionPort, PageAdmissionRequest, PageAdmissionSeal, RequestAdmission, RequestContext,
+};
+use tracedecay_domain::{
+    CodeGenerationId, FileOccurrenceId, ManifestDigest, RetrievalGrainV1, SessionId,
+    SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, canonical_sha256,
+};
+use tracedecay_temporal_query::cursor::{StableSortKey, encode_cursor, verify_cursor};
+use tracedecay_temporal_query::ports::{
+    BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
+    TemporalSnapshotRequest, TemporalWatermarks,
+};
+use tracedecay_temporal_query::resolution::ValidatedAuthorization;
+use tracedecay_tool_catalog::{CatalogContributionV1, SurfaceBindingV1};
+
+use super::symbol_graph::SymbolGraphCursorPort;
+use crate::diagnostics_query::DiagnosticQueryCursor;
+
+#[derive(Clone, Copy)]
+pub(super) enum PrimitivePageOwner {
+    SymbolGraph(&'static str),
+    Diagnostics,
+}
+
+pub(super) const fn declared_primitive_page_owner(
+    operation: ApplicationWireOperation,
+) -> Option<PrimitivePageOwner> {
+    match operation {
+        ApplicationWireOperation::CodeSymbolSearch => {
+            Some(PrimitivePageOwner::SymbolGraph("search"))
+        }
+        ApplicationWireOperation::CodeSignatureSearch => {
+            Some(PrimitivePageOwner::SymbolGraph("signature"))
+        }
+        ApplicationWireOperation::CodeImplementations => {
+            Some(PrimitivePageOwner::SymbolGraph("implementations"))
+        }
+        ApplicationWireOperation::CodeTypeHierarchy => {
+            Some(PrimitivePageOwner::SymbolGraph("hierarchy"))
+        }
+        ApplicationWireOperation::CodeCallers => Some(PrimitivePageOwner::SymbolGraph("callers")),
+        ApplicationWireOperation::DiagnosticsRead => Some(PrimitivePageOwner::Diagnostics),
+        _ => None,
+    }
+}
+
+pub struct SymbolGraphPageAdmissionAdapterV1<C> {
+    catalog: Arc<[CatalogContributionV1]>,
+    cursors: C,
+}
+
+impl<C> SymbolGraphPageAdmissionAdapterV1<C> {
+    pub fn new(catalog: Arc<[CatalogContributionV1]>, cursors: C) -> Self {
+        Self { catalog, cursors }
+    }
+}
+
+impl<C> PageAdmissionPort for SymbolGraphPageAdmissionAdapterV1<C>
+where
+    C: SymbolGraphCursorPort,
+{
+    fn admit<'a>(
+        &'a self,
+        request: PageAdmissionRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'a> {
+        Box::pin(async move {
+            let PrimitivePageOwner::SymbolGraph(lane) =
+                declared_primitive_page_owner(request.operation())
+                    .ok_or(PageAdmissionError::Unsupported)?
+            else {
+                return Err(PageAdmissionError::Unsupported);
+            };
+            let observed_at = request.observed_at();
+            validate_catalog_page_request(&self.catalog, &request, observed_at)?;
+            if let Some(cursor) = &request.page().cursor {
+                self.cursors
+                    .resume_offset(request.context(), lane, cursor, observed_at)
+                    .map_err(|failure| match failure.kind {
+                        PrimitiveFailureKind::InvalidRequest => PageAdmissionError::InvalidRequest,
+                        PrimitiveFailureKind::NotFoundOrNotAuthorized => PageAdmissionError::Denied,
+                        PrimitiveFailureKind::Stale => PageAdmissionError::Stale,
+                        PrimitiveFailureKind::Unavailable => PageAdmissionError::Unavailable,
+                    })?;
+            }
+            Ok(seal.admit(request))
+        })
+    }
+}
+
+pub(super) struct AuthenticatedDiagnosticCursorAuthorityV1 {
+    key: SignedCursorKeyRefV1,
+    configuration_digest: ManifestDigest,
+    authenticator: Arc<dyn SessionCursorAuthenticator>,
+}
+
+impl AuthenticatedDiagnosticCursorAuthorityV1 {
+    pub(super) fn new(
+        key: SignedCursorKeyRefV1,
+        configuration_digest: ManifestDigest,
+        authenticator: Arc<dyn SessionCursorAuthenticator>,
+    ) -> Self {
+        Self {
+            key,
+            configuration_digest,
+            authenticator,
+        }
+    }
+
+    fn snapshot(
+        &self,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+        observed_at: UtcMicros,
+    ) -> Result<TemporalExecutionSnapshot, ()> {
+        if context.validate().is_err()
+            || context.admission_at(observed_at) != RequestAdmission::Admitted
+        {
+            return Err(());
+        }
+        let request_digest = canonical_sha256(&(
+            "tracedecay.diagnostics.cursor.v1",
+            context.actor(),
+            context.grant().revision,
+            &context.grant().digest,
+            &context.grant().issuer,
+            &context.grant().allowed_capabilities,
+            &context.grant().allowed_use_cases,
+            context.grant().disclosure,
+            generation.as_str(),
+            lane,
+        ))
+        .map_err(|_| ())?;
+        let request = TemporalSnapshotRequest::new(
+            SessionId::new("session.daemon.diagnostics").map_err(|_| ())?,
+            context.scope().scope_digest.as_str(),
+            request_digest.as_str(),
+            context.grant().digest.as_str(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::Occurrence,
+        )
+        .map_err(|_| ())?;
+        TemporalExecutionSnapshot::new_authorized(
+            request,
+            TemporalWatermarks {
+                generation: 1,
+                source: 1,
+                projection: 1,
+                index: 1,
+                summary: 1,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new(
+                    "configuration_digest",
+                    self.configuration_digest.as_str(),
+                )
+                .map_err(|_| ())?,
+            },
+            Some(self.key.clone()),
+            ValidatedAuthorization::Authorized,
+        )
+        .map_err(|_| ())
+    }
+
+    pub(super) fn decode(
+        &self,
+        encoded: &str,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+        observed_at: UtcMicros,
+    ) -> Result<DiagnosticQueryCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane, observed_at)?;
+        let sort_key =
+            verify_cursor(encoded, &snapshot, self.authenticator.as_ref()).map_err(|_| ())?;
+        if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
+            return Err(());
+        }
+        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id)).map_err(|_| ())
+    }
+
+    pub(super) fn encode(
+        &self,
+        cursor: &DiagnosticQueryCursor,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+        observed_at: UtcMicros,
+    ) -> Result<OpaqueCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane, observed_at)?;
+        let encoded = encode_cursor(
+            &snapshot,
+            &StableSortKey {
+                normalized_score_micros: 0,
+                knowledge_at_micros: 0,
+                stable_id: cursor.anchor().to_owned(),
+            },
+            self.authenticator.as_ref(),
+        )
+        .map_err(|_| ())?;
+        OpaqueCursor::new(encoded).map_err(|_| ())
+    }
+}
+
+pub(super) enum DiagnosticPageLaneV1 {
+    Workspace,
+    File(FileOccurrenceId),
+}
+
+impl DiagnosticPageLaneV1 {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Workspace => "workspace",
+            Self::File(file) => file.as_str(),
+        }
+    }
+}
+
+pub(super) struct DiagnosticPageAdmissionAdapterV1 {
+    catalog: Arc<[CatalogContributionV1]>,
+    authority: AuthenticatedDiagnosticCursorAuthorityV1,
+    generation: CodeGenerationId,
+    lane: DiagnosticPageLaneV1,
+}
+
+impl DiagnosticPageAdmissionAdapterV1 {
+    pub(super) fn new(
+        catalog: Arc<[CatalogContributionV1]>,
+        authority: AuthenticatedDiagnosticCursorAuthorityV1,
+        generation: CodeGenerationId,
+        lane: DiagnosticPageLaneV1,
+    ) -> Self {
+        Self {
+            catalog,
+            authority,
+            generation,
+            lane,
+        }
+    }
+}
+
+impl PageAdmissionPort for DiagnosticPageAdmissionAdapterV1 {
+    fn admit<'a>(
+        &'a self,
+        request: PageAdmissionRequest,
+        seal: PageAdmissionSeal,
+    ) -> PageAdmissionFuture<'a> {
+        Box::pin(async move {
+            if !matches!(
+                declared_primitive_page_owner(request.operation()),
+                Some(PrimitivePageOwner::Diagnostics)
+            ) {
+                return Err(PageAdmissionError::Unsupported);
+            }
+            validate_catalog_page_request(&self.catalog, &request, request.observed_at())?;
+            if let Some(cursor) = &request.page().cursor {
+                self.authority
+                    .decode(
+                        cursor.as_str(),
+                        request.context(),
+                        &self.generation,
+                        self.lane.as_str(),
+                        request.observed_at(),
+                    )
+                    .map_err(|_| PageAdmissionError::Stale)?;
+            }
+            Ok(seal.admit(request))
+        })
+    }
+}
+
+fn validate_catalog_page_request(
+    catalog: &[CatalogContributionV1],
+    request: &PageAdmissionRequest,
+    observed_at: UtcMicros,
+) -> Result<(), PageAdmissionError> {
+    request
+        .context()
+        .validate()
+        .map_err(|_| PageAdmissionError::Denied)?;
+    request
+        .operation_scope_digest()
+        .validate()
+        .map_err(|_| PageAdmissionError::InvalidRequest)?;
+    request
+        .body_digest()
+        .validate()
+        .map_err(|_| PageAdmissionError::InvalidRequest)?;
+    if request.operation_scope_digest() != &request.context().scope().scope_digest
+        || request.context().admission_at(observed_at) != RequestAdmission::Admitted
+    {
+        return Err(PageAdmissionError::Denied);
+    }
+
+    let mut bindings = catalog
+        .iter()
+        .flat_map(CatalogContributionV1::bindings)
+        .filter(|binding| binding.binding_id() == request.binding_id());
+    let binding = bindings.next().ok_or(PageAdmissionError::BindingMismatch)?;
+    if bindings.next().is_some() {
+        return Err(PageAdmissionError::Unavailable);
+    }
+    validate_binding_operation(binding, request.operation())?;
+
+    let mut capabilities = catalog
+        .iter()
+        .flat_map(CatalogContributionV1::capabilities)
+        .filter(|capability| capability.capability_id() == binding.capability_id());
+    let capability = capabilities.next().ok_or(PageAdmissionError::Unavailable)?;
+    if capabilities.next().is_some() {
+        return Err(PageAdmissionError::Unavailable);
+    }
+    if !capability.availability().is_callable()
+        || capability
+            .binding_ids()
+            .binary_search(binding.binding_id())
+            .is_err()
+    {
+        return Err(PageAdmissionError::Unsupported);
+    }
+    let pagination = capability
+        .pagination()
+        .ok_or(PageAdmissionError::Unsupported)?;
+    if request.page().page_size > pagination.maximum_page_size() {
+        return Err(PageAdmissionError::InvalidRequest);
+    }
+    if !request
+        .context()
+        .allows(capability.capability_id(), capability.use_case_id())
+    {
+        return Err(PageAdmissionError::Denied);
+    }
+    Ok(())
+}
+
+fn validate_binding_operation(
+    binding: &SurfaceBindingV1,
+    operation: ApplicationWireOperation,
+) -> Result<(), PageAdmissionError> {
+    if ApplicationWireOperation::from_catalog_name(binding.operation().as_str()) != Some(operation)
+    {
+        return Err(PageAdmissionError::BindingMismatch);
+    }
+    Ok(())
+}

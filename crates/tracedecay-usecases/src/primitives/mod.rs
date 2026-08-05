@@ -2,6 +2,7 @@
 
 pub mod concrete;
 pub mod grep_analysis;
+mod page_admission;
 pub mod production;
 pub mod runtime;
 mod support;
@@ -16,6 +17,7 @@ pub use grep_analysis::{
     TraceDecayComplexityAuthorityV1, TraceDecayDependencyDepthAuthorityV1,
     production_grep_analysis_operations,
 };
+pub use page_admission::SymbolGraphPageAdmissionAdapterV1;
 pub use production::{
     Pr12ProductionPrimitiveOpenRequestV1, TraceDecayAffectedTestsPortV1,
     admitted_root_uri_for_project, locator_digest_for_project,
@@ -37,3 +39,7 @@ pub use runtime::{
     StorageStatusPrimitiveResult, open_pr12_primitive_project_runtime,
 };
 pub use symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
+
+#[cfg(test)]
+#[path = "page_admission_tests.rs"]
+mod page_admission_tests;

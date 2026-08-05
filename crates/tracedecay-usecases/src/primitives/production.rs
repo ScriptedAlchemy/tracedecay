@@ -23,7 +23,7 @@ use tracedecay_application::retrieval::{
 use tracedecay_application::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
     EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
-    OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission, RequestContext, ResolvedScope,
+    OpaqueCursor, OperationBudgetUsage, PageState, RequestContext, ResolvedScope,
     RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
@@ -34,6 +34,7 @@ use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
 use super::concrete::{AuthenticatedSymbolGraphCursorAdapter, SymbolGraphCursorSnapshotAuthority};
+use super::page_admission::AuthenticatedDiagnosticCursorAuthorityV1;
 use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest,
@@ -53,9 +54,7 @@ use super::support::{
 };
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
-use crate::diagnostics_query::{
-    DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
-};
+use crate::diagnostics_query::{DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticsQuery};
 use crate::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::operation_stream::OperationEventAuthority;
 use crate::source_authorization::ProjectSourceAccessSnapshot;
@@ -70,12 +69,10 @@ use tracedecay_global_db::RegisteredGlobalDb;
 use tracedecay_global_db::session_temporal::GlobalDbCursorKeyProvider;
 use tracedecay_runtime_core::db::Database;
 use tracedecay_runtime_core::types::{Node, Visibility};
-use tracedecay_temporal_query::cursor::{
-    CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
-};
+use tracedecay_temporal_query::cursor::CURSOR_LIFETIME_MICROS;
 use tracedecay_temporal_query::ports::{
-    BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
-    TemporalSnapshotRequest, TemporalWatermarks,
+    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
+    TemporalWatermarks,
 };
 use tracedecay_temporal_query::resolution::ValidatedAuthorization;
 
@@ -267,108 +264,6 @@ fn diagnostics_result(
 }
 
 const DIAGNOSTIC_CURSOR_LANE_WORKSPACE: &str = "workspace";
-
-struct AuthenticatedDiagnosticCursorAuthorityV1 {
-    key: SignedCursorKeyRefV1,
-    configuration_digest: ManifestDigest,
-    authenticator: Arc<dyn SessionCursorAuthenticator>,
-}
-
-impl AuthenticatedDiagnosticCursorAuthorityV1 {
-    fn snapshot(
-        &self,
-        context: &RequestContext,
-        generation: &CodeGenerationId,
-        lane: &str,
-    ) -> Result<TemporalExecutionSnapshot, ()> {
-        if context.validate().is_err()
-            || context.admission_at(now_observed()) != RequestAdmission::Admitted
-        {
-            return Err(());
-        }
-        let request_digest = canonical_sha256(&(
-            "tracedecay.diagnostics.cursor.v1",
-            context.actor(),
-            context.grant().revision,
-            &context.grant().digest,
-            &context.grant().issuer,
-            &context.grant().allowed_capabilities,
-            &context.grant().allowed_use_cases,
-            context.grant().disclosure,
-            generation.as_str(),
-            lane,
-        ))
-        .map_err(|_| ())?;
-        let request = TemporalSnapshotRequest::new(
-            SessionId::new("session.daemon.diagnostics").map_err(|_| ())?,
-            context.scope().scope_digest.as_str(),
-            request_digest.as_str(),
-            context.grant().digest.as_str(),
-            TemporalModeV1::Current,
-            RetrievalGrainV1::Occurrence,
-        )
-        .map_err(|_| ())?;
-        TemporalExecutionSnapshot::new_authorized(
-            request,
-            TemporalWatermarks {
-                generation: 1,
-                source: 1,
-                projection: 1,
-                index: 1,
-                summary: 1,
-            },
-            KernelVersions {
-                schema: 1,
-                ranking: 1,
-                configuration_digest: BindingDigest::new(
-                    "configuration_digest",
-                    self.configuration_digest.as_str(),
-                )
-                .map_err(|_| ())?,
-            },
-            Some(self.key.clone()),
-            ValidatedAuthorization::Authorized,
-        )
-        .map_err(|_| ())
-    }
-
-    fn decode(
-        &self,
-        encoded: &str,
-        context: &RequestContext,
-        generation: &CodeGenerationId,
-        lane: &str,
-    ) -> Result<DiagnosticQueryCursor, ()> {
-        let snapshot = self.snapshot(context, generation, lane)?;
-        let sort_key =
-            verify_cursor(encoded, &snapshot, self.authenticator.as_ref()).map_err(|_| ())?;
-        if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
-            return Err(());
-        }
-        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id)).map_err(|_| ())
-    }
-
-    fn encode(
-        &self,
-        cursor: &DiagnosticQueryCursor,
-        context: &RequestContext,
-        generation: &CodeGenerationId,
-        lane: &str,
-    ) -> Result<OpaqueCursor, ()> {
-        let snapshot = self.snapshot(context, generation, lane)?;
-        let encoded = encode_cursor(
-            &snapshot,
-            &StableSortKey {
-                normalized_score_micros: 0,
-                knowledge_at_micros: 0,
-                stable_id: cursor.anchor().to_owned(),
-            },
-            self.authenticator.as_ref(),
-        )
-        .map_err(|_| ())?;
-        OpaqueCursor::new(encoded).map_err(|_| ())
-    }
-}
 
 fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCoverageV1 {
     PrimitiveCoverageV1 {
@@ -1390,6 +1285,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     context.request,
                     &current_generation,
                     cursor_lane,
+                    finished_at,
                 ) {
                     Ok(cursor) => Some(cursor),
                     Err(()) => {
@@ -1430,6 +1326,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                         context.request,
                         &current_generation,
                         cursor_lane,
+                        finished_at,
                     )
                 })
                 .transpose();
@@ -1578,6 +1475,20 @@ pub struct ProjectSymbolGraphCursorSnapshotAuthority {
     key: SignedCursorKeyRefV1,
     configuration_digest: ManifestDigest,
     watermark: u64,
+}
+
+impl ProjectSymbolGraphCursorSnapshotAuthority {
+    pub(super) fn new(
+        key: SignedCursorKeyRefV1,
+        configuration_digest: ManifestDigest,
+        watermark: u64,
+    ) -> Self {
+        Self {
+            key,
+            configuration_digest,
+            watermark,
+        }
+    }
 }
 
 fn symbol_graph_snapshot_failure(
@@ -2200,11 +2111,11 @@ pub async fn open_pr12_production_primitive_runtime(
         })?
         .node_count
         .max(1);
-    let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
-        key: key.clone(),
-        configuration_digest: configuration_digest.clone(),
+    let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
+        key.clone(),
+        configuration_digest.clone(),
         watermark,
-    });
+    ));
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
         AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
     );
@@ -2220,11 +2131,7 @@ pub async fn open_pr12_production_primitive_runtime(
         Arc::clone(&session_db),
         code_index,
         diagnostic_identity,
-        AuthenticatedDiagnosticCursorAuthorityV1 {
-            key,
-            configuration_digest,
-            authenticator,
-        },
+        AuthenticatedDiagnosticCursorAuthorityV1::new(key, configuration_digest, authenticator),
     ));
     open_pr12_primitive_project_runtime(
         database,
@@ -2396,6 +2303,8 @@ mod unavailable_evidence_tests {
         let outcome = diagnostics_unavailable(UtcMicros(1), OmissionReason::Unavailable);
         let coverage = &outcome.evidence().coverage;
 
+        assert!(matches!(&outcome, RetrievalPortOutcome::Unavailable(_)));
+        assert!(outcome.evidence().payload.is_none());
         assert!(coverage.validate().is_ok());
         assert_eq!(
             coverage.domains,
@@ -2404,6 +2313,32 @@ mod unavailable_evidence_tests {
                 completeness: CoverageCompleteness::Unknown,
             }]
         );
+    }
+
+    #[test]
+    fn stale_diagnostic_owner_is_not_reported_as_an_authentic_empty_result() {
+        let outcome = diagnostics_unavailable(UtcMicros(1), OmissionReason::Stale);
+
+        assert!(matches!(&outcome, RetrievalPortOutcome::Unavailable(_)));
+        assert!(outcome.evidence().payload.is_none());
+        assert_eq!(outcome.evidence().temporal.freshness, FreshnessState::Stale);
+        assert_eq!(
+            outcome.evidence().omissions,
+            vec![Omission {
+                domain: EvidenceDomain::Diagnostic,
+                count: 0,
+                reason: OmissionReason::Stale,
+            }]
+        );
+    }
+
+    #[test]
+    fn operational_read_failure_is_not_reported_as_an_authentic_empty_result() {
+        let outcome: RetrievalPortOutcome<HealthDeltaResult> =
+            failed(EvidenceDomain::Operational, UtcMicros(1));
+
+        assert!(matches!(&outcome, RetrievalPortOutcome::Failed(_)));
+        assert!(outcome.evidence().payload.is_none());
     }
 }
 
@@ -2482,6 +2417,7 @@ mod affected_tests_tests {
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
     use super::*;
+    use crate::diagnostics_query::DiagnosticQueryCursor;
     use tracedecay_code_index::provider::{
         GenerationProviderCoverageV1, GenerationProviderReadV1,
         GenerationTestAttributionJoinReadPort,
@@ -2629,11 +2565,11 @@ mod affected_tests_tests {
         };
         let authenticator =
             InMemoryCursorAuthenticator::new(key.clone(), vec![7_u8; 32]).expect("authenticator");
-        let authority = AuthenticatedDiagnosticCursorAuthorityV1 {
+        let authority = AuthenticatedDiagnosticCursorAuthorityV1::new(
             key,
-            configuration_digest: digest('c'),
-            authenticator: Arc::new(authenticator),
-        };
+            digest('c'),
+            Arc::new(authenticator),
+        );
         let context = cursor_context("project.diagnostics");
         let current_generation = generation("generation.diagnostics.1");
         let query_cursor =
@@ -2644,6 +2580,7 @@ mod affected_tests_tests {
                 &context,
                 &current_generation,
                 DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                UtcMicros(2),
             )
             .expect("encode");
 
@@ -2654,6 +2591,7 @@ mod affected_tests_tests {
                     &context,
                     &current_generation,
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    UtcMicros(2),
                 )
                 .expect("decode"),
             query_cursor
@@ -2665,6 +2603,7 @@ mod affected_tests_tests {
                     &cursor_context("project.diagnostics.other"),
                     &current_generation,
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    UtcMicros(2),
                 )
                 .is_err()
         );
@@ -2675,6 +2614,7 @@ mod affected_tests_tests {
                     &context,
                     &generation("generation.diagnostics.2"),
                     DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                    UtcMicros(2),
                 )
                 .is_err()
         );
@@ -2685,6 +2625,7 @@ mod affected_tests_tests {
                     &context,
                     &current_generation,
                     "file.diagnostics",
+                    UtcMicros(2),
                 )
                 .is_err()
         );
@@ -2739,11 +2680,11 @@ mod affected_tests_tests {
             InMemoryCursorAuthenticator::new(key.clone(), vec![9_u8; 32]).expect("authenticator"),
         );
         let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
-            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
+            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority::new(
                 key,
-                configuration_digest: digest('c'),
-                watermark: 11,
-            }),
+                digest('c'),
+                11,
+            )),
             authenticator,
         );
 
