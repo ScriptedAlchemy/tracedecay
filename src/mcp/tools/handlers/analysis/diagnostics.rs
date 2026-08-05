@@ -117,7 +117,7 @@ async fn session_correlation_health_json(
                 "history_index_watermark": health.history_index_watermark,
                 "index_empty": empty,
                 "notice": if empty {
-                    "correlation index empty — `tracedecay_sessions_for` will return nothing until it is populated; it automatic history indexings on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now"
+                    "correlation index empty — `tracedecay_sessions_for` will return nothing until it is populated; automatic history indexing will run on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now"
                 } else {
                     "correlation index populated"
                 },
@@ -130,7 +130,7 @@ async fn session_correlation_health_json(
             "last_span_write": Value::Null,
             "history_index_watermark": Value::Null,
             "index_empty": true,
-            "notice": "correlation index not yet created — `tracedecay_sessions_for` will return nothing until it is populated; it automatic history indexings on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now",
+            "notice": "correlation index not yet created — `tracedecay_sessions_for` will return nothing until it is populated; automatic history indexing will run on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now",
         }),
     }
 }

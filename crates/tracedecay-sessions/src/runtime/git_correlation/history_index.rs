@@ -9,7 +9,7 @@ use super::{
     SpanSource, TargetScan, normalize_worktree, run_commit_attribution_sweep,
 };
 
-// Historical history indexing for sessions that predate live span recording.
+// Historical indexing for sessions that predate live span recording.
 
 /// One session's declared and message-derived activity bounds, read from the
 /// per-project session store. Any field may be `None` when the source row left

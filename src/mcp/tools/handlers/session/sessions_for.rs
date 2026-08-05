@@ -282,8 +282,8 @@ fn render_sessions_for_md(value: &Value) -> String {
                     );
                 } else {
                     md.empty_note(
-                        "Correlation index is empty — no git spans recorded yet. It will \
-                         automatic history indexing on the next MCP server startup, or run \
+                        "Correlation index is empty — no git spans recorded yet. Automatic \
+                         history indexing will run on the next MCP server startup, or run \
                          `tracedecay sessions git-index-history` to populate it now.",
                     );
                 }
@@ -463,7 +463,7 @@ pub(in super::super) async fn handle_sessions_for(
                 if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
                     "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-index-history` adds weaker historical overlap evidence"
                 } else {
-                    "correlation index empty (no git spans recorded yet) — it will automatic history indexing on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now"
+                    "correlation index empty (no git spans recorded yet) — automatic history indexing will run on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now"
                 }
             } else {
                 "no sessions matched this git ref"

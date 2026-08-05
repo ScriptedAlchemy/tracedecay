@@ -17,13 +17,10 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, Value, params
 
 use super::SessionMessageRecord;
 
-/// Schema version recorded in `session_schema_migrations`.
-///
-/// v4 adds no columns: it is the one-shot [`compact_session_git_spans`] repair
-/// of span rows written by the pre-fix "extend only the newest span" rule.
-pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 4;
+/// Exact-final git-correlation schema identity.
+pub const GIT_CORRELATION_SCHEMA_VERSION: i64 = 1;
 
-const MIGRATION_NAME: &str = "git_correlation";
+const SCHEMA_IDENTITY_KEY: &str = "schema_identity";
 
 const MESSAGE_WORKTREE_KEYS: [&str; 9] = [
     "codex_turn_worktree",
@@ -563,8 +560,7 @@ fn digest_bytes(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
-/// Creates the correlation tables when missing. Version-gated via
-/// `session_schema_migrations` like the LCM schema; idempotent.
+/// Creates the exact-final correlation tables in an empty correlation store.
 pub async fn ensure_git_correlation_schema(conn: &Connection) -> Result<(), GitCorrelationError> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -577,34 +573,24 @@ pub async fn ensure_git_correlation_schema(conn: &Connection) -> Result<(), GitC
 pub async fn ensure_git_correlation_schema_in_transaction(
     conn: &(impl Executor + ?Sized),
 ) -> Result<(), GitCorrelationError> {
-    conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_schema_migrations (
-            name TEXT PRIMARY KEY,
-            version INTEGER NOT NULL,
-            applied_at INTEGER NOT NULL DEFAULT (unixepoch())
-        );",
-    )
-    .await?;
-    let version = schema_version(conn).await?;
-    if version.is_some_and(|version| version > GIT_CORRELATION_SCHEMA_VERSION) {
-        return Err(GitCorrelationError::Db(format!(
-            "database uses newer git correlation schema {} (this binary supports {})",
-            version.unwrap_or_default(),
-            GIT_CORRELATION_SCHEMA_VERSION
-        )));
+    let existing = [
+        table_exists(conn, "session_git_spans").await?,
+        table_exists(conn, "commit_sessions").await?,
+        table_exists(conn, "git_correlation_meta").await?,
+    ];
+    if existing.iter().any(|exists| *exists) {
+        if existing.iter().all(|exists| *exists)
+            && schema_version(conn).await? == Some(GIT_CORRELATION_SCHEMA_VERSION)
+        {
+            return validate_git_correlation_schema(conn).await;
+        }
+        return Err(GitCorrelationError::Db(
+            "git correlation store is not exact-final; reset the project store".to_owned(),
+        ));
     }
-    if version == Some(GIT_CORRELATION_SCHEMA_VERSION) {
-        return Ok(());
-    }
-    // Only a pre-v3 `commit_sessions` needs the relation/evidence rebuild
-    // below. A v3 table already has those columns *and* real producer evidence
-    // in them, which the rebuild's `INSERT ... SELECT` would flatten back to
-    // observed/time_overlap, so later upgrades must leave it alone.
-    let rebuild_commit_table =
-        table_exists(conn, "commit_sessions").await? && version.is_none_or(|version| version < 3);
 
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS session_git_spans (
+        "CREATE TABLE session_git_spans (
             span_id INTEGER PRIMARY KEY AUTOINCREMENT,
             provider TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL,
@@ -619,28 +605,21 @@ pub async fn ensure_git_correlation_schema_in_transaction(
             updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
             CHECK(first_ts <= last_ts)
         );
-        CREATE INDEX IF NOT EXISTS idx_session_git_spans_session
+        CREATE INDEX idx_session_git_spans_session
             ON session_git_spans(provider, session_id, last_ts);
-        CREATE INDEX IF NOT EXISTS idx_session_git_spans_branch
+        CREATE INDEX idx_session_git_spans_branch
             ON session_git_spans(branch, last_ts);
-        CREATE INDEX IF NOT EXISTS idx_session_git_spans_worktree
+        CREATE INDEX idx_session_git_spans_worktree
             ON session_git_spans(worktree, last_ts);
-        CREATE TABLE IF NOT EXISTS git_correlation_meta (
+        CREATE TABLE git_correlation_meta (
             key TEXT PRIMARY KEY,
             value INTEGER NOT NULL,
             updated_at INTEGER NOT NULL DEFAULT (unixepoch())
         );",
     )
     .await?;
-    if rebuild_commit_table {
-        conn.execute(
-            "ALTER TABLE commit_sessions RENAME TO commit_sessions_legacy_v3",
-            (),
-        )
-        .await?;
-    }
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS commit_sessions (
+        "CREATE TABLE commit_sessions (
             commit_sha TEXT NOT NULL,
             provider TEXT NOT NULL DEFAULT '',
             session_id TEXT NOT NULL,
@@ -662,52 +641,19 @@ pub async fn ensure_git_correlation_schema_in_transaction(
         );",
     )
     .await?;
-    if rebuild_commit_table {
-        conn.execute(
-            "INSERT INTO commit_sessions (
-                    commit_sha, provider, session_id, branch, worktree,
-                    committed_at, span_overlap_kind, span_id,
-                    relation, evidence, confidence, evidence_message_id, created_at
-                 )
-                 SELECT commit_sha, provider, session_id, branch, worktree,
-                    committed_at, span_overlap_kind, span_id,
-                    'observed',
-                    CASE WHEN span_overlap_kind = 'reflog'
-                         THEN 'reflog_overlap' ELSE 'time_overlap' END,
-                    CASE WHEN span_overlap_kind = 'reflog' THEN 30 ELSE 20 END,
-                    NULL, created_at
-                 FROM commit_sessions_legacy_v3",
-            (),
-        )
-        .await?;
-        conn.execute("DROP TABLE commit_sessions_legacy_v3", ())
-            .await?;
-    }
     conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_commit_sessions_session
+        "CREATE INDEX idx_commit_sessions_session
                 ON commit_sessions(provider, session_id, committed_at);
-             CREATE INDEX IF NOT EXISTS idx_commit_sessions_branch
+             CREATE INDEX idx_commit_sessions_branch
                 ON commit_sessions(branch, committed_at);",
     )
     .await?;
-    // v4 repair. Every path reaching here is below v4 (equal returned early,
-    // newer errored above), so the compaction runs exactly once per store.
-    compact_session_git_spans(conn, DEFAULT_SPAN_MERGE_GAP_SECS).await?;
-    // `applied_at` records when this store first gained the correlation schema
-    // and is deliberately left alone by later version bumps. Consolidation
-    // verifies the destination's `session_schema_migrations` against a *frozen*
-    // copy of the target store that is never normalized, so a bump that also
-    // rewrote `applied_at` would make the destination diverge from the union of
-    // its own inputs. Nothing reads the column as a per-version watermark.
     conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version",
-        params![MIGRATION_NAME, GIT_CORRELATION_SCHEMA_VERSION],
+        "INSERT INTO git_correlation_meta(key, value) VALUES (?1, ?2)",
+        params![SCHEMA_IDENTITY_KEY, GIT_CORRELATION_SCHEMA_VERSION],
     )
     .await?;
-    Ok(())
+    validate_git_correlation_schema(conn).await
 }
 
 async fn schema_version(
@@ -715,14 +661,88 @@ async fn schema_version(
 ) -> Result<Option<i64>, GitCorrelationError> {
     let mut rows = conn
         .query(
-            "SELECT version FROM session_schema_migrations WHERE name = ?1",
-            params![MIGRATION_NAME],
+            "SELECT value FROM git_correlation_meta WHERE key = ?1",
+            params![SCHEMA_IDENTITY_KEY],
         )
         .await?;
     rows.next()
         .await?
         .map(|row| row.get(0).map_err(GitCorrelationError::from))
         .transpose()
+}
+
+async fn validate_git_correlation_schema(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> Result<(), GitCorrelationError> {
+    const REQUIRED_OBJECTS: [(&str, &str); 8] = [
+        ("table", "session_git_spans"),
+        ("table", "commit_sessions"),
+        ("table", "git_correlation_meta"),
+        ("index", "idx_session_git_spans_session"),
+        ("index", "idx_session_git_spans_branch"),
+        ("index", "idx_session_git_spans_worktree"),
+        ("index", "idx_commit_sessions_session"),
+        ("index", "idx_commit_sessions_branch"),
+    ];
+    for (kind, name) in REQUIRED_OBJECTS {
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = ?1 AND name = ?2",
+                params![kind, name],
+            )
+            .await?;
+        let present = rows
+            .next()
+            .await?
+            .is_some_and(|row| row.get::<i64>(0).ok() == Some(1));
+        if !present {
+            return Err(GitCorrelationError::Db(format!(
+                "git correlation store is missing required {kind} '{name}'; reset the project store"
+            )));
+        }
+    }
+    const REQUIRED_COLUMNS: [(&str, &[&str]); 3] = [
+        (
+            "session_git_spans",
+            &[
+                "span_id",
+                "provider",
+                "session_id",
+                "worktree",
+                "first_ts",
+                "last_ts",
+                "source",
+            ],
+        ),
+        (
+            "commit_sessions",
+            &[
+                "commit_sha",
+                "provider",
+                "session_id",
+                "span_overlap_kind",
+                "relation",
+                "evidence",
+                "confidence",
+            ],
+        ),
+        ("git_correlation_meta", &["key", "value", "updated_at"]),
+    ];
+    for (table, required) in REQUIRED_COLUMNS {
+        let mut rows = conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await?;
+        let mut columns = HashSet::new();
+        while let Some(row) = rows.next().await? {
+            columns.insert(row.get::<String>(1)?);
+        }
+        if let Some(missing) = required.iter().find(|column| !columns.contains(**column)) {
+            return Err(GitCorrelationError::Db(format!(
+                "git correlation store is missing column {table}.{missing}; reset the project store"
+            )));
+        }
+    }
+    Ok(())
 }
 
 async fn table_exists(
