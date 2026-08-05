@@ -1,7 +1,7 @@
 //! Narrow store port for git-correlation session authority.
 //!
 //! Production adapters live in the root `src/store/git_correlation.rs`.
-//! Session logic depends only on this contract so backfill/query code does not
+//! Session logic depends only on this contract so history indexing/query code does not
 //! import the concrete registered global database type or full analytics event
 //! rows.
 
@@ -11,7 +11,7 @@ use tracedecay_runtime_core::db::engine::{Executor, QueryExecutor, ReadSnapshot}
 
 use super::GitCorrelationError;
 
-/// Session-scoped analytics timestamp consumed by git-correlation backfill.
+/// Session-scoped analytics timestamp consumed by git-correlation history indexing.
 ///
 /// Only provider/session identity and the event timestamp are retained. Full
 /// analytics event rows stay outside the sessions layer.
@@ -35,15 +35,15 @@ impl AnalyticsSessionTimestampSource for AnalyticsSessionTimestamp {
     }
 }
 
-/// Write transaction surface required by span/commit backfill.
+/// Write transaction surface required by span/commit history indexing.
 pub trait GitCorrelationWriteTxn: QueryExecutor + Executor + Sized + Send {
     fn commit(self) -> impl Future<Output = Result<(), GitCorrelationError>> + Send;
 }
 
-/// The already-open project-sessions authority backfill reads and writes.
+/// The already-open project-sessions authority history indexing reads and writes.
 ///
 /// This is the inverted seam for the root `GlobalDbGitCorrelationStore`
-/// adapter: backfill needs an authority check, a read snapshot, and a write
+/// adapter: history indexing needs an authority check, a read snapshot, and a write
 /// transaction, and nothing about the registered global database that supplies
 /// them.
 ///

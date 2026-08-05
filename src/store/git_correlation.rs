@@ -1,6 +1,6 @@
 //! Root adapter over [`RegisteredGlobalDb`] for git-correlation operations.
 //!
-//! Session backfill/query logic depends on the port; this module owns the
+//! Session historical indexing and query logic depends on the port; this module owns the
 //! concrete registered-database binding, authority checks, and high-level
 //! façade methods.
 
@@ -11,11 +11,12 @@ use tracedecay_store::StoreShardScopeV1;
 use crate::db::engine::ReadSnapshot;
 use crate::global_db::{RegisteredGlobalDb, RegisteredGlobalDbWriteTransaction};
 use crate::sessions::git_correlation::{
-    AnalyticsSessionTimestampSource, BackfillOptions, BackfillStats, CommitRelationFilter,
-    CorrelationIndexHealth, GitCorrelationError, GitCorrelationSessionStore,
-    GitCorrelationWriteTxn, GitReflogSource, SessionGitCorrelationHit, SessionsForQuery,
-    SpanObservation, correlation_index_health, record_span_observation_in_transaction,
-    run_backfill, run_incremental_backfill, sessions_for_with_relation,
+    AnalyticsSessionTimestampSource, CommitRelationFilter, CorrelationIndexHealth,
+    GitCorrelationError, GitCorrelationSessionStore, GitCorrelationWriteTxn,
+    GitHistoryIndexOptions, GitHistoryIndexStats, GitReflogSource, SessionGitCorrelationHit,
+    SessionsForQuery, SpanObservation, correlation_index_health,
+    record_span_observation_in_transaction, run_history_index, run_incremental_history_index,
+    sessions_for_with_relation,
 };
 
 /// Adapter over an already-open project-sessions database.
@@ -86,25 +87,25 @@ where
         Ok(span_id)
     }
 
-    pub(crate) async fn run_backfill<E, G>(
+    pub(crate) async fn run_history_index<E, G>(
         &self,
         analytics_events: &[E],
         git: &G,
-        opts: &BackfillOptions,
-    ) -> Result<BackfillStats, GitCorrelationError>
+        opts: &GitHistoryIndexOptions,
+    ) -> Result<GitHistoryIndexStats, GitCorrelationError>
     where
         E: AnalyticsSessionTimestampSource,
         G: GitReflogSource + ?Sized,
     {
-        run_backfill(self, analytics_events, git, opts).await
+        run_history_index(self, analytics_events, git, opts).await
     }
 
-    pub(crate) async fn run_incremental_backfill<G: GitReflogSource + ?Sized>(
+    pub(crate) async fn run_incremental_history_index<G: GitReflogSource + ?Sized>(
         &self,
         git: &G,
         limit_sessions: usize,
-    ) -> Result<BackfillStats, GitCorrelationError> {
-        run_incremental_backfill(self, git, limit_sessions).await
+    ) -> Result<GitHistoryIndexStats, GitCorrelationError> {
+        run_incremental_history_index(self, git, limit_sessions).await
     }
 
     pub(crate) async fn correlation_index_health(

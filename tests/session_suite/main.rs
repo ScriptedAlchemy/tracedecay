@@ -12,7 +12,7 @@ mod common;
 mod anchor_resolution;
 mod anchor_tombstone_expiry;
 mod fact_anchor_authority;
-mod git_backfill;
+mod git_history_index;
 mod global_db;
 mod lcm_compression;
 mod lcm_dag;

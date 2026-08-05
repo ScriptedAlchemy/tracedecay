@@ -13,7 +13,7 @@ use crate::tracedecay::TraceDecay;
 use super::super::ToolResult;
 use super::json_result;
 
-const GIT_BACKFILL_ANALYTICS_LIMIT: usize = 500_000;
+const GIT_HISTORY_INDEX_ANALYTICS_LIMIT: usize = 500_000;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
@@ -22,7 +22,7 @@ enum AdminCliAction {
         range: String,
     },
     SessionsIngest,
-    SessionsGitBackfill {
+    SessionsGitHistoryIndex {
         since: i64,
         limit_sessions: usize,
         dry_run: bool,
@@ -237,12 +237,12 @@ async fn dispatch_admin_cli(
             )
             .await?
         }
-        AdminCliAction::SessionsGitBackfill {
+        AdminCliAction::SessionsGitHistoryIndex {
             since,
             limit_sessions,
             dry_run,
         } => {
-            sessions_git_backfill(
+            sessions_git_history_index(
                 context.require_project()?,
                 context.require_accounting_db()?,
                 context.require_project_session_db()?,
@@ -612,7 +612,7 @@ async fn sessions_ingest(
     }))
 }
 
-async fn sessions_git_backfill(
+async fn sessions_git_history_index(
     cg: &TraceDecay,
     global_db: &RegisteredGlobalDb,
     session_db: &Arc<RegisteredGlobalDb>,
@@ -621,7 +621,7 @@ async fn sessions_git_backfill(
     dry_run: bool,
 ) -> Result<Value> {
     use crate::sessions::git_correlation::{
-        BackfillOptions, DEFAULT_SPAN_MERGE_GAP_SECS, SystemGit,
+        DEFAULT_SPAN_MERGE_GAP_SECS, GitHistoryIndexOptions, SystemGit,
     };
 
     let project_id = RegisteredGlobalDb::canonical_project_key(cg.project_root());
@@ -629,16 +629,16 @@ async fn sessions_git_backfill(
         .query_analytics_events(&AnalyticsEventQuery {
             project_id: Some(project_id),
             since: Some(since),
-            limit: GIT_BACKFILL_ANALYTICS_LIMIT,
+            limit: GIT_HISTORY_INDEX_ANALYTICS_LIMIT,
             ..Default::default()
         })
         .await
         .unwrap_or_default();
     let stats = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(session_db))
-        .run_backfill(
+        .run_history_index(
             &analytics_events,
             &SystemGit,
-            &BackfillOptions {
+            &GitHistoryIndexOptions {
                 since,
                 limit_sessions,
                 merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
@@ -648,7 +648,7 @@ async fn sessions_git_backfill(
         )
         .await
         .map_err(|error| TraceDecayError::Config {
-            message: format!("git backfill failed: {error}"),
+            message: format!("git history indexing failed: {error}"),
         })?;
     Ok(json!({
         "dry_run": dry_run,
@@ -697,12 +697,12 @@ mod tests {
         ));
         assert!(matches!(
             serde_json::from_value::<AdminCliAction>(json!({
-                "action": "sessions_git_backfill",
+                "action": "sessions_git_history_index",
                 "since": 1,
                 "limit_sessions": 50,
                 "dry_run": true,
             })),
-            Ok(AdminCliAction::SessionsGitBackfill { dry_run: true, .. })
+            Ok(AdminCliAction::SessionsGitHistoryIndex { dry_run: true, .. })
         ));
     }
 

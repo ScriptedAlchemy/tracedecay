@@ -277,14 +277,14 @@ fn render_sessions_for_md(value: &Value) -> String {
                 if value.get("git_ref").and_then(Value::as_str) == Some("commit") {
                     md.empty_note(
                         "No commit evidence is indexed yet. Run `tracedecay sync` to ingest \
-                         direct host/tool evidence; `tracedecay sessions git-backfill` adds \
+                         direct host/tool evidence; `tracedecay sessions git-index-history` adds \
                          weaker historical overlap evidence.",
                     );
                 } else {
                     md.empty_note(
                         "Correlation index is empty — no git spans recorded yet. It will \
-                         auto-backfill on the next MCP server startup, or run \
-                         `tracedecay sessions git-backfill` to populate it now.",
+                         automatic history indexing on the next MCP server startup, or run \
+                         `tracedecay sessions git-index-history` to populate it now.",
                     );
                 }
             } else {
@@ -444,11 +444,11 @@ pub(in super::super) async fn handle_sessions_for(
             "span_count": health.span_count,
             "commit_count": health.commit_count,
             "last_span_write": health.last_span_write,
-            "backfill_watermark": health.backfill_watermark,
+            "history_index_watermark": health.history_index_watermark,
         });
     }
     // When nothing matched, say *why*: an empty index self-heals via startup
-    // auto-backfill (or a manual `tracedecay sessions git-backfill`), whereas a
+    // automatic history indexing (or a manual `tracedecay sessions git-index-history`), whereas a
     // populated index genuinely had no session on this ref.
     if results.is_empty() {
         if let Some(observed) = &observed_fallback {
@@ -461,9 +461,9 @@ pub(in super::super) async fn handle_sessions_for(
         } else {
             payload["message"] = json!(if index_empty {
                 if matches!(&query.git_ref, GitRefFilter::Commit(_)) {
-                    "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-backfill` adds weaker historical overlap evidence"
+                    "no commit evidence indexed yet — run `tracedecay sync` to ingest direct host/tool evidence; `tracedecay sessions git-index-history` adds weaker historical overlap evidence"
                 } else {
-                    "correlation index empty (no git spans recorded yet) — it will auto-backfill on the next MCP server startup, or run `tracedecay sessions git-backfill` to populate it now"
+                    "correlation index empty (no git spans recorded yet) — it will automatic history indexing on the next MCP server startup, or run `tracedecay sessions git-index-history` to populate it now"
                 }
             } else {
                 "no sessions matched this git ref"

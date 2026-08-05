@@ -3,13 +3,13 @@ use tracedecay_runtime_core::db::engine::{QueryExecutor, Row, params};
 use super::store::GitCorrelationSessionStore;
 
 use super::{
-    AUTO_BACKFILL_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence, CommitRelation,
-    CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, GitCorrelationWriteTxn,
-    ScannedCommit, SpanObservation, SpanOverlapKind, SpanScanTarget, SpanSource, TargetScan,
-    normalize_worktree, run_commit_attribution_sweep,
+    AUTO_HISTORY_INDEX_WATERMARK_KEY, AnalyticsSessionTimestampSource, CommitEvidence,
+    CommitRelation, CommitSessionRecord, DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError,
+    GitCorrelationWriteTxn, ScannedCommit, SpanObservation, SpanOverlapKind, SpanScanTarget,
+    SpanSource, TargetScan, normalize_worktree, run_commit_attribution_sweep,
 };
 
-// Historical backfill for sessions that predate live span recording.
+// Historical history indexing for sessions that predate live span recording.
 
 /// One session's declared and message-derived activity bounds, read from the
 /// per-project session store. Any field may be `None` when the source row left
@@ -68,7 +68,7 @@ impl SessionActivityRow {
         }
     }
 
-    /// The activity timestamp the incremental backfill orders and watermarks by:
+    /// The activity timestamp the incremental history indexing orders and watermarks by:
     /// the newest message time, else the declared end, else the start. Mirrors
     /// the `COALESCE(MAX(m.timestamp), s.ended_at, s.started_at)` key used by
     /// [`session_activity_rows_since`], so the returned value compares directly
@@ -198,9 +198,9 @@ pub fn window_branch_segments(
     segments
 }
 
-/// Reason a session was skipped by the backfill (counted and reported).
+/// Reason a session was skipped by the history indexing (counted and reported).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackfillSkipReason {
+pub enum GitHistoryIndexSkipReason {
     /// Session had no usable timestamp in any signal source.
     NoActivityWindow,
     /// `project_path` was empty or not a resolvable git worktree.
@@ -209,7 +209,7 @@ pub enum BackfillSkipReason {
     GitError,
 }
 
-impl BackfillSkipReason {
+impl GitHistoryIndexSkipReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NoActivityWindow => "no_activity_window",
@@ -219,9 +219,9 @@ impl BackfillSkipReason {
     }
 }
 
-/// Tunables for [`run_backfill`].
+/// Tunables for [`run_history_index`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BackfillOptions {
+pub struct GitHistoryIndexOptions {
     /// Inclusive lower bound (unix seconds) on session activity and commit
     /// times. Sessions whose activity ends before this are skipped.
     pub since: i64,
@@ -235,7 +235,7 @@ pub struct BackfillOptions {
     pub dry_run: bool,
 }
 
-impl Default for BackfillOptions {
+impl Default for GitHistoryIndexOptions {
     fn default() -> Self {
         Self {
             since: 0,
@@ -247,9 +247,9 @@ impl Default for BackfillOptions {
     }
 }
 
-/// Outcome counters for one backfill run.
+/// Outcome counters for one history indexing run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BackfillStats {
+pub struct GitHistoryIndexStats {
     pub sessions_scanned: usize,
     pub spans_written: usize,
     pub commits_attributed: usize,
@@ -258,12 +258,12 @@ pub struct BackfillStats {
     pub skipped_git_error: usize,
 }
 
-impl BackfillStats {
-    fn record_skip(&mut self, reason: BackfillSkipReason) {
+impl GitHistoryIndexStats {
+    fn record_skip(&mut self, reason: GitHistoryIndexSkipReason) {
         match reason {
-            BackfillSkipReason::NoActivityWindow => self.skipped_no_window += 1,
-            BackfillSkipReason::NotAWorktree => self.skipped_not_worktree += 1,
-            BackfillSkipReason::GitError => self.skipped_git_error += 1,
+            GitHistoryIndexSkipReason::NoActivityWindow => self.skipped_no_window += 1,
+            GitHistoryIndexSkipReason::NotAWorktree => self.skipped_not_worktree += 1,
+            GitHistoryIndexSkipReason::GitError => self.skipped_git_error += 1,
         }
     }
 
@@ -272,11 +272,11 @@ impl BackfillStats {
     }
 }
 
-/// Abstracts the git subprocess surface the backfill needs, so tests can run
+/// Abstracts the git subprocess surface the history indexing needs, so tests can run
 /// the core against a real repo ([`SystemGit`]) or a canned fixture.
 ///
 /// `Send + Sync` so a `&dyn GitReflogSource` can be held across an `.await`
-/// inside a spawned task (the startup auto-backfill runs on a tokio worker).
+/// inside a spawned task (the startup automatic history indexing runs on a tokio worker).
 pub trait GitReflogSource: Send + Sync {
     /// `git reflog --date=unix HEAD` text for `worktree`, or `None` on error.
     fn reflog(&self, worktree: &std::path::Path) -> Option<String>;
@@ -346,7 +346,7 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
     commits
 }
 
-/// Runs the historical backfill against one project's session store.
+/// Runs the historical indexing against one project's session store.
 ///
 /// `session_store` is the per-project sessions authority (already open, and —
 /// for a real run — writable). `analytics_events` contribute only
@@ -357,12 +357,12 @@ pub fn parse_commit_log(log_text: &str, max: usize) -> Vec<(String, i64)> {
 ///
 /// When `opts.dry_run` is set no rows are written; the returned counts reflect
 /// what *would* have been written.
-pub async fn run_backfill<S, E, G>(
+pub async fn run_history_index<S, E, G>(
     session_store: &S,
     analytics_events: &[E],
     git: &G,
-    opts: &BackfillOptions,
-) -> Result<BackfillStats, GitCorrelationError>
+    opts: &GitHistoryIndexOptions,
+) -> Result<GitHistoryIndexStats, GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
     E: AnalyticsSessionTimestampSource,
@@ -374,8 +374,8 @@ where
         .await
         .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
-    let mut stats = BackfillStats::default();
-    backfill_rows(
+    let mut stats = GitHistoryIndexStats::default();
+    index_history_rows(
         session_store,
         git,
         opts,
@@ -387,43 +387,43 @@ where
     Ok(stats)
 }
 
-/// Default number of previously-unattempted sessions the auto-backfill drains
+/// Default number of previously-unattempted sessions the automatic history indexing drains
 /// per pass. Bounds a single startup/tick so the first run on a store with
 /// months of history never blocks; successive passes advance the watermark and
 /// drain the remainder.
-pub const DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS: usize = 50;
+pub const DEFAULT_AUTO_HISTORY_INDEX_SESSIONS_PER_PASS: usize = 50;
 
-/// Runs one incremental, idempotent pass of the historical git-span backfill,
+/// Runs one incremental, idempotent pass of the historical git-span history indexing,
 /// advancing a persistent watermark so unattended callers (MCP server startup)
 /// drain months of history a bounded batch at a time without a manual CLI
 /// invocation.
 ///
-/// The watermark ([`AUTO_BACKFILL_WATERMARK_KEY`]) records the highest session
+/// The watermark ([`AUTO_HISTORY_INDEX_WATERMARK_KEY`]) records the highest session
 /// activity timestamp already attempted. Each pass reads up to `limit_sessions`
-/// sessions strictly newer than the watermark, oldest-first, backfills them
+/// sessions strictly newer than the watermark, oldest-first, indexes them
 /// (span/commit writes are idempotent), then advances the watermark to the
 /// newest activity in the batch. Fresh sessions recorded after a pass are
 /// picked up by a later pass; a fully-drained store scans nothing.
 ///
 /// Analytics timestamps are not consulted here (the manual
-/// `tracedecay sessions git-backfill` remains the exhaustive, watermark-free,
-/// analytics-aware path); auto-backfill relies on session and reflog
+/// `tracedecay sessions git-index-history` remains the exhaustive, watermark-free,
+/// analytics-aware path); automatic history indexing relies on session and reflog
 /// timestamps alone, which is enough to populate branch/worktree spans.
-pub async fn run_incremental_backfill<S: GitCorrelationSessionStore, G>(
+pub async fn run_incremental_history_index<S: GitCorrelationSessionStore, G>(
     session_store: &S,
     git: &G,
     limit_sessions: usize,
-) -> Result<BackfillStats, GitCorrelationError>
+) -> Result<GitHistoryIndexStats, GitCorrelationError>
 where
     G: GitReflogSource + ?Sized,
 {
     session_store.require_project_sessions_authority()?;
-    let mut stats = BackfillStats::default();
+    let mut stats = GitHistoryIndexStats::default();
     if limit_sessions == 0 {
         return Ok(stats);
     }
     let snapshot = session_store.read_snapshot().await?;
-    let watermark = super::read_meta_value(&snapshot, AUTO_BACKFILL_WATERMARK_KEY)
+    let watermark = super::read_meta_value(&snapshot, AUTO_HISTORY_INDEX_WATERMARK_KEY)
         .await?
         .unwrap_or(0);
     let rows = session_activity_rows_since(&snapshot, watermark, limit_sessions)
@@ -433,16 +433,16 @@ where
 
     // `since` is left at 0: the query already excludes anything at or below the
     // watermark, so a second time floor would only drop legitimately-new spans.
-    let opts = BackfillOptions {
+    let opts = GitHistoryIndexOptions {
         since: 0,
         limit_sessions,
         merge_gap_secs: DEFAULT_SPAN_MERGE_GAP_SECS,
-        max_commits_per_repo: BackfillOptions::default().max_commits_per_repo,
+        max_commits_per_repo: GitHistoryIndexOptions::default().max_commits_per_repo,
         dry_run: false,
     };
     if !rows.is_empty() {
         let no_analytics: &[super::AnalyticsSessionTimestamp] = &[];
-        backfill_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
+        index_history_rows(session_store, git, &opts, &rows, no_analytics, &mut stats).await?;
 
         // Advance the watermark to the newest activity attempted this pass.
         // Rows are ordered oldest-first, so the last row carries the max; fall
@@ -455,8 +455,12 @@ where
             && new_watermark > watermark
         {
             let transaction = session_store.open_write_transaction().await?;
-            super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
-                .await?;
+            super::write_meta_value(
+                &transaction,
+                AUTO_HISTORY_INDEX_WATERMARK_KEY,
+                new_watermark,
+            )
+            .await?;
             GitCorrelationWriteTxn::commit(transaction).await?;
         }
     }
@@ -464,7 +468,7 @@ where
     // Sweep commit attribution over span targets written since the last sweep.
     // This is the only attribution path for spans recorded live by the hook
     // route: those sessions have no transcript rows, so the session-driven
-    // backfill above never sees them, and without this sweep their commits
+    // history indexing above never sees them, and without this sweep their commits
     // would stay unattributed until a transcript ingest happens to run. The
     // sweep keeps its own watermark and is idempotent, so running it on every
     // pass (including passes with zero new session rows) is safe.
@@ -478,7 +482,7 @@ where
     Ok(stats)
 }
 
-/// Scans one span target's branch history through the backfill's git source,
+/// Scans one span target's branch history through the history indexing's git source,
 /// mirroring the ingest-time sweep's scanner: commits on the recorded branch
 /// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
 /// [`TargetScan::Unavailable`] — not an empty list — when the worktree is gone
@@ -512,17 +516,17 @@ fn scan_span_target<G: GitReflogSource + ?Sized>(
     )
 }
 
-/// Shared per-session backfill loop used by both the exhaustive
-/// [`run_backfill`] and the incremental [`run_incremental_backfill`]. Indexes
+/// Shared per-session history indexing loop used by both the exhaustive
+/// [`run_history_index`] and the incremental [`run_incremental_history_index`]. Indexes
 /// the supplied analytics timestamps once, then folds each row into the span
 /// and commit tables, counting skips instead of aborting.
-async fn backfill_rows<S, E, G: GitReflogSource + ?Sized>(
+async fn index_history_rows<S, E, G: GitReflogSource + ?Sized>(
     session_store: &S,
     git: &G,
-    opts: &BackfillOptions,
+    opts: &GitHistoryIndexOptions,
     rows: &[SessionActivityRow],
     analytics_events: &[E],
-    stats: &mut BackfillStats,
+    stats: &mut GitHistoryIndexStats,
 ) -> Result<(), GitCorrelationError>
 where
     S: GitCorrelationSessionStore,
@@ -543,7 +547,7 @@ where
     for row in rows {
         stats.sessions_scanned += 1;
         if let Err(reason) =
-            backfill_one_session(session_store, git, opts, row, &analytics_ts, stats).await
+            index_one_historical_session(session_store, git, opts, row, &analytics_ts, stats).await
         {
             stats.record_skip(reason);
         }
@@ -551,34 +555,39 @@ where
     Ok(())
 }
 
-async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource + ?Sized>(
+async fn index_one_historical_session<
+    S: GitCorrelationSessionStore,
+    G: GitReflogSource + ?Sized,
+>(
     session_store: &S,
     git: &G,
-    opts: &BackfillOptions,
+    opts: &GitHistoryIndexOptions,
     row: &SessionActivityRow,
     analytics_ts: &std::collections::HashMap<(String, String), Vec<i64>>,
-    stats: &mut BackfillStats,
-) -> Result<(), BackfillSkipReason> {
-    let (mut win_start, win_end) = row.window().ok_or(BackfillSkipReason::NoActivityWindow)?;
+    stats: &mut GitHistoryIndexStats,
+) -> Result<(), GitHistoryIndexSkipReason> {
+    let (mut win_start, win_end) = row
+        .window()
+        .ok_or(GitHistoryIndexSkipReason::NoActivityWindow)?;
     if win_end < opts.since {
-        return Err(BackfillSkipReason::NoActivityWindow);
+        return Err(GitHistoryIndexSkipReason::NoActivityWindow);
     }
     win_start = win_start.max(opts.since);
     if win_start > win_end {
-        return Err(BackfillSkipReason::NoActivityWindow);
+        return Err(GitHistoryIndexSkipReason::NoActivityWindow);
     }
 
     if row.project_path.trim().is_empty() {
-        return Err(BackfillSkipReason::NotAWorktree);
+        return Err(GitHistoryIndexSkipReason::NotAWorktree);
     }
     let worktree_path = std::path::Path::new(row.project_path.trim());
     let worktree_root = tracedecay_runtime_core::worktree::git_worktree_root(worktree_path)
-        .ok_or(BackfillSkipReason::NotAWorktree)?;
+        .ok_or(GitHistoryIndexSkipReason::NotAWorktree)?;
     let worktree = normalize_worktree(&worktree_root.to_string_lossy());
 
     let reflog_text = git
         .reflog(&worktree_root)
-        .ok_or(BackfillSkipReason::GitError)?;
+        .ok_or(GitHistoryIndexSkipReason::GitError)?;
     let timeline = branch_timeline_from_reflog(&reflog_text);
     let current_branch = git.current_branch(&worktree_root);
 
@@ -613,7 +622,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                 let transaction = session_store
                     .open_write_transaction()
                     .await
-                    .map_err(|_| BackfillSkipReason::GitError)?;
+                    .map_err(|_| GitHistoryIndexSkipReason::GitError)?;
                 super::record_span_observation_in_transaction(
                     &transaction,
                     &SpanObservation {
@@ -623,15 +632,15 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                         branch: segment.branch.clone(),
                         worktree: worktree.clone(),
                         ts,
-                        source: SpanSource::Backfill,
+                        source: SpanSource::HistoryIndex,
                     },
                     opts.merge_gap_secs,
                 )
                 .await
-                .map_err(|_| BackfillSkipReason::GitError)?;
+                .map_err(|_| GitHistoryIndexSkipReason::GitError)?;
                 GitCorrelationWriteTxn::commit(transaction)
                     .await
-                    .map_err(|_| BackfillSkipReason::GitError)?;
+                    .map_err(|_| GitHistoryIndexSkipReason::GitError)?;
             }
         }
         stats.spans_written += 1;
@@ -654,7 +663,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
             let transaction = session_store
                 .open_write_transaction()
                 .await
-                .map_err(|_| BackfillSkipReason::GitError)?;
+                .map_err(|_| GitHistoryIndexSkipReason::GitError)?;
             let inserted = super::upsert_commit_session(
                 &transaction,
                 &CommitSessionRecord {
@@ -673,10 +682,10 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
                 },
             )
             .await
-            .map_err(|_| BackfillSkipReason::GitError)?;
+            .map_err(|_| GitHistoryIndexSkipReason::GitError)?;
             GitCorrelationWriteTxn::commit(transaction)
                 .await
-                .map_err(|_| BackfillSkipReason::GitError)?;
+                .map_err(|_| GitHistoryIndexSkipReason::GitError)?;
             if inserted {
                 stats.commits_attributed += 1;
             }
@@ -685,7 +694,7 @@ async fn backfill_one_session<S: GitCorrelationSessionStore, G: GitReflogSource 
     Ok(())
 }
 
-/// Reads per-session activity windows for the backfill from a project-sessions
+/// Reads per-session activity windows for the history indexing from a project-sessions
 /// snapshot opened through [`GitCorrelationStore`].
 pub(super) async fn session_activity_rows(
     conn: &(impl QueryExecutor + ?Sized),
@@ -722,7 +731,7 @@ pub(super) async fn session_activity_rows(
 
 /// Reads per-session activity windows whose activity timestamp is strictly
 /// greater than `since_exclusive`, oldest-first and capped at `limit`. Backs the
-/// incremental auto-backfill: paired with a persisted watermark it drains
+/// incremental automatic history indexing: paired with a persisted watermark it drains
 /// history forward in bounded batches. Sessions with no timestamp at all are
 /// excluded (their `COALESCE` key is `NULL`, so the `HAVING` filter drops them —
 /// they carry no derivable activity window anyway).

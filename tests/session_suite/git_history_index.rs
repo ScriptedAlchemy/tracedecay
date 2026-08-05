@@ -1,9 +1,9 @@
-//! Integration coverage for the historical session↔git correlation backfill
-//! (`tracedecay sessions git-backfill`).
+//! Integration coverage for the historical session↔git correlation history indexing
+//! (`tracedecay sessions git-index-history`).
 //!
 //! Seeds a `sessions.db` with two sessions — one spanning a mid-session branch
 //! switch — against a real git repo carrying commits on both branches, runs
-//! the backfill core directly (no binary spawn), and asserts `sessions_for`
+//! the history indexing core directly (no binary spawn), and asserts `sessions_for`
 //! returns the expected branch/commit attribution, including the branch-switch
 //! case. A fake [`GitReflogSource`] supplies the branch timeline so the switch
 //! lands deterministically relative to each session's activity window, while
@@ -16,8 +16,8 @@ use tempfile::TempDir;
 
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use tracedecay::sessions::git_correlation::{
-    BackfillOptions, BranchTimelineEntry, CommitRelationFilter, GitRefFilter, GitReflogSource,
-    SessionsForQuery, normalize_worktree,
+    BranchTimelineEntry, CommitRelationFilter, GitHistoryIndexOptions, GitRefFilter,
+    GitReflogSource, SessionsForQuery, normalize_worktree,
 };
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay_domain::ProjectId;
@@ -171,7 +171,7 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
     let db = HostAdmissionTestRuntimeV1::project(
         tmp.path().join(".tracedecay"),
         repo,
-        ProjectId::new("project.git-backfill").unwrap(),
+        ProjectId::new("project.git-index-history").unwrap(),
     )
     .await
     .unwrap_or_else(|error| panic!("open registered sessions runtime: {error}"));
@@ -229,7 +229,7 @@ async fn open_seeded_db(repo: &Path) -> (TempDir, HostAdmissionTestRuntimeV1, St
 }
 
 #[tokio::test]
-async fn backfill_attributes_branch_switch_and_commits() {
+async fn history_index_attributes_branch_switch_and_commits() {
     let (_base, repo, main_shas, feature_shas) = build_repo();
     let worktree = normalize_worktree(&repo.to_string_lossy());
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
@@ -244,15 +244,15 @@ async fn backfill_attributes_branch_switch_and_commits() {
         current: Some("main".to_string()),
         real_repo: repo.clone(),
     };
-    let opts = BackfillOptions {
+    let opts = GitHistoryIndexOptions {
         since: T_BASE - 1,
         ..Default::default()
     };
 
     let stats = db
-        .run_git_backfill_for_test(&[], &git, &opts)
+        .run_git_history_index_for_test(&[], &git, &opts)
         .await
-        .unwrap_or_else(|e| panic!("backfill: {e}"));
+        .unwrap_or_else(|e| panic!("history indexing: {e}"));
     assert_eq!(stats.sessions_scanned, 2);
     assert_eq!(
         stats.skipped_total(),
@@ -328,7 +328,7 @@ async fn backfill_attributes_branch_switch_and_commits() {
 }
 
 #[tokio::test]
-async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
+async fn history_index_is_idempotent_and_dry_run_writes_nothing() {
     let (_base, repo, _main, _feature) = build_repo();
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
     let git = FakeGit {
@@ -339,17 +339,17 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
         current: Some("main".to_string()),
         real_repo: repo.clone(),
     };
-    let opts = BackfillOptions {
+    let opts = GitHistoryIndexOptions {
         since: T_BASE - 1,
         ..Default::default()
     };
 
     // Dry run writes nothing: no spans, so sessions_for is empty afterward.
     let dry = db
-        .run_git_backfill_for_test(
+        .run_git_history_index_for_test(
             &[],
             &git,
-            &BackfillOptions {
+            &GitHistoryIndexOptions {
                 dry_run: true,
                 ..opts.clone()
             },
@@ -373,12 +373,12 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
 
     // First real run writes; second run writes nothing new.
     let first = db
-        .run_git_backfill_for_test(&[], &git, &opts)
+        .run_git_history_index_for_test(&[], &git, &opts)
         .await
         .unwrap();
     assert!(first.commits_attributed >= 1);
     let second = db
-        .run_git_backfill_for_test(&[], &git, &opts)
+        .run_git_history_index_for_test(&[], &git, &opts)
         .await
         .unwrap();
     assert_eq!(
@@ -404,9 +404,9 @@ async fn backfill_is_idempotent_and_dry_run_writes_nothing() {
     assert_eq!(ids, vec!["s_main".to_string(), "s_switch".to_string()]);
 }
 
-/// Watermark key mirrored from `git_correlation::AUTO_BACKFILL_WATERMARK_KEY`
+/// Watermark key mirrored from `git_correlation::AUTO_HISTORY_INDEX_WATERMARK_KEY`
 /// (that const is `pub(crate)`, so integration tests reference the literal).
-const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+const AUTO_HISTORY_INDEX_WATERMARK_KEY: &str = "auto_history_index_activity_watermark";
 
 fn incremental_git(repo: &Path) -> FakeGit {
     FakeGit {
@@ -420,14 +420,14 @@ fn incremental_git(repo: &Path) -> FakeGit {
 }
 
 #[tokio::test]
-async fn incremental_backfill_advances_watermark_and_is_idempotent() {
+async fn incremental_history_index_advances_watermark_and_is_idempotent() {
     let (_base, repo, _main, _feature) = build_repo();
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
     let git = incremental_git(&repo);
 
     // No pass has run yet, so no watermark is recorded.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(AUTO_HISTORY_INDEX_WATERMARK_KEY)
             .await
             .unwrap(),
         None
@@ -435,7 +435,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 
     // First pass drains both seeded sessions and writes their spans.
     let first = db
-        .run_incremental_git_backfill_for_test(&git, 50)
+        .run_incremental_git_history_index_for_test(&git, 50)
         .await
         .unwrap();
     assert_eq!(first.sessions_scanned, 2);
@@ -447,7 +447,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
     // The watermark advances to the newest session activity: s_switch's last
     // message at T_BASE + 850.
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(AUTO_HISTORY_INDEX_WATERMARK_KEY)
             .await
             .unwrap(),
         Some(T_BASE + 850)
@@ -455,7 +455,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 
     // A second pass finds nothing newer than the watermark: no rescans.
     let second = db
-        .run_incremental_git_backfill_for_test(&git, 50)
+        .run_incremental_git_history_index_for_test(&git, 50)
         .await
         .unwrap();
     assert_eq!(second.sessions_scanned, 0);
@@ -480,7 +480,7 @@ async fn incremental_backfill_advances_watermark_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
+async fn incremental_history_index_cap_drains_history_oldest_first_across_passes() {
     let (_base, repo, _main, _feature) = build_repo();
     let (_db_tmp, db, _project) = open_seeded_db(&repo).await;
     let git = incremental_git(&repo);
@@ -488,12 +488,12 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
     // A cap of one session per pass drains oldest-first. s_main's activity
     // (last message T_BASE + 200) precedes s_switch's (T_BASE + 850).
     let pass1 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
+        .run_incremental_git_history_index_for_test(&git, 1)
         .await
         .unwrap();
     assert_eq!(pass1.sessions_scanned, 1);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(AUTO_HISTORY_INDEX_WATERMARK_KEY)
             .await
             .unwrap(),
         Some(T_BASE + 200),
@@ -501,12 +501,12 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
     );
 
     let pass2 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
+        .run_incremental_git_history_index_for_test(&git, 1)
         .await
         .unwrap();
     assert_eq!(pass2.sessions_scanned, 1);
     assert_eq!(
-        db.git_correlation_meta_for_test(AUTO_BACKFILL_WATERMARK_KEY)
+        db.git_correlation_meta_for_test(AUTO_HISTORY_INDEX_WATERMARK_KEY)
             .await
             .unwrap(),
         Some(T_BASE + 850)
@@ -514,7 +514,7 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
 
     // History fully drained: the next pass has nothing to do.
     let pass3 = db
-        .run_incremental_git_backfill_for_test(&git, 1)
+        .run_incremental_git_history_index_for_test(&git, 1)
         .await
         .unwrap();
     assert_eq!(pass3.sessions_scanned, 0);
@@ -538,13 +538,13 @@ async fn incremental_backfill_cap_drains_history_oldest_first_across_passes() {
 }
 
 #[tokio::test]
-async fn backfill_skips_non_worktree_sessions() {
+async fn history_index_skips_non_worktree_sessions() {
     let (_base, repo, _main, _feature) = build_repo();
     let tmp = tempfile::tempdir().unwrap();
     let db = HostAdmissionTestRuntimeV1::project(
         tmp.path().join(".tracedecay"),
         &repo,
-        ProjectId::new("project.git-backfill-non-worktree").unwrap(),
+        ProjectId::new("project.git-index-history-non-worktree").unwrap(),
     )
     .await
     .unwrap();
@@ -575,10 +575,10 @@ async fn backfill_skips_non_worktree_sessions() {
         real_repo: repo.clone(),
     };
     let stats = db
-        .run_git_backfill_for_test(
+        .run_git_history_index_for_test(
             &[],
             &git,
-            &BackfillOptions {
+            &GitHistoryIndexOptions {
                 since: T_BASE - 1,
                 ..Default::default()
             },

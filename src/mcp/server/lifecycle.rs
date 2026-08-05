@@ -496,9 +496,9 @@ async fn run_startup_session_post_ingest(
 ) -> bool {
     let git = crate::sessions::git_correlation::SystemGit;
     let _ = crate::store::GlobalDbGitCorrelationStore::new(Arc::clone(&db))
-        .run_incremental_backfill(
+        .run_incremental_history_index(
             &git,
-            crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
+            crate::sessions::git_correlation::DEFAULT_AUTO_HISTORY_INDEX_SESSIONS_PER_PASS,
         )
         .await;
     if cancellation.is_cancelled() {
@@ -834,7 +834,7 @@ impl McpServer {
                     }
                     // Historical git-span correlation is only ever written by
                     // live hook events (which never fire for stdio/daemonless
-                    // deployments) or a manual CLI backfill. Neither runs for
+                    // deployments) or a manual CLI history-index pass. Neither runs for
                     // most projects, leaving `session_git_spans` empty so
                     // `sessions_for` silently returns nothing. Drain that
                     // history here — one bounded, watermarked pass per startup

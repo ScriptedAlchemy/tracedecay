@@ -191,37 +191,37 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn run_git_backfill_for_test(
+    pub async fn run_git_history_index_for_test(
         &self,
         analytics_events: &[crate::global_db::AnalyticsEventRecord],
         git: &dyn crate::sessions::git_correlation::GitReflogSource,
-        options: &crate::sessions::git_correlation::BackfillOptions,
+        options: &crate::sessions::git_correlation::GitHistoryIndexOptions,
     ) -> std::result::Result<
-        crate::sessions::git_correlation::BackfillStats,
+        crate::sessions::git_correlation::GitHistoryIndexStats,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
             crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
-            .run_backfill(analytics_events, git, options)
+            .run_history_index(analytics_events, git, options)
             .await
     }
 
     #[doc(hidden)]
-    pub async fn run_incremental_git_backfill_for_test(
+    pub async fn run_incremental_git_history_index_for_test(
         &self,
         git: &dyn crate::sessions::git_correlation::GitReflogSource,
         limit_sessions: usize,
     ) -> std::result::Result<
-        crate::sessions::git_correlation::BackfillStats,
+        crate::sessions::git_correlation::GitHistoryIndexStats,
         crate::sessions::git_correlation::GitCorrelationError,
     > {
         let database = self.project_database_for_test().map_err(|error| {
             crate::sessions::git_correlation::GitCorrelationError::Db(error.to_string())
         })?;
         crate::store::GlobalDbGitCorrelationStore::new(database)
-            .run_incremental_backfill(git, limit_sessions)
+            .run_incremental_history_index(git, limit_sessions)
             .await
     }
 

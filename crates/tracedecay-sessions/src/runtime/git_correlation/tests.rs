@@ -1809,7 +1809,7 @@ async fn correlation_index_health_reports_empty_then_populated() {
     assert_eq!(empty.span_count, 0);
     assert_eq!(empty.commit_count, 0);
     assert_eq!(empty.last_span_write, None);
-    assert_eq!(empty.backfill_watermark, None);
+    assert_eq!(empty.history_index_watermark, None);
     assert!(empty.is_empty(), "no spans means the index is empty");
 
     // One recorded observation flips the index to populated with a write time.
@@ -1821,12 +1821,12 @@ async fn correlation_index_health_reports_empty_then_populated() {
     assert!(populated.last_span_write.is_some());
     assert!(!populated.is_empty());
 
-    // The auto-backfill watermark surfaces once a pass has written it.
-    write_meta_value(&conn, AUTO_BACKFILL_WATERMARK_KEY, 4_242)
+    // The automatic history indexing watermark surfaces once a pass has written it.
+    write_meta_value(&conn, AUTO_HISTORY_INDEX_WATERMARK_KEY, 4_242)
         .await
         .unwrap();
     let with_watermark = correlation_index_health(&conn).await.unwrap();
-    assert_eq!(with_watermark.backfill_watermark, Some(4_242));
+    assert_eq!(with_watermark.history_index_watermark, Some(4_242));
 }
 
 #[tokio::test]
@@ -1839,5 +1839,5 @@ async fn correlation_index_health_without_tables_is_empty() {
     assert!(health.is_empty());
     assert_eq!(health.span_count, 0);
     assert_eq!(health.commit_count, 0);
-    assert_eq!(health.backfill_watermark, None);
+    assert_eq!(health.history_index_watermark, None);
 }

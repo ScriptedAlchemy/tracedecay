@@ -46,10 +46,10 @@ pub const DEFAULT_SPAN_MERGE_GAP_SECS: i64 = 30 * 60;
 /// Hard cap on rows returned by [`sessions_for`].
 pub const MAX_SESSIONS_FOR_LIMIT: usize = 100;
 
-/// `git_correlation_meta` key holding the auto-backfill activity watermark:
-/// the highest session-activity timestamp the incremental backfill has already
-/// attempted. See [`run_incremental_backfill`].
-pub const AUTO_BACKFILL_WATERMARK_KEY: &str = "auto_backfill_activity_watermark";
+/// `git_correlation_meta` key holding the automatic history indexing activity watermark:
+/// the highest session-activity timestamp the incremental history indexing has already
+/// attempted. See [`run_incremental_history_index`].
+pub const AUTO_HISTORY_INDEX_WATERMARK_KEY: &str = "auto_history_index_activity_watermark";
 
 /// Errors from the git-correlation store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,8 +85,8 @@ pub enum SpanSource {
     HookRoute,
     /// Derived during transcript ingest/sync.
     Ingest,
-    /// Reconstructed by the historical backfill command.
-    Backfill,
+    /// Reconstructed by the historical indexing command.
+    HistoryIndex,
 }
 
 impl SpanSource {
@@ -94,7 +94,7 @@ impl SpanSource {
         match self {
             Self::HookRoute => "hook_route",
             Self::Ingest => "ingest",
-            Self::Backfill => "backfill",
+            Self::HistoryIndex => "history_index",
         }
     }
 
@@ -102,7 +102,7 @@ impl SpanSource {
         match value {
             "hook_route" => Some(Self::HookRoute),
             "ingest" => Some(Self::Ingest),
-            "backfill" => Some(Self::Backfill),
+            "history_index" => Some(Self::HistoryIndex),
             _ => None,
         }
     }
@@ -121,7 +121,7 @@ pub enum SpanOverlapKind {
     /// often land moments after the last recorded tool use).
     ExtendedWindow,
     /// Attributed via `git reflog` checkout history rather than a recorded
-    /// span (backfill of sessions that predate span recording).
+    /// span (history indexing of sessions that predate span recording).
     Reflog,
 }
 
@@ -614,7 +614,7 @@ pub async fn ensure_git_correlation_schema_in_transaction(
             first_ts INTEGER NOT NULL,
             last_ts INTEGER NOT NULL,
             event_count INTEGER NOT NULL DEFAULT 1,
-            source TEXT NOT NULL CHECK(source IN ('hook_route', 'ingest', 'backfill')),
+            source TEXT NOT NULL CHECK(source IN ('hook_route', 'ingest', 'history_index')),
             created_at INTEGER NOT NULL DEFAULT (unixepoch()),
             updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
             CHECK(first_ts <= last_ts)
@@ -965,7 +965,7 @@ pub async fn record_span_observation_in_transaction(
     // Pick *any* span this observation can extend, not merely the newest one.
     // Selecting the newest (`ORDER BY last_ts DESC LIMIT 1`) silently breaks
     // whenever observations arrive out of order relative to the newest span —
-    // which is the norm, not the exception: a transcript re-ingest or backfill
+    // which is the norm, not the exception: a transcript re-ingest or history indexing
     // replays a session's earlier messages after later ones are already
     // recorded, and a session that switches branches A → B → A leaves an older
     // A-span behind a newer B-span. In those cases the newest span is not
@@ -1635,13 +1635,13 @@ pub struct CorrelationIndexHealth {
     pub commit_count: i64,
     /// Newest `session_git_spans.updated_at`, or `None` when empty.
     pub last_span_write: Option<i64>,
-    /// The auto-backfill activity watermark, or `None` when a pass never ran.
-    pub backfill_watermark: Option<i64>,
+    /// The automatic history indexing activity watermark, or `None` when a pass never ran.
+    pub history_index_watermark: Option<i64>,
 }
 
 impl CorrelationIndexHealth {
     /// True when the correlation index holds no spans — either the tables are
-    /// missing or no observation/backfill ever wrote a row. Distinct from a
+    /// missing or no observation/history indexing ever wrote a row. Distinct from a
     /// populated index that simply had no rows matching a given git ref.
     pub const fn is_empty(&self) -> bool {
         self.span_count == 0
@@ -1668,7 +1668,7 @@ pub async fn correlation_index_health(
             span_count: 0,
             commit_count: 0,
             last_span_write: None,
-            backfill_watermark: None,
+            history_index_watermark: None,
         });
     }
     let mut span_rows = conn
@@ -1688,13 +1688,13 @@ pub async fn correlation_index_health(
         Some(row) => row.get::<i64>(0)?,
         None => 0,
     };
-    let backfill_watermark = read_meta_value(conn, AUTO_BACKFILL_WATERMARK_KEY).await?;
+    let history_index_watermark = read_meta_value(conn, AUTO_HISTORY_INDEX_WATERMARK_KEY).await?;
     Ok(CorrelationIndexHealth {
         tables_present: true,
         span_count,
         commit_count,
         last_span_write,
-        backfill_watermark,
+        history_index_watermark,
     })
 }
 
@@ -1886,14 +1886,15 @@ fn commit_hit_strength(hit: &SessionGitCorrelationHit) -> (u8, i64) {
     (relation_rank, hit.confidence.unwrap_or(0))
 }
 
-mod backfill;
+mod history_index;
 mod store;
-pub use backfill::{
-    BackfillOptions, BackfillSkipReason, BackfillStats, BranchTimelineEntry,
-    DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS, GitReflogSource, SessionActivityRow, SystemGit,
-    WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log, window_branch_segments,
+pub use history_index::{
+    BranchTimelineEntry, DEFAULT_AUTO_HISTORY_INDEX_SESSIONS_PER_PASS, GitHistoryIndexOptions,
+    GitHistoryIndexSkipReason, GitHistoryIndexStats, GitReflogSource, SessionActivityRow,
+    SystemGit, WindowBranchSegment, branch_timeline_from_reflog, parse_commit_log,
+    window_branch_segments,
 };
-pub use backfill::{run_backfill, run_incremental_backfill};
+pub use history_index::{run_history_index, run_incremental_history_index};
 pub use store::AnalyticsSessionTimestamp;
 pub use store::{
     AnalyticsSessionTimestampSource, GitCorrelationSessionStore, GitCorrelationWriteTxn,
