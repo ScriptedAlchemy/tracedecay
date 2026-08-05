@@ -3166,6 +3166,106 @@ mod tests {
         .expect("Scout owner")
     }
 
+    fn configured_model_evidence() -> crate::agents::context_scout_v2::ContextScoutEvidenceEnvelopeV1
+    {
+        use crate::agents::context_scout_v2::{
+            ContextScoutEvidenceEnvelopeV1, ContextScoutEvidenceSourceKindV1,
+            ContextScoutEvidenceSourceReceiptV1, ContextScoutRedactionReceiptV1,
+        };
+        use tracedecay_application::{
+            AuthorityReceipt, CoverageCompleteness, CoverageDomainState, DisclosureClass,
+            EvidenceCoverage, EvidenceDomain, FreshnessState, PolicyDecisionRef, ResolvedScope,
+            RetrieverContributionState, TemporalState,
+        };
+        use tracedecay_domain::feedback::{FeedbackContentIdentityV1, FeedbackScopeV1};
+        use tracedecay_domain::{
+            CodeGenerationId, ComponentVersion, ManifestDigest, RefId, RetrievalAnchorId,
+            TemporalModeV1,
+        };
+
+        fn typed_id<T>(value: &str) -> T
+        where
+            T: TryFrom<String>,
+            T::Error: std::fmt::Debug,
+        {
+            T::try_from(value.to_owned()).unwrap()
+        }
+
+        fn digest(character: char) -> ManifestDigest {
+            ManifestDigest::new(format!("sha256:{}", character.to_string().repeat(64))).unwrap()
+        }
+
+        let scope = ResolvedScope::new(
+            typed_id("project.scout.configured-model"),
+            typed_id("repository.scout.configured-model"),
+            typed_id("worktree.scout.configured-model"),
+            Some(typed_id::<RefId>("refs/heads/main")),
+        )
+        .unwrap();
+        let generation = typed_id::<CodeGenerationId>("generation.scout.configured-model.current");
+        ContextScoutEvidenceEnvelopeV1::claim(
+            FeedbackScopeV1 {
+                project_id: scope.project_id.clone(),
+                repository_id: scope.repository_id.clone(),
+                worktree_id: scope.worktree_id.clone(),
+                branch_ref: "refs/heads/main".to_owned(),
+                head_commit_id: typed_id("commit.scout.configured-model"),
+            },
+            scope.clone(),
+            FeedbackContentIdentityV1::SavedContent {
+                generation_digest: digest('c'),
+                file_digest: digest('d'),
+            },
+            generation.clone(),
+            AuthorityReceipt {
+                grant_id: typed_id("grant.scout.configured-model"),
+                grant_revision: 1,
+                grant_digest: digest('a'),
+                authorized_scope_digest: scope.scope_digest.clone(),
+                disclosure: DisclosureClass::Evidence,
+                policy: PolicyDecisionRef::new(
+                    "policy.scout.configured-model",
+                    1,
+                    digest('b'),
+                    ComponentVersion::new("policy.scout.configured-model.v1").unwrap(),
+                )
+                .unwrap(),
+                revalidated_at: UtcMicros(1),
+            },
+            ContextScoutRedactionReceiptV1::MetadataOnly {
+                disclosure: DisclosureClass::Evidence,
+            },
+            vec![ContextScoutEvidenceSourceReceiptV1 {
+                source: ContextScoutEvidenceSourceKindV1::Query,
+                contribution_state: RetrieverContributionState::Completed,
+                temporal: TemporalState {
+                    requested_mode: TemporalModeV1::Current,
+                    requested_at: UtcMicros(1),
+                    resolved_at: UtcMicros(2),
+                    source_generation: Some(generation),
+                    watermark_digest: Some(digest('e')),
+                    freshness: FreshnessState::Current,
+                },
+                coverage: EvidenceCoverage {
+                    requested_domains: vec![EvidenceDomain::Anchor],
+                    visited: Some(1),
+                    eligible: Some(1),
+                    returned: 1,
+                    completeness: CoverageCompleteness::Complete,
+                    domains: vec![CoverageDomainState {
+                        domain: EvidenceDomain::Anchor,
+                        completeness: CoverageCompleteness::Complete,
+                    }],
+                },
+                anchors: vec![typed_id::<RetrievalAnchorId>(
+                    "anchor.scout.configured-model",
+                )],
+            }],
+            UtcMicros(2),
+        )
+        .unwrap()
+    }
+
     fn configured_model_input(
         configuration_revision: [u8; 32],
     ) -> crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
@@ -3187,24 +3287,14 @@ mod tests {
             delivery_window:
                 crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
             delivered_dedupe_keys: BTreeSet::new(),
-            candidates: vec![
-                crate::agents::context_scout_v2::ContextScoutCandidateV1 {
-                    dedupe_key: [11; 32],
-                    category:
-                        crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
-                    relevance_score: 10,
-                    suggestion_text: "Use the admitted evidence.".to_owned(),
-                    evidence: vec![
-                        crate::agents::context_scout_v2::ContextScoutEvidenceBindingV1 {
-                            anchor_id: [12; 16],
-                            content_identity: [13; 32],
-                            generation:
-                                crate::agents::context_scout_v2::ContextScoutEvidenceGenerationV1::SavedContent,
-                        },
-                    ],
-                    expires_at: UtcMicros(100),
-                },
-            ],
+            candidates: vec![crate::agents::context_scout_v2::ContextScoutCandidateV1 {
+                dedupe_key: [11; 32],
+                category: crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
+                relevance_score: 10,
+                suggestion_text: "Use the admitted evidence.".to_owned(),
+                evidence: configured_model_evidence(),
+                expires_at: UtcMicros(100),
+            }],
         }
     }
 
