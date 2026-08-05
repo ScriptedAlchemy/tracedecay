@@ -3,12 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use schemars::schema_for;
 use tracedecay_application::{
-    CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    MAX_TASK_HANDOFF_LIFETIME_MICROS, RequestContext, RequestId, ResolvedScope,
-    TaskHandoffAuthorityError, TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome,
-    TaskHandoffError, TaskHandoffGrant, TaskHandoffIssueRequest, TaskHandoffRedeemRequest,
-    TaskHandoffScope, TaskHandoffService, TaskHandoffToken, WorkflowCoordinationError,
-    WorkflowDefinitionAuthorityError, WorkflowDefinitionAuthorityPort, WorkflowDefinitionService,
+    CancellationContext, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestContext,
+    RequestId, ResolvedScope, TASK_HANDOFF_LIFETIME_MICROS, TaskHandoffAuthorityError,
+    TaskHandoffAuthorityPort, TaskHandoffConsumeOutcome, TaskHandoffError, TaskHandoffGrant,
+    TaskHandoffIssueRequest, TaskHandoffRedeemRequest, TaskHandoffScope, TaskHandoffService,
+    TaskHandoffToken, WorkflowCoordinationError, WorkflowDefinitionAuthorityError,
+    WorkflowDefinitionAuthorityPort, WorkflowDefinitionService,
 };
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, RepositoryId, RunId, TaskId, ThreadId, UtcMicros,
@@ -305,7 +305,7 @@ fn token(value: char) -> TaskHandoffToken {
 
 #[test]
 fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_leakage() {
-    assert_eq!(MAX_TASK_HANDOFF_LIFETIME_MICROS, UtcMicros(60_000_000));
+    assert_eq!(TASK_HANDOFF_LIFETIME_MICROS, UtcMicros(60_000_000));
     let authority = FakeHandoffAuthority::default();
     let service = TaskHandoffService::new(authority);
     let scope = handoff_scope();
@@ -374,7 +374,6 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
                 ),
                 scope.clone(),
                 &handoff,
-                UtcMicros(20),
                 UtcMicros(10),
             )
             .unwrap_err(),
@@ -402,27 +401,17 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
     ] {
         assert_eq!(
             service
-                .issue(
-                    &context,
-                    scope.clone(),
-                    &handoff,
-                    UtcMicros(20),
-                    UtcMicros(10),
-                )
+                .issue(&context, scope.clone(), &handoff, UtcMicros(10),)
                 .unwrap_err(),
             TaskHandoffError::Unauthorized
         );
     }
 
-    service
-        .issue(
-            &issue_context,
-            scope.clone(),
-            &handoff,
-            UtcMicros(20),
-            UtcMicros(10),
-        )
+    let grant = service
+        .issue(&issue_context, scope.clone(), &handoff, UtcMicros(10))
         .unwrap();
+    assert_eq!(*grant.issued_at(), UtcMicros(10));
+    assert_eq!(*grant.expires_at(), UtcMicros(60_000_010));
 
     assert_eq!(
         service
@@ -532,36 +521,30 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
         TaskHandoffError::ScopeMismatch
     );
 
-    // Half-open expiry: consumed_at == expires_at is Expired.
+    // Half-open expiry: consumed_at == the fixed expiry is Expired.
     assert_eq!(
         service
-            .redeem(&redeem_context, &handoff, &scope, UtcMicros(20))
+            .redeem(&redeem_context, &handoff, &scope, UtcMicros(60_000_010))
             .unwrap_err(),
         TaskHandoffError::Expired
     );
     service
-        .redeem(&redeem_context, &handoff, &scope, UtcMicros(19))
+        .redeem(&redeem_context, &handoff, &scope, UtcMicros(60_000_009))
         .unwrap();
     assert_eq!(
         service
-            .redeem(&redeem_context, &handoff, &scope, UtcMicros(19))
+            .redeem(&redeem_context, &handoff, &scope, UtcMicros(60_000_009))
             .unwrap_err(),
         TaskHandoffError::Replay
     );
 
     let expired = token('e');
     service
-        .issue(
-            &issue_context,
-            scope.clone(),
-            &expired,
-            UtcMicros(20),
-            UtcMicros(10),
-        )
+        .issue(&issue_context, scope.clone(), &expired, UtcMicros(10))
         .unwrap();
     assert_eq!(
         service
-            .redeem(&redeem_context, &expired, &scope, UtcMicros(21))
+            .redeem(&redeem_context, &expired, &scope, UtcMicros(60_000_010),)
             .unwrap_err(),
         TaskHandoffError::Expired
     );
@@ -572,35 +555,21 @@ fn handoff_enforces_authorization_scope_expiry_and_single_use_without_bearer_lea
                 &issue_context,
                 scope.clone(),
                 &token('x'),
-                UtcMicros(10),
-                UtcMicros(10),
+                UtcMicros(i64::MAX - 59_999_999),
             )
             .unwrap_err(),
         TaskHandoffError::InvalidExpiry
     );
 
-    // Maximum lifetime is 60 seconds (60_000_000 micros).
-    assert_eq!(
-        service
-            .issue(
-                &issue_context,
-                scope.clone(),
-                &token('l'),
-                UtcMicros(10 + 60_000_001),
-                UtcMicros(10),
-            )
-            .unwrap_err(),
-        TaskHandoffError::InvalidExpiry
-    );
-    service
+    let boundary = service
         .issue(
             &issue_context,
             scope.clone(),
             &token('m'),
-            UtcMicros(10 + 60_000_000),
-            UtcMicros(10),
+            UtcMicros(i64::MAX - 60_000_000),
         )
         .unwrap();
+    assert_eq!(*boundary.expires_at(), UtcMicros(i64::MAX));
 }
 
 #[test]
@@ -609,7 +578,6 @@ fn handoff_wire_requests_reject_caller_supplied_identity_and_time() {
     let issue = serde_json::json!({
         "scope": scope,
         "secret": "s".repeat(48),
-        "expires_at": 20,
     });
     assert!(serde_json::from_value::<TaskHandoffIssueRequest>(issue.clone()).is_ok());
     let mut caller_issued = issue.clone();
@@ -618,11 +586,17 @@ fn handoff_wire_requests_reject_caller_supplied_identity_and_time() {
         serde_json::from_value::<TaskHandoffIssueRequest>(caller_issued).is_err(),
         "issuance actor must come from authenticated context"
     );
-    let mut caller_issued_at = issue;
+    let mut caller_issued_at = issue.clone();
     caller_issued_at["issued_at"] = serde_json::json!(10);
     assert!(
         serde_json::from_value::<TaskHandoffIssueRequest>(caller_issued_at).is_err(),
         "issuance time must come from the daemon clock"
+    );
+    let mut caller_expires_at = issue;
+    caller_expires_at["expires_at"] = serde_json::json!(60_000_010);
+    assert!(
+        serde_json::from_value::<TaskHandoffIssueRequest>(caller_expires_at).is_err(),
+        "expiry must be derived from the fixed authority lifetime"
     );
 
     let redeem = serde_json::json!({
@@ -647,11 +621,16 @@ fn handoff_wire_requests_reject_caller_supplied_identity_and_time() {
 #[test]
 fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
     let scope = handoff_scope();
-    let grant =
-        TaskHandoffGrant::new(scope.clone(), digest('f'), UtcMicros(10), UtcMicros(20)).unwrap();
+    let grant = TaskHandoffGrant::new(
+        scope.clone(),
+        digest('f'),
+        UtcMicros(10),
+        UtcMicros(60_000_010),
+    )
+    .unwrap();
     assert_eq!(grant.scope(), &scope);
     assert_eq!(*grant.issued_at(), UtcMicros(10));
-    assert_eq!(*grant.expires_at(), UtcMicros(20));
+    assert_eq!(*grant.expires_at(), UtcMicros(60_000_010));
     let json = serde_json::to_value(&grant).unwrap();
     assert_eq!(json["scope"]["thread_id"], "thread.workflow.coordination");
     assert_eq!(
@@ -665,12 +644,15 @@ fn handoff_grant_deserialization_fails_closed_on_scope_and_expiry() {
     assert!(serde_json::from_value::<TaskHandoffGrant>(expired_order).is_err());
 
     let mut inverted = json.clone();
-    inverted["issued_at"] = serde_json::json!(21);
-    inverted["expires_at"] = serde_json::json!(20);
+    inverted["issued_at"] = serde_json::json!(60_000_011);
+    inverted["expires_at"] = serde_json::json!(60_000_010);
     assert!(serde_json::from_value::<TaskHandoffGrant>(inverted).is_err());
 
+    let mut too_short = json.clone();
+    too_short["expires_at"] = serde_json::json!(10 + 59_999_999);
+    assert!(serde_json::from_value::<TaskHandoffGrant>(too_short).is_err());
+
     let mut too_long = json.clone();
-    too_long["issued_at"] = serde_json::json!(10);
     too_long["expires_at"] = serde_json::json!(10 + 60_000_001);
     assert!(serde_json::from_value::<TaskHandoffGrant>(too_long).is_err());
 

@@ -197,7 +197,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         scope.clone(),
         token_digest(&secret),
         UtcMicros(10),
-        UtcMicros(20),
+        UtcMicros(60_000_010),
     )
     .unwrap();
 
@@ -266,7 +266,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
         scope.clone(),
         token_digest(&"e".repeat(48)),
         UtcMicros(10),
-        UtcMicros(20),
+        UtcMicros(60_000_010),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &expired).unwrap();
@@ -275,7 +275,7 @@ fn handoff_persists_digest_only_and_classifies_consume_outcomes() {
             &authority,
             expired.token_digest(),
             &scope,
-            UtcMicros(20),
+            UtcMicros(60_000_010),
         )
         .unwrap(),
         TaskHandoffConsumeOutcome::Expired
@@ -305,7 +305,7 @@ fn definition_and_handoff_survive_registered_store_restart() {
         scope.clone(),
         token_digest(&"r".repeat(48)),
         UtcMicros(10),
-        UtcMicros(50),
+        UtcMicros(60_000_010),
     )
     .unwrap();
     TaskHandoffAuthorityPort::issue(&authority, &grant).unwrap();
