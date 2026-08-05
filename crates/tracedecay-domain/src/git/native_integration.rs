@@ -19,6 +19,214 @@ pub enum NativeIntegrationMechanicalModeV1 {
     CherryPickExactCommits,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeIntegrationPreviewBlockerV1 {
+    NativeConflict,
+    SemanticConflict,
+    PartialEvidence,
+    UnsupportedRepositoryState,
+    UnsupportedHooks,
+    UnsupportedSigning,
+    UnsupportedDriver,
+    DependencyNotReady,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state", content = "blockers")]
+pub enum NativeIntegrationPreviewDispositionV1 {
+    Eligible,
+    PreviewOnly(Vec<NativeIntegrationPreviewBlockerV1>),
+}
+
+impl NativeIntegrationPreviewDispositionV1 {
+    pub const fn is_eligible(&self) -> bool {
+        matches!(self, Self::Eligible)
+    }
+}
+
+/// Immutable result of private native preflight.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeIntegrationPreviewV1 {
+    pub preview_id: NativeIntegrationPreviewId,
+    pub repository_id: RepositoryId,
+    pub source_worktree_id: WorktreeId,
+    pub destination_worktree_id: WorktreeId,
+    pub source_ref: String,
+    pub destination_ref: String,
+    pub destination_checked_out: bool,
+    pub mode: NativeIntegrationMechanicalModeV1,
+    pub source_tip: GitOidV1,
+    pub destination_tip: GitOidV1,
+    pub destination_tree: GitOidV1,
+    pub merge_base: GitOidV1,
+    pub ordered_source_commits: Vec<GitOidV1>,
+    pub expected_created_commits: Vec<GitOidV1>,
+    pub candidate_destination_tip: GitOidV1,
+    pub candidate_tree: GitOidV1,
+    pub repository_snapshot_digest: ManifestDigest,
+    pub selection_digest: ManifestDigest,
+    pub topology_digest: ManifestDigest,
+    pub configuration_digest: ManifestDigest,
+    pub attributes_digest: ManifestDigest,
+    pub hook_policy_digest: ManifestDigest,
+    pub signing_policy_digest: ManifestDigest,
+    pub message_policy_digest: ManifestDigest,
+    pub semantic_evidence_digest: ManifestDigest,
+    pub disposition: NativeIntegrationPreviewDispositionV1,
+    pub created_at: UtcMicros,
+    pub expires_at: UtcMicros,
+    pub preview_digest: ManifestDigest,
+}
+
+#[derive(Serialize)]
+struct NativeIntegrationPreviewDigestMaterial<'a> {
+    domain: &'static str,
+    preview_id: &'a NativeIntegrationPreviewId,
+    repository_id: &'a RepositoryId,
+    source_worktree_id: &'a WorktreeId,
+    destination_worktree_id: &'a WorktreeId,
+    source_ref: &'a str,
+    destination_ref: &'a str,
+    destination_checked_out: bool,
+    mode: NativeIntegrationMechanicalModeV1,
+    source_tip: &'a GitOidV1,
+    destination_tip: &'a GitOidV1,
+    destination_tree: &'a GitOidV1,
+    merge_base: &'a GitOidV1,
+    ordered_source_commits: &'a [GitOidV1],
+    expected_created_commits: &'a [GitOidV1],
+    candidate_destination_tip: &'a GitOidV1,
+    candidate_tree: &'a GitOidV1,
+    repository_snapshot_digest: &'a ManifestDigest,
+    selection_digest: &'a ManifestDigest,
+    topology_digest: &'a ManifestDigest,
+    configuration_digest: &'a ManifestDigest,
+    attributes_digest: &'a ManifestDigest,
+    hook_policy_digest: &'a ManifestDigest,
+    signing_policy_digest: &'a ManifestDigest,
+    message_policy_digest: &'a ManifestDigest,
+    semantic_evidence_digest: &'a ManifestDigest,
+    disposition: &'a NativeIntegrationPreviewDispositionV1,
+    created_at: UtcMicros,
+    expires_at: UtcMicros,
+}
+
+impl NativeIntegrationPreviewV1 {
+    pub fn compute_preview_digest(&self) -> Result<ManifestDigest, DomainError> {
+        self.validate_fields()?;
+        canonical_sha256(&NativeIntegrationPreviewDigestMaterial {
+            domain: "tracedecay.native-integration.preview.v1",
+            preview_id: &self.preview_id,
+            repository_id: &self.repository_id,
+            source_worktree_id: &self.source_worktree_id,
+            destination_worktree_id: &self.destination_worktree_id,
+            source_ref: &self.source_ref,
+            destination_ref: &self.destination_ref,
+            destination_checked_out: self.destination_checked_out,
+            mode: self.mode,
+            source_tip: &self.source_tip,
+            destination_tip: &self.destination_tip,
+            destination_tree: &self.destination_tree,
+            merge_base: &self.merge_base,
+            ordered_source_commits: &self.ordered_source_commits,
+            expected_created_commits: &self.expected_created_commits,
+            candidate_destination_tip: &self.candidate_destination_tip,
+            candidate_tree: &self.candidate_tree,
+            repository_snapshot_digest: &self.repository_snapshot_digest,
+            selection_digest: &self.selection_digest,
+            topology_digest: &self.topology_digest,
+            configuration_digest: &self.configuration_digest,
+            attributes_digest: &self.attributes_digest,
+            hook_policy_digest: &self.hook_policy_digest,
+            signing_policy_digest: &self.signing_policy_digest,
+            message_policy_digest: &self.message_policy_digest,
+            semantic_evidence_digest: &self.semantic_evidence_digest,
+            disposition: &self.disposition,
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.preview_digest.validate()?;
+        self.validate_fields()?;
+        if self.preview_digest != self.compute_preview_digest()? {
+            return Err(DomainError::DigestMismatch);
+        }
+        Ok(())
+    }
+
+    fn validate_fields(&self) -> Result<(), DomainError> {
+        self.preview_id.validate()?;
+        self.repository_id.validate()?;
+        self.source_worktree_id.validate()?;
+        self.destination_worktree_id.validate()?;
+        validate_full_branch_ref(&self.source_ref)?;
+        validate_full_branch_ref(&self.destination_ref)?;
+        self.source_tip.validate()?;
+        self.destination_tip.validate()?;
+        self.destination_tree.validate()?;
+        self.merge_base.validate()?;
+        self.candidate_destination_tip.validate()?;
+        self.candidate_tree.validate()?;
+        for commit in self
+            .ordered_source_commits
+            .iter()
+            .chain(&self.expected_created_commits)
+        {
+            commit.validate()?;
+        }
+        for digest in [
+            &self.repository_snapshot_digest,
+            &self.selection_digest,
+            &self.topology_digest,
+            &self.configuration_digest,
+            &self.attributes_digest,
+            &self.hook_policy_digest,
+            &self.signing_policy_digest,
+            &self.message_policy_digest,
+            &self.semantic_evidence_digest,
+        ] {
+            digest.validate()?;
+        }
+        if self.source_worktree_id == self.destination_worktree_id
+            || self.source_ref == self.destination_ref
+            || self.source_tip == self.destination_tip
+            || self.destination_tip == self.candidate_destination_tip
+            || self.created_at >= self.expires_at
+            || self.ordered_source_commits.is_empty()
+            || has_duplicates(&self.ordered_source_commits)
+            || has_duplicates(&self.expected_created_commits)
+        {
+            return Err(noncanonical("native integration preview"));
+        }
+        if let NativeIntegrationPreviewDispositionV1::PreviewOnly(blockers) = &self.disposition
+            && (blockers.is_empty() || blockers.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(noncanonical("native integration preview blockers"));
+        }
+        match self.mode {
+            NativeIntegrationMechanicalModeV1::FastForward
+                if self.candidate_destination_tip != self.source_tip
+                    || !self.expected_created_commits.is_empty() => {}
+            NativeIntegrationMechanicalModeV1::TwoParentMerge
+                if self.expected_created_commits.len() != 1
+                    || self.expected_created_commits.last()
+                        != Some(&self.candidate_destination_tip) => {}
+            NativeIntegrationMechanicalModeV1::CherryPickExactCommits
+                if self.expected_created_commits.len() != self.ordered_source_commits.len()
+                    || self.expected_created_commits.last()
+                        != Some(&self.candidate_destination_tip) => {}
+            NativeIntegrationMechanicalModeV1::FastForward
+            | NativeIntegrationMechanicalModeV1::TwoParentMerge
+            | NativeIntegrationMechanicalModeV1::CherryPickExactCommits => return Ok(()),
+        }
+        Err(noncanonical("native integration mechanical preview"))
+    }
+}
+
 /// Durable state around native mutation boundaries.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +338,37 @@ impl NativeIntegrationJournalV1 {
         Ok(journal)
     }
 
+    pub fn prepared_from_preview(
+        transaction_id: NativeIntegrationTransactionId,
+        preview: &NativeIntegrationPreviewV1,
+        started_at: UtcMicros,
+    ) -> Result<Self, DomainError> {
+        preview.validate()?;
+        if !preview.disposition.is_eligible() || started_at > preview.expires_at {
+            return Err(noncanonical("native integration applicable preview"));
+        }
+        let mut journal = Self::prepared(
+            transaction_id,
+            preview.preview_id.clone(),
+            preview.preview_digest.clone(),
+            preview.repository_id.clone(),
+            preview.source_worktree_id.clone(),
+            preview.destination_worktree_id.clone(),
+            preview.mode,
+            preview.source_tip.clone(),
+            preview.destination_tip.clone(),
+            preview.destination_tree.clone(),
+            preview.candidate_destination_tip.clone(),
+            preview.repository_snapshot_digest.clone(),
+            preview.candidate_tree.clone(),
+            started_at,
+        )?;
+        if preview.destination_checked_out {
+            journal.mark_destination_checked_out()?;
+        }
+        Ok(journal)
+    }
+
     /// Set only while assembling the initial journal, before it is persisted.
     pub fn mark_destination_checked_out(&mut self) -> Result<(), DomainError> {
         if self.phase != NativeIntegrationJournalPhaseV1::Prepared
@@ -195,6 +434,52 @@ impl NativeIntegrationJournalV1 {
 
     pub const fn requires_recovery(&self) -> bool {
         !self.phase.is_terminal()
+    }
+
+    /// Accept exactly one legal phase transition or one cancellation request.
+    /// Stores use this before their compare-and-swap update so a caller cannot
+    /// rewrite immutable bindings while presenting a plausible revision.
+    pub fn permits_replacement(&self, replacement: &Self) -> bool {
+        if self.transaction_id != replacement.transaction_id
+            || self.preview_id != replacement.preview_id
+            || self.preview_digest != replacement.preview_digest
+            || self.repository_id != replacement.repository_id
+            || self.source_worktree_id != replacement.source_worktree_id
+            || self.destination_worktree_id != replacement.destination_worktree_id
+            || self.destination_checked_out != replacement.destination_checked_out
+            || self.mode != replacement.mode
+            || self.source_tip != replacement.source_tip
+            || self.expected_destination_tip != replacement.expected_destination_tip
+            || self.expected_destination_tree != replacement.expected_destination_tree
+            || self.expected_new_destination_tip != replacement.expected_new_destination_tip
+            || self.expected_repository_snapshot_digest
+                != replacement.expected_repository_snapshot_digest
+            || self.candidate_tree != replacement.candidate_tree
+            || self.started_at != replacement.started_at
+        {
+            return false;
+        }
+
+        let mut expected = self.clone();
+        let transition = if self.phase != replacement.phase
+            && self.cancellation_requested_at == replacement.cancellation_requested_at
+        {
+            expected.advance(replacement.phase, replacement.updated_at)
+        } else if self.phase == replacement.phase
+            && self.cancellation_requested_at.is_none()
+            && replacement.cancellation_requested_at.is_some()
+        {
+            expected
+                .request_cancellation(replacement.updated_at)
+                .and_then(|changed| {
+                    changed
+                        .then_some(())
+                        .ok_or_else(|| noncanonical("native integration cancellation replacement"))
+                })
+        } else {
+            return false;
+        };
+        transition.is_ok() && expected == *replacement
     }
 
     pub const fn status(&self) -> NativeIntegrationStatusV1 {
@@ -527,6 +812,26 @@ fn noncanonical(field: &'static str) -> DomainError {
     DomainError::NonCanonical { field }
 }
 
+fn validate_full_branch_ref(reference: &str) -> Result<(), DomainError> {
+    validate_path_label(reference, "native integration branch ref")?;
+    if !reference.starts_with("refs/heads/")
+        || reference.ends_with('/')
+        || reference.contains("..")
+        || reference.contains("@{")
+        || reference.contains('\\')
+    {
+        return Err(noncanonical("native integration branch ref"));
+    }
+    Ok(())
+}
+
+fn has_duplicates(values: &[GitOidV1]) -> bool {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    sorted.len() != values.len()
+}
+
 crate::canonical_text::validated_string_newtype!(
     plain,
     DomainError,
@@ -534,6 +839,7 @@ crate::canonical_text::validated_string_newtype!(
     NativeIntegrationPreviewId => "native integration preview id",
     NativeIntegrationTransactionId => "native integration transaction id",
     NativeIntegrationReceiptId => "native integration receipt id",
+    NativeIntegrationRecoveryReceiptId => "native integration recovery receipt id",
     NativeIntegrationApprovalId => "native integration approval id",
     NativeIntegrationIdempotencyKey => "native integration idempotency key",
 );

@@ -488,6 +488,12 @@ impl RegisteredGlobalDb {
     ) -> super::git_index_transactions::GlobalDbGitIndexTransactionStore<'_> {
         super::git_index_transactions::GlobalDbGitIndexTransactionStore::new(self)
     }
+
+    pub fn native_integration_store(
+        &self,
+    ) -> super::git_index_transactions::GlobalDbNativeIntegrationStore<'_> {
+        super::git_index_transactions::GlobalDbNativeIntegrationStore::new(self)
+    }
 }
 
 // `impl ExactSqlWriteAuthority for DatabaseAuthority` moved into

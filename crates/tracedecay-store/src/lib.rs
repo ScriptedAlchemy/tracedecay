@@ -19,6 +19,7 @@ pub mod external_source;
 pub mod fault_harness;
 pub mod git_index_transactions;
 pub mod memory;
+pub mod native_integration;
 pub mod observation;
 pub mod projection;
 pub mod remote_recovery;
@@ -129,6 +130,11 @@ pub use memory::{
     MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1, PromoteFactProposal,
     PromoteFactProposalOutcome, RetrievalAnchorQuery, StoredFactV1,
     authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
+};
+pub use native_integration::{
+    NativeIntegrationBeginRequestV1, NativeIntegrationBeginResultV1, NativeIntegrationRecordV1,
+    NativeIntegrationStore, NativeIntegrationStoreError, NativeIntegrationStoreResult,
+    NativeIntegrationTerminalWriteV1,
 };
 pub use observation::{
     AnchoredObservationWrite, CursorAdvanceOutcome, ObservationAdmissionPort,

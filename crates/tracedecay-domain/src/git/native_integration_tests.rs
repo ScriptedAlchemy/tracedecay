@@ -1,6 +1,7 @@
 use crate::{
     GitOidV1, ManifestDigest, NativeIntegrationJournalPhaseV1, NativeIntegrationJournalV1,
-    NativeIntegrationMechanicalModeV1, NativeIntegrationPreviewId, NativeIntegrationReceiptId,
+    NativeIntegrationMechanicalModeV1, NativeIntegrationPreviewDispositionV1,
+    NativeIntegrationPreviewId, NativeIntegrationPreviewV1, NativeIntegrationReceiptId,
     NativeIntegrationReceiptOutcomeV1, NativeIntegrationReceiptV1, NativeIntegrationTransactionId,
     RepositoryId, UtcMicros, WorktreeId,
 };
@@ -32,6 +33,44 @@ fn prepared() -> NativeIntegrationJournalV1 {
         UtcMicros(10),
     )
     .expect("prepared journal")
+}
+
+fn preview() -> NativeIntegrationPreviewV1 {
+    let mut preview = NativeIntegrationPreviewV1 {
+        preview_id: NativeIntegrationPreviewId::new("native-integration.preview.1")
+            .expect("preview"),
+        repository_id: RepositoryId::new("repository.1").expect("repository"),
+        source_worktree_id: WorktreeId::new("worktree.source").expect("source"),
+        destination_worktree_id: WorktreeId::new("worktree.destination").expect("destination"),
+        source_ref: "refs/heads/source".to_owned(),
+        destination_ref: "refs/heads/destination".to_owned(),
+        destination_checked_out: false,
+        mode: NativeIntegrationMechanicalModeV1::TwoParentMerge,
+        source_tip: oid('1'),
+        destination_tip: oid('2'),
+        destination_tree: oid('5'),
+        merge_base: oid('6'),
+        ordered_source_commits: vec![oid('1')],
+        expected_created_commits: vec![oid('3')],
+        candidate_destination_tip: oid('3'),
+        candidate_tree: oid('4'),
+        repository_snapshot_digest: digest('b'),
+        selection_digest: digest('c'),
+        topology_digest: digest('d'),
+        configuration_digest: digest('e'),
+        attributes_digest: digest('f'),
+        hook_policy_digest: digest('7'),
+        signing_policy_digest: digest('8'),
+        message_policy_digest: digest('9'),
+        semantic_evidence_digest: digest('0'),
+        disposition: NativeIntegrationPreviewDispositionV1::Eligible,
+        created_at: UtcMicros(1),
+        expires_at: UtcMicros(100),
+        preview_digest: digest('a'),
+    };
+    preview.preview_digest = preview.compute_preview_digest().expect("preview digest");
+    preview.validate().expect("preview");
+    preview
 }
 
 #[test]
@@ -201,4 +240,24 @@ fn rollback_receipt_proves_exact_old_ref_tree_and_snapshot() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn immutable_preview_binds_ordered_commits_refs_and_all_drift_evidence() {
+    let preview = preview();
+    NativeIntegrationJournalV1::prepared_from_preview(
+        NativeIntegrationTransactionId::new("native-integration.transaction.preview")
+            .expect("transaction"),
+        &preview,
+        UtcMicros(10),
+    )
+    .expect("preview-bound journal");
+
+    let mut tampered = preview.clone();
+    tampered.ordered_source_commits.push(oid('7'));
+    assert!(tampered.validate().is_err());
+
+    let mut unqualified_ref = preview;
+    unqualified_ref.source_ref = "source".to_owned();
+    assert!(unqualified_ref.validate().is_err());
 }
