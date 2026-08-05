@@ -71,6 +71,27 @@
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn isolated_evaluation_import_never_follows_a_catalog_member_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let package = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        symlink(outside.path(), package.path().join("model.onnx")).unwrap();
+        let package_root =
+            cap_std::fs::Dir::open_ambient_dir(package.path(), cap_fs_ext::ambient_authority())
+                .unwrap();
+        let destination = tempfile::NamedTempFile::new().unwrap();
+        std::fs::remove_file(destination.path()).unwrap();
+
+        let result =
+            copy_local_evaluation_member(&package_root, "model.onnx", destination.path());
+
+        assert_eq!(result, Err(ModelLifecycleErrorV1::VerificationFailed));
+        assert!(!destination.path().exists());
+    }
+
     #[test]
     fn restart_re_admits_explicit_import_without_legacy_acquisition() {
         let fixture = tempfile::tempdir().unwrap();

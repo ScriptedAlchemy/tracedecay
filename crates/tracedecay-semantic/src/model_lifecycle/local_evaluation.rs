@@ -5,6 +5,8 @@ use super::manifest::{
     ResourceCeilingV1, RuntimeCompatibilityV1, SemanticMetricV1, Sha256DigestHex,
     TruncationPolicyV1, TruncationSideV1, UpstreamSourceV1,
 };
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, ambient_authority};
+use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
 
 /// Import the production embedding package into an explicit evaluator-owned
 /// lifecycle root. This path never consults a profile, daemon registry,
@@ -25,13 +27,14 @@ pub fn open_local_semantic_evaluation_lifecycle(
         .prefix(".semantic-evaluation-package-")
         .tempdir_in(lifecycle_root)
         .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+    let package_root = Dir::open_ambient_dir(package_directory, ambient_authority())
+        .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
     for member in model.members.values() {
-        let source = package_directory.join(&member.path);
         let destination = package_view.path().join(&member.path);
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
         }
-        fs::copy(source, destination).map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        copy_local_evaluation_member(&package_root, &member.path, &destination)?;
     }
     owner.import_local_artifact(
         DEFAULT_FASTEMBED_MODEL_ID,
@@ -40,6 +43,38 @@ pub fn open_local_semantic_evaluation_lifecycle(
         imported_at_unix,
     )?;
     Ok(Arc::new(owner))
+}
+
+fn copy_local_evaluation_member(
+    package_root: &Dir,
+    member_path: &str,
+    destination: &Path,
+) -> Result<(), ModelLifecycleErrorV1> {
+    if Path::new(member_path).components().count() != 1 {
+        return Err(ModelLifecycleErrorV1::VerificationFailed);
+    }
+    let mut options = CapOpenOptions::new();
+    options.read(true);
+    options.follow(FollowSymlinks::No);
+    let mut source = package_root
+        .open_with(member_path, &options)
+        .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+    let metadata = source
+        .metadata()
+        .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+    if !metadata.is_file() {
+        return Err(ModelLifecycleErrorV1::VerificationFailed);
+    }
+    let mut destination = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+    io::copy(&mut source, &mut destination)
+        .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+    destination
+        .sync_all()
+        .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)
 }
 
 fn local_evaluation_manifest(
