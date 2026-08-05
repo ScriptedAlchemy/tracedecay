@@ -46,12 +46,24 @@ release-plz path. Each library crate's `[[package]]` entry disables its own
 GitHub Release and git tag, leaving those binary-distribution identities with
 the root `tracedecay` crate.
 
-Release PRs may modify only `CHANGELOG.md`, `Cargo.lock`, and `Cargo.toml`. The
-read-only `Release PR integrity` workflow loads its guard from the trusted base
-commit, not from the proposed release branch. If a reviewed release PR must
-carry another change, apply the `release-extra-files-approved` label; tracked
-files that are also ignored remain forbidden because release-plz omits them
-when it creates its temporary repository copy.
+## Release artifact acceptance
+
+Release acceptance exercises the produced archive and installed binary, never
+a source-tree file inventory or a release-PR path policy. The archive must
+contain a self-contained Rust package graph and the embedded dashboard and
+first-party host assets required by the binary.
+
+The installed binary is exercised with a fresh isolated host profile for every
+supported host. Each official host operation must install, update, and
+uninstall only its owned files while preserving unrelated profile content; the
+same embedded artifact identity must be observed throughout. A supported host
+that defers or cannot complete one of those operations blocks acceptance. A
+host without an evidenced native registration remains a typed unavailable
+result, rather than a successful empty install.
+
+Recorded native host events remain historical-ingestion evidence: they pass
+through the production decoder and ingestion path, not a synthetic packaging
+fixture. They do not substitute for the installed host lifecycle journey.
 
 ## SDK Distribution
 
