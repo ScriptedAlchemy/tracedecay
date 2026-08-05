@@ -3,11 +3,15 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphCancellation, GraphDb, GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability,
-    GraphEntity, GraphEntityId, GraphFormatVersion, GraphMutation, GraphNamespace,
-    GraphProjectionId, GraphProperty, GraphPropertyName, GraphRelation, GraphRelationId,
-    GraphRelationKind, GraphWatermark, GraphWriteBatch, NeverCancelled, SourceGeneration,
+    GraphCancellation, GraphDb, GraphDbError, GraphDbOwner, GraphEntity, GraphEntityId,
+    GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty, GraphPropertyName,
+    GraphRelation, GraphRelationId, GraphRelationKind, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, SourceGeneration,
 };
+
+mod support;
+
+use support::RegisteredGraph;
 
 #[derive(Debug)]
 struct Cancelled;
@@ -57,14 +61,8 @@ fn relation(value: &str, from: &str, to: &str) -> GraphRelation {
     .unwrap()
 }
 
-fn open(location: GraphDbLocation, durability: GraphDurability) -> GraphDb {
-    GraphDb::open(GraphDbOpenOptions {
-        location,
-        expected_format: GraphFormatVersion::new(2).unwrap(),
-        durability,
-        cancellation: live(),
-    })
-    .unwrap()
+fn open_memory() -> Arc<GraphDb> {
+    GraphDbOwner::memory(live()).unwrap().handle()
 }
 
 fn publish(db: &GraphDb, generation: &str) {
@@ -89,11 +87,7 @@ fn publish(db: &GraphDb, generation: &str) {
 #[test]
 fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
     let temp = TempDir::new().unwrap();
-    let path = temp.path().join("code.grafeo");
-    let db = open(
-        GraphDbLocation::Persistent(path.clone()),
-        GraphDurability::Sync,
-    );
+    let (registered, db) = RegisteredGraph::open(temp.path()).unwrap();
     publish(&db, "generation.one");
     let snapshot = db.snapshot().unwrap();
 
@@ -141,13 +135,9 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
         Some(entity("root", "generation.two"))
     );
 
-    db.close().unwrap();
-    assert_eq!(
-        db.entity(&namespace(), &entity_id("root"), live())
-            .unwrap_err(),
-        GraphDbError::Closed
-    );
-    let reopened = open(GraphDbLocation::Persistent(path), GraphDurability::Sync);
+    drop(db);
+    registered.close().unwrap();
+    let reopened = registered.reopen().unwrap();
     assert_eq!(
         reopened
             .entity(&namespace(), &entity_id("root"), live())
@@ -164,7 +154,7 @@ fn typed_point_reads_preserve_snapshot_and_reopen_identity() {
 
 #[test]
 fn typed_point_reads_honor_cancellation_without_serving_state() {
-    let db = open(GraphDbLocation::Memory, GraphDurability::Memory);
+    let db = open_memory();
     publish(&db, "generation.one");
     let snapshot = db.snapshot().unwrap();
     let cancelled: Arc<dyn GraphCancellation> = Arc::new(Cancelled);

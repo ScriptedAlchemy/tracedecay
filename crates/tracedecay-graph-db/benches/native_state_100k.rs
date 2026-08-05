@@ -1,27 +1,54 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 use tracedecay_graph_db::{
-    GraphDb, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
-    GraphFormatVersion, GraphMutation, GraphNamespace, GraphProjectionId, GraphWatermark,
-    GraphWriteBatch, NeverCancelled, SourceGeneration,
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphEntity, GraphEntityId,
+    GraphMutation, GraphNamespace, GraphProjectionId, GraphWatermark, GraphWriteBatch,
+    NeverCancelled, SourceGeneration,
+};
+use tracedecay_store::{
+    BrainId, LocatorDigest, ProjectId, StoreAuthorityEpochV1, StoreIncarnationV1,
+    StoreRuntimeBindingV1, StoreShardIdV1, UserProfileId, VerifiedStoreLocatorV1,
 };
 
 const ENTITY_COUNT: usize = 100_000;
 
-fn options(path: std::path::PathBuf) -> GraphDbOpenOptions {
-    GraphDbOpenOptions {
-        location: GraphDbLocation::Persistent(path),
-        expected_format: GraphFormatVersion::new(2).expect("benchmark format is valid"),
-        durability: GraphDurability::Sync,
+fn registration(root: &std::path::Path) -> GraphDbRegistration {
+    let binding = StoreRuntimeBindingV1::new(
+        StoreShardIdV1::project(
+            BrainId::try_from("brain.benchmark".to_owned()).expect("valid brain"),
+            UserProfileId::try_from("profile.benchmark".to_owned()).expect("valid profile"),
+            ProjectId::try_from("project.benchmark".to_owned()).expect("valid project"),
+        ),
+        StoreIncarnationV1::new(1).expect("valid incarnation"),
+        StoreAuthorityEpochV1::new(1).expect("valid epoch"),
+    );
+    GraphDbRegistration {
+        verified_locator: VerifiedStoreLocatorV1::new(
+            binding.shard_id.clone(),
+            binding.incarnation,
+            LocatorDigest::new(format!("sha256:{}", "b".repeat(64))).expect("valid locator digest"),
+        ),
+        binding,
+        store_root: root.to_path_buf(),
         cancellation: Arc::new(NeverCancelled),
+        lifecycle_cancellation: Arc::new(NeverCancelled),
+        deadline: Instant::now() + Duration::from_secs(3_600),
     }
 }
 
-fn populate(path: &std::path::Path) {
-    let db = GraphDb::open(options(path.to_path_buf())).expect("benchmark store opens");
+fn registry() -> GraphDbRegistry {
+    GraphDbRegistry::new(GraphDbRegistryConfig { max_open: 1 })
+        .expect("benchmark registry config is valid")
+}
+
+fn populate(registry: &GraphDbRegistry, request: &GraphDbRegistration) {
+    let db = registry
+        .resolve(request.clone())
+        .expect("benchmark store opens");
     let mutations = (0..ENTITY_COUNT)
         .map(|index| {
             GraphMutation::UpsertEntity(
@@ -45,26 +72,31 @@ fn populate(path: &std::path::Path) {
     )
     .expect("benchmark batch is valid");
     db.apply(batch).expect("100k-node batch commits");
-    db.close().expect("benchmark store closes");
+    drop(db);
+    registry.close(request).expect("benchmark store closes");
 }
 
 fn native_state_100k(criterion: &mut Criterion) {
     let temp = TempDir::new().expect("benchmark temporary directory exists");
-    let path = temp.path().join("native-state-100k.grafeo");
-    populate(&path);
+    let registry = registry();
+    let request = registration(temp.path());
+    populate(&registry, &request);
 
     criterion.bench_function("native_state/reopen_100k_without_graph_scan", |bencher| {
         bencher.iter_batched(
-            || path.clone(),
-            |path| {
-                let db = GraphDb::open(options(path)).expect("100k-node store reopens");
-                db.close().expect("100k-node store closes");
+            || (registry.clone(), request.clone()),
+            |(registry, request)| {
+                let database = registry.reopen(request.clone()).expect("store reopens");
+                drop(database);
+                registry.close(&request).expect("store closes");
             },
             BatchSize::SmallInput,
         );
     });
 
-    let db = GraphDb::open(options(path)).expect("100k-node store opens for point reads");
+    let db = registry
+        .resolve(request.clone())
+        .expect("benchmark store opens for point reads");
     let namespace = GraphNamespace::new("benchmark").expect("benchmark namespace is valid");
     let identity = GraphEntityId::new("entity-099999").expect("benchmark identity is valid");
     criterion.bench_function("native_state/indexed_point_read_100k", |bencher| {
@@ -73,7 +105,6 @@ fn native_state_100k(criterion: &mut Criterion) {
                 .expect("indexed point read succeeds")
         });
     });
-    db.close().expect("benchmark store closes");
 }
 
 criterion_group! {

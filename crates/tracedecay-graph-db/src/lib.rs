@@ -5,6 +5,7 @@ mod point_read;
 mod projection;
 mod projection_read;
 mod publication;
+mod registry;
 mod runtime;
 mod schema;
 mod state;
@@ -23,8 +24,13 @@ pub use projection_read::{
     GraphProjectionLabelPage, GraphProjectionPage, GraphProjectionReadRequest,
     GraphProjectionTelemetry, GraphProjectionTelemetryRequest,
 };
-pub use publication::GraphPublication;
-pub use runtime::{GraphDb, GraphSnapshot};
+pub use publication::{
+    GraphPublication, GraphPublicationDigest, GraphPublicationInputDigest, GraphPublicationReceipt,
+};
+pub use registry::{
+    GraphDbRegistration, GraphDbRegistry, GraphDbRegistryConfig, GraphDbRegistryStatus,
+};
+pub use runtime::{GraphDb, GraphDbOwner, GraphDbRuntimeState, GraphSnapshot};
 pub use traversal::{GraphTraversalDirection, TraversalRequest, TraversalResult, TraversalVisit};
 pub use vector::{
     GraphVectorIndexRequest, GraphVectorIndexStatus, MAX_VECTOR_SEARCH_LIMIT, VectorMatch,

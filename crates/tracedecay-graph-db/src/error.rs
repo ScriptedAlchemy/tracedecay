@@ -10,6 +10,8 @@ pub enum GraphDbError {
     Conflict,
     #[error("graph operation budget exhausted")]
     BudgetExhausted,
+    #[error("graph operation deadline exceeded")]
+    DeadlineExceeded,
     #[error("graph database reset required: {message}")]
     ResetRequired { message: String },
     #[error("graph database is corrupt: {message}")]

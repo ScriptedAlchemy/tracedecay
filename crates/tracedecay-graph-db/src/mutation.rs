@@ -29,7 +29,7 @@ pub(crate) fn apply(
     state: &mut FormatState,
     batch: GraphWriteBatch,
     digest: String,
-    publication_record: Option<(GraphIdempotencyKey, String)>,
+    publication_record: Option<(GraphIdempotencyKey, String, String)>,
     poisoned: &AtomicBool,
 ) -> Result<GraphCommit, GraphDbError> {
     validate_references(database, &batch)?;
@@ -82,7 +82,7 @@ fn apply_in_transaction(
     batch: &GraphWriteBatch,
     commit: &GraphCommit,
     previous_projection: Option<grafeo_common::types::NodeId>,
-    publication_record: Option<&(GraphIdempotencyKey, String)>,
+    publication_record: Option<&(GraphIdempotencyKey, String, String)>,
 ) -> Result<(), GraphDbError> {
     let mut entity_nodes = BTreeMap::<String, Option<grafeo_common::types::NodeId>>::new();
     for mutation in &batch.mutations {
@@ -162,8 +162,9 @@ fn apply_in_transaction(
             )?;
         }
     }
-    if let Some((key, digest)) = publication_record {
-        let properties = publication_properties(&batch.namespace, key, digest, commit)?;
+    if let Some((key, digest, input_digest)) = publication_record {
+        let properties =
+            publication_properties(&batch.namespace, key, digest, input_digest, commit)?;
         let label = publication_key_label(&batch.namespace, key);
         tracked_create_node(
             session,

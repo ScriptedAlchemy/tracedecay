@@ -5975,6 +5975,7 @@ dependencies = [
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
+ "tracedecay-store",
 ]
 
 [[package]]
@@ -6079,6 +6080,7 @@ dependencies = [
  "tracedecay-code-extraction",
  "tracedecay-code-index",
  "tracedecay-domain",
+ "tracedecay-graph-db",
  "tracedecay-temporal-query",
  "zeroize",
 ]

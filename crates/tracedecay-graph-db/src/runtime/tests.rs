@@ -7,13 +7,13 @@ use grafeo_common::types::Value;
 
 use super::{GraphDb, require_committed_vector_scalar};
 use crate::{
-    GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDurability, GraphEntity, GraphEntityId,
-    GraphFormatVersion, GraphMutation, GraphNamespace, GraphProjectionId, GraphProperty,
-    GraphPropertyName, GraphTraversalDirection, GraphWatermark, GraphWriteBatch, NeverCancelled,
-    SourceGeneration, TraversalRequest,
+    GraphDbError, GraphDbLocation, GraphDbOpenOptions, GraphDbOwner, GraphDbRuntimeState,
+    GraphDurability, GraphEntity, GraphEntityId, GraphFormatVersion, GraphMutation, GraphNamespace,
+    GraphProjectionId, GraphProperty, GraphPropertyName, GraphTraversalDirection, GraphWatermark,
+    GraphWriteBatch, NeverCancelled, SourceGeneration, TraversalRequest,
 };
 
-fn memory_db() -> GraphDb {
+fn memory_db() -> Arc<GraphDb> {
     GraphDb::open(GraphDbOpenOptions {
         location: GraphDbLocation::Memory,
         expected_format: GraphFormatVersion::new(2).unwrap(),
@@ -21,6 +21,48 @@ fn memory_db() -> GraphDb {
         cancellation: Arc::new(NeverCancelled),
     })
     .unwrap()
+}
+
+#[test]
+fn runtime_state_distinguishes_ready_closed_and_durability_uncertain() {
+    let ready = memory_db();
+    assert_eq!(ready.runtime_state(), GraphDbRuntimeState::Ready);
+    ready.close().unwrap();
+    assert_eq!(ready.runtime_state(), GraphDbRuntimeState::Closed);
+
+    let uncertain = memory_db();
+    uncertain.inner.poisoned.store(true, Ordering::Release);
+    assert_eq!(
+        uncertain.runtime_state(),
+        GraphDbRuntimeState::DurabilityUncertain
+    );
+}
+
+#[test]
+fn owner_close_releases_the_physical_database_after_durability_uncertainty() {
+    let owner = GraphDbOwner::open(GraphDbOpenOptions {
+        location: GraphDbLocation::Memory,
+        expected_format: GraphFormatVersion::new(2).unwrap(),
+        durability: GraphDurability::Memory,
+        cancellation: Arc::new(NeverCancelled),
+    })
+    .unwrap();
+    let handle = owner.handle();
+    handle.inner.poisoned.store(true, Ordering::Release);
+
+    assert!(matches!(
+        owner.close(),
+        Err(GraphDbError::DurabilityUncertain { .. })
+    ));
+    assert!(
+        handle
+            .inner
+            .database
+            .read()
+            .expect("database lock remains readable")
+            .is_none(),
+        "owner close must release the physical Grafeo database even after poisoning"
+    );
 }
 
 fn scalar_batch(value: &str) -> GraphWriteBatch {
