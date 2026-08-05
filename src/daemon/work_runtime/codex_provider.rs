@@ -22,7 +22,7 @@ use super::native_cli::{
     NativeCliCancellation, NativeCliKind, NativeCliLaunchPlan, NativeCliWorkRun,
 };
 
-const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
+pub(crate) const CODEX_PROVIDER_ID: &str = "provider.work.codex-app-server";
 const CODEX_ROUTE_ID: &str = "route.work.codex-app-server.v1";
 const CLAUDE_PROVIDER_ID: &str = "provider.work.claude-code-cli";
 const CLAUDE_ROUTE_ID: &str = "route.work.claude-code-cli.v1";

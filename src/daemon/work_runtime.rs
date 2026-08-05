@@ -9,6 +9,8 @@ use tracedecay_application::{
     WorkExecutionService, WorkProviderExecutionError, WorkProviderSettlementV1, WorkStorageError,
     WorkStoragePort,
 };
+#[cfg(all(test, unix))]
+use tracedecay_domain::WorkProviderRouteV1;
 use tracedecay_domain::{
     AttemptId, ManifestDigest, UtcMicros, WorkArtifactId, WorkArtifactRefV1, WorkAttemptIdentityV1,
     WorkAttemptProgressV1, WorkAttemptProjectionBindingV1, WorkAttemptStateV1, WorkAttemptV1,
@@ -26,7 +28,11 @@ use crate::sessions::codex_app_server::CodexAppServerSummaryConfig;
 mod codex_provider;
 mod native_cli;
 mod provider_registry;
+#[cfg(all(test, unix))]
+mod tests;
 
+#[cfg(test)]
+pub(crate) use codex_provider::CODEX_PROVIDER_ID;
 use codex_provider::{NativeWorkProviderConfigV1, NativeWorkProviderV1};
 use provider_registry::WorkProviderRegistry;
 
@@ -103,6 +109,21 @@ where
             project_root,
             configuration_digest,
         }
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn provider_route(&self) -> Result<WorkProviderRouteV1, WorkProviderExecutionError> {
+        self.queue.route()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn is_ready(&self) -> bool {
+        event_lane::enabled(Some(self.observation_db.as_ref()))
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn in_flight(&self) -> usize {
+        self.queue.in_flight()
     }
 
     pub(crate) fn capacity(&self) -> usize {

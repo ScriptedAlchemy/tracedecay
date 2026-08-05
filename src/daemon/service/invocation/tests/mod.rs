@@ -11,6 +11,100 @@ use tracedecay_lsp::{
     LspRequestId, UnavailableSemanticProvider,
 };
 
+struct UnavailableWorkExecutableBindingResolver;
+
+impl crate::config::work_executable_binding::WorkExecutableBindingResolver
+    for UnavailableWorkExecutableBindingResolver
+{
+    fn resolve(
+        &self,
+        reference: &tracedecay_domain::WorkExecutableReference,
+        _backend: tracedecay_domain::WorkProviderBackendV1,
+        _protocol: tracedecay_domain::WorkProviderProtocol,
+    ) -> Result<
+        crate::config::work_executable_binding::ResolvedWorkExecutableBinding,
+        crate::config::work_executable_binding::WorkExecutableBindingError,
+    > {
+        Err(
+            crate::config::work_executable_binding::WorkExecutableBindingError::Absent {
+                executable_id: reference.executable_id().to_owned(),
+            },
+        )
+    }
+}
+
+fn unavailable_work_executable_bindings()
+-> Arc<dyn crate::config::work_executable_binding::WorkExecutableBindingResolver + Send + Sync> {
+    Arc::new(UnavailableWorkExecutableBindingResolver)
+}
+
+fn fixture_work_executable_bindings(
+    project_id: &ProjectId,
+    project_root: &std::path::Path,
+    executable_path: &std::path::Path,
+    revision_id: ConfigurationRevisionId,
+) -> (
+    Arc<dyn crate::config::work_executable_binding::WorkExecutableBindingResolver + Send + Sync>,
+    tracedecay_domain::WorkExecutableReference,
+    tracedecay_domain::ConfigurationSnapshotId,
+) {
+    use sha2::{Digest, Sha256};
+
+    let bytes = std::fs::read(executable_path).expect("provider fixture bytes");
+    let executable = tracedecay_domain::WorkExecutableReference::new(
+        "executable.codex.app-server".to_owned(),
+        ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(bytes))))
+            .expect("provider digest"),
+    )
+    .expect("provider reference");
+    let binding = tracedecay_domain::configuration::WorkExecutableBindingV1::new(
+        executable.clone(),
+        executable_path
+            .canonicalize()
+            .expect("provider canonical path"),
+        vec![tracedecay_domain::configuration::WorkExecutableCapabilityV1::CodexAppServerJsonRpc],
+    )
+    .expect("provider binding");
+    let setting = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::WORK_EXECUTABLE_BINDINGS_SETTING_KEY,
+    )
+    .expect("provider setting");
+    let resolution = crate::config::resolver::resolve_configuration(
+        &crate::config::registry::ConfigurationRegistry::core().expect("configuration registry"),
+        &[crate::config::resolver::ConfigurationLayerV1 {
+            layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            revision_id: revision_id.clone(),
+            entries: BTreeMap::from([(
+                setting,
+                tracedecay_domain::configuration::ConfigurationValueV1::WorkExecutableBindings(
+                    vec![binding],
+                ),
+            )]),
+        }],
+    )
+    .expect("provider configuration");
+    let snapshot_id = resolution.snapshot.snapshot_id.clone();
+    let configuration = crate::config::PinnedRuntimeConfiguration::new(
+        crate::config::RuntimeConfigurationTarget {
+            project_id: project_id.clone(),
+            project_root: project_root.to_path_buf(),
+        },
+        revision_id,
+        resolution.snapshot,
+    )
+    .expect("pinned provider configuration");
+    (
+        crate::config::work_executable_binding::PinnedWorkExecutableBindingResolver::shared_from_configuration(
+            &configuration,
+        )
+        .expect("provider resolver"),
+        executable,
+        snapshot_id,
+    )
+}
+
 #[derive(Default)]
 struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
 
@@ -175,4 +269,6 @@ mod lsp_lease_tests;
 mod lsp_tests;
 mod plan26_tests;
 mod primitive_tests;
+mod registrars_tests;
 mod types_tests;
+mod work_tests;
