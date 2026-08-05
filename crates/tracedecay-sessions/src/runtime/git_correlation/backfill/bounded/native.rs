@@ -81,7 +81,7 @@ impl ReflogSealBuilder {
 struct RepositorySeal {
     head: HeadSeal,
     reflog_prefix: ReflogPrefixSeal,
-    branch_tips: BTreeMap<String, Option<gix::ObjectId>>,
+    consulted_refs: BTreeMap<String, Option<gix::ObjectId>>,
 }
 
 impl RepositorySeal {
@@ -97,9 +97,9 @@ impl RepositorySeal {
         {
             return Err(BoundedBackfillInterruption::SourceUnavailable);
         }
-        for (branch, expected) in &self.branch_tips {
+        for (reference, expected) in &self.consulted_refs {
             control.check()?;
-            if exact_branch_tip(repository, branch)? != *expected {
+            if exact_ref_tip(repository, reference)? != *expected {
                 return Err(BoundedBackfillInterruption::SourceUnavailable);
             }
         }
@@ -107,10 +107,28 @@ impl RepositorySeal {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HeadState {
+    LocalBranch(String),
+    Detached,
+}
+
+impl HeadState {
+    fn branch(&self) -> Option<&str> {
+        match self {
+            Self::LocalBranch(branch) => Some(branch),
+            Self::Detached => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CheckoutTarget(String);
+
 #[derive(Debug)]
 struct Checkout {
-    from: Option<String>,
-    to: Option<String>,
+    from: CheckoutTarget,
+    to: CheckoutTarget,
 }
 
 pub(super) fn produce(
@@ -134,7 +152,7 @@ pub(super) fn produce(
     write_event(&mut writer, PreparedGitEvent::Begin { worktree }, control)?;
 
     let head_before = capture_head(&repository)?;
-    let current_branch = head_branch(&head_before)?;
+    let current_state = head_state(&head_before)?;
     let current_oid = head_before
         .target
         .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
@@ -147,25 +165,30 @@ pub(super) fn produce(
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     let mut reflog_seal = ReflogSealBuilder::new();
     let mut stopped_at_boundary = false;
-    let mut state_branch = current_branch;
+    let mut state = current_state;
     let mut state_oid = current_oid;
     let mut segment_end = window_end;
     let mut segment_tip = current_oid;
     let mut emitted_commits = 0_usize;
-    let mut branch_seal = BTreeMap::new();
+    let mut consulted_refs = BTreeMap::new();
 
     if let Some(entries) = entries.as_mut() {
         for entry in entries {
             control.check()?;
             let entry = entry.map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
+            if entry.new_oid != state_oid {
+                return Err(BoundedBackfillInterruption::SourceUnavailable);
+            }
             reflog_seal.push(&entry)?;
             let checkout = parse_checkout(&entry)?;
             let timestamp = entry.signature.time.seconds;
             if timestamp > window_end {
                 cross_entry_backwards(
+                    &repository,
                     &entry,
                     checkout.as_ref(),
-                    &mut state_branch,
+                    &mut consulted_refs,
+                    &mut state,
                     &mut state_oid,
                 )?;
                 segment_tip = state_oid;
@@ -176,15 +199,17 @@ pub(super) fn produce(
                 break;
             }
             match checkout {
-                Some(checkout) if checkout.to != checkout.from => {
-                    if checkout.to != state_branch {
+                Some(checkout) => {
+                    let to =
+                        classify_checkout_target(&repository, &checkout.to, &mut consulted_refs)?;
+                    if to != state {
                         return Err(BoundedBackfillInterruption::SourceUnavailable);
                     }
                     emit_segment(
                         &repository,
                         &mut writer,
-                        &mut branch_seal,
-                        state_branch.as_deref(),
+                        &mut consulted_refs,
+                        state.branch(),
                         timestamp,
                         segment_end,
                         segment_tip,
@@ -192,18 +217,14 @@ pub(super) fn produce(
                         &mut emitted_commits,
                         control,
                     )?;
-                    state_branch = checkout.from;
+                    state =
+                        classify_checkout_target(&repository, &checkout.from, &mut consulted_refs)?;
                     state_oid = entry.previous_oid;
                     segment_end = timestamp;
                     segment_tip = state_oid;
                 }
-                checkout => {
-                    cross_entry_backwards(
-                        &entry,
-                        checkout.as_ref(),
-                        &mut state_branch,
-                        &mut state_oid,
-                    )?;
+                None => {
+                    state_oid = entry.previous_oid;
                 }
             }
         }
@@ -211,8 +232,8 @@ pub(super) fn produce(
     emit_segment(
         &repository,
         &mut writer,
-        &mut branch_seal,
-        state_branch.as_deref(),
+        &mut consulted_refs,
+        state.branch(),
         window_start,
         segment_end,
         segment_tip,
@@ -228,7 +249,7 @@ pub(super) fn produce(
     RepositorySeal {
         head: head_after,
         reflog_prefix: reflog_seal.finish(!stopped_at_boundary),
-        branch_tips: branch_seal,
+        consulted_refs,
     }
     .verify(&repository, control)?;
     control.check()?;
@@ -248,7 +269,7 @@ pub(super) fn produce(
 fn emit_segment(
     repository: &gix::Repository,
     writer: &mut impl Write,
-    branch_seal: &mut BTreeMap<String, Option<gix::ObjectId>>,
+    consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
     branch: Option<&str>,
     start: i64,
     end: i64,
@@ -272,10 +293,8 @@ fn emit_segment(
     let Some(branch) = branch else {
         return Ok(());
     };
-    if !branch_seal.contains_key(branch) {
-        control.check()?;
-        branch_seal.insert(branch.to_owned(), exact_branch_tip(repository, branch)?);
-    }
+    let local_ref = format!("refs/heads/{branch}");
+    consult_exact_ref(repository, consulted_refs, &local_ref)?;
     scan_segment(
         repository,
         writer,
@@ -354,16 +373,19 @@ fn write_event(
 }
 
 fn cross_entry_backwards(
+    repository: &gix::Repository,
     entry: &gix::refs::log::Line,
     checkout: Option<&Checkout>,
-    state_branch: &mut Option<String>,
+    consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
+    state: &mut HeadState,
     state_oid: &mut gix::ObjectId,
 ) -> Result<(), BoundedBackfillInterruption> {
     if let Some(checkout) = checkout {
-        if checkout.to != *state_branch {
+        let to = classify_checkout_target(repository, &checkout.to, consulted_refs)?;
+        if to != *state {
             return Err(BoundedBackfillInterruption::SourceUnavailable);
         }
-        state_branch.clone_from(&checkout.from);
+        *state = classify_checkout_target(repository, &checkout.from, consulted_refs)?;
     }
     *state_oid = entry.previous_oid;
     Ok(())
@@ -379,18 +401,19 @@ fn capture_head(repository: &gix::Repository) -> Result<HeadSeal, BoundedBackfil
     })
 }
 
-fn head_branch(seal: &HeadSeal) -> Result<Option<String>, BoundedBackfillInterruption> {
-    seal.referent
-        .as_deref()
-        .map(|name| {
+fn head_state(seal: &HeadSeal) -> Result<HeadState, BoundedBackfillInterruption> {
+    match seal.referent.as_deref() {
+        Some(name) => {
             let short = name
                 .strip_prefix(b"refs/heads/")
                 .ok_or(BoundedBackfillInterruption::SourceUnavailable)?;
             std::str::from_utf8(short)
                 .map(str::to_owned)
+                .map(HeadState::LocalBranch)
                 .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)
-        })
-        .transpose()
+        }
+        None => Ok(HeadState::Detached),
+    }
 }
 
 fn capture_reflog_prefix(
@@ -457,27 +480,74 @@ fn parse_checkout(
         return Err(BoundedBackfillInterruption::SourceUnavailable);
     }
     Ok(Some(Checkout {
-        from: checkout_target(from)?,
-        to: checkout_target(to)?,
+        from: parse_checkout_target(from)?,
+        to: parse_checkout_target(to)?,
     }))
 }
 
-fn checkout_target(target: &[u8]) -> Result<Option<String>, BoundedBackfillInterruption> {
-    if (7..=64).contains(&target.len()) && target.iter().all(u8::is_ascii_hexdigit) {
-        return Ok(None);
-    }
+fn parse_checkout_target(target: &[u8]) -> Result<CheckoutTarget, BoundedBackfillInterruption> {
     std::str::from_utf8(target)
-        .map(|target| Some(target.to_owned()))
+        .map(|target| CheckoutTarget(target.to_owned()))
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)
 }
 
-fn exact_branch_tip(
+fn classify_checkout_target(
     repository: &gix::Repository,
-    branch: &str,
+    target: &CheckoutTarget,
+    consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
+) -> Result<HeadState, BoundedBackfillInterruption> {
+    let label = &target.0;
+    if label.starts_with("refs/") {
+        return Ok(HeadState::Detached);
+    }
+    let local_ref = format!("refs/heads/{label}");
+    if gix::refs::FullName::try_from(local_ref.as_str()).is_err() {
+        return Ok(HeadState::Detached);
+    }
+    if consult_exact_ref(repository, consulted_refs, &local_ref)?.is_some() {
+        return Ok(HeadState::LocalBranch(label.clone()));
+    }
+    for alternate in [
+        format!("refs/tags/{label}"),
+        format!("refs/remotes/{label}"),
+    ] {
+        if gix::refs::FullName::try_from(alternate.as_str()).is_ok()
+            && consult_exact_ref(repository, consulted_refs, &alternate)?.is_some()
+        {
+            return Ok(HeadState::Detached);
+        }
+    }
+    if (7..=64).contains(&label.len()) && label.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(HeadState::Detached);
+    }
+    if gix::refs::FullName::try_from(label.as_str()).is_ok()
+        && consult_exact_ref(repository, consulted_refs, label)?.is_some()
+    {
+        return Ok(HeadState::Detached);
+    }
+    Ok(HeadState::LocalBranch(label.clone()))
+}
+
+fn consult_exact_ref(
+    repository: &gix::Repository,
+    consulted_refs: &mut BTreeMap<String, Option<gix::ObjectId>>,
+    reference: &str,
 ) -> Result<Option<gix::ObjectId>, BoundedBackfillInterruption> {
-    let exact_name = format!("refs/heads/{branch}");
+    let tip = exact_ref_tip(repository, reference)?;
+    if let Some(previous) = consulted_refs.insert(reference.to_owned(), tip)
+        && previous != tip
+    {
+        return Err(BoundedBackfillInterruption::SourceUnavailable);
+    }
+    Ok(tip)
+}
+
+fn exact_ref_tip(
+    repository: &gix::Repository,
+    reference: &str,
+) -> Result<Option<gix::ObjectId>, BoundedBackfillInterruption> {
     let reference = repository
-        .try_find_reference(exact_name.as_str())
+        .try_find_reference(reference)
         .map_err(|_| BoundedBackfillInterruption::SourceUnavailable)?;
     reference
         .map(|reference| {
@@ -550,8 +620,12 @@ mod tests {
         let fixture = repository_fixture();
         let repository = gix::discover(fixture.path()).unwrap();
 
-        assert!(exact_branch_tip(&repository, "main").unwrap().is_some());
-        assert!(exact_branch_tip(&repository, "main~1").is_err());
+        assert!(
+            exact_ref_tip(&repository, "refs/heads/main")
+                .unwrap()
+                .is_some()
+        );
+        assert!(gix::refs::FullName::try_from("refs/heads/main~1").is_err());
     }
 
     #[test]
@@ -579,9 +653,9 @@ mod tests {
         let seal = RepositorySeal {
             head: capture_head(&repository).unwrap(),
             reflog_prefix: complete_reflog_seal(&repository),
-            branch_tips: BTreeMap::from([(
-                "main".to_owned(),
-                exact_branch_tip(&repository, "main").unwrap(),
+            consulted_refs: BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                exact_ref_tip(&repository, "refs/heads/main").unwrap(),
             )]),
         };
 
@@ -605,11 +679,11 @@ mod tests {
         let control =
             BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
         let head_before = capture_head(&repository).unwrap();
-        let branch_tip_before = exact_branch_tip(&repository, "main").unwrap();
+        let branch_tip_before = exact_ref_tip(&repository, "refs/heads/main").unwrap();
         let seal = RepositorySeal {
             head: head_before.clone(),
             reflog_prefix: complete_reflog_seal(&repository),
-            branch_tips: BTreeMap::from([("main".to_owned(), branch_tip_before)]),
+            consulted_refs: BTreeMap::from([("refs/heads/main".to_owned(), branch_tip_before)]),
         };
 
         let reflog_path = fixture.path().join(".git/logs/HEAD");
@@ -634,7 +708,7 @@ mod tests {
         );
         assert_eq!(capture_head(&repository).unwrap(), head_before);
         assert_eq!(
-            exact_branch_tip(&repository, "main").unwrap(),
+            exact_ref_tip(&repository, "refs/heads/main").unwrap(),
             branch_tip_before
         );
         assert_eq!(
@@ -684,6 +758,86 @@ mod tests {
         );
     }
 
+    fn assert_checkout_label_is_detached(fixture: &tempfile::TempDir, label: &str) {
+        let control =
+            BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+        let events =
+            read_events(produce(fixture.path(), 0, i64::MAX, usize::MAX, &control).unwrap());
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, PreparedGitEvent::Segment { branch: None, .. }))
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            PreparedGitEvent::Segment {
+                branch: Some(branch),
+                ..
+            } if branch == label
+        )));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            PreparedGitEvent::Commit { branch, .. } if branch == label
+        )));
+    }
+
+    #[test]
+    fn tag_checkout_is_detached_without_a_fake_local_branch() {
+        let fixture = repository_fixture();
+        git(fixture.path(), &["tag", "release"]);
+        git(fixture.path(), &["checkout", "release"]);
+
+        assert_checkout_label_is_detached(&fixture, "release");
+    }
+
+    #[test]
+    fn remote_checkout_is_detached_without_a_fake_local_branch() {
+        let fixture = repository_fixture();
+        git(
+            fixture.path(),
+            &["update-ref", "refs/remotes/origin/main", "HEAD"],
+        );
+        git(fixture.path(), &["checkout", "origin/main"]);
+
+        assert_checkout_label_is_detached(&fixture, "origin/main");
+    }
+
+    #[test]
+    fn revision_checkout_is_detached_instead_of_source_unavailable() {
+        let fixture = repository_fixture();
+        std::fs::write(fixture.path().join("fixture.txt"), "two").unwrap();
+        git(fixture.path(), &["add", "fixture.txt"]);
+        git(fixture.path(), &["commit", "-m", "two"]);
+        git(fixture.path(), &["checkout", "HEAD~1"]);
+
+        assert_checkout_label_is_detached(&fixture, "HEAD~1");
+    }
+
+    #[test]
+    fn reflog_oid_discontinuity_is_source_unavailable() {
+        let fixture = repository_fixture();
+        std::fs::write(fixture.path().join("fixture.txt"), "two").unwrap();
+        git(fixture.path(), &["add", "fixture.txt"]);
+        git(fixture.path(), &["commit", "-m", "two"]);
+        let reflog_path = fixture.path().join(".git/logs/HEAD");
+        let reflog = std::fs::read(&reflog_path).unwrap();
+        let mut lines = reflog
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(<[u8]>::to_vec)
+            .collect::<Vec<_>>();
+        assert!(lines.len() >= 2);
+        lines[0][41..81].fill(b'0');
+        std::fs::write(reflog_path, lines.concat()).unwrap();
+        let control =
+            BoundedGitControl::new(ObservationCancellation::default(), Duration::from_secs(10));
+
+        assert_eq!(
+            produce(fixture.path(), 0, i64::MAX, usize::MAX, &control).unwrap_err(),
+            BoundedBackfillInterruption::SourceUnavailable
+        );
+    }
+
     #[test]
     fn linked_worktree_stream_uses_its_private_head() {
         let fixture = repository_fixture();
@@ -717,7 +871,7 @@ mod tests {
         git(fixture.path(), &["branch", "-D", "historical"]);
         let repository = gix::discover(fixture.path()).unwrap();
         assert!(
-            exact_branch_tip(&repository, "historical")
+            exact_ref_tip(&repository, "refs/heads/historical")
                 .unwrap()
                 .is_none()
         );
