@@ -90,8 +90,95 @@ pub(super) async fn execute_portable_daemon_invocation(
         }
         project_path = Some(resolved_project_path);
     }
+    let selectors = match &request.payload {
+        service::invocation::DaemonInvocationPayload::MultiRootScopeSetCompareAndSwap {
+            request,
+            ..
+        } => Some(request.roots.clone()),
+        service::invocation::DaemonInvocationPayload::MultiRootExecute { request, .. } => {
+            let scope_set = match store_administration
+                .registered_profile_database()
+                .await
+                .ok()
+                .and_then(|database| database.authorized_scope_set_storage().ok())
+                .and_then(|storage| storage.read(&request.scope_set_id).ok().flatten())
+                .filter(|scope_set| {
+                    scope_set.revision() == request.scope_set_revision
+                        && scope_set.digest() == &request.scope_set_digest
+                }) {
+                Some(scope_set) => scope_set,
+                None => {
+                    return DaemonInvocationResponse::problem(
+                        request_id,
+                        DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                    );
+                }
+            };
+            Some(
+                scope_set
+                    .roots()
+                    .iter()
+                    .filter_map(|root| {
+                        let locator = root.locator()?;
+                        tracedecay_application::RegisteredRootSelectorV1::new(
+                            locator.project_id.clone(),
+                            &locator.canonical_root,
+                        )
+                        .ok()
+                    })
+                    .collect(),
+            )
+        }
+        _ => None,
+    };
+    if let Some(selectors) = selectors {
+        let roots = match resolve_multi_root_projects(
+            &store_administration,
+            &invocation.service,
+            &selectors,
+        )
+        .await
+        {
+            Ok(roots) => roots,
+            Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        };
+        for (root, scope, _) in roots {
+            let mut root_handshake = handshake.clone();
+            root_handshake.project_path = Some(root.clone());
+            root_handshake.allow_init = false;
+            root_handshake.allow_initialize_root_routing = false;
+            if Box::pin(portable_project_server_for_request(
+                lifecycle.clone(),
+                store_administration.clone(),
+                Arc::clone(&project_open_gates),
+                invocation.clone(),
+                http_application_registry.clone(),
+                &root_handshake,
+                ProjectServerRequirement::Core,
+                #[cfg(test)]
+                project_open_attempts.clone(),
+            ))
+            .await
+            .is_err()
+                || !invocation
+                    .service
+                    .lsp_owner_matches_scope(&root, &scope)
+                    .await
+            {
+                return DaemonInvocationResponse::problem(
+                    request_id,
+                    DaemonInvocationProblem::Unavailable,
+                );
+            }
+        }
+    }
     invocation
-        .invoke_for_project(&store_administration, project_path.as_deref(), request)
+        .invoke_for_project(
+            &store_administration,
+            project_path.as_deref(),
+            None,
+            request,
+        )
         .await
 }
 
@@ -360,6 +447,7 @@ pub(super) async fn execute_daemon_invocation(
         .invoke_for_project(
             &engine.store_administration,
             project_path.as_deref(),
+            None,
             request,
         )
         .await

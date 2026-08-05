@@ -132,33 +132,35 @@ impl DaemonInvocationService {
         }
         replicas.sort_by(|left, right| left.2.scope_digest.cmp(&right.2.scope_digest));
         replicas.dedup_by(|left, right| left.2.scope_digest == right.2.scope_digest);
-        let replica_digests = replicas
-            .iter()
-            .map(|(_, _, scope, _)| scope.scope_digest.clone())
-            .collect::<Vec<_>>();
+        let mut replica_digests = Vec::with_capacity(replicas.len());
         for (ordinal, project_root, scope, storage) in &replicas {
             let revalidated_at = current_micros();
             if deadline.is_elapsed_at(revalidated_at) {
                 return None;
             }
-            self.multi_root_query_context(
-                project_root,
-                scope,
-                *ordinal,
-                revalidated_at,
-                deadline,
-                cancellation,
-                &capability,
-                &use_case,
-            )
-            .await?;
-            match storage
-                .begin_durable_compare_and_swap(
-                    idempotency_key,
-                    &command_digest,
-                    request.expected_revision,
-                    &next,
+            let reauthorization = self
+                .multi_root_query_context(
+                    project_root,
+                    scope,
+                    *ordinal,
+                    revalidated_at,
+                    deadline,
+                    cancellation,
+                    &capability,
+                    &use_case,
                 )
+                .await?;
+            if reauthorization.actor() != next.actor_id() || reauthorization.scope() != scope {
+                return None;
+            }
+            let replica_digest = canonical_sha256(&(
+                "tracedecay.daemon.multi-root-replica-authorization.v1",
+                &scope.scope_digest,
+                &reauthorization.grant().digest,
+            ))
+            .ok()?;
+            match storage
+                .prepare_durable_replica(idempotency_key, &command_digest, &next)
                 .ok()?
             {
                 tracedecay_rusqlite_runtime::repository::AuthorizedScopeSetDurableCasV1::Conflict(
@@ -199,8 +201,9 @@ impl DaemonInvocationService {
                 _ => return None,
             }
             coordinator_storage
-                .record_durable_replica(idempotency_key, &command_digest, &scope.scope_digest)
+                .record_durable_replica(idempotency_key, &command_digest, &replica_digest)
                 .ok()?;
+            replica_digests.push(replica_digest);
         }
         let commit_at = current_micros();
         if deadline.is_elapsed_at(commit_at) {
@@ -217,6 +220,31 @@ impl DaemonInvocationService {
             &use_case,
         )
         .await?;
+        for ((ordinal, project_root, scope, _), expected_digest) in
+            replicas.iter().zip(&replica_digests)
+        {
+            let reauthorization = self
+                .multi_root_query_context(
+                    project_root,
+                    scope,
+                    *ordinal,
+                    current_micros(),
+                    deadline,
+                    cancellation,
+                    &capability,
+                    &use_case,
+                )
+                .await?;
+            let actual_digest = canonical_sha256(&(
+                "tracedecay.daemon.multi-root-replica-authorization.v1",
+                &scope.scope_digest,
+                &reauthorization.grant().digest,
+            ))
+            .ok()?;
+            if &actual_digest != expected_digest {
+                return None;
+            }
+        }
         match coordinator_storage
             .complete_durable_compare_and_swap(idempotency_key, &command_digest, &replica_digests)
             .ok()?

@@ -301,6 +301,7 @@ impl InProcessDaemonInvocationExecutor {
             .invoke_for_project(
                 &self.store_administration,
                 Some(&self.project_path),
+                Some((self.scope.clone(), self.generation.clone())),
                 request,
             )
             .await;

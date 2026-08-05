@@ -148,6 +148,7 @@ pub(super) async fn execute_one_multi_root_operation(
             let response = Box::pin(state.invoke_for_project(
                 store_administration,
                 Some(root),
+                Some((scope.clone(), pinned_generation.clone())),
                 DaemonInvocationRequest::work_application(
                     format!("request.multi-root.work.{ordinal}"),
                     request,

@@ -606,6 +606,30 @@ fn durable_scope_set_cas_hides_prepares_and_preserves_readable_state_on_conflict
     );
     assert_eq!(replica.storage.read(next.scope_set_id()).unwrap(), None);
 
+    let second = scope_set_for_actor(2, "actor.owner");
+    let second_key = "request.scope-set.hidden-prepare.second";
+    let second_digest = digest('8');
+    assert!(matches!(
+        coordinator
+            .storage
+            .begin_durable_compare_and_swap(
+                second_key,
+                &second_digest,
+                Some(ScopeSetRevision::new(1).unwrap()),
+                &second,
+            )
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    assert!(matches!(
+        replica
+            .storage
+            .prepare_durable_replica(second_key, &second_digest, &second)
+            .unwrap(),
+        AuthorizedScopeSetDurableCasV1::Pending(_)
+    ));
+    assert_eq!(replica.storage.read(second.scope_set_id()).unwrap(), None);
+
     let conflict_coordinator =
         RegisteredScopeSetStore::start("durable-conflict-coordinator", |_| {});
     let conflict_replica = RegisteredScopeSetStore::start("durable-conflict-participant", |_| {});

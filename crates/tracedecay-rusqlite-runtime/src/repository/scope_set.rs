@@ -296,6 +296,30 @@ impl AuthorizedScopeSetSqliteStorage {
         Ok(AuthorizedScopeSetDurableCasV1::Pending(next.clone()))
     }
 
+    pub fn prepare_durable_replica(
+        &self,
+        idempotency_key: &str,
+        command_digest: &ManifestDigest,
+        next: &AuthorizedScopeSet,
+    ) -> Result<AuthorizedScopeSetDurableCasV1, AuthorizedScopeSetStoreError> {
+        next.validate()?;
+        let transaction = self.handle.begin_immediate()?;
+        if let Some(replay) = read_durable_cas(&transaction, idempotency_key, command_digest)? {
+            transaction.rollback()?;
+            return Ok(replay);
+        }
+        insert_durable_cas(
+            &transaction,
+            idempotency_key,
+            command_digest,
+            "pending",
+            next,
+            None,
+        )?;
+        transaction.commit()?;
+        Ok(AuthorizedScopeSetDurableCasV1::Pending(next.clone()))
+    }
+
     pub fn record_durable_replica(
         &self,
         idempotency_key: &str,
